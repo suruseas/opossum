@@ -1,0 +1,46 @@
+name: ci
+
+# Static checks + the fake-shim regression gate. These are cross-platform (the
+# fake `container` shim is just Go + /bin/sh), so they run on Linux — fast and
+# cheap. The real-`container` layer needs macOS 26 on Apple silicon with nested
+# virtualization, which GitHub-hosted runners don't provide; that layer is
+# verified on real hardware (see docs/real-runtime-review.md).
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"; echo "$unformatted"; exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      - name: build
+        run: go build ./...
+      - name: test (race + coverage)
+        run: go test ./... -race -cover
+
+  release-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          install-only: true
+          version: "~> v2"
+      - name: validate .goreleaser.yaml
+        run: goreleaser check

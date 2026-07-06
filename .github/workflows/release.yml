@@ -1,0 +1,29 @@
+name: release
+
+# Cut a release by pushing a version tag, e.g. `git tag v0.1.0 && git push origin v0.1.0`.
+# GoReleaser then builds the darwin/arm64 binary, attaches the tarball +
+# checksums to a GitHub Release, and (once brews: is enabled) updates the tap.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # create the GitHub Release
+
+jobs:
+  goreleaser:
+    runs-on: macos-latest # darwin build target
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so GoReleaser sees the tag
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,19 @@
+name: hello
+
+# Lightweight, build-free stack for a real run: both services stay up, and we
+# verify `web` can resolve `db` by its bare service name over the shared project
+# network. Container names are namespaced per project — here db.hello.opossum and
+# web.hello.opossum — so this can run alongside other projects.
+services:
+  db:
+    image: docker.io/library/alpine:3.20
+    command: ["sleep", "3600"]
+
+  web:
+    image: docker.io/library/alpine:3.20
+    # `entrypoint` overrides the image ENTRYPOINT; combined with `command` the
+    # container runs entrypoint ++ command = /bin/sh -c "<command>".
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["echo 'web up — resolving db by name'; sleep 3600"]
+    depends_on:
+      - db

@@ -1,0 +1,57 @@
+# GoReleaser config for opossum. Produces the release artifacts that a Homebrew
+# formula consumes: per-arch tarballs + a checksums file, attached to a GitHub
+# Release. Run via the release workflow (a v* tag push) or `goreleaser release`.
+#
+# opossum targets Apple's `container` runtime, which requires macOS 26 on Apple
+# silicon, so we build darwin/arm64 only — an amd64 build couldn't run.
+version: 2
+
+project_name: opossum
+
+builds:
+  - id: opossum
+    main: ./cmd/opossum
+    binary: opossum
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+    goarch:
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - id: opossum
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+# We hand-maintain CHANGELOG.md, so don't let GoReleaser generate release notes
+# from commits.
+changelog:
+  disable: true
+
+release:
+  github:
+    owner: suruseas
+    name: opossum
+
+# Homebrew publishing (enable once the tap repo exists):
+# Create a `homebrew-opossum` repo under the same owner and a PAT secret with
+# repo scope on it, then uncomment. GoReleaser will generate/update the formula
+# on each release, so `brew install suruseas/opossum/opossum` just works — the
+# same release format, no rework.
+#
+# brews:
+#   - name: opossum
+#     repository:
+#       owner: suruseas
+#       name: homebrew-opossum
+#     homepage: "https://github.com/suruseas/opossum"
+#     description: "A Docker Compose-like orchestrator for Apple's container runtime"
+#     license: "MIT"
+#     dependencies:
+#       - name: apple/container/container

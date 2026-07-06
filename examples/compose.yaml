@@ -1,0 +1,53 @@
+name: demo
+
+# A three-service stack. `web` reaches `db` and `cache` by their service names —
+# opossum puts every service on the shared `demo-net` network, and Apple's
+# container runtime resolves peer names over its built-in DNS (macOS 26+).
+services:
+  db:
+    # Image tag and password come from .env (see examples/.env); the shell can
+    # override them, e.g. POSTGRES_TAG=17 opossum up.
+    image: postgres:${POSTGRES_TAG:-16}
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secret}
+      POSTGRES_DB: app
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 2s
+      retries: 15
+      start_period: 1s
+
+  cache:
+    image: redis:7
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      retries: 15
+
+  # A one-shot init/migration step: it runs to completion (exit 0) before web
+  # starts. opossum runs it in the foreground and gates web on its exit code.
+  migrate:
+    image: alpine:3.20
+    # String form is shell-word-split, so `sh -c` with a quoted script works
+    # (the list form is also accepted and taken verbatim).
+    command: sh -c "echo 'running db migrations…'; sleep 1; echo 'migrations done'"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    build: ./web
+    ports:
+      - "${WEB_HOST_PORT:-8080}:8080"
+    environment:
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-secret}@db:5432/app
+      REDIS_URL: redis://cache:6379
+    # Wait until db and cache pass their healthchecks, and migrate has finished
+    # successfully — not merely started.
+    depends_on:
+      db:
+        condition: service_healthy
+      cache:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully

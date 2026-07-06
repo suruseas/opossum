@@ -1,0 +1,60 @@
+# A realistic, build-free app stack you can click around in.
+#
+#   opossum -f examples/app-stack/compose.yaml up
+#   open http://localhost:8080        # Adminer — log in with Server: db, user/pass/db: demo
+#
+# Every image is pre-built (no `container builder start` needed). It shows off
+# dependency ordering, health-gated startup, bare-name service discovery, a
+# published port, and a *persistent* Postgres volume done the right way.
+name: appstack
+
+services:
+  # PostgreSQL with a persistent named volume. NOTE the PGDATA subdirectory:
+  # Apple's container mounts a named volume as a non-empty mount point, and
+  # Postgres `initdb` refuses that — so we point PGDATA one level down. (opossum
+  # warns at `up` time if you forget.) MySQL/MariaDB don't need this.
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: demo
+      POSTGRES_PASSWORD: demo
+      POSTGRES_DB: demo
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U demo -d demo"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  cache:
+    image: redis:7
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # A browsable DB UI. Waits for db to be healthy, then serves on :8080.
+  adminer:
+    image: adminer:4
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # Resolves its peers by bare service name over the shared network, proving
+  # discovery works, then idles. Check it with: opossum logs worker
+  worker:
+    image: alpine:3.20
+    depends_on:
+      db:
+        condition: service_healthy
+      cache:
+        condition: service_started
+    command: ["sh", "-c", "echo '--- resolving peers by bare name ---'; nslookup db | grep -A1 Name; nslookup cache | grep -A1 Name; echo 'worker: db + cache reachable'; sleep 3600"]
+
+volumes:
+  db_data:
