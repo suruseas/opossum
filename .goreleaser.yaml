@@ -39,19 +39,19 @@ release:
     owner: suruseas
     name: opossum
 
-# Homebrew publishing (enable once the tap repo exists):
-# Create a `homebrew-opossum` repo under the same owner and a PAT secret with
-# repo scope on it, then uncomment. GoReleaser will generate/update the formula
-# on each release, so `brew install suruseas/opossum/opossum` just works — the
-# same release format, no rework.
-#
-# brews:
-#   - name: opossum
-#     repository:
-#       owner: suruseas
-#       name: homebrew-opossum
-#     homepage: "https://github.com/suruseas/opossum"
-#     description: "A Docker Compose-like orchestrator for Apple's container runtime"
-#     license: "MIT"
-#     dependencies:
-#       - name: apple/container/container
+# Homebrew publishing: GoReleaser generates/updates the formula in the
+# suruseas/homebrew-opossum tap on each release, so `brew install
+# suruseas/opossum/opossum` just works. Pushing to the separate tap repo needs a
+# token with write access to it (HOMEBREW_TAP_TOKEN secret) — the default
+# GITHUB_TOKEN is scoped to this repo only.
+brews:
+  - name: opossum
+    repository:
+      owner: suruseas
+      name: homebrew-opossum
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    homepage: "https://github.com/suruseas/opossum"
+    description: "A Docker Compose-like orchestrator for Apple's container runtime"
+    license: "MIT"
+    dependencies:
+      - name: container

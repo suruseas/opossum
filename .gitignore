@@ -26,7 +26,7 @@ Thumbs.db
 .vscode/
 *.swp
 
-# Claude Code local files
+# Claude Code local settings & Plan C agent-runtime (machine-local, not committed)
 .claude/
 CLAUDE.md
 .mcp.json
