@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
@@ -15,6 +16,47 @@ import (
 // Runtime invokes the `container` binary.
 type Runtime struct {
 	Bin string
+	// Verbose echoes each `container` invocation before running it (useful for
+	// bug reports). The echo goes to Trace, or os.Stderr when Trace is nil.
+	Verbose bool
+	Trace   io.Writer
+}
+
+// trace echoes the about-to-run command when Verbose is set. Args containing
+// spaces or newlines (e.g. a multi-line env value) are quoted so each invocation
+// stays on a single line.
+func (r *Runtime) trace(args []string) {
+	if !r.Verbose {
+		return
+	}
+	w := r.Trace
+	if w == nil {
+		w = os.Stderr
+	}
+	parts := make([]string, len(args))
+	for i, a := range args {
+		if needsQuote(a) {
+			parts[i] = strconv.Quote(a)
+		} else {
+			parts[i] = a
+		}
+	}
+	fmt.Fprintf(w, "+ %s %s\n", r.Bin, strings.Join(parts, " "))
+}
+
+// needsQuote reports whether an argument must be quoted to keep the verbose trace
+// on one readable line: empty, or containing whitespace/quotes/backslash or any
+// control character (newlines, tabs, ESC, etc.).
+func needsQuote(a string) bool {
+	if a == "" {
+		return true
+	}
+	for _, r := range a {
+		if r < 0x20 || r == ' ' || r == '"' || r == '\'' || r == '\\' {
+			return true
+		}
+	}
+	return false
 }
 
 // New returns a Runtime. The binary can be overridden with OPOSSUM_CONTAINER_BIN
@@ -35,6 +77,7 @@ func (r *Runtime) Available() bool {
 
 // stream runs a command with stdio attached to the parent process.
 func (r *Runtime) stream(args ...string) error {
+	r.trace(args)
 	cmd := exec.Command(r.Bin, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -44,6 +87,7 @@ func (r *Runtime) stream(args ...string) error {
 
 // capture runs a command and returns combined stdout+stderr.
 func (r *Runtime) capture(args ...string) (string, error) {
+	r.trace(args)
 	cmd := exec.Command(r.Bin, args...)
 	var buf bytes.Buffer
 	cmd.Stdout = &buf

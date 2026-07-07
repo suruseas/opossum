@@ -21,6 +21,7 @@ var (
 	composeFile string
 	projectName string
 	dnsDomain   string
+	verbose     bool
 )
 
 // newRootCmd builds the command tree. Extracted from main so tests can execute
@@ -36,6 +37,7 @@ func newRootCmd() *cobra.Command {
 	root.PersistentFlags().StringVarP(&composeFile, "file", "f", "", "path to the compose file (default: the first of compose.yaml, compose.yml, docker-compose.yaml, docker-compose.yml)")
 	root.PersistentFlags().StringVarP(&projectName, "project-name", "p", "", "project name (defaults to the compose file's directory)")
 	root.PersistentFlags().StringVar(&dnsDomain, "dns-domain", "opossum", "local DNS domain for bare-name service discovery (create once: sudo container system dns create <domain>)")
+	root.PersistentFlags().BoolVar(&verbose, "verbose", false, "print each underlying container command as it runs (useful for bug reports)")
 
 	root.AddCommand(
 		upCmd(), downCmd(), psCmd(), imagesCmd(), logsCmd(), statsCmd(),
@@ -321,5 +323,7 @@ func loadOrchestrator(out io.Writer) (*orchestrator.Orchestrator, error) {
 	default:
 		proj.Name = compose.SanitizeName(filepath.Base(proj.BaseDir))
 	}
-	return orchestrator.New(proj, runtime.New(), dnsDomain, out), nil
+	rt := runtime.New()
+	rt.Verbose = verbose
+	return orchestrator.New(proj, rt, dnsDomain, out), nil
 }

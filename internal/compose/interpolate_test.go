@@ -100,6 +100,50 @@ func TestParseDotEnv(t *testing.T) {
 	}
 }
 
+// A multi-line quoted value (e.g. a PEM key) spans several lines until its
+// closing quote — the same as docker compose's env_file handling. This also
+// covers the `KEY: value` (colon) separator docker compose accepts.
+func TestParseDotEnvMultiline(t *testing.T) {
+	dir := t.TempDir()
+	pem := "-----BEGIN PUBLIC KEY-----\nMIIBLine1\nMIIBLine2\n-----END PUBLIC KEY-----"
+	body := "" +
+		"DQUOTE=\"" + pem + "\"\n" + // double-quoted, `=` separator
+		"SQUOTE: '" + pem + "'\n" + // single-quoted, `:` separator (the reported case)
+		"COLON: plain\n" + // `:` separator, single line
+		"AFTER=tail\n" // a normal line after a multi-line value still parses
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := parseDotEnv(filepath.Join(dir, ".env"))
+	if err != nil {
+		t.Fatalf("parseDotEnv: %v", err)
+	}
+	want := map[string]string{
+		"DQUOTE": pem,
+		"SQUOTE": pem,
+		"COLON":  "plain",
+		"AFTER":  "tail",
+	}
+	for k, v := range want {
+		if got, ok := m[k]; !ok || got != v {
+			t.Errorf(".env[%q] = %q (ok=%v), want %q", k, got, ok, v)
+		}
+	}
+}
+
+// An opening quote with no closing quote is an error, matching docker compose
+// (a truncated PEM key should fail loudly, not silently pass a wrong value).
+func TestParseDotEnvUnterminatedQuoteErrors(t *testing.T) {
+	dir := t.TempDir()
+	body := "GOOD=ok\nBAD=\"-----BEGIN PUBLIC KEY-----\nMIIBLine1\n" // no closing quote
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parseDotEnv(filepath.Join(dir, ".env")); err == nil {
+		t.Fatal("expected an error for an unterminated quoted value")
+	}
+}
+
 func TestParseDotEnvMissingIsEmpty(t *testing.T) {
 	m, err := parseDotEnv(filepath.Join(t.TempDir(), "nope.env"))
 	if err != nil || len(m) != 0 {

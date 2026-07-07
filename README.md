@@ -267,6 +267,10 @@ opossum mirrors the common `docker compose` subcommands, delegating each to the
 | `run [--rm] [--no-deps] <service> [cmd]` | ✅ | one-off foreground container; starts deps unless `--no-deps`; no published ports |
 | `config [--services]` | ✅ | validate and print the resolved config (interpolation + env_file applied), noting ignored fields |
 
+Add `--verbose` to any command to print each underlying `container` invocation
+(as `+ container …`) to stderr — handy when filing a bug report, so you can see
+exactly what opossum ran.
+
 ## Differences from docker compose
 
 opossum aims to run a familiar `compose.yaml`, but it delegates to Apple's

@@ -5,12 +5,78 @@ package runtime
 // hostAddress of "0.0.0.0", which must never be reported as the container's IP.
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// exitShim returns a Runtime whose `container` just exits 0 — for exercising the
+// verbose command trace without caring about output.
+func exitShim(t *testing.T) string {
+	t.Helper()
+	shim := filepath.Join(t.TempDir(), "container.sh")
+	if err := os.WriteFile(shim, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return shim
+}
+
+func TestVerboseTracesCommands(t *testing.T) {
+	shim := exitShim(t)
+	var buf bytes.Buffer
+	r := &Runtime{Bin: shim, Verbose: true, Trace: &buf}
+
+	r.capture("inspect", "web.foo.opossum")
+	if got := buf.String(); !strings.Contains(got, "+ "+shim+" inspect web.foo.opossum") {
+		t.Errorf("verbose trace = %q, want the inspect command echoed", got)
+	}
+
+	// The stream path (used by `up`, so it carries the key `container run …` line)
+	// must trace too.
+	buf.Reset()
+	if err := r.stream("run", "-d", "--name", "web.foo.opossum", "web:latest"); err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	if got := buf.String(); !strings.Contains(got, "+ "+shim+" run -d --name web.foo.opossum web:latest") {
+		t.Errorf("stream path should trace the run command, got %q", got)
+	}
+
+	// A multi-line arg (e.g. a PEM env value) is quoted so the trace stays on one
+	// line instead of spilling raw newlines.
+	buf.Reset()
+	r.capture("run", "-e", "KEY=line1\nline2")
+	got := buf.String()
+	if !strings.Contains(got, `"KEY=line1\nline2"`) {
+		t.Errorf("multi-line arg should be quoted onto one line, got %q", got)
+	}
+	if n := strings.Count(got, "\n"); n != 1 {
+		t.Errorf("trace should be a single line (one trailing newline), got %d newlines: %q", n, got)
+	}
+
+	// Other control characters (e.g. ESC) are quoted too, so the trace can't be
+	// pushed onto another line or inject terminal escapes.
+	buf.Reset()
+	r.capture("run", "-e", "T=a\x1bb")
+	if got := buf.String(); !strings.Contains(got, `"T=a\x1bb"`) {
+		t.Errorf("control char should be quoted, got %q", got)
+	}
+}
+
+func TestVerboseOffIsSilent(t *testing.T) {
+	shim := exitShim(t)
+	var buf bytes.Buffer
+	r := &Runtime{Bin: shim, Verbose: false, Trace: &buf}
+	r.capture("inspect", "x")
+	if err := r.stream("version"); err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("verbose off must be silent, got %q", buf.String())
+	}
+}
 
 // replayShim returns a Runtime whose `container` prints the given output (to
 // stdout; capture merges stderr anyway) and exits with the given code — used to

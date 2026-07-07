@@ -6,6 +6,21 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-07
+
+### Added
+
+- `--verbose` prints each `container` command opossum runs, for debugging what's
+  sent to the runtime.
+
+### Fixed
+
+- `env_file` now parses multi-line quoted values and `:`-separated entries.
+- `env_file` values with an unterminated quote now error clearly, matching
+  docker compose, instead of being silently mishandled.
+
+## [0.2.0] - 2026-07-06
+
 ### Added
 
 - Bind mounts now expand a leading `~` to the home directory, and a missing bind
@@ -165,5 +180,7 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/suruseas/opossum/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/suruseas/opossum/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/suruseas/opossum/releases/tag/v0.1.0

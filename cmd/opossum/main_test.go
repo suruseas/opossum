@@ -37,6 +37,24 @@ exit 0
 	}
 }
 
+// TestVerboseFlagAccepted checks the global --verbose flag parses and is wired
+// through to a working run (the command trace itself goes to stderr; the
+// runtime package owns that behavior).
+func TestVerboseFlagAccepted(t *testing.T) {
+	fakeShim(t)
+	compose := writeCompose(t, `
+name: demo
+services:
+  web:
+    image: web:latest
+`)
+	root := newRootCmd()
+	root.SetArgs([]string{"-f", compose, "--verbose", "up"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("--verbose up: %v", err)
+	}
+}
+
 func writeCompose(t *testing.T, body string) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "compose.yaml")

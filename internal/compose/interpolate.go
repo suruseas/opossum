@@ -1,7 +1,6 @@
 package compose
 
 import (
-	"bufio"
 	"bytes"
 	"fmt"
 	"os"
@@ -30,43 +29,80 @@ func loadEnv(dir string) (varLookup, error) {
 	}, nil
 }
 
-// parseDotEnv reads a KEY=VALUE file. Blank lines and `#` comments are ignored,
-// surrounding single/double quotes are stripped, and a missing file yields an
+// parseDotEnv reads a KEY=VALUE (or KEY: VALUE) file, matching docker compose's
+// env_file handling. Blank lines and `#` comments are ignored, an `export ` prefix
+// is dropped, and surrounding single/double quotes are stripped. A value whose
+// opening quote isn't closed on the same line continues across lines — e.g. a
+// multi-line PEM key — keeping the embedded newlines. A missing file yields an
 // empty map (no error). Values are taken literally (no nested interpolation).
 func parseDotEnv(path string) (map[string]string, error) {
-	f, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return map[string]string{}, nil
 		}
 		return nil, fmt.Errorf("reading %s: %w", path, err)
 	}
-	defer f.Close()
+	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
 
 	out := map[string]string{}
-	sc := bufio.NewScanner(f)
-	line := 0
-	for sc.Scan() {
-		line++
-		raw := strings.TrimSpace(sc.Text())
+	for i := 0; i < len(lines); i++ {
+		raw := strings.TrimSpace(lines[i])
 		if raw == "" || strings.HasPrefix(raw, "#") {
 			continue
 		}
 		raw = strings.TrimPrefix(raw, "export ")
-		key, val, ok := strings.Cut(raw, "=")
+		key, val, ok := splitEnvLine(raw)
 		if !ok {
-			return nil, fmt.Errorf("%s:%d: expected KEY=VALUE, got %q", path, line, raw)
+			return nil, fmt.Errorf("%s:%d: expected KEY=VALUE, got %q", path, i+1, raw)
 		}
 		key = strings.TrimSpace(key)
 		if key == "" {
-			return nil, fmt.Errorf("%s:%d: empty variable name", path, line)
+			return nil, fmt.Errorf("%s:%d: empty variable name", path, i+1)
 		}
-		out[key] = unquote(strings.TrimSpace(val))
-	}
-	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("reading %s: %w", path, err)
+		val = strings.TrimSpace(val)
+
+		// A quoted value whose closing quote isn't on this line spans multiple
+		// lines (e.g. a PEM key): gather following lines verbatim, preserving the
+		// newlines, until the closing quote. An unterminated value is an error,
+		// matching docker compose.
+		if len(val) > 1 && (val[0] == '"' || val[0] == '\'') && strings.IndexByte(val[1:], val[0]) < 0 {
+			q := val[0]
+			start := i + 1
+			var sb strings.Builder
+			sb.WriteString(val[1:]) // content after the opening quote
+			closed := false
+			for i+1 < len(lines) {
+				i++
+				sb.WriteByte('\n')
+				if j := strings.IndexByte(lines[i], q); j >= 0 {
+					sb.WriteString(lines[i][:j])
+					closed = true
+					break
+				}
+				sb.WriteString(lines[i])
+			}
+			if !closed {
+				return nil, fmt.Errorf("%s:%d: unterminated quoted value for %q", path, start, key)
+			}
+			out[key] = sb.String()
+			continue
+		}
+		out[key] = unquote(val)
 	}
 	return out, nil
+}
+
+// splitEnvLine splits an env_file line into key and value on the first `=` or `:`
+// (whichever appears first). `=` is the canonical separator; `:` is accepted for
+// docker compose compatibility.
+func splitEnvLine(s string) (key, val string, ok bool) {
+	for i := 0; i < len(s); i++ {
+		if s[i] == '=' || s[i] == ':' {
+			return s[:i], s[i+1:], true
+		}
+	}
+	return "", "", false
 }
 
 // unquote strips a single pair of matching surrounding quotes.
