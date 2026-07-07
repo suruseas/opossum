@@ -8,6 +8,7 @@ package orchestrator_test
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -61,9 +62,16 @@ echo "$*" >> "$FAKE_LOG"
 case "$1" in
   inspect)
     # Optionally attach an opossum.project label so evals can drive the
-    # foreign-project collision guard (default: unlabeled).
+    # foreign-project collision guard (default: unlabeled). A prior run records
+    # the container's config-hash under STATE_DIR, echoed back here so a second
+    # up can detect an unchanged container and skip recreating it.
     lbl=""
     [ -n "$INSPECT_PROJECT" ] && lbl='"opossum.project":"'"$INSPECT_PROJECT"'"'
+    if [ -n "$STATE_DIR" ] && [ -f "$STATE_DIR/$2.hash" ]; then
+      h=$(cat "$STATE_DIR/$2.hash")
+      [ -n "$lbl" ] && lbl="$lbl,"
+      lbl="$lbl"'"opossum.config-hash":"'"$h"'"'
+    fi
     echo '[{"status":{"state":"'"${INSPECT_STATE:-running}"'","networks":[{"network":"n","ipv4Address":"192.168.64.10/24","ipv4Gateway":"192.168.64.1"}]},"configuration":{"labels":{'"$lbl"'},"publishedPorts":[{"containerPort":8080,"hostAddress":"0.0.0.0","hostPort":8080,"proto":"tcp"}]}}]'
     ;;
   network)
@@ -75,11 +83,24 @@ case "$1" in
     fi
     ;;
   run)
+    # Record the container's config-hash (from -l opossum.config-hash=…) keyed by
+    # its --name, so a later inspect reports it and up idempotency can be tested.
+    if [ -n "$STATE_DIR" ]; then
+      cname=""; chash=""; prev=""
+      for a in $*; do
+        [ "$prev" = --name ] && cname="$a"
+        case "$a" in opossum.config-hash=*) chash="${a#opossum.config-hash=}" ;; esac
+        prev="$a"
+      done
+      [ -n "$cname" ] && [ -n "$chash" ] && echo "$chash" > "$STATE_DIR/$cname.hash"
+    fi
     # Simulate a container whose process exits non-zero: a foreground run of
     # $RUN_FAIL returns 1, letting evals drive the completed-successfully failure.
     case " $* " in *" --name $RUN_FAIL "*) [ -n "$RUN_FAIL" ] && exit 1 ;; esac
     ;;
   exec)
+    # HEALTH_HANG makes the probe never return, to drive the per-attempt timeout.
+    [ -n "$HEALTH_HANG" ] && sleep 30
     n=$(cat "$HEALTH_COUNTER" 2>/dev/null || echo 0)
     n=$((n + 1))
     echo "$n" > "$HEALTH_COUNTER"
@@ -91,6 +112,24 @@ case "$1" in
     # error, to drive the fail-safe path.
     [ -n "$VOLUME_LS_FAIL" ] && exit 1
     [ "$2" = ls ] && printf '%s\n' "$VOLUME_LS"
+    ;;
+  ls)
+    # container list: emit a summary per name in $LS_CONTAINERS (labeled with
+    # project $LS_PROJECT) and $LS_FOREIGN (labeled with a different project, to
+    # verify orphan removal never touches another project's containers).
+    printf '['
+    first=1
+    for n in $LS_CONTAINERS; do
+      [ "$first" = 1 ] || printf ','
+      printf '{"status":{"state":"running"},"configuration":{"id":"%s","labels":{"opossum.project":"%s"}}}' "$n" "$LS_PROJECT"
+      first=0
+    done
+    for n in $LS_FOREIGN; do
+      [ "$first" = 1 ] || printf ','
+      printf '{"status":{"state":"running"},"configuration":{"id":"%s","labels":{"opossum.project":"otherproj"}}}' "$n"
+      first=0
+    done
+    printf ']'
     ;;
   image)
     # image inspect exits 0 (present) unless the ref is listed in IMAGE_ABSENT,
@@ -107,6 +146,7 @@ exit 0
 	}
 	t.Setenv("FAKE_LOG", logPath)
 	t.Setenv("HEALTH_COUNTER", filepath.Join(dir, "health.count"))
+	t.Setenv("STATE_DIR", dir) // remembers each run's config-hash for idempotency evals
 	read := func() []string {
 		b, err := os.ReadFile(logPath)
 		if err != nil {
@@ -115,7 +155,14 @@ exit 0
 			}
 			t.Fatal(err)
 		}
-		return strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+		lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+		// The config-hash label is an implementation detail of change detection;
+		// strip it so command-shape assertions stay stable. The dedicated skip
+		// tests verify its effect (a second up doesn't recreate an unchanged one).
+		for i, l := range lines {
+			lines[i] = stripConfigHash(l)
+		}
+		return lines
 	}
 	return &runtime.Runtime{Bin: shim}, read
 }
@@ -143,6 +190,21 @@ func project(name string, svcs map[string]*compose.Service) *compose.Project {
 		s.Name = n
 	}
 	return &compose.Project{Name: name, BaseDir: testBaseDir, Services: svcs}
+}
+
+// stripConfigHash removes the " -l opossum.config-hash=<hex>" token from a logged
+// command so command-shape assertions don't depend on the hash value.
+func stripConfigHash(line string) string {
+	const tok = " -l opossum.config-hash="
+	i := strings.Index(line, tok)
+	if i < 0 {
+		return line
+	}
+	j := i + len(tok)
+	for j < len(line) && line[j] != ' ' {
+		j++
+	}
+	return line[:i] + line[j:]
 }
 
 func hasLine(lines []string, want string) bool {
@@ -341,38 +403,53 @@ func TestUpPassesEntrypoint(t *testing.T) {
 	}
 }
 
-func TestUpWarnsAboutUnsupportedFields(t *testing.T) {
-	rt, _ := fakeShim(t)
-	p := project("demo", map[string]*compose.Service{
-		"web": {Image: "web:latest", Unsupported: []string{"container_name", "restart"}},
-	})
-	var out bytes.Buffer
-	o := orchestrator.New(p, rt, "opossum", &out)
-	if err := o.Up(true); err != nil {
-		t.Fatalf("Up: %v", err)
+// Ignored service fields don't affect startup, so they're silent by default and
+// only surface under --verbose (rt.Verbose) — a warning per field alarmed users.
+func TestUpUnsupportedFieldsSilentUnlessVerbose(t *testing.T) {
+	upOutput := func(verbose bool) string {
+		rt, _ := fakeShim(t)
+		rt.Verbose = verbose
+		p := project("demo", map[string]*compose.Service{
+			"web": {Image: "web:latest", Unsupported: []string{"container_name", "restart"}},
+		})
+		var out bytes.Buffer
+		if err := orchestrator.New(p, rt, "opossum", &out).Up(true); err != nil {
+			t.Fatalf("Up: %v", err)
+		}
+		return out.String()
 	}
-	got := out.String()
+	if got := upOutput(false); strings.Contains(got, "unsupported field") {
+		t.Errorf("ignored-field warning should be hidden by default, got:\n%s", got)
+	}
+	got := upOutput(true)
 	if !strings.Contains(got, "unsupported field") || !strings.Contains(got, "container_name") || !strings.Contains(got, "restart") {
-		t.Errorf("expected a warning naming the ignored fields, got:\n%s", got)
+		t.Errorf("--verbose should name the ignored fields, got:\n%s", got)
 	}
 }
 
-func TestUpWarnsAboutTopLevelIgnoredFields(t *testing.T) {
-	rt, _ := fakeShim(t)
-	p := project("demo", map[string]*compose.Service{"web": {Image: "web:latest"}})
-	p.Unsupported = []string{"networks", "volumes"}
-	var out bytes.Buffer
-	o := orchestrator.New(p, rt, "opossum", &out)
-	if err := o.Up(true); err != nil {
-		t.Fatalf("Up: %v", err)
+func TestUpTopLevelIgnoredFieldsSilentUnlessVerbose(t *testing.T) {
+	upOutput := func(verbose bool) string {
+		rt, _ := fakeShim(t)
+		rt.Verbose = verbose
+		p := project("demo", map[string]*compose.Service{"web": {Image: "web:latest"}})
+		p.Unsupported = []string{"networks", "volumes"}
+		var out bytes.Buffer
+		if err := orchestrator.New(p, rt, "opossum", &out).Up(true); err != nil {
+			t.Fatalf("Up: %v", err)
+		}
+		return out.String()
 	}
-	if got := out.String(); !strings.Contains(got, "unsupported top-level field(s): networks, volumes") {
-		t.Errorf("expected a top-level ignored-fields warning, got:\n%s", got)
+	if got := upOutput(false); strings.Contains(got, "unsupported top-level") {
+		t.Errorf("top-level ignored-fields warning should be hidden by default, got:\n%s", got)
+	}
+	if got := upOutput(true); !strings.Contains(got, "unsupported top-level field(s): networks, volumes") {
+		t.Errorf("--verbose should show the top-level ignored fields, got:\n%s", got)
 	}
 }
 
 func TestUpBuildsAndTags(t *testing.T) {
 	rt, log := fakeShim(t)
+	t.Setenv("IMAGE_ABSENT", "demo-api:latest") // a fresh build: the image isn't present yet
 	p := project("demo", map[string]*compose.Service{
 		"api": {Build: &compose.Build{Context: "/ctx"}},
 	})
@@ -381,7 +458,7 @@ func TestUpBuildsAndTags(t *testing.T) {
 		t.Fatalf("Up: %v", err)
 	}
 	lines := log()
-	if !hasLine(lines, "build -t demo-api:latest /ctx") {
+	if !hasLine(lines, "build --progress plain -t demo-api:latest /ctx") {
 		t.Errorf("expected build with project-scoped tag, got %v", lines)
 	}
 	// The built image tag is what gets run.
@@ -394,6 +471,7 @@ func TestUpBuildTargetFlag(t *testing.T) {
 	// A multi-stage build target must reach `container build` as --target, so a
 	// service that pins a stage builds that stage rather than the final one (#75).
 	rt, log := fakeShim(t)
+	t.Setenv("IMAGE_ABSENT", "demo-api:latest")
 	p := project("demo", map[string]*compose.Service{
 		"api": {Build: &compose.Build{Context: "/ctx", Target: "builder"}},
 	})
@@ -401,7 +479,7 @@ func TestUpBuildTargetFlag(t *testing.T) {
 	if err := o.Up(true); err != nil {
 		t.Fatalf("Up: %v", err)
 	}
-	if !hasLine(log(), "build -t demo-api:latest --target builder /ctx") {
+	if !hasLine(log(), "build --progress plain -t demo-api:latest --target builder /ctx") {
 		t.Errorf("expected build to pass --target builder, got %v", log())
 	}
 }
@@ -411,6 +489,7 @@ func TestBuildContextUnreadableWarns(t *testing.T) {
 	// failure at COPY time (#83): under /private/tmp, or a symlinked directory.
 	t.Run("under /private/tmp", func(t *testing.T) {
 		rt, _ := fakeShim(t)
+		t.Setenv("IMAGE_ABSENT", "demo-api:latest")
 		var out bytes.Buffer
 		p := project("demo", map[string]*compose.Service{
 			"api": {Build: &compose.Build{Context: "/private/tmp/ctx"}},
@@ -435,6 +514,7 @@ func TestBuildContextUnreadableWarns(t *testing.T) {
 			t.Fatal(err)
 		}
 		rt, _ := fakeShim(t)
+		t.Setenv("IMAGE_ABSENT", "demo-api:latest")
 		var out bytes.Buffer
 		p := project("demo", map[string]*compose.Service{
 			"api": {Build: &compose.Build{Context: link}},
@@ -539,7 +619,7 @@ func TestDownTearsDownInReverse(t *testing.T) {
 		"web": {Image: "web:latest", DependsOn: compose.DependsOn{{Name: "db"}}},
 	})
 	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
-	if err := o.Down(false, ""); err != nil {
+	if err := o.Down(false, "", false); err != nil {
 		t.Fatalf("Down: %v", err)
 	}
 	lines := log()
@@ -575,7 +655,7 @@ func TestBuildAndPullSelectByServiceKind(t *testing.T) {
 	}
 	lines := log()
 	// Only the build service is built; the image-only service is skipped.
-	if !hasLine(lines, "build -t demo-api:latest /ctx") {
+	if !hasLine(lines, "build --progress plain -t demo-api:latest /ctx") {
 		t.Errorf("expected api to be built, got %v", lines)
 	}
 	if countLines(lines, "build ") != 1 {
@@ -840,7 +920,7 @@ func TestDownVolumesRemovesOnlyNamedVolumes(t *testing.T) {
 	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
 
 	// Without -v, no volume is deleted.
-	if err := o.Down(false, ""); err != nil {
+	if err := o.Down(false, "", false); err != nil {
 		t.Fatalf("Down: %v", err)
 	}
 	if indexOf(log(), "volume delete") >= 0 {
@@ -850,7 +930,7 @@ func TestDownVolumesRemovesOnlyNamedVolumes(t *testing.T) {
 	// With -v, the named volume is removed but the bind mount source is not.
 	rt2, log2 := fakeShim(t)
 	o2 := orchestrator.New(p, rt2, "opossum", &bytes.Buffer{})
-	if err := o2.Down(true, ""); err != nil {
+	if err := o2.Down(true, "", false); err != nil {
 		t.Fatalf("Down: %v", err)
 	}
 	if !hasLine(log2(), "volume delete demo_pgdata") {
@@ -952,7 +1032,7 @@ func TestExternalVolumeNotNamespacedOrRemoved(t *testing.T) {
 
 	rt2, log2 := fakeShim(t)
 	o2 := orchestrator.New(newP(), rt2, "opossum", &bytes.Buffer{})
-	if err := o2.Down(true, ""); err != nil {
+	if err := o2.Down(true, "", false); err != nil {
 		t.Fatalf("Down: %v", err)
 	}
 	if !hasLine(log2(), "volume delete demo_pgdata") {
@@ -1031,7 +1111,7 @@ func TestDownRemovesAnonVolume(t *testing.T) {
 	p := project("demo", map[string]*compose.Service{
 		"web": {Image: "web:latest", Volumes: []string{"/app/cache"}},
 	})
-	if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Down(true, ""); err != nil {
+	if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Down(true, "", false); err != nil {
 		t.Fatalf("Down: %v", err)
 	}
 	if indexOf(log(), "volume delete demo_web_app_cache_") < 0 {
@@ -1048,7 +1128,7 @@ func imageProject() *compose.Project {
 
 func TestDownRmiLocalRemovesBuiltOnly(t *testing.T) {
 	rt, log := fakeShim(t)
-	if err := orchestrator.New(imageProject(), rt, "opossum", &bytes.Buffer{}).Down(false, "local"); err != nil {
+	if err := orchestrator.New(imageProject(), rt, "opossum", &bytes.Buffer{}).Down(false, "local", false); err != nil {
 		t.Fatalf("Down: %v", err)
 	}
 	if indexOf(log(), "image delete --force demo-web:latest") < 0 {
@@ -1061,7 +1141,7 @@ func TestDownRmiLocalRemovesBuiltOnly(t *testing.T) {
 
 func TestDownRmiAllRemovesBuiltAndPulled(t *testing.T) {
 	rt, log := fakeShim(t)
-	if err := orchestrator.New(imageProject(), rt, "opossum", &bytes.Buffer{}).Down(false, "all"); err != nil {
+	if err := orchestrator.New(imageProject(), rt, "opossum", &bytes.Buffer{}).Down(false, "all", false); err != nil {
 		t.Fatalf("Down: %v", err)
 	}
 	if indexOf(log(), "image delete --force demo-web:latest") < 0 || indexOf(log(), "image delete --force postgres:16") < 0 {
@@ -1071,7 +1151,7 @@ func TestDownRmiAllRemovesBuiltAndPulled(t *testing.T) {
 
 func TestDownWithoutRmiRemovesNoImages(t *testing.T) {
 	rt, log := fakeShim(t)
-	if err := orchestrator.New(imageProject(), rt, "opossum", &bytes.Buffer{}).Down(false, ""); err != nil {
+	if err := orchestrator.New(imageProject(), rt, "opossum", &bytes.Buffer{}).Down(false, "", false); err != nil {
 		t.Fatalf("Down: %v", err)
 	}
 	if indexOf(log(), "image delete") >= 0 {
@@ -1334,6 +1414,394 @@ func TestUpWaitsForHealthyDependency(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Waiting for db to be healthy") {
 		t.Errorf("expected a wait message, got:\n%s", out.String())
+	}
+}
+
+// A health probe that never returns must not block `up` forever: each attempt is
+// bounded by the healthcheck's timeout, so up fails (after retries) instead (#139).
+func TestUpHealthProbeTimeoutDoesNotHang(t *testing.T) {
+	rt, _ := fakeShim(t)
+	t.Setenv("HEALTH_HANG", "1") // the healthcheck exec never returns
+	p := project("demo", map[string]*compose.Service{
+		"db": {
+			Image: "postgres:16",
+			Healthcheck: &compose.Healthcheck{
+				Test:    []string{"pg_isready"},
+				Timeout: 150 * time.Millisecond, // per-attempt bound
+				Retries: 2,
+			},
+		},
+		"web": {
+			Image:     "web:latest",
+			DependsOn: compose.DependsOn{{Name: "db", Condition: compose.ConditionHealthy}},
+		},
+	})
+	done := make(chan error, 1)
+	go func() { done <- orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true) }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected up to fail when the health probe hangs, got nil")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("up hung on a stuck health probe — per-attempt timeout not enforced")
+	}
+}
+
+// Interrupting `up` (Ctrl-C, modelled by cancelling the signal context) while it
+// waits on a dependency's health must roll back what it already started — the
+// started container and the network — rather than leaving residue (#140).
+func TestUpRollsBackOnInterrupt(t *testing.T) {
+	rt, log := fakeShim(t)
+	t.Setenv("HEALTH_OK_AT", "100000") // db never reports healthy, so up stays in the probe loop
+	ctx, cancel := context.WithCancel(context.Background())
+	p := project("demo", map[string]*compose.Service{
+		"db": {
+			Image: "postgres:16",
+			Healthcheck: &compose.Healthcheck{
+				Test:     []string{"pg_isready"},
+				Interval: 5 * time.Millisecond,
+				Retries:  1_000_000,
+				Timeout:  time.Second,
+			},
+		},
+		"web": {
+			Image:     "web:latest",
+			DependsOn: compose.DependsOn{{Name: "db", Condition: compose.ConditionHealthy}},
+		},
+	})
+	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
+	o.OnSignal(ctx)
+
+	done := make(chan error, 1)
+	go func() { done <- o.Up(true) }()
+
+	// Interrupt only once db has actually started (so there's something to roll back).
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && indexOf(log(), "run -d --name db.demo.opossum") < 0 {
+		time.Sleep(2 * time.Millisecond)
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected an interrupt error")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("up did not return after interrupt")
+	}
+	lines := log()
+	if indexOf(lines, "run -d --name db.demo.opossum") < 0 {
+		t.Fatalf("db should have started before the interrupt, got %v", lines)
+	}
+	// Rollback: db is stopped (Stop is used nowhere else in up) and the network removed.
+	if indexOf(lines, "stop db.demo.opossum") < 0 {
+		t.Errorf("interrupt should stop the started container, got %v", lines)
+	}
+	if indexOf(lines, "network delete demo-net") < 0 {
+		t.Errorf("interrupt should remove the created network, got %v", lines)
+	}
+	if indexOf(lines, "run -d --name web.demo.opossum") >= 0 {
+		t.Errorf("web must not start after the interrupt, got %v", lines)
+	}
+}
+
+// A second `up` leaves a running, unchanged service alone instead of recreating
+// it (docker compose parity) — so it keeps its state and logs (#144).
+func TestUpSkipsUnchangedRunningService(t *testing.T) {
+	rt, log := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{"web": {Image: "web:latest"}})
+	var out bytes.Buffer
+	o := orchestrator.New(p, rt, "opossum", &out)
+	if err := o.Up(true); err != nil {
+		t.Fatalf("first up: %v", err)
+	}
+	if err := o.Up(true); err != nil {
+		t.Fatalf("second up: %v", err)
+	}
+	if n := countLines(log(), "run -d --name web.demo.opossum"); n != 1 {
+		t.Errorf("an unchanged running service should be created once, got %d runs", n)
+	}
+	if !strings.Contains(out.String(), "web is up to date") {
+		t.Errorf("expected 'web is up to date' on the second up, got:\n%s", out.String())
+	}
+}
+
+// `up --foreground` must recreate even an unchanged running service: attaching to
+// stream its output requires a fresh container, so the skip is bypassed.
+func TestUpForegroundRecreatesEvenIfUnchanged(t *testing.T) {
+	rt, log := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{"web": {Image: "web:latest"}})
+	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
+	if err := o.Up(true); err != nil { // detached
+		t.Fatalf("first up: %v", err)
+	}
+	if err := o.Up(false); err != nil { // --foreground
+		t.Fatalf("foreground up: %v", err)
+	}
+	if n := countLines(log(), "--name web.demo.opossum"); n != 2 {
+		t.Errorf("foreground up should recreate to attach, want 2 runs got %d", n)
+	}
+}
+
+// --force-recreate recreates even when nothing changed.
+func TestUpForceRecreateRecreates(t *testing.T) {
+	rt, log := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{"web": {Image: "web:latest"}})
+	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
+	if err := o.Up(true); err != nil {
+		t.Fatalf("first up: %v", err)
+	}
+	o.SetUpOptions(true, false, false, false) // --force-recreate
+	if err := o.Up(true); err != nil {
+		t.Fatalf("second up: %v", err)
+	}
+	if n := countLines(log(), "run -d --name web.demo.opossum"); n != 2 {
+		t.Errorf("--force-recreate should recreate, want 2 runs got %d", n)
+	}
+}
+
+// A configuration change (here: environment) recreates the service.
+func TestUpRecreatesOnConfigChange(t *testing.T) {
+	rt, log := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{"web": {Image: "web:latest"}})
+	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
+	if err := o.Up(true); err != nil {
+		t.Fatalf("first up: %v", err)
+	}
+	p.Services["web"].Environment = compose.Environment{"NEW=1"} // config changed
+	if err := o.Up(true); err != nil {
+		t.Fatalf("second up: %v", err)
+	}
+	if n := countLines(log(), "run -d --name web.demo.opossum"); n != 2 {
+		t.Errorf("a changed service should be recreated, want 2 runs got %d", n)
+	}
+}
+
+// A build service builds only when its image is missing (or --build); --no-build
+// refuses to build a missing image.
+func TestUpBuildsOnlyWhenNeeded(t *testing.T) {
+	t.Run("present image is not rebuilt", func(t *testing.T) {
+		rt, log := fakeShim(t) // image inspect returns present by default
+		p := project("demo", map[string]*compose.Service{"api": {Build: &compose.Build{Context: "/ctx"}}})
+		if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true); err != nil {
+			t.Fatalf("Up: %v", err)
+		}
+		if n := countLines(log(), "build "); n != 0 {
+			t.Errorf("a present image should not be rebuilt, got %d builds", n)
+		}
+	})
+	t.Run("no-build errors on a missing image", func(t *testing.T) {
+		rt, _ := fakeShim(t)
+		t.Setenv("IMAGE_ABSENT", "demo-api:latest")
+		p := project("demo", map[string]*compose.Service{"api": {Build: &compose.Build{Context: "/ctx"}}})
+		o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
+		o.SetUpOptions(false, false, true, false) // --no-build
+		if err := o.Up(true); err == nil || !strings.Contains(err.Error(), "no-build") {
+			t.Fatalf("expected a --no-build error for a missing image, got %v", err)
+		}
+	})
+}
+
+// orphanProject: current compose has only `web`; the runtime still holds an
+// `old` container from a since-removed service.
+func orphanProject(t *testing.T) *compose.Project {
+	t.Helper()
+	t.Setenv("LS_CONTAINERS", "web.demo.opossum old.demo.opossum")
+	t.Setenv("LS_PROJECT", "demo")
+	return project("demo", map[string]*compose.Service{"web": {Image: "web:latest"}})
+}
+
+func TestUpWarnsAboutOrphans(t *testing.T) {
+	rt, _ := fakeShim(t)
+	p := orphanProject(t)
+	var out bytes.Buffer
+	if err := orchestrator.New(p, rt, "opossum", &out).Up(true); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	if !strings.Contains(out.String(), "orphan") || !strings.Contains(out.String(), "old.demo.opossum") {
+		t.Errorf("expected an orphan warning naming old.demo.opossum, got:\n%s", out.String())
+	}
+}
+
+func TestUpRemovesOrphans(t *testing.T) {
+	rt, log := fakeShim(t)
+	p := orphanProject(t)
+	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
+	o.SetUpOptions(false, false, false, true) // --remove-orphans
+	if err := o.Up(true); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	// The orphan is stopped+deleted (stop is unique to orphan removal here); the
+	// current service `web` is not treated as an orphan.
+	if indexOf(log(), "stop old.demo.opossum") < 0 || indexOf(log(), "delete --force old.demo.opossum") < 0 {
+		t.Errorf("--remove-orphans should stop+delete the orphan, got %v", log())
+	}
+}
+
+func TestDownRemovesOrphans(t *testing.T) {
+	rt, log := fakeShim(t)
+	p := orphanProject(t)
+	if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Down(false, "", true); err != nil {
+		t.Fatalf("Down: %v", err)
+	}
+	if indexOf(log(), "delete --force old.demo.opossum") < 0 {
+		t.Errorf("down --remove-orphans should delete the orphan, got %v", log())
+	}
+}
+
+func TestDownWithoutFlagLeavesOrphans(t *testing.T) {
+	rt, log := fakeShim(t)
+	p := orphanProject(t)
+	if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Down(false, "", false); err != nil {
+		t.Fatalf("Down: %v", err)
+	}
+	if indexOf(log(), "old.demo.opossum") >= 0 {
+		t.Errorf("down without --remove-orphans must not touch orphans, got %v", log())
+	}
+}
+
+// The safety invariant: --remove-orphans must never warn about or remove another
+// project's container (only this project's label is considered).
+func TestRemoveOrphansSparesOtherProjects(t *testing.T) {
+	newProj := func(t *testing.T) *compose.Project {
+		t.Setenv("LS_CONTAINERS", "web.demo.opossum")          // this project, current service
+		t.Setenv("LS_PROJECT", "demo")                         // its label
+		t.Setenv("LS_FOREIGN", "db.other.opossum otherproj-x") // a different project's containers
+		return project("demo", map[string]*compose.Service{"web": {Image: "web:latest"}})
+	}
+
+	rt, log := fakeShim(t)
+	var out bytes.Buffer
+	o := orchestrator.New(newProj(t), rt, "opossum", &out)
+	o.SetUpOptions(false, false, false, true) // --remove-orphans
+	if err := o.Up(true); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	if strings.Contains(out.String(), "orphan") {
+		t.Errorf("must not report another project's containers as orphans, got:\n%s", out.String())
+	}
+	for _, foreign := range []string{"db.other.opossum", "otherproj-x"} {
+		if indexOf(log(), foreign) >= 0 {
+			t.Errorf("--remove-orphans must not touch another project's container %q, got %v", foreign, log())
+		}
+	}
+
+	rt2, log2 := fakeShim(t)
+	if err := orchestrator.New(newProj(t), rt2, "opossum", &bytes.Buffer{}).Down(false, "", true); err != nil {
+		t.Fatalf("Down: %v", err)
+	}
+	if indexOf(log2(), "db.other.opossum") >= 0 {
+		t.Errorf("down --remove-orphans must not touch another project's container, got %v", log2())
+	}
+}
+
+// profilesProject: web always runs; debug is gated behind the "debug" profile.
+func profilesProject() *compose.Project {
+	return project("demo", map[string]*compose.Service{
+		"web":   {Image: "web:latest"},
+		"debug": {Image: "debug:latest", Profiles: []string{"debug"}},
+	})
+}
+
+func startedDebug(t *testing.T, o *orchestrator.Orchestrator, log func() []string, args ...string) bool {
+	t.Helper()
+	if err := o.Up(true, args...); err != nil {
+		t.Fatalf("Up %v: %v", args, err)
+	}
+	return indexOf(log(), "run -d --name debug.demo.opossum") >= 0
+}
+
+func TestUpProfilesGatedByDefault(t *testing.T) {
+	rt, log := fakeShim(t)
+	o := orchestrator.New(profilesProject(), rt, "opossum", &bytes.Buffer{})
+	if startedDebug(t, o, log) {
+		t.Error("a profiled service must not start by default")
+	}
+	if indexOf(log(), "run -d --name web.demo.opossum") < 0 {
+		t.Error("a non-profiled service should always start")
+	}
+}
+
+func TestUpProfilesActivatedStart(t *testing.T) {
+	rt, log := fakeShim(t)
+	o := orchestrator.New(profilesProject(), rt, "opossum", &bytes.Buffer{})
+	o.EnableProfiles([]string{"debug"})
+	if !startedDebug(t, o, log) {
+		t.Error("a profiled service should start when its profile is active")
+	}
+}
+
+func TestUpProfilesNamedServiceEnables(t *testing.T) {
+	rt, log := fakeShim(t)
+	o := orchestrator.New(profilesProject(), rt, "opossum", &bytes.Buffer{})
+	// Naming a gated service on the command line enables it (docker compose parity).
+	if !startedDebug(t, o, log, "debug") {
+		t.Error("naming a profiled service should start it")
+	}
+}
+
+// A started service that depends on a profile-gated, inactive service is an
+// error — docker compose treats the gated dependency as undefined.
+func TestUpProfilesDependencyOnDisabledErrors(t *testing.T) {
+	rt, _ := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"web":    {Image: "web:latest", DependsOn: compose.DependsOn{{Name: "helper"}}},
+		"helper": {Image: "helper:latest", Profiles: []string{"opt"}},
+	})
+	err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true)
+	if err == nil || !strings.Contains(err.Error(), "profile is not active") {
+		t.Fatalf("expected a disabled-dependency error, got %v", err)
+	}
+}
+
+// A gated dependency whose profile IS active starts normally (no error) and the
+// dependent runs too.
+func TestUpProfilesActiveDependencyStarts(t *testing.T) {
+	rt, log := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"web":    {Image: "web:latest", DependsOn: compose.DependsOn{{Name: "helper"}}},
+		"helper": {Image: "helper:latest", Profiles: []string{"opt"}},
+	})
+	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
+	o.EnableProfiles([]string{"opt"})
+	if err := o.Up(true); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	lines := log()
+	if indexOf(lines, "run -d --name helper.demo.opossum") < 0 || indexOf(lines, "run -d --name web.demo.opossum") < 0 {
+		t.Errorf("both helper (active profile) and web should start, got %v", lines)
+	}
+}
+
+// A service listing several profiles is enabled if ANY of them is active.
+func TestUpProfilesMultipleAnyActive(t *testing.T) {
+	rt, log := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"svc": {Image: "svc:latest", Profiles: []string{"a", "b"}},
+	})
+	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
+	o.EnableProfiles([]string{"b"}) // second profile active
+	if err := o.Up(true); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	if indexOf(log(), "run -d --name svc.demo.opossum") < 0 {
+		t.Errorf("service should start when any of its profiles is active, got %v", log())
+	}
+}
+
+// `run` is consistent with `up`: a gated-inactive dependency is an error, not a
+// silent force-start.
+func TestRunProfilesDependencyOnDisabledErrors(t *testing.T) {
+	rt, _ := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"web":    {Image: "web:latest", DependsOn: compose.DependsOn{{Name: "helper"}}},
+		"helper": {Image: "helper:latest", Profiles: []string{"opt"}},
+	})
+	err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).RunOneOff("web", nil, orchestrator.RunOneOffOptions{})
+	if err == nil || !strings.Contains(err.Error(), "profile is not active") {
+		t.Fatalf("run should error on a gated-inactive dependency, got %v", err)
 	}
 }
 

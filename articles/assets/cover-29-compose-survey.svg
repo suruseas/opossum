@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="420" viewBox="0 0 1000 420">
+  <!-- dev.to cover, 1000x420. Dark single-look card: headline + one stacked bar
+       of the 29 awesome-compose outcomes. Palette validated (CVD worst 16.9,
+       all fills >= 3:1 on #1a1a19); neutral grays + fixed status hues carry
+       semantics, with direct labels on every segment as secondary encoding. -->
+  <rect width="1000" height="420" fill="#1a1a19"/>
+
+  <!-- kicker -->
+  <text x="42" y="66" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif"
+        font-size="16" font-weight="600" letter-spacing="3" fill="#898781">APPLE CONTAINER · MACOS 26 · NO DOCKER DESKTOP</text>
+
+  <!-- headline -->
+  <text x="40" y="128" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif"
+        font-size="50" font-weight="800" fill="#ffffff">29 real docker-compose projects,</text>
+  <text x="40" y="186" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif"
+        font-size="50" font-weight="800" fill="#c3c2b7">run unmodified. What broke?</text>
+
+  <!-- stacked bar: 29 projects, px-per-project = 912/29 = 31.448
+       segments: 14 / 4 / 3 / 5 / 3, 2px surface gaps between fills -->
+  <!-- ran as-is: 14 -> 440.3px, x 40..480.3, rounded left end -->
+  <path d="M48 252 h432.3 v72 h-432.3 a8 8 0 0 1 -8 -8 v-56 a8 8 0 0 1 8 -8 Z" fill="#0ca30c"/>
+  <!-- one-line fix: 4 -> 125.8px -->
+  <rect x="482.3" y="252" width="125.8" height="72" fill="#fab219"/>
+  <!-- other (env/setup x2, build outlasted the timeout x1): 3 -> 94.3px -->
+  <rect x="610.1" y="252" width="94.3" height="72" fill="#a8a7a0"/>
+  <!-- broken upstream: 5 -> 157.2px -->
+  <rect x="706.4" y="252" width="157.2" height="72" fill="#71706a"/>
+  <!-- can't run by design: 3 -> 94.3px, rounded right end -->
+  <path d="M865.6 252 h86.3 a8 8 0 0 1 8 8 v56 a8 8 0 0 1 -8 8 h-86.3 Z" fill="#d03b3b"/>
+
+  <!-- counts inside segments (white ink on fills) -->
+  <text x="260" y="298" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif"
+        font-size="30" font-weight="800" fill="#ffffff">14</text>
+  <text x="545" y="298" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif"
+        font-size="30" font-weight="800" fill="#1a1a19">4</text>
+  <text x="657" y="298" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif"
+        font-size="30" font-weight="800" fill="#1a1a19">3</text>
+  <text x="785" y="298" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif"
+        font-size="30" font-weight="800" fill="#ffffff">5</text>
+  <text x="912" y="298" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif"
+        font-size="30" font-weight="800" fill="#ffffff">3</text>
+
+  <!-- category labels under segments (secondary ink, never series-colored) -->
+  <text x="260" y="352" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif"
+        font-size="17" font-weight="600" fill="#c3c2b7">ran as-is</text>
+  <text x="545" y="352" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif"
+        font-size="17" font-weight="600" fill="#c3c2b7">one-line fix</text>
+  <text x="657" y="352" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif"
+        font-size="17" font-weight="600" fill="#c3c2b7">other</text>
+  <text x="785" y="352" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif"
+        font-size="17" font-weight="600" fill="#c3c2b7">broken upstream</text>
+  <text x="785" y="372" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif"
+        font-size="14" fill="#898781">(fails on Docker too)</text>
+  <text x="912" y="352" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif"
+        font-size="17" font-weight="600" fill="#c3c2b7">can't run</text>
+  <text x="912" y="372" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif"
+        font-size="14" fill="#898781">(by design)</text>
+
+  <!-- footnote -->
+  <text x="42" y="404" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif"
+        font-size="14" fill="#898781">Docker's awesome-compose samples · Apple container 1.0 · opossum</text>
+</svg>

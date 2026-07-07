@@ -3,10 +3,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"strings"
+	"syscall"
 
 	"github.com/spf13/cobra"
 	"github.com/suruseas/opossum/internal/compose"
@@ -22,6 +26,7 @@ var (
 	projectName string
 	dnsDomain   string
 	verbose     bool
+	envFiles    []string
 )
 
 // newRootCmd builds the command tree. Extracted from main so tests can execute
@@ -38,6 +43,7 @@ func newRootCmd() *cobra.Command {
 	root.PersistentFlags().StringVarP(&projectName, "project-name", "p", "", "project name (defaults to the compose file's directory)")
 	root.PersistentFlags().StringVar(&dnsDomain, "dns-domain", "opossum", "local DNS domain for bare-name service discovery (create once: sudo container system dns create <domain>)")
 	root.PersistentFlags().BoolVar(&verbose, "verbose", false, "print each underlying container command as it runs (useful for bug reports)")
+	root.PersistentFlags().StringArrayVar(&envFiles, "env-file", nil, "env file(s) for ${VAR} interpolation, replacing the default .env (repeatable; later files win)")
 
 	root.AddCommand(
 		upCmd(), downCmd(), psCmd(), imagesCmd(), logsCmd(), statsCmd(),
@@ -94,24 +100,54 @@ func main() {
 
 func upCmd() *cobra.Command {
 	var foreground bool
+	var profiles []string
+	var forceRecreate, build, noBuild, removeOrphans bool
 	cmd := &cobra.Command{
 		Use:   "up [service...]",
 		Short: "Build and start services in dependency order (all, or the named services plus their dependencies)",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if build && noBuild {
+				return fmt.Errorf("--build and --no-build are mutually exclusive")
+			}
 			o, err := loadOrchestrator(cmd.OutOrStdout())
 			if err != nil {
 				return err
 			}
+			o.SetUpOptions(forceRecreate, build, noBuild, removeOrphans)
+			// Activate compose profiles from --profile and COMPOSE_PROFILES so
+			// `profiles:`-gated services start.
+			o.EnableProfiles(profiles)
+			o.EnableProfiles(strings.Split(os.Getenv("COMPOSE_PROFILES"), ","))
+			// First Ctrl-C cancels the run so a partial `up` rolls back cleanly; a
+			// second one forces an immediate exit (as docker compose does).
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			sig := make(chan os.Signal, 2)
+			signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+			defer signal.Stop(sig)
+			go func() {
+				<-sig
+				cancel()
+				<-sig
+				os.Exit(130)
+			}()
+			o.OnSignal(ctx)
 			return o.Up(!foreground, args...)
 		},
 	}
 	cmd.Flags().BoolVar(&foreground, "foreground", false, "run a single service attached in the foreground instead of detached (rejected for multiple long-running services)")
+	cmd.Flags().StringArrayVar(&profiles, "profile", nil, "enable services gated behind this compose profile (repeatable; also honors COMPOSE_PROFILES)")
+	cmd.Flags().BoolVar(&forceRecreate, "force-recreate", false, "recreate containers even if their configuration is unchanged")
+	cmd.Flags().BoolVar(&build, "build", false, "build images before starting, even if already present")
+	cmd.Flags().BoolVar(&noBuild, "no-build", false, "don't build images (error if one is missing)")
+	cmd.Flags().BoolVar(&removeOrphans, "remove-orphans", false, "remove containers for services no longer in the compose file")
 	return cmd
 }
 
 func downCmd() *cobra.Command {
 	var volumes bool
 	var rmi string
+	var removeOrphans bool
 	cmd := &cobra.Command{
 		Use:   "down",
 		Short: "Stop and remove all services and the project network",
@@ -125,11 +161,12 @@ func downCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return o.Down(volumes, rmi)
+			return o.Down(volumes, rmi, removeOrphans)
 		},
 	}
 	cmd.Flags().BoolVarP(&volumes, "volumes", "v", false, "also remove named volumes declared by services")
 	cmd.Flags().StringVar(&rmi, "rmi", "", "also remove images: \"local\" (opossum-built) or \"all\" (built + pulled)")
+	cmd.Flags().BoolVar(&removeOrphans, "remove-orphans", false, "also remove containers for services no longer in the compose file")
 	return cmd
 }
 
@@ -196,6 +233,7 @@ func configCmd() *cobra.Command {
 
 func runCmd() *cobra.Command {
 	var rm, noDeps bool
+	var profiles []string
 	cmd := &cobra.Command{
 		Use:   "run [--rm] [--no-deps] <service> [command...]",
 		Short: "Run a one-off command in a new container for a service",
@@ -205,11 +243,14 @@ func runCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			o.EnableProfiles(profiles)
+			o.EnableProfiles(strings.Split(os.Getenv("COMPOSE_PROFILES"), ","))
 			return o.RunOneOff(args[0], args[1:], orchestrator.RunOneOffOptions{Rm: rm, NoDeps: noDeps})
 		},
 	}
 	cmd.Flags().BoolVar(&rm, "rm", false, "remove the container after it exits")
 	cmd.Flags().BoolVar(&noDeps, "no-deps", false, "don't start linked services")
+	cmd.Flags().StringArrayVar(&profiles, "profile", nil, "enable services gated behind this compose profile (repeatable; also honors COMPOSE_PROFILES)")
 	// Flags after the service name belong to the executed command, not opossum.
 	cmd.Flags().SetInterspersed(false)
 	return cmd
@@ -311,7 +352,7 @@ func loadOrchestrator(out io.Writer) (*orchestrator.Orchestrator, error) {
 		}
 		file = found
 	}
-	proj, err := compose.Load(file)
+	proj, err := compose.Load(file, envFiles...)
 	if err != nil {
 		return nil, err
 	}

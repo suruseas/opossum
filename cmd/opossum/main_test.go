@@ -364,7 +364,7 @@ func TestBuildCLI(t *testing.T) {
 	if _, err := run(t, "-f", compose, "build"); err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	if joined := strings.Join(readLog(), "\n"); !strings.Contains(joined, "build -t demo-api:latest /ctx") {
+	if joined := strings.Join(readLog(), "\n"); !strings.Contains(joined, "build --progress plain -t demo-api:latest /ctx") {
 		t.Errorf("build should build api, got:\n%s", joined)
 	}
 }

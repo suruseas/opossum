@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // exitShim returns a Runtime whose `container` just exits 0 — for exercising the
@@ -369,7 +370,7 @@ func TestBuildAssemblesArgv(t *testing.T) {
 		t.Fatalf("Build: %v", err)
 	}
 	got := lastLine(t, read)
-	want := "build -t demo-api:latest -f Dockerfile.api --build-arg VERSION=1 --build-arg MODE=prod /ctx"
+	want := "build --progress plain -t demo-api:latest -f Dockerfile.api --build-arg VERSION=1 --build-arg MODE=prod /ctx"
 	if got != want {
 		t.Errorf("Build argv mismatch\n got: %s\nwant: %s", got, want)
 	}
@@ -380,7 +381,7 @@ func TestBuildTargetArgv(t *testing.T) {
 	if err := rt.Build(BuildOptions{Tag: "app:latest", Context: "/ctx", Target: "builder"}); err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	if got := lastLine(t, read); got != "build -t app:latest --target builder /ctx" {
+	if got := lastLine(t, read); got != "build --progress plain -t app:latest --target builder /ctx" {
 		t.Errorf("Build --target argv = %q", got)
 	}
 }
@@ -390,14 +391,33 @@ func TestBuildDefaultsContextToDot(t *testing.T) {
 	if err := rt.Build(BuildOptions{Tag: "x:latest"}); err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	if got := lastLine(t, read); got != "build -t x:latest ." {
+	if got := lastLine(t, read); got != "build --progress plain -t x:latest ." {
 		t.Errorf("Build with empty context = %q, want trailing '.'", got)
+	}
+}
+
+// A hung probe must not block forever: Exec with a timeout returns an error
+// promptly instead of waiting for the (here, 10s-sleeping) command.
+func TestExecTimesOut(t *testing.T) {
+	shim := filepath.Join(t.TempDir(), "container.sh")
+	if err := os.WriteFile(shim, []byte("#!/bin/sh\nsleep 10\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := &Runtime{Bin: shim}
+	start := time.Now()
+	err := r.Exec("web", []string{"true"}, 200*time.Millisecond)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected a timeout error for a hung probe")
+	}
+	if elapsed > 3*time.Second {
+		t.Errorf("Exec should return near the timeout, took %s", elapsed)
 	}
 }
 
 func TestExecStopDeleteArgv(t *testing.T) {
 	rt, read := loggingShim(t)
-	if err := rt.Exec("db.opossum", []string{"pg_isready", "-U", "postgres"}); err != nil {
+	if err := rt.Exec("db.opossum", []string{"pg_isready", "-U", "postgres"}, 0); err != nil {
 		t.Fatalf("Exec: %v", err)
 	}
 	if got := lastLine(t, read); got != "exec db.opossum pg_isready -U postgres" {

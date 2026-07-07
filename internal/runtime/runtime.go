@@ -4,6 +4,7 @@ package runtime
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,15 +12,31 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Runtime invokes the `container` binary.
 type Runtime struct {
 	Bin string
-	// Verbose echoes each `container` invocation before running it (useful for
-	// bug reports). The echo goes to Trace, or os.Stderr when Trace is nil.
+	// Verbose turns on extra diagnostics for bug reports: it echoes each
+	// `container` invocation before running it (to Trace, or os.Stderr when Trace
+	// is nil), and callers also use it to surface otherwise-hidden notices (e.g.
+	// ignored compose fields).
 	Verbose bool
 	Trace   io.Writer
+	// Ctx is the cancellation scope for child processes: when it's cancelled
+	// (e.g. Ctrl-C during `up`), an in-flight build/run/exec is killed so the
+	// caller can roll back promptly. nil means no cancellation (background).
+	Ctx context.Context
+}
+
+// baseCtx is the parent context for child processes — Ctx when set, else a
+// never-cancelled background context.
+func (r *Runtime) baseCtx() context.Context {
+	if r.Ctx != nil {
+		return r.Ctx
+	}
+	return context.Background()
 }
 
 // trace echoes the about-to-run command when Verbose is set. Args containing
@@ -78,7 +95,8 @@ func (r *Runtime) Available() bool {
 // stream runs a command with stdio attached to the parent process.
 func (r *Runtime) stream(args ...string) error {
 	r.trace(args)
-	cmd := exec.Command(r.Bin, args...)
+	cmd := exec.CommandContext(r.baseCtx(), r.Bin, args...)
+	cmd.WaitDelay = 2 * time.Second // don't hang on a lingering child after cancel
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
@@ -88,7 +106,8 @@ func (r *Runtime) stream(args ...string) error {
 // capture runs a command and returns combined stdout+stderr.
 func (r *Runtime) capture(args ...string) (string, error) {
 	r.trace(args)
-	cmd := exec.Command(r.Bin, args...)
+	cmd := exec.CommandContext(r.baseCtx(), r.Bin, args...)
+	cmd.WaitDelay = 2 * time.Second // don't hang on a lingering child after cancel
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
@@ -205,9 +224,11 @@ type BuildOptions struct {
 	Target     string // --target: multi-stage build stage
 }
 
-// Build builds an image.
+// Build builds an image. It always requests `--progress plain` so build output is
+// steady per-line logging: a long step (e.g. transferring a large context) keeps
+// advancing on screen instead of sitting on an in-place line that looks stuck.
 func (r *Runtime) Build(o BuildOptions) error {
-	args := []string{"build", "-t", o.Tag}
+	args := []string{"build", "--progress", "plain", "-t", o.Tag}
 	if o.Dockerfile != "" {
 		args = append(args, "-f", o.Dockerfile)
 	}
@@ -303,8 +324,28 @@ func (r *Runtime) Run(o RunOptions) error {
 
 // Exec runs a command inside a running container and returns an error if it
 // exits non-zero. Output is captured (not streamed) so health probes stay quiet.
-func (r *Runtime) Exec(name string, args []string) error {
-	_, err := r.capture(append([]string{"exec", name}, args...)...)
+// A positive timeout bounds the call so a hung probe can't block `up` forever; a
+// non-positive timeout means no limit.
+func (r *Runtime) Exec(name string, args []string, timeout time.Duration) error {
+	full := append([]string{"exec", name}, args...)
+	r.trace(full)
+	ctx := r.baseCtx()
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	cmd := exec.CommandContext(ctx, r.Bin, full...)
+	// After the deadline kills the process, don't wait indefinitely for a lingering
+	// child to release the output pipes — force them closed so Run() actually returns.
+	cmd.WaitDelay = timeout
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	err := cmd.Run()
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("probe did not return within %s", timeout)
+	}
 	return err
 }
 
@@ -409,6 +450,7 @@ type inspectResult struct {
 		} `json:"networks"`
 	} `json:"status"`
 	Configuration struct {
+		ID             string            `json:"id"` // the container's name (Apple `container` uses name as id)
 		Labels         map[string]string `json:"labels"`
 		PublishedPorts []struct {
 			ContainerPort int    `json:"containerPort"`
@@ -417,6 +459,35 @@ type inspectResult struct {
 			Proto         string `json:"proto"`
 		} `json:"publishedPorts"`
 	} `json:"configuration"`
+}
+
+// ContainerSummary is one entry from `container ls -a`.
+type ContainerSummary struct {
+	Name   string
+	State  string
+	Labels map[string]string
+}
+
+// List returns every container (running or not) with its name, state, and labels,
+// so callers can find a project's containers (e.g. to detect orphans).
+func (r *Runtime) List() []ContainerSummary {
+	out, err := r.capture("ls", "-a", "--format", "json")
+	if err != nil {
+		return nil
+	}
+	var results []inspectResult
+	if err := json.Unmarshal([]byte(out), &results); err != nil {
+		return nil
+	}
+	summaries := make([]ContainerSummary, 0, len(results))
+	for _, res := range results {
+		summaries = append(summaries, ContainerSummary{
+			Name:   res.Configuration.ID,
+			State:  res.Status.State,
+			Labels: res.Configuration.Labels,
+		})
+	}
+	return summaries
 }
 
 // PortMapping is one published-port entry from `container inspect`.

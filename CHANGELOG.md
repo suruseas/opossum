@@ -6,6 +6,29 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-08
+
+### Added
+
+- `profiles` support: services in a profile don't start by default; enable them
+  with `--profile <name>` or `COMPOSE_PROFILES`. `run` also honors profiles (a
+  gated dependency is an error).
+- `up --remove-orphans` removes containers for services deleted from the compose file.
+- `--env-file <path>` overrides which file supplies interpolation variables
+  (instead of the default `.env` next to the compose file).
+- `up` is now idempotent: an unchanged service isn't recreated and an existing
+  image isn't rebuilt, so re-running `up` is fast and non-destructive.
+- Calmer `up` output: build progress is always shown; harmless warnings move
+  behind `--verbose`.
+
+### Fixed
+
+- `up` applies a healthcheck's `timeout` (clamped to 30s for 0/negative values),
+  so a hanging probe no longer blocks `up` indefinitely.
+- Ctrl-C during `up` rolls back cleanly, killing in-flight build/run/probe
+  children and leaving no orphaned containers or network.
+- `up --foreground` recreates and attaches even when the service is unchanged.
+
 ## [0.3.0] - 2026-07-07
 
 ### Added
@@ -180,7 +203,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/suruseas/opossum/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/suruseas/opossum/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/suruseas/opossum/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/suruseas/opossum/releases/tag/v0.1.0

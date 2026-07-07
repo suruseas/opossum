@@ -209,6 +209,76 @@ services:
 	}
 }
 
+func mustWriteFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// An explicit --env-file replaces the default .env (docker compose): values from
+// .env that the env-file doesn't set are gone.
+func TestLoadEnvFileReplacesDotEnv(t *testing.T) {
+	dir := t.TempDir()
+	cfile := filepath.Join(dir, "compose.yaml")
+	mustWriteFile(t, cfile, "services:\n  web:\n    image: \"i-${FOO:-none}-${BAR:-none}\"\n")
+	mustWriteFile(t, filepath.Join(dir, ".env"), "FOO=dot\nBAR=dot\n")
+	custom := filepath.Join(dir, "custom.env")
+	mustWriteFile(t, custom, "FOO=custom\n")
+
+	proj, err := Load(cfile, custom)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := proj.Services["web"].Image; got != "i-custom-none" {
+		t.Errorf("env-file should replace .env, got %q", got)
+	}
+}
+
+func TestLoadEnvFilesLaterWins(t *testing.T) {
+	dir := t.TempDir()
+	cfile := filepath.Join(dir, "compose.yaml")
+	mustWriteFile(t, cfile, "services:\n  web:\n    image: \"i-${FOO:-none}-${BAZ:-none}\"\n")
+	a := filepath.Join(dir, "a.env")
+	mustWriteFile(t, a, "FOO=a\n")
+	b := filepath.Join(dir, "b.env")
+	mustWriteFile(t, b, "FOO=b\nBAZ=b\n")
+
+	proj, err := Load(cfile, a, b)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := proj.Services["web"].Image; got != "i-b-b" {
+		t.Errorf("later env-file should win, got %q", got)
+	}
+}
+
+func TestLoadEnvFileShellStillOverrides(t *testing.T) {
+	t.Setenv("FOO", "shell")
+	dir := t.TempDir()
+	cfile := filepath.Join(dir, "compose.yaml")
+	mustWriteFile(t, cfile, "services:\n  web:\n    image: \"i-${FOO}\"\n")
+	custom := filepath.Join(dir, "custom.env")
+	mustWriteFile(t, custom, "FOO=custom\n")
+
+	proj, err := Load(cfile, custom)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := proj.Services["web"].Image; got != "i-shell" {
+		t.Errorf("shell env should override an --env-file value, got %q", got)
+	}
+}
+
+func TestLoadEnvFileFlagMissingErrors(t *testing.T) {
+	dir := t.TempDir()
+	cfile := filepath.Join(dir, "compose.yaml")
+	mustWriteFile(t, cfile, "services:\n  web:\n    image: x\n")
+	if _, err := Load(cfile, filepath.Join(dir, "nope.env")); err == nil {
+		t.Fatal("a missing --env-file should be an error")
+	}
+}
+
 func TestLoadRequiredVarUnsetFails(t *testing.T) {
 	p := writeProject(t, `
 services:

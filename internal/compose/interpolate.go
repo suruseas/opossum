@@ -15,10 +15,30 @@ type varLookup func(name string) (string, bool)
 // loadEnv builds the variable lookup used for interpolation: values from a
 // `.env` file in dir, overlaid by the process environment (the shell wins, as in
 // docker-compose). A missing .env file is not an error.
-func loadEnv(dir string) (varLookup, error) {
-	fromFile, err := parseDotEnv(filepath.Join(dir, ".env"))
-	if err != nil {
-		return nil, err
+func loadEnv(dir string, envFiles []string) (varLookup, error) {
+	var fromFile map[string]string
+	if len(envFiles) > 0 {
+		// Explicit --env-file(s) replace the default .env; later files win, and a
+		// named file that's missing is an error (unlike the optional default .env).
+		fromFile = map[string]string{}
+		for _, f := range envFiles {
+			if _, err := os.Stat(f); err != nil {
+				return nil, fmt.Errorf("env file %q: %w", f, err)
+			}
+			m, err := parseDotEnv(f)
+			if err != nil {
+				return nil, err
+			}
+			for k, v := range m {
+				fromFile[k] = v
+			}
+		}
+	} else {
+		m, err := parseDotEnv(filepath.Join(dir, ".env"))
+		if err != nil {
+			return nil, err
+		}
+		fromFile = m
 	}
 	return func(name string) (string, bool) {
 		if v, ok := os.LookupEnv(name); ok {

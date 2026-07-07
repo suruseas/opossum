@@ -41,6 +41,7 @@ type Service struct {
 	Secrets     SecretRefs    `yaml:"secrets"`
 	DependsOn   DependsOn     `yaml:"depends_on"`
 	Healthcheck *Healthcheck  `yaml:"healthcheck"`
+	Profiles    []string      `yaml:"profiles"` // service starts only when one of these profiles is active (empty = always)
 
 	// Unsupported holds any compose keys opossum doesn't act on (e.g.
 	// container_name, restart), collected during parsing so it can warn rather
@@ -436,7 +437,7 @@ func (d DependsOn) Names() []string {
 type Healthcheck struct {
 	Test        []string      // argv for `container exec` (shell forms wrapped in `sh -c`)
 	Interval    time.Duration // wait between attempts (default 30s)
-	Timeout     time.Duration // advisory per-attempt timeout (default 30s)
+	Timeout     time.Duration // enforced per-attempt timeout (default 30s)
 	Retries     int           // attempts before giving up (default 3)
 	StartPeriod time.Duration // grace period before the first attempt (default 0)
 	Disabled    bool          // test: ["NONE"]

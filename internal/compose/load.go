@@ -61,7 +61,10 @@ func Discover(dir string) (string, error) {
 }
 
 // Load reads and validates a compose file.
-func Load(path string) (*Project, error) {
+// Load parses a compose file. envFiles, when given, supply the ${VAR}
+// interpolation values in place of the default `.env` (docker compose's
+// --env-file; later files win, the shell still overrides all).
+func Load(path string, envFiles ...string) (*Project, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading compose file: %w", err)
@@ -74,8 +77,8 @@ func Load(path string) (*Project, error) {
 	baseDir := filepath.Dir(abs)
 
 	// Expand ${VAR} references before parsing, using a `.env` file next to the
-	// compose file overlaid by the process environment.
-	lookup, err := loadEnv(baseDir)
+	// compose file (or the given --env-file paths) overlaid by the process env.
+	lookup, err := loadEnv(baseDir, envFiles)
 	if err != nil {
 		return nil, err
 	}

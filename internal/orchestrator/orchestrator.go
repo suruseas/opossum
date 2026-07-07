@@ -4,6 +4,7 @@
 package orchestrator
 
 import (
+	"context"
 	"fmt"
 	"hash/fnv"
 	"net"
@@ -29,11 +30,142 @@ type Orchestrator struct {
 	rt        *runtime.Runtime
 	out       interface{ Write([]byte) (int, error) }
 	sleep     func(time.Duration) // overridable so tests don't wait in real time
+	ctx       context.Context     // cancelled on Ctrl-C so a partial `up` rolls back
+	profiles  map[string]bool     // active compose profiles (--profile / COMPOSE_PROFILES)
+	up        upOptions           // per-invocation `up` flags
+}
+
+// upOptions holds the `up` recreate/build flags.
+type upOptions struct {
+	forceRecreate bool // --force-recreate: recreate even if unchanged
+	build         bool // --build: (re)build images even if present
+	noBuild       bool // --no-build: never build (error if an image is missing)
+	removeOrphans bool // --remove-orphans: remove containers for services no longer in the compose
+}
+
+// orphans returns the project's containers (by label) whose names don't match any
+// current service — left behind when a service was removed or renamed. Both a
+// service's up-container and its one-off `-run` container count as expected.
+func (o *Orchestrator) orphans() []string {
+	expected := map[string]bool{}
+	for name := range o.Project.Services {
+		expected[o.containerName(name)] = true
+		expected[o.containerName(name+"-run")] = true
+	}
+	var found []string
+	for _, c := range o.rt.List() {
+		if c.Labels[projectLabel] == o.Project.Name && !expected[c.Name] {
+			found = append(found, c.Name)
+		}
+	}
+	sort.Strings(found)
+	return found
+}
+
+// removeOrphans stops and deletes the given orphan containers.
+func (o *Orchestrator) removeOrphans(orphans []string) {
+	for _, c := range orphans {
+		o.logf("Removing orphan container %s\n", c)
+		o.rt.Stop(c)
+		o.rt.Delete(c)
+	}
 }
 
 // New builds an Orchestrator writing user-facing output to w.
 func New(p *compose.Project, rt *runtime.Runtime, dnsDomain string, w interface{ Write([]byte) (int, error) }) *Orchestrator {
-	return &Orchestrator{Project: p, DNSDomain: dnsDomain, rt: rt, out: w, sleep: time.Sleep}
+	return &Orchestrator{Project: p, DNSDomain: dnsDomain, rt: rt, out: w, sleep: time.Sleep, ctx: context.Background()}
+}
+
+// OnSignal sets the cancellation scope for `up`: when ctx is cancelled (e.g. the
+// user presses Ctrl-C), an in-progress up stops and rolls back the work it has
+// done so far rather than leaving half-created containers and a network behind.
+// The runtime shares the context so a blocking child (build/run/probe) is killed
+// on cancel — not only when an interactive Ctrl-C reaches it via the process group.
+func (o *Orchestrator) OnSignal(ctx context.Context) {
+	if ctx != nil {
+		o.ctx = ctx
+		o.rt.Ctx = ctx
+	}
+}
+
+// SetUpOptions configures `up`'s recreate/build behavior from the command flags.
+func (o *Orchestrator) SetUpOptions(forceRecreate, build, noBuild, removeOrphans bool) {
+	o.up = upOptions{forceRecreate: forceRecreate, build: build, noBuild: noBuild, removeOrphans: removeOrphans}
+}
+
+// configHashLabel stamps a container with a fingerprint of its spec, so a later
+// `up` can tell whether the configuration changed and skip recreating it.
+const configHashLabel = "opossum.config-hash"
+
+// configHash fingerprints the fields that define a container, so `up` can leave a
+// running container alone when nothing changed (matching docker compose). Set-like
+// fields are sorted so ordering never triggers a spurious recreate; command and
+// entrypoint keep their argv order. The config-hash label itself is not included.
+func configHash(o runtime.RunOptions) string {
+	h := fnv.New64a()
+	write := func(parts ...string) {
+		for _, p := range parts {
+			h.Write([]byte(p))
+			h.Write([]byte{0})
+		}
+	}
+	writeSorted := func(tag string, xs []string) {
+		cp := append([]string(nil), xs...)
+		sort.Strings(cp)
+		write(tag)
+		write(cp...)
+	}
+	write("image", o.Image, "platform", o.Platform, "network", o.Network,
+		"dns", o.DNSDomain, o.DNSSearch)
+	writeSorted("env", o.Env)
+	writeSorted("ports", o.Ports)
+	writeSorted("volumes", o.Volumes)
+	writeSorted("tmpfs", o.Tmpfs)
+	writeSorted("labels", o.Labels)
+	write("command")
+	write(o.Command...)
+	write("entrypoint")
+	write(o.Entrypoint...)
+	return fmt.Sprintf("%x", h.Sum64())
+}
+
+// EnableProfiles marks compose profiles active (from --profile flags and the
+// COMPOSE_PROFILES env var), so services gated behind them start.
+func (o *Orchestrator) EnableProfiles(profiles []string) {
+	if o.profiles == nil {
+		o.profiles = map[string]bool{}
+	}
+	for _, p := range profiles {
+		if p = strings.TrimSpace(p); p != "" {
+			o.profiles[p] = true
+		}
+	}
+}
+
+// enabled reports whether a service is active under the current profiles: a
+// service with no profiles is always enabled; otherwise one of its profiles must
+// be active, or it must be named explicitly (docker compose: naming a profiled
+// service enables it). named holds the services requested on the command line.
+func (o *Orchestrator) enabled(name string, named map[string]bool) bool {
+	svc := o.Project.Services[name]
+	if len(svc.Profiles) == 0 || named[name] {
+		return true
+	}
+	for _, p := range svc.Profiles {
+		if o.profiles[p] {
+			return true
+		}
+	}
+	return false
+}
+
+// interrupted returns a rollback-triggering error if up's context has been
+// cancelled (Ctrl-C), so the deferred teardown runs.
+func (o *Orchestrator) interrupted() error {
+	if o.ctx != nil && o.ctx.Err() != nil {
+		return fmt.Errorf("interrupted — rolling back")
+	}
+	return nil
 }
 
 func (o *Orchestrator) logf(format string, a ...interface{}) {
@@ -86,15 +218,59 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 		return err
 	}
 
-	// Surface compose fields we don't act on, so they aren't silently ignored.
-	if u := o.Project.Unsupported; len(u) > 0 {
-		o.logf("warning: ignoring unsupported top-level field(s): %s\n", strings.Join(u, ", "))
+	// Profiles: a `profiles:`-gated service starts only when one of its profiles
+	// is active or it's named explicitly. With no names, drop inactive-profile
+	// services; either way, a started service may not depend on a disabled one
+	// (docker compose treats that as an undefined dependency).
+	named := map[string]bool{}
+	for _, s := range services {
+		named[s] = true
+	}
+	if len(services) == 0 {
+		kept := order[:0]
+		for _, name := range order {
+			if o.enabled(name, named) {
+				kept = append(kept, name)
+			}
+		}
+		order = kept
 	}
 	for _, name := range order {
-		if u := o.Project.Services[name].Unsupported; len(u) > 0 {
-			o.logf("warning: service %q: ignoring unsupported field(s): %s\n", name, strings.Join(u, ", "))
+		for _, dep := range o.Project.Services[name].DependsOn {
+			if !o.enabled(dep.Name, named) {
+				return fmt.Errorf("service %q depends on %q, whose profile is not active — enable it with --profile or COMPOSE_PROFILES, or name it explicitly", name, dep.Name)
+			}
 		}
+	}
+
+	// Compose fields we don't act on don't affect startup, and a warning for each
+	// one is more alarming than useful — surface them only under --verbose. Fields
+	// that DO change behavior (e.g. a Postgres datadir on a named volume) still
+	// warn unconditionally below.
+	if o.rt.Verbose {
+		if u := o.Project.Unsupported; len(u) > 0 {
+			o.logf("warning: ignoring unsupported top-level field(s): %s\n", strings.Join(u, ", "))
+		}
+		for _, name := range order {
+			if u := o.Project.Services[name].Unsupported; len(u) > 0 {
+				o.logf("warning: service %q: ignoring unsupported field(s): %s\n", name, strings.Join(u, ", "))
+			}
+		}
+	}
+	for _, name := range order {
 		o.warnPostgresDatadir(name, o.Project.Services[name])
+	}
+
+	// Containers for services no longer in the compose are removed with
+	// --remove-orphans, otherwise just flagged (docker compose parity).
+	if orphans := o.orphans(); len(orphans) > 0 {
+		if o.up.removeOrphans {
+			o.removeOrphans(orphans)
+		} else {
+			o.logf("warning: found orphan container(s) not defined in the compose file: %s\n"+
+				"         remove them with `opossum down --remove-orphans` (or `up --remove-orphans`)\n",
+				strings.Join(orphans, ", "))
+		}
 	}
 
 	// Services some dependent needs to run to completion (exit 0). The runtime
@@ -149,6 +325,10 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 		if err == nil {
 			return
 		}
+		// When up was interrupted, the shared context is already cancelled — reset
+		// the runtime to a live context so the teardown commands themselves aren't
+		// killed. (A second Ctrl-C still force-exits from the signal handler.)
+		o.rt.Ctx = context.Background()
 		for i := len(started) - 1; i >= 0; i-- {
 			o.rt.Stop(started[i])
 			o.rt.Delete(started[i])
@@ -165,6 +345,11 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 	}
 
 	for _, name := range order {
+		// Bail out (into the deferred rollback) if the user interrupted us between
+		// services.
+		if err = o.interrupted(); err != nil {
+			return err
+		}
 		svc := o.Project.Services[name]
 		cname := o.containerName(name)
 
@@ -173,26 +358,25 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 			return err
 		}
 
+		// Build the image only when it's missing or --build was given (docker
+		// compose builds lazily); --no-build refuses to build. A (re)build means the
+		// image may have changed, so force a recreate below.
 		image := svc.Image
+		rebuilt := false
 		if svc.Build != nil {
 			image = o.Project.Name + "-" + name + ":latest"
-			o.logf("Building %s\n", name)
-			if err := o.rt.Build(o.buildOptions(image, svc.Build)); err != nil {
-				return fmt.Errorf("building service %q: %w", name, err)
+			have := o.rt.ImageExists(image)
+			switch {
+			case o.up.noBuild && !have:
+				return fmt.Errorf("service %q: image %q is not built and --no-build was given", name, image)
+			case o.up.build || !have:
+				o.logf("Building %s\n", name)
+				if err := o.rt.Build(o.buildOptions(image, svc.Build)); err != nil {
+					return fmt.Errorf("building service %q: %w", name, err)
+				}
+				rebuilt = true
 			}
 		}
-
-		// Create any missing bind-mount host directories (docker compose does; the
-		// runtime errors on a missing bind source).
-		o.ensureBindDirs(svc.Volumes)
-
-		// Seed fresh named/anonymous volumes from the image before the container
-		// mounts them (Apple `container` mounts them empty, unlike Docker).
-		o.seedVolumes(name, image, svc.Volumes)
-
-		// Replace any stale container left by a previous run of THIS project (the
-		// pre-flight above already ruled out foreign owners).
-		o.rt.Delete(cname)
 
 		runOpts := runtime.RunOptions{
 			Name:       cname,
@@ -210,6 +394,32 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 			Labels:     []string{projectLabel + "=" + o.Project.Name},
 			Detach:     detach,
 		}
+		hash := configHash(runOpts)
+		runOpts.Labels = append(runOpts.Labels, configHashLabel+"="+hash)
+
+		// A long-running service that's already up with the same config is left
+		// alone (docker compose parity) — no delete/recreate, so it keeps running
+		// with its state and logs. --force-recreate and a fresh build override this.
+		// A foreground run always recreates: attaching requires a fresh container.
+		if detach && !oneShot[name] && !o.up.forceRecreate && !rebuilt {
+			if cur := o.rt.Inspect(cname); cur.Exists && cur.State == "running" && cur.Labels[configHashLabel] == hash {
+				o.logf("%s is up to date\n", name)
+				continue
+			}
+		}
+
+		// Create any missing bind-mount host directories (docker compose does; the
+		// runtime errors on a missing bind source).
+		o.ensureBindDirs(svc.Volumes)
+
+		// Seed fresh named/anonymous volumes from the image before the container
+		// mounts them (Apple `container` mounts them empty, unlike Docker).
+		o.seedVolumes(name, image, svc.Volumes)
+
+		// Replace any stale container left by a previous run of THIS project (the
+		// pre-flight above already ruled out foreign owners).
+		o.rt.Delete(cname)
+
 		// Track before running so rollback also removes a container whose run
 		// failed (it may have been created before erroring).
 		started = append(started, cname)
@@ -455,6 +665,19 @@ func (o *Orchestrator) awaitHealthyDeps(name string, svc *compose.Service) error
 	return nil
 }
 
+// defaultProbeTimeout bounds a healthcheck attempt when the compose sets no (or a
+// non-positive) timeout — matching docker compose, where `0` means "use the
+// default", not "run unbounded". Without this a hung probe could still block
+// `up` forever on a `timeout: 0s` (#139).
+const defaultProbeTimeout = 30 * time.Second
+
+func probeTimeout(hc *compose.Healthcheck) time.Duration {
+	if hc.Timeout <= 0 {
+		return defaultProbeTimeout
+	}
+	return hc.Timeout
+}
+
 // waitHealthy runs a service's healthcheck via `container exec`, retrying up to
 // Retries times with Interval between attempts, after an initial StartPeriod.
 func (o *Orchestrator) waitHealthy(name string, hc *compose.Healthcheck) error {
@@ -468,10 +691,15 @@ func (o *Orchestrator) waitHealthy(name string, hc *compose.Healthcheck) error {
 	}
 	var last error
 	for i := 0; i < attempts; i++ {
+		// A Ctrl-C during a long health wait should abort into rollback, not keep
+		// probing.
+		if err := o.interrupted(); err != nil {
+			return err
+		}
 		if i > 0 {
 			o.sleep(hc.Interval)
 		}
-		if err := o.rt.Exec(cname, hc.Test); err == nil {
+		if err := o.rt.Exec(cname, hc.Test, probeTimeout(hc)); err == nil {
 			return nil
 		} else {
 			last = err
@@ -488,7 +716,7 @@ func (o *Orchestrator) waitHealthy(name string, hc *compose.Healthcheck) error {
 // Down stops and removes every service in reverse dependency order, deletes the
 // project network, and — when removeVolumes is set — removes the project's named
 // volumes.
-func (o *Orchestrator) Down(removeVolumes bool, rmi string) error {
+func (o *Orchestrator) Down(removeVolumes bool, rmi string, removeOrphans bool) error {
 	order, err := o.Project.StartupOrder()
 	if err != nil {
 		return err
@@ -501,6 +729,11 @@ func (o *Orchestrator) Down(removeVolumes bool, rmi string) error {
 		o.rt.Delete(cname)
 		// Also clear any leftover one-off container from `run` (no --rm).
 		o.rt.Delete(o.containerName(name + "-run"))
+	}
+	// Containers for services no longer in the compose are removed with
+	// --remove-orphans (docker compose parity).
+	if removeOrphans {
+		o.removeOrphans(o.orphans())
 	}
 	o.rt.DeleteNetwork(o.networkName())
 	if removeVolumes {
@@ -798,6 +1031,15 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 
 	if !opts.NoDeps {
 		if deps := svc.DependsOn.Names(); len(deps) > 0 {
+			// A gated-inactive dependency is an error here too (as in `up`) rather
+			// than being silently force-started. The run target itself is "named",
+			// but its dependencies must be enabled on their own.
+			named := map[string]bool{service: true}
+			for _, d := range deps {
+				if !o.enabled(d, named) {
+					return fmt.Errorf("service %q depends on %q, whose profile is not active — enable it with --profile or COMPOSE_PROFILES, or name it explicitly", service, d)
+				}
+			}
 			if err := o.Up(true, deps...); err != nil {
 				return fmt.Errorf("starting dependencies: %w", err)
 			}
