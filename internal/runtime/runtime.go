@@ -29,6 +29,17 @@ type Runtime struct {
 	// (e.g. Ctrl-C during `up`), an in-flight build/run/exec is killed so the
 	// caller can roll back promptly. nil means no cancellation (background).
 	Ctx context.Context
+	// DockerBin is the docker CLI used only by ImportFromDocker (empty = "docker").
+	// It's a seam for tests; the normal path never shells out to docker.
+	DockerBin string
+}
+
+// dockerBin returns the docker CLI to invoke for image import.
+func (r *Runtime) dockerBin() string {
+	if r.DockerBin != "" {
+		return r.DockerBin
+	}
+	return "docker"
 }
 
 // baseCtx is the parent context for child processes — Ctx when set, else a

@@ -49,7 +49,7 @@ func newRootCmd() *cobra.Command {
 		upCmd(), downCmd(), psCmd(), imagesCmd(), logsCmd(), statsCmd(),
 		stopCmd(), restartCmd(), startCmd(), execCmd(),
 		buildCmd(), pullCmd(), killCmd(), runCmd(),
-		configCmd(),
+		importCmd(), configCmd(),
 	)
 	return root
 }
@@ -78,6 +78,11 @@ func pullCmd() *cobra.Command {
 		func(o *orchestrator.Orchestrator, args []string) error { return o.Pull(args) })
 }
 
+func importCmd() *cobra.Command {
+	return servicesCmd("import [service...]", "Import services' Docker-built images (reuse Docker builds, skip Apple's builder)",
+		func(o *orchestrator.Orchestrator, args []string) error { return o.Import(args...) })
+}
+
 func startCmd() *cobra.Command {
 	return servicesCmd("start [service...]", "Start existing (stopped) service containers",
 		func(o *orchestrator.Orchestrator, args []string) error { return o.Start(args) })
@@ -101,7 +106,7 @@ func main() {
 func upCmd() *cobra.Command {
 	var foreground bool
 	var profiles []string
-	var forceRecreate, build, noBuild, removeOrphans bool
+	var forceRecreate, build, noBuild, removeOrphans, fromDocker bool
 	cmd := &cobra.Command{
 		Use:   "up [service...]",
 		Short: "Build and start services in dependency order (all, or the named services plus their dependencies)",
@@ -113,7 +118,7 @@ func upCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			o.SetUpOptions(forceRecreate, build, noBuild, removeOrphans)
+			o.SetUpOptions(forceRecreate, build, noBuild, removeOrphans, fromDocker)
 			// Activate compose profiles from --profile and COMPOSE_PROFILES so
 			// `profiles:`-gated services start.
 			o.EnableProfiles(profiles)
@@ -141,6 +146,7 @@ func upCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&build, "build", false, "build images before starting, even if already present")
 	cmd.Flags().BoolVar(&noBuild, "no-build", false, "don't build images (error if one is missing)")
 	cmd.Flags().BoolVar(&removeOrphans, "remove-orphans", false, "remove containers for services no longer in the compose file")
+	cmd.Flags().BoolVar(&fromDocker, "from-docker", false, "for services with a build, import the image from Docker instead of building it (needs the docker CLI)")
 	return cmd
 }
 

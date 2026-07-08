@@ -52,7 +52,10 @@ Docker still wins when per-start latency across many short-lived containers
 dominates. One thing it does **not** fix: bind-mount file I/O is the same
 host↔VM shared-filesystem model as Docker (metadata-heavy small-file work is
 slow in both) — keep hot paths like DB data and `node_modules` in a **named
-volume**. See [`docs/benchmarks.md`](docs/benchmarks.md).
+volume**. See [`docs/benchmarks.md`](docs/benchmarks.md), and
+[`docs/vs-docker-desktop.md`](docs/vs-docker-desktop.md) for a measured,
+honest side-by-side (idle footprint, throwaway-container speed, build, disk,
+and the daily-op gaps).
 
 **Native networking, not reimplemented.** opossum leans on Apple `container`'s
 built-in DNS (macOS 26) instead of building its own: it names each container
@@ -129,37 +132,76 @@ sudo container system dns create opossum
 Use a different name with `--dns-domain <name>` (and create that name instead).
 Remove it later with `sudo container system dns delete opossum`.
 
-## Quickstart: run an existing `docker-compose.yml`
+## Quickstart (coming from `docker compose`)
+
+opossum reads your existing `compose.yaml` / `docker-compose.yml` **as-is** — no
+conversion, no new file. If you're switching from Docker Desktop you almost
+certainly already have your images built, so the quickest way in is to reuse
+those builds and skip Apple's (cold-starting) builder:
 
 ```sh
-# 1. Prereqs: Apple container running, opossum built (see Requirements / Install)
+# One-time: start Apple container and register a local DNS domain so services
+# can resolve each other by name
 container system start
-
-# 2. One-time: register the DNS domain so services resolve each other by name
 sudo container system dns create opossum
 
-# 3. Run your project as-is — opossum discovers compose.yaml / docker-compose.yml
 cd path/to/your-project
-opossum up            # build + start (detached); --foreground to run in the foreground
+docker compose build       # if you haven't already (or the images are already there)
+opossum up --from-docker   # import each built image from Docker, then start
+```
 
-# 4. Work with it
+opossum names a built image `<project>-<service>` just like `docker compose`,
+defaulting the project to the directory name — so the import lines up. If your
+directory name contains `_` or `.` the two tools normalize it differently; pass
+the **same** `-p <name>` to both commands in that case.
+
+That's it — the same project, running on Apple `container`. Work with it using
+the verbs you already know:
+
+```sh
 opossum ps            # services / IP / ports / status
 opossum stats         # live CPU / memory / net / I/O per service
-opossum logs web -f   # follow one service's logs
+opossum logs web -f   # follow a service's logs
 opossum exec -it web sh
 opossum down          # stop + remove (add -v to also drop named volumes)
 ```
 
-**If something doesn't come up, check these three** (each is warned about at `up`
-time — see [Differences from docker compose](#differences-from-docker-compose)):
-
-1. **DNS domain not registered** → services can't resolve each other. Run step 2 above.
-2. **Postgres data on a named volume** → `initdb` fails. Set `PGDATA` to a subdirectory (`environment: PGDATA=/var/lib/postgresql/data/pgdata`). MySQL/MariaDB are fine.
-3. **`build:` from a temp/scratch dir** → the builder can't read a context under `/private/tmp` or a symlink. Run from a real path under your home directory.
-4. **Host port already in use** → `up` says which port and service; on macOS a taken port 5000/7000 is often the **AirPlay Receiver** (turn it off in System Settings › General › AirDrop & Handoff, or remap the host port).
-
-Run `opossum config` first to preview the resolved configuration and any fields
+**Prefer to build with Apple's builder?** Drop `--from-docker` and run
+`opossum up` — opossum builds any `build:` service itself (a heavy build can be
+slow; see [Troubleshooting builds](#troubleshooting-builds)). Either way, run
+`opossum config` first to preview the resolved configuration and any fields
 opossum ignores (`networks`, `restart`, …).
+
+**If a service doesn't come up**, each of these is also warned about at `up` time
+(see [Differences from docker compose](#differences-from-docker-compose)):
+
+1. **DNS domain not registered** → services can't resolve each other by name. Run the setup line above.
+2. **Postgres data on a named volume** → `initdb` fails. Set `PGDATA` to a subdirectory (`environment: PGDATA=/var/lib/postgresql/data/pgdata`). MySQL/MariaDB are fine.
+3. **Host port already in use** → `up` names the port and service; on macOS a taken 5000/7000 is often the **AirPlay Receiver** (turn it off in System Settings › General › AirDrop & Handoff, or remap the host port).
+4. **Building from a temp/scratch dir** → Apple's builder can't read a context under `/private/tmp` or a symlink. Build from a real path under your home directory (or use `--from-docker`).
+
+### Reuse images you already built with Docker
+
+Images are OCI-standard, so a Docker-built image runs on Apple `container` — the
+two just keep separate stores. If you're coming from `docker compose`, you almost
+certainly already have your services built; `opossum import` copies them over so
+the first `up` starts everything **without rebuilding** in Apple's builder:
+
+```sh
+docker compose build          # (or you already have the images)
+opossum import                # docker save → container image load, per build service
+opossum up                    # starts immediately; no rebuild
+
+# …or in one step — import each build service instead of building it, then start:
+opossum up --from-docker
+```
+
+`docker compose` and opossum name a built image the same way
+(`<project>-<service>:latest`), so the import lands under the tag `up` looks for.
+This is also the escape hatch when Apple's builder can't handle a Dockerfile
+(BuildKit-specific features): build it with Docker and import it. `docker` is only
+invoked by `import` — the normal path never shells out to it. Alternatively, push
+the image to a registry and let `opossum pull` fetch it.
 
 ### Safe to try alongside Docker
 
@@ -263,7 +305,7 @@ opossum mirrors the common `docker compose` subcommands, delegating each to the
 
 | Command | Supported | Notes |
 |---------|-----------|-------|
-| `up [service…]` | ✅ | build + start the project, or named services plus their deps. Leaves a running service untouched when its config is unchanged (build images only if missing), and flags orphan containers from removed services; `--force-recreate`, `--build`, `--no-build`, `--remove-orphans`, `--foreground`, `--profile` |
+| `up [service…]` | ✅ | build + start the project, or named services plus their deps. Leaves a running service untouched when its config is unchanged (build images only if missing), and flags orphan containers from removed services; `--force-recreate`, `--build`, `--no-build`, `--from-docker` (import build images from Docker instead of building), `--remove-orphans`, `--foreground`, `--profile` |
 | `down [-v] [--rmi local\|all]` | ✅ | stop, remove, and delete the project network; `-v` also removes named volumes; `--rmi local` removes opossum-built images (`all` also removes pulled ones); `--remove-orphans` also removes containers for services no longer in the compose |
 | `ps` | ✅ | service / container / IP / ports / status |
 | `images` | ✅ | each service's image, whether opossum builds it, and whether it's present locally |
@@ -272,6 +314,7 @@ opossum mirrors the common `docker compose` subcommands, delegating each to the
 | `exec [-it] <service> <cmd…>` | ✅ | run a command in a running service |
 | `build [service…]` | ✅ | build images for services with `build:` |
 | `pull [service…]` | ✅ | pull images for services with `image:` |
+| `import [service…]` | ✅ (extra) | copy a service's Docker-built image into `container`'s store, so `up` skips the rebuild |
 | `start [service…]` | ✅ | start existing (stopped) containers |
 | `stop [service…]` | ✅ | stop without removing |
 | `restart [service…]` | ✅ | stop then start in place |

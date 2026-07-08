@@ -45,6 +45,7 @@ type upOptions struct {
 	build         bool // --build: (re)build images even if present
 	noBuild       bool // --no-build: never build (error if an image is missing)
 	removeOrphans bool // --remove-orphans: remove containers for services no longer in the compose
+	fromDocker    bool // --from-docker: import a build service's image from Docker instead of building it
 }
 
 // orphans returns the project's containers (by label) whose names don't match any
@@ -93,8 +94,8 @@ func (o *Orchestrator) OnSignal(ctx context.Context) {
 }
 
 // SetUpOptions configures `up`'s recreate/build behavior from the command flags.
-func (o *Orchestrator) SetUpOptions(forceRecreate, build, noBuild, removeOrphans bool) {
-	o.up = upOptions{forceRecreate: forceRecreate, build: build, noBuild: noBuild, removeOrphans: removeOrphans}
+func (o *Orchestrator) SetUpOptions(forceRecreate, build, noBuild, removeOrphans, fromDocker bool) {
+	o.up = upOptions{forceRecreate: forceRecreate, build: build, noBuild: noBuild, removeOrphans: removeOrphans, fromDocker: fromDocker}
 }
 
 // configHashLabel stamps a container with a fingerprint of its spec, so a later
@@ -404,13 +405,25 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 		if svc.Build != nil {
 			image = o.Project.Name + "-" + name + ":latest"
 			have := o.rt.ImageExists(image)
+			need := o.up.build || !have
 			switch {
+			case o.up.fromDocker && need:
+				// Bring the image over from Docker instead of building it here.
+				dockerRef := image
+				if svc.Image != "" {
+					dockerRef = svc.Image // docker tags a build+image service by its image:
+				}
+				o.logf("Importing %s from Docker (%s)\n", name, dockerRef)
+				if err := o.rt.ImportFromDocker(dockerRef, image); err != nil {
+					return fmt.Errorf("importing service %q: %w", name, err)
+				}
+				rebuilt = true
 			case o.up.noBuild && !have:
 				return fmt.Errorf("service %q: image %q is not built and --no-build was given", name, image)
-			case o.up.build || !have:
+			case need:
 				o.logf("Building %s\n", name)
 				if err := o.rt.Build(o.buildOptions(image, svc.Build)); err != nil {
-					return fmt.Errorf("building service %q: %w", name, err)
+					return buildFailed(name, err)
 				}
 				rebuilt = true
 			}
@@ -1102,6 +1115,55 @@ func (o *Orchestrator) resolveServices(services []string) ([]string, error) {
 	return services, nil
 }
 
+// Import brings each build service's Docker-built image into container's store,
+// so `up` starts it without rebuilding in Apple's builder. Handy for onboarding
+// (reuse images an existing `docker compose` already built) or as a fallback
+// when Apple's builder can't handle a Dockerfile. With no services all build
+// services are imported; otherwise the named ones. docker compose and opossum
+// name a built image the same way (`<project>-<service>:latest`), so it lands
+// under the tag `up` looks for.
+func (o *Orchestrator) Import(services ...string) error {
+	order, err := o.resolveServices(services)
+	if err != nil {
+		return err
+	}
+	imported := 0
+	for _, name := range order {
+		svc := o.Project.Services[name]
+		target, built := o.serviceImage(name, svc)
+		if !built {
+			if len(services) > 0 {
+				o.logf("Skipping %s: no build to import (uses image %s)\n", name, target)
+			}
+			continue
+		}
+		// docker compose tags a build service by its `image:` if set, otherwise by
+		// `<project>-<service>`. opossum's `up` always looks for the latter, so pull
+		// from whatever Docker named it and retag to what `up` expects.
+		dockerRef := target
+		if svc.Image != "" {
+			dockerRef = svc.Image
+		}
+		o.logf("Importing %s from Docker (%s)\n", name, dockerRef)
+		if err := o.rt.ImportFromDocker(dockerRef, target); err != nil {
+			return fmt.Errorf("importing service %q: %w", name, err)
+		}
+		imported++
+	}
+	if imported == 0 {
+		o.logf("No build services to import.\n")
+	}
+	return nil
+}
+
+// buildFailed wraps a build error with a pointer to the Docker-import fallback,
+// so a builder that can't handle a Dockerfile (or is misbehaving) isn't a dead
+// end.
+func buildFailed(service string, err error) error {
+	return fmt.Errorf("building service %q: %w\n"+
+		"  (if Apple's builder can't handle this Dockerfile, build it with Docker and import it: opossum import %s)", service, err, service)
+}
+
 // RunOneOffOptions configures a one-off `run`.
 type RunOneOffOptions struct {
 	Rm     bool // remove the container after it exits
@@ -1148,7 +1210,7 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 		image = o.Project.Name + "-" + service + ":latest"
 		o.logf("Building %s\n", service)
 		if err := o.rt.Build(o.buildOptions(image, svc.Build)); err != nil {
-			return fmt.Errorf("building service %q: %w", service, err)
+			return buildFailed(service, err)
 		}
 	}
 
@@ -1215,7 +1277,7 @@ func (o *Orchestrator) Build(services []string) error {
 		image := o.Project.Name + "-" + name + ":latest"
 		o.logf("Building %s\n", name)
 		if err := o.rt.Build(o.buildOptions(image, svc.Build)); err != nil {
-			return fmt.Errorf("building service %q: %w", name, err)
+			return buildFailed(name, err)
 		}
 	}
 	return nil

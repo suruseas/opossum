@@ -1571,7 +1571,7 @@ func TestUpForceRecreateRecreates(t *testing.T) {
 	if err := o.Up(true); err != nil {
 		t.Fatalf("first up: %v", err)
 	}
-	o.SetUpOptions(true, false, false, false) // --force-recreate
+	o.SetUpOptions(true, false, false, false, false) // --force-recreate
 	if err := o.Up(true); err != nil {
 		t.Fatalf("second up: %v", err)
 	}
@@ -1615,7 +1615,7 @@ func TestUpBuildsOnlyWhenNeeded(t *testing.T) {
 		t.Setenv("IMAGE_ABSENT", "demo-api:latest")
 		p := project("demo", map[string]*compose.Service{"api": {Build: &compose.Build{Context: "/ctx"}}})
 		o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
-		o.SetUpOptions(false, false, true, false) // --no-build
+		o.SetUpOptions(false, false, true, false, false) // --no-build
 		if err := o.Up(true); err == nil || !strings.Contains(err.Error(), "no-build") {
 			t.Fatalf("expected a --no-build error for a missing image, got %v", err)
 		}
@@ -1647,7 +1647,7 @@ func TestUpRemovesOrphans(t *testing.T) {
 	rt, log := fakeShim(t)
 	p := orphanProject(t)
 	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
-	o.SetUpOptions(false, false, false, true) // --remove-orphans
+	o.SetUpOptions(false, false, false, true, false) // --remove-orphans
 	if err := o.Up(true); err != nil {
 		t.Fatalf("Up: %v", err)
 	}
@@ -1693,7 +1693,7 @@ func TestRemoveOrphansSparesOtherProjects(t *testing.T) {
 	rt, log := fakeShim(t)
 	var out bytes.Buffer
 	o := orchestrator.New(newProj(t), rt, "opossum", &out)
-	o.SetUpOptions(false, false, false, true) // --remove-orphans
+	o.SetUpOptions(false, false, false, true, false) // --remove-orphans
 	if err := o.Up(true); err != nil {
 		t.Fatalf("Up: %v", err)
 	}

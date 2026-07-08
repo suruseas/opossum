@@ -6,6 +6,20 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-09
+
+### Added
+
+- `opossum import [service…]` copies a service's Docker-built image into
+  `container`'s store (`docker save` → `container image load`), so `up` starts it
+  without rebuilding in Apple's builder — handy for onboarding (reuse images
+  `docker compose` already built) or when Apple's builder can't handle a
+  Dockerfile. A failed build now points to this fallback. `docker` is only
+  invoked by `import`.
+- `up --from-docker` does the import inline: for each service with a build, it
+  imports the Docker-built image instead of building, then starts — a one-command
+  onboarding path for a project you already `docker compose build`.
+
 ## [0.5.0] - 2026-07-09
 
 ### Added
@@ -235,7 +249,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/suruseas/opossum/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/suruseas/opossum/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/suruseas/opossum/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/suruseas/opossum/compare/v0.2.0...v0.3.0
