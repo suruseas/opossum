@@ -218,7 +218,7 @@ services:
 	}
 }
 
-func TestLogsFollowMultipleCLIErrors(t *testing.T) {
+func TestLogsFollowMultipleCLI(t *testing.T) {
 	fakeShim(t)
 	compose := writeCompose(t, `
 name: demo
@@ -228,9 +228,9 @@ services:
   web:
     image: web:latest
 `)
-	// --follow across all services is rejected.
-	if _, err := run(t, "-f", compose, "logs", "--follow"); err == nil {
-		t.Fatal("expected an error following multiple services")
+	// --follow across all services now multiplexes rather than erroring (#148).
+	if _, err := run(t, "-f", compose, "logs", "--follow"); err != nil {
+		t.Fatalf("logs --follow should multiplex multiple services, got: %v", err)
 	}
 }
 
@@ -339,6 +339,76 @@ func TestConfigServicesCLI(t *testing.T) {
 	}
 	if strings.Contains(out, "image:") {
 		t.Errorf("--services should print names only, got:\n%s", out)
+	}
+}
+
+// config mirrors what `up` would start: a profile-gated service is hidden unless
+// its profile is active (docker compose parity) (#155).
+func TestConfigProfileFilteredCLI(t *testing.T) {
+	fakeShim(t)
+	compose := writeCompose(t, "name: demo\nservices:\n  web:\n    image: web\n  debug:\n    image: dbg\n    profiles: [debug]\n")
+
+	// Default: debug is hidden from --services and the full config.
+	out, err := run(t, "-f", compose, "config", "--services")
+	if err != nil {
+		t.Fatalf("config --services: %v", err)
+	}
+	if strings.Contains(out, "debug") {
+		t.Errorf("gated service should be hidden by default, got:\n%s", out)
+	}
+	full, err := run(t, "-f", compose, "config")
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	if strings.Contains(full, "debug:") {
+		t.Errorf("gated service should be hidden from full config by default, got:\n%s", full)
+	}
+
+	// With --profile debug, it appears in both --services and the full config.
+	out, err = run(t, "-f", compose, "config", "--profile", "debug", "--services")
+	if err != nil {
+		t.Fatalf("config --profile: %v", err)
+	}
+	if !strings.Contains(out, "debug") {
+		t.Errorf("--profile debug should include the gated service, got:\n%s", out)
+	}
+	full, err = run(t, "-f", compose, "config", "--profile", "debug")
+	if err != nil {
+		t.Fatalf("config --profile (full): %v", err)
+	}
+	if !strings.Contains(full, "debug:") {
+		t.Errorf("--profile debug should render the gated service in full config, got:\n%s", full)
+	}
+}
+
+// config rejects the same projects `up` does: an enabled service depending on a
+// gated-inactive one is an error, not a config with a dangling reference (#155).
+func TestConfigRejectsGatedDependency(t *testing.T) {
+	fakeShim(t)
+	compose := writeCompose(t, "name: demo\nservices:\n  web:\n    image: web\n    depends_on: [helper]\n  helper:\n    image: h\n    profiles: [opt]\n")
+	if _, err := run(t, "-f", compose, "config"); err == nil {
+		t.Fatal("config should error when an enabled service depends on a gated-inactive one")
+	}
+}
+
+// Multiple -f merge on the command line: a later file overrides an earlier one.
+func TestMultipleComposeFilesCLI(t *testing.T) {
+	fakeShim(t)
+	dir := t.TempDir()
+	base := filepath.Join(dir, "base.yml")
+	over := filepath.Join(dir, "over.yml")
+	if err := os.WriteFile(base, []byte("services:\n  web:\n    image: web:1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(over, []byte("services:\n  web:\n    image: web:2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := run(t, "-f", base, "-f", over, "config")
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	if !strings.Contains(out, "image: web:2") {
+		t.Errorf("a later -f should override an earlier one, got:\n%s", out)
 	}
 }
 

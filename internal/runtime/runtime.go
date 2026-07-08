@@ -3,6 +3,7 @@
 package runtime
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -100,6 +101,33 @@ func (r *Runtime) stream(args ...string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
+	return cmd.Run()
+}
+
+// streamHeartbeat is like stream but shows a "still working" spinner during long
+// silent stretches. It's used only for build, whose output goes quiet during
+// context transfer and base-image pull — and which already renders with
+// --progress plain, so wrapping its stdout (which drops the child out of TTY
+// mode) costs no terminal features. Interactive/TTY-sensitive streamed commands
+// (exec, stats) keep their real terminal fds and get no spinner. The spinner is
+// a no-op unless stderr is a terminal, so piped/redirected output is unchanged.
+func (r *Runtime) streamHeartbeat(label string, tee io.Writer, args ...string) error {
+	r.trace(args)
+	cmd := exec.CommandContext(r.baseCtx(), r.Bin, args...)
+	cmd.WaitDelay = 2 * time.Second
+	cmd.Stdin = os.Stdin
+	out, errw := io.Writer(os.Stdout), io.Writer(os.Stderr)
+	if tee != nil {
+		// Feed a copy of the output to tee (a build-error detector) without
+		// altering what the user sees.
+		out = io.MultiWriter(os.Stdout, tee)
+		errw = io.MultiWriter(os.Stderr, tee)
+	}
+	hb := newHeartbeat(os.Stderr, defaultHeartbeatIdle, label)
+	cmd.Stdout = hb.wrap(out)
+	cmd.Stderr = hb.wrap(errw)
+	hb.run()
+	defer hb.close()
 	return cmd.Run()
 }
 
@@ -243,7 +271,16 @@ func (r *Runtime) Build(o BuildOptions) error {
 		ctx = "."
 	}
 	args = append(args, ctx)
-	return r.stream(args...)
+	// Tee the output through a detector so an opaque builder failure (corrupted
+	// cache, resource exhaustion) becomes an actionable hint.
+	det := &buildErrorDetector{}
+	err := r.streamHeartbeat("building", det, args...)
+	if err != nil {
+		if h := det.hint(); h != "" {
+			return fmt.Errorf("%w\n%s", err, h)
+		}
+	}
+	return err
 }
 
 // RunOptions describes a `container run` invocation.
@@ -261,6 +298,8 @@ type RunOptions struct {
 	Command    []string
 	Entrypoint []string // overrides the image ENTRYPOINT (--entrypoint + positional args)
 	Labels     []string // key=value labels (-l)
+	Memory     string   // -m memory limit (e.g. "512M")
+	CPUs       string   // -c CPU count (integer)
 	Detach     bool
 }
 
@@ -280,6 +319,12 @@ func (r *Runtime) Run(o RunOptions) error {
 		if p := strings.ToLower(o.Platform); strings.Contains(p, "amd64") || strings.Contains(p, "x86_64") {
 			args = append(args, "--rosetta")
 		}
+	}
+	if o.Memory != "" {
+		args = append(args, "-m", o.Memory)
+	}
+	if o.CPUs != "" {
+		args = append(args, "-c", o.CPUs)
 	}
 	if o.Network != "" {
 		args = append(args, "--network", o.Network)
@@ -388,6 +433,76 @@ func (r *Runtime) Logs(name string, o LogsOptions) error {
 	}
 	args = append(args, name)
 	return r.stream(args...)
+}
+
+func (r *Runtime) logsArgs(name string, o LogsOptions) []string {
+	args := []string{"logs"}
+	if o.Follow {
+		args = append(args, "-f")
+	}
+	if o.Tail > 0 {
+		args = append(args, "-n", strconv.Itoa(o.Tail))
+	}
+	return append(args, name)
+}
+
+// FollowLogs streams a container's logs, writing each line to w prefixed with
+// prefix, until the stream ends or ctx is cancelled. Used to multiplex several
+// services' logs onto one output; w must be safe for concurrent Write. A whole
+// line is written in one call so concurrent streams don't interleave mid-line.
+// A real failure (not a Ctrl-C cancel) is surfaced as a prefixed diagnostic line
+// and returned, so a failing stream isn't silent.
+func (r *Runtime) FollowLogs(ctx context.Context, name string, o LogsOptions, w io.Writer, prefix string) error {
+	args := r.logsArgs(name, o)
+	r.trace(args)
+	cmd := exec.CommandContext(ctx, r.Bin, args...)
+	// A real OS pipe (not an io.Writer) so the child writes directly and the reader
+	// sees EOF when it exits — stdout and stderr share it (logs may use either).
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	cmd.Stdout = pw
+	cmd.Stderr = pw
+	if err := cmd.Start(); err != nil {
+		pr.Close()
+		pw.Close()
+		return err
+	}
+	pw.Close() // parent's copy; the child holds the write end, so pr EOFs on exit
+
+	// Unblock a stuck read on cancel, in case a lingering grandchild holds the write
+	// end past the child's death (so Ctrl-C always returns).
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			pr.Close()
+		case <-done:
+		}
+	}()
+
+	// ReadString (not bufio.Scanner) has no line-length cap, so a very long log line
+	// can't silently truncate or stop the stream.
+	br := bufio.NewReader(pr)
+	for {
+		line, rerr := br.ReadString('\n')
+		if len(line) > 0 {
+			w.Write([]byte(prefix + strings.TrimRight(line, "\r\n") + "\n"))
+		}
+		if rerr != nil {
+			break
+		}
+	}
+	pr.Close()
+
+	err = cmd.Wait()
+	if err != nil && ctx.Err() == nil { // a genuine failure, not a Ctrl-C cancel
+		fmt.Fprintf(w, "%s[logs error: %v]\n", prefix, err)
+		return err
+	}
+	return nil
 }
 
 // Stats streams `container stats` for the named containers (CPU %, memory, net,

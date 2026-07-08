@@ -1,4 +1,6 @@
-# opossum
+<p align="center">
+  <img src="docs/assets/readme-banner.png" alt="opossum — Compose-style orchestration for Apple's container runtime" width="920">
+</p>
 
 A Docker Compose–like orchestrator for [Apple's `container`](https://github.com/apple/container)
 runtime on macOS. Define a multi-service stack in a familiar `compose.yaml`, and
@@ -241,11 +243,18 @@ startup, demonstrating name-based discovery.
 | `command` | ✅ | list, or a string that is shell-word-split (`sh -c "echo hi"` → `sh`, `-c`, `echo hi`) |
 | `entrypoint` | ✅ | overrides the image ENTRYPOINT; string (shell-split) or list, same as `command` |
 | `profiles` | ✅ | a gated service starts only when one of its profiles is active (`--profile <name>`, `COMPOSE_PROFILES`, or naming the service); services with no `profiles` always start |
+| `mem_limit` / `cpus` | ✅ | passed to `container run` as `-m` / `-c`. Also reads `deploy.resources.limits.{memory,cpus}` (the two forms must agree); memory is rounded up to MiB, CPUs to a whole number (Apple's runtime allocates whole vCPUs) |
 | `${VAR}` interpolation | ✅ | `$VAR`, `${VAR}`, `${VAR:-default}`, `${VAR:?required}`, `$$` escape; values from a `.env` file next to the compose file (or `--env-file` paths, which replace `.env`; later files win), overridden by the shell |
 
-Other compose fields (e.g. `container_name`, `restart`, `deploy`, `networks`)
+Other compose fields (e.g. `container_name`, `restart`, `networks`)
 are parsed but not acted on — `opossum config` (or `opossum up --verbose`) lists
 the ignored fields, so a `docker-compose.yml` runs without surprises.
+
+**Multiple files merge** like docker compose: pass `-f base.yml -f override.yml`
+(later files override earlier ones — mappings merge by key, most sequences append,
+`command`/`entrypoint` replace), and a `compose.override.yaml` (or
+`docker-compose.override.yml`) next to a discovered compose file is merged
+automatically.
 
 ## Command support
 
@@ -258,7 +267,7 @@ opossum mirrors the common `docker compose` subcommands, delegating each to the
 | `down [-v] [--rmi local\|all]` | ✅ | stop, remove, and delete the project network; `-v` also removes named volumes; `--rmi local` removes opossum-built images (`all` also removes pulled ones); `--remove-orphans` also removes containers for services no longer in the compose |
 | `ps` | ✅ | service / container / IP / ports / status |
 | `images` | ✅ | each service's image, whether opossum builds it, and whether it's present locally |
-| `logs [service…]` | ✅ | `--follow`, `-n/--tail` |
+| `logs [service…]` | ✅ | `--follow` (several services multiplexed, each line prefixed with its name), `-n/--tail` |
 | `stats [service…]` | ✅ | live CPU / memory / net / block I/O / pids (streams; `--no-stream` for a snapshot) |
 | `exec [-it] <service> <cmd…>` | ✅ | run a command in a running service |
 | `build [service…]` | ✅ | build images for services with `build:` |
@@ -268,7 +277,7 @@ opossum mirrors the common `docker compose` subcommands, delegating each to the
 | `restart [service…]` | ✅ | stop then start in place |
 | `kill [service…]` | ✅ | send a signal (default KILL); `-s/--signal` |
 | `run [--rm] [--no-deps] <service> [cmd]` | ✅ | one-off foreground container; starts deps unless `--no-deps`; no published ports |
-| `config [--services]` | ✅ | validate and print the resolved config (interpolation + env_file applied), noting ignored fields |
+| `config [--services]` | ✅ | validate and print the resolved config (interpolation + env_file applied), noting ignored fields; mirrors what `up` starts, so `profiles:`-gated services appear only with `--profile` |
 
 Add `--verbose` to any command to print each underlying `container` invocation
 (as `+ container …`) to stderr — handy when filing a bug report, so you can see
@@ -290,20 +299,21 @@ features aren't supported. The detailed rationale for each is in
 | Named volumes | shared globally by name | namespaced `<project>_<volume>`; `down -v` only removes this project's |
 | Volume seeding | a fresh named/anonymous volume is pre-filled from the image's contents at that path | **not seeded** — a fresh volume always mounts empty (named *and* anonymous) |
 | Networks | user-defined networks/aliases | one network per project (`<project>-net`); `networks:` is ignored |
+| Published ports | a bare `ports: - "3000"` picks a random host port | mirrors it to `3000:3000` — Apple `container` requires a host port and has no random option |
 | Healthcheck | engine-native | no native support — opossum runs `healthcheck.test` via `container exec` and polls |
 | `service_completed_successfully` | engine tracks exit | opossum runs the one-shot in the **foreground** (an exit code is only observable there) |
 
 **Not supported / hard constraints:**
 
 - **Platform**: macOS 26+ on Apple silicon, single host only (no Swarm/remote). Relies on `container`'s macOS-26 networking + DNS.
-- **Ignored fields** (parsed and listed by `opossum config` / `--verbose`, not acted on): `networks`, `restart`, `deploy`, `container_name`, `cap_add`/`cap_drop`, `sysctls`, `devices`, `privileged`, and top-level volume `driver`/`labels`.
+- **Ignored fields** (parsed and listed by `opossum config` / `--verbose`, not acted on): `networks`, `restart`, `deploy` (except `resources.limits`), `container_name`, `cap_add`/`cap_drop`, `sysctls`, `devices`, `privileged`, and top-level volume `driver`/`labels`.
 - **`secrets`**: file-based only; `external` secrets and `uid`/`gid`/`mode` are not applied.
 - **DB data dirs**: Postgres `initdb` fails on a named-volume mount point — use a **subdirectory** (`PGDATA=/var/lib/postgresql/data/pgdata`). Very common in real app composes (gitea, nextcloud, …), so `up` **warns** when it sees a named volume at `/var/lib/postgresql/data` without a PGDATA subdirectory. (MySQL/MariaDB tolerate the mount point.)
 - **Volumes aren't seeded from the image**: Docker copies an image's directory contents into a *fresh* named or anonymous volume the first time it's used; Apple `container` mounts it **empty**. This breaks the common dev pattern of a bind-mounted source plus a `- /app/node_modules` volume to preserve the image's installed dependencies — on opossum that `node_modules` is empty and the app fails to start (`ng serve`/`vite`/etc. can't find their packages). Work around it by installing deps at container start (`command: sh -c "npm ci && npm start"`), or by not shadowing the dependency dir with a volume. Applies to **named volumes too**, not just anonymous ones.
 - **Build context**: Apple's builder can't read a context under `/private/tmp` or a symlinked directory — build from a real path under your home dir (`up` warns).
 - **Won't run at all**: composes that need Linux-host kernel access (WireGuard's `NET_ADMIN` + `/lib/modules`), or that bind-mount the Docker socket (`/var/run/docker.sock`, e.g. Portainer) — these depend on features Apple `container` doesn't provide (also true of Docker Desktop for the host-path cases).
 - **cgroup-sensitive JVM images (e.g. Elasticsearch 7.x)**: the container's bundled JDK reads the host cgroup to size the heap, and Apple `container`'s VM doesn't expose the cgroup mount the way it expects — the process crashes at launch with `CgroupInfo.getMountPoint() … null` before any config applies (`ES_JAVA_OPTS`/`JAVA_TOOL_OPTIONS` don't help; observed on Elasticsearch 7.16 and 7.17). `opossum ps` shows such a service as `stopped`; check `opossum logs <svc>`. This is a runtime/JDK–VM incompatibility, not an opossum limitation.
-- **Not parsed**: `configs`, `extends`, merging multiple compose files, and the map form of `external`.
+- **Not parsed**: `configs`, `extends`, and the map form of `external`.
 
 Everything else in the [Compose support](#compose-support) and
 [Command support](#command-support) tables works as in docker compose.
@@ -381,12 +391,34 @@ optional surrounding quotes), and the process environment overrides them — so
 unset/empty), and `$$` for a literal `$`. An undefined variable with no default
 expands to an empty string.
 
-## Roadmap
+## Troubleshooting builds
 
-- `opossum logs -f` across all services at once (multiplexed), not just a single
-  service.
-- Merging multiple compose files (`-f base.yml -f override.yml`, and an
-  auto-discovered `compose.override.yaml`).
+Builds run in Apple's shared `container` builder VM, which starts with modest
+resources (2 CPUs / 2 GB). Since each running service is its own VM too, a heavy
+build can starve.
+
+- **A build is very slow, runs out of memory, or fails with `Unavailable` /
+  `EOF`** (e.g. a large multi-stage image, or a big `apt-get install`): give the
+  builder more resources. It's a shared VM, so this is a one-time setup, not
+  per-project.
+  ```sh
+  container builder delete --force
+  container builder start --cpus 4 --memory 8g
+  opossum up
+  ```
+  Also make sure the host has RAM to spare — stopping other heavy services while
+  the first build runs helps, since every service is a separate VM.
+- **A build hangs or fails with `unable to read root manifest` /
+  `failed to load cache key`** (often after interrupting a build with Ctrl-C):
+  the builder cache is in a bad state. Reset it and retry:
+  ```sh
+  container builder delete --force
+  opossum up
+  ```
+- **`transferring context` is slow**: your build context is large. Add a
+  `.dockerignore` next to the Dockerfile that excludes things the image doesn't
+  need — `.git`, `node_modules`, `tmp`, `log`, `vendor/bundle`, build artifacts —
+  so less data is sent to the builder.
 
 ## Development
 

@@ -26,6 +26,8 @@ type configService struct {
 	Ports       []string             `yaml:"ports,omitempty"`
 	Volumes     []string             `yaml:"volumes,omitempty"`
 	Tmpfs       []string             `yaml:"tmpfs,omitempty"`
+	MemLimit    string               `yaml:"mem_limit,omitempty"`
+	CPUs        string               `yaml:"cpus,omitempty"`
 	DependsOn   map[string]configDep `yaml:"depends_on,omitempty"`
 	Healthcheck *configHealthcheck   `yaml:"healthcheck,omitempty"`
 }
@@ -56,6 +58,7 @@ type configHealthcheck struct {
 func RenderConfig(p *Project) (string, error) {
 	out := configOutput{Name: p.Name, Services: map[string]configService{}}
 	for name, svc := range p.Services {
+		mem, cpu, _ := svc.Resources() // validated at load; show the effective -m/-c
 		cs := configService{
 			Image:       svc.Image,
 			Platform:    svc.Platform,
@@ -65,6 +68,8 @@ func RenderConfig(p *Project) (string, error) {
 			Ports:       svc.Ports,
 			Volumes:     svc.Volumes,
 			Tmpfs:       svc.Tmpfs,
+			MemLimit:    mem,
+			CPUs:        cpu,
 		}
 		if svc.Build != nil {
 			cs.Build = &configBuild{Context: svc.Build.Context, Dockerfile: svc.Build.Dockerfile, Args: svc.Build.Args, Target: svc.Build.Target}

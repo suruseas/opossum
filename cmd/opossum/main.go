@@ -22,11 +22,11 @@ import (
 var version = "0.1.0-dev"
 
 var (
-	composeFile string
-	projectName string
-	dnsDomain   string
-	verbose     bool
-	envFiles    []string
+	composeFiles []string
+	projectName  string
+	dnsDomain    string
+	verbose      bool
+	envFiles     []string
 )
 
 // newRootCmd builds the command tree. Extracted from main so tests can execute
@@ -39,7 +39,7 @@ func newRootCmd() *cobra.Command {
 		SilenceErrors: true,
 		Version:       version,
 	}
-	root.PersistentFlags().StringVarP(&composeFile, "file", "f", "", "path to the compose file (default: the first of compose.yaml, compose.yml, docker-compose.yaml, docker-compose.yml)")
+	root.PersistentFlags().StringArrayVarP(&composeFiles, "file", "f", nil, "path to a compose file (repeatable; later files override earlier ones). Default: a discovered compose file plus its override")
 	root.PersistentFlags().StringVarP(&projectName, "project-name", "p", "", "project name (defaults to the compose file's directory)")
 	root.PersistentFlags().StringVar(&dnsDomain, "dns-domain", "opossum", "local DNS domain for bare-name service discovery (create once: sudo container system dns create <domain>)")
 	root.PersistentFlags().BoolVar(&verbose, "verbose", false, "print each underlying container command as it runs (useful for bug reports)")
@@ -200,6 +200,7 @@ func psCmd() *cobra.Command {
 
 func configCmd() *cobra.Command {
 	var servicesOnly bool
+	var profiles []string
 	cmd := &cobra.Command{
 		Use:   "config",
 		Short: "Validate and print the resolved compose configuration",
@@ -208,6 +209,16 @@ func configCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Mirror what `up` would start: gated services appear only when their
+			// profile is active (docker compose parity).
+			o.EnableProfiles(profiles)
+			o.EnableProfiles(strings.Split(os.Getenv("COMPOSE_PROFILES"), ","))
+			// Reject the same projects `up` would (an enabled service depending on a
+			// gated-inactive one), rather than printing a dangling reference.
+			if err := o.ValidateProfiles(); err != nil {
+				return err
+			}
+			enabled := o.EnabledServices()
 			w := cmd.OutOrStdout()
 			if servicesOnly {
 				order, err := o.Project.StartupOrder()
@@ -215,11 +226,24 @@ func configCmd() *cobra.Command {
 					return err
 				}
 				for _, name := range order {
-					fmt.Fprintln(w, name)
+					if enabled[name] {
+						fmt.Fprintln(w, name)
+					}
 				}
 				return nil
 			}
-			rendered, err := compose.RenderConfig(o.Project)
+			proj := o.Project
+			if len(enabled) < len(proj.Services) {
+				cp := *proj
+				cp.Services = map[string]*compose.Service{}
+				for n, s := range proj.Services {
+					if enabled[n] {
+						cp.Services[n] = s
+					}
+				}
+				proj = &cp
+			}
+			rendered, err := compose.RenderConfig(proj)
 			if err != nil {
 				return err
 			}
@@ -228,6 +252,7 @@ func configCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&servicesOnly, "services", false, "print only the service names")
+	cmd.Flags().StringArrayVar(&profiles, "profile", nil, "include services gated behind this compose profile (repeatable; also honors COMPOSE_PROFILES)")
 	return cmd
 }
 
@@ -320,7 +345,7 @@ func logsCmd() *cobra.Command {
 		},
 	}
 	// No -f shorthand: the root reserves -f for --file.
-	cmd.Flags().BoolVar(&follow, "follow", false, "follow log output (requires exactly one service)")
+	cmd.Flags().BoolVar(&follow, "follow", false, "follow log output (several services are multiplexed, each line prefixed with its name)")
 	cmd.Flags().IntVarP(&tail, "tail", "n", 0, "number of lines to show from the end of the logs (0 = all)")
 	return cmd
 }
@@ -343,16 +368,20 @@ func statsCmd() *cobra.Command {
 }
 
 func loadOrchestrator(out io.Writer) (*orchestrator.Orchestrator, error) {
-	// No -f: discover a standard compose file in the working directory.
-	file := composeFile
-	if file == "" {
+	files := composeFiles
+	if len(files) == 0 {
+		// No -f: discover a standard compose file, plus its override if present
+		// (docker compose auto-merges compose.override.yaml / docker-compose.override.yml).
 		found, err := compose.Discover(".")
 		if err != nil {
 			return nil, err
 		}
-		file = found
+		files = []string{found}
+		if ov := compose.DiscoverOverride("."); ov != "" {
+			files = append(files, ov)
+		}
 	}
-	proj, err := compose.Load(file, envFiles...)
+	proj, err := compose.LoadFiles(files, envFiles)
 	if err != nil {
 		return nil, err
 	}

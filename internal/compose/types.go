@@ -4,8 +4,10 @@ package compose
 
 import (
 	"fmt"
+	"math"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,12 +43,148 @@ type Service struct {
 	Secrets     SecretRefs    `yaml:"secrets"`
 	DependsOn   DependsOn     `yaml:"depends_on"`
 	Healthcheck *Healthcheck  `yaml:"healthcheck"`
-	Profiles    []string      `yaml:"profiles"` // service starts only when one of these profiles is active (empty = always)
+	Profiles    []string      `yaml:"profiles"`  // service starts only when one of these profiles is active (empty = always)
+	MemLimit    scalarStr     `yaml:"mem_limit"` // legacy memory limit ("512m", "2g", …)
+	CPUs        scalarStr     `yaml:"cpus"`      // legacy CPU limit (may be fractional)
+	Deploy      *Deploy       `yaml:"deploy"`    // only deploy.resources.limits.{memory,cpus} is acted on
 
 	// Unsupported holds any compose keys opossum doesn't act on (e.g.
 	// container_name, restart), collected during parsing so it can warn rather
 	// than silently ignore them.
 	Unsupported []string `yaml:"-"`
+}
+
+// scalarStr accepts a YAML scalar (number or string) as its string form, so a
+// field like `cpus: 1.5` or `memory: "512m"` decodes uniformly.
+type scalarStr string
+
+func (s *scalarStr) UnmarshalYAML(n *yaml.Node) error {
+	*s = scalarStr(n.Value)
+	return nil
+}
+
+// Deploy carries the one part of `deploy:` opossum acts on: resource limits.
+type Deploy struct {
+	Resources *DeployResources `yaml:"resources"`
+}
+
+// DeployResources is deploy.resources; only limits are used (reservations ignored).
+type DeployResources struct {
+	Limits *DeployLimits `yaml:"limits"`
+}
+
+// DeployLimits is deploy.resources.limits.
+type DeployLimits struct {
+	Memory scalarStr `yaml:"memory"`
+	CPUs   scalarStr `yaml:"cpus"`
+}
+
+func (s *Service) deployMemory() string {
+	if s.Deploy != nil && s.Deploy.Resources != nil && s.Deploy.Resources.Limits != nil {
+		return string(s.Deploy.Resources.Limits.Memory)
+	}
+	return ""
+}
+
+func (s *Service) deployCPUs() string {
+	if s.Deploy != nil && s.Deploy.Resources != nil && s.Deploy.Resources.Limits != nil {
+		return string(s.Deploy.Resources.Limits.CPUs)
+	}
+	return ""
+}
+
+// Resources resolves the effective `container run` -m/-c arguments from the
+// legacy (mem_limit/cpus) and modern (deploy.resources.limits) fields. Both forms
+// may be set only if they agree (docker compose parity). Memory is emitted in
+// MiB with an uppercase suffix and CPUs as an integer (rounded up), which is what
+// Apple's `container` accepts (lowercase suffixes / fractional CPUs are rejected).
+func (s *Service) Resources() (mem, cpu string, err error) {
+	memBytes, err := resolveScalar("mem_limit", "deploy.resources.limits.memory",
+		string(s.MemLimit), s.deployMemory(), parseMemoryBytes)
+	if err != nil {
+		return "", "", fmt.Errorf("service %q: %w", s.Name, err)
+	}
+	if memBytes > 0 {
+		mib := (int64(memBytes) + (1 << 20) - 1) / (1 << 20) // ceil to MiB
+		mem = strconv.FormatInt(mib, 10) + "M"
+	}
+	cpus, err := resolveScalar("cpus", "deploy.resources.limits.cpus",
+		string(s.CPUs), s.deployCPUs(), parseCPUs)
+	if err != nil {
+		return "", "", fmt.Errorf("service %q: %w", s.Name, err)
+	}
+	if cpus > 0 {
+		cpu = strconv.Itoa(int(math.Ceil(cpus))) // Apple container wants a whole CPU count
+	}
+	return mem, cpu, nil
+}
+
+// resolveScalar picks the legacy or deploy value for one resource, erroring if
+// both are set to different values (as docker compose does).
+func resolveScalar(legacyKey, deployKey, legacy, deploy string, parse func(string) (float64, error)) (float64, error) {
+	var v float64
+	if legacy != "" {
+		p, err := parse(legacy)
+		if err != nil {
+			return 0, err
+		}
+		v = p
+	}
+	if deploy != "" {
+		p, err := parse(deploy)
+		if err != nil {
+			return 0, err
+		}
+		if v != 0 && p != 0 && v != p {
+			return 0, fmt.Errorf("%s and %s are set to different values", legacyKey, deployKey)
+		}
+		if p != 0 {
+			v = p
+		}
+	}
+	return v, nil
+}
+
+// parseMemoryBytes parses "512m"/"2g"/"512MiB"/"512" into bytes (binary units,
+// matching docker compose).
+func parseMemoryBytes(s string) (float64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, nil
+	}
+	end := 0
+	for end < len(s) && (s[end] == '.' || (s[end] >= '0' && s[end] <= '9')) {
+		end++
+	}
+	num, err := strconv.ParseFloat(s[:end], 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid memory value %q", s)
+	}
+	unit := strings.ToLower(strings.TrimSpace(s[end:]))
+	unit = strings.TrimSuffix(unit, "ib") // mib -> m
+	unit = strings.TrimSuffix(unit, "b")  // mb -> m, b -> ""
+	mult := map[string]float64{"": 1, "k": 1 << 10, "m": 1 << 20, "g": 1 << 30, "t": 1 << 40, "p": 1 << 50}
+	f, ok := mult[unit]
+	if !ok {
+		return 0, fmt.Errorf("invalid memory unit in %q", s)
+	}
+	return num * f, nil
+}
+
+// parseCPUs parses a CPU count ("1.5", "0.5", "2").
+func parseCPUs(s string) (float64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, nil
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid cpus value %q", s)
+	}
+	if f < 0 {
+		return 0, fmt.Errorf("cpus must not be negative, got %q", s)
+	}
+	return f, nil
 }
 
 // serviceKnownKeys is the set of compose service keys opossum understands,
@@ -96,8 +234,47 @@ func (s *Service) UnmarshalYAML(value *yaml.Node) error {
 			s.Unsupported = append(s.Unsupported, k)
 		}
 	}
+	// `deploy` is a known key (opossum acts on resources.limits), but flag it if it
+	// carries anything else opossum drops (replicas, restart_policy, reservations…),
+	// so those aren't silently ignored.
+	if dep, ok := keys["deploy"]; ok && deployHasExtra(dep) {
+		s.Unsupported = append(s.Unsupported, "deploy")
+	}
 	sort.Strings(s.Unsupported)
 	return nil
+}
+
+// deployHasExtra reports whether a `deploy:` node contains anything beyond
+// resources.limits.{memory,cpus} — the only part opossum applies.
+func deployHasExtra(n yaml.Node) bool {
+	var top map[string]yaml.Node
+	if n.Decode(&top) != nil {
+		return true
+	}
+	for k, v := range top {
+		if k != "resources" {
+			return true
+		}
+		var res map[string]yaml.Node
+		if v.Decode(&res) != nil {
+			return true
+		}
+		for rk, rv := range res {
+			if rk != "limits" {
+				return true // e.g. reservations
+			}
+			var lim map[string]yaml.Node
+			if rv.Decode(&lim) != nil {
+				return true
+			}
+			for lk := range lim {
+				if lk != "memory" && lk != "cpus" {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // tmpfsMarker tags a `type: tmpfs` entry inside the parsed Volumes list so

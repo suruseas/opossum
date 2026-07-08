@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
+  <!-- GitHub social preview (1280x640). Dark card: opossum mark + wordmark + tagline. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#20201e"/>
+      <stop offset="1" stop-color="#141413"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="640" fill="url(#bg)"/>
+
+  <!-- ============ opossum mark (side profile, curled tail) ============ -->
+  <g transform="translate(120,150)">
+    <!-- tail: long curl behind the body -->
+    <path d="M300 250 C 400 260, 460 220, 450 160 C 443 118, 396 108, 380 140 C 368 164, 390 186, 412 176"
+          fill="none" stroke="#d98da8" stroke-width="26" stroke-linecap="round"/>
+    <!-- body -->
+    <ellipse cx="185" cy="235" rx="165" ry="115" fill="#8a8a84"/>
+    <!-- haunch highlight -->
+    <ellipse cx="255" cy="255" rx="70" ry="60" fill="#7b7b75"/>
+    <!-- legs -->
+    <rect x="95"  y="320" width="30" height="48" rx="14" fill="#4a4a46"/>
+    <rect x="160" y="330" width="30" height="42" rx="14" fill="#4a4a46"/>
+    <rect x="230" y="330" width="30" height="42" rx="14" fill="#4a4a46"/>
+    <!-- head: white wedge with pointed snout, facing left -->
+    <path d="M120 150 C 60 160, 8 205, -18 236 C -26 246, -22 258, -8 258 C 40 262, 96 268, 130 262 C 168 254, 176 196, 150 165 C 140 153, 130 148, 120 150 Z"
+          fill="#f2f1ea"/>
+    <!-- ear -->
+    <ellipse cx="128" cy="132" rx="34" ry="30" fill="#3d3d3a"/>
+    <ellipse cx="132" cy="136" rx="20" ry="17" fill="#d98da8"/>
+    <!-- eye -->
+    <circle cx="52" cy="222" r="11" fill="#141413"/>
+    <circle cx="56" cy="218" r="3.5" fill="#ffffff"/>
+    <!-- nose -->
+    <circle cx="-16" cy="248" r="12" fill="#e08bab"/>
+  </g>
+
+  <!-- ============ wordmark + tagline ============ -->
+  <text x="660" y="285" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif"
+        font-size="110" font-weight="800" fill="#ffffff" letter-spacing="-2">opossum</text>
+  <text x="664" y="345" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif"
+        font-size="30" fill="#c3c2b7">Compose-style orchestration for</text>
+  <text x="664" y="385" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif"
+        font-size="30" fill="#c3c2b7">Apple's container runtime</text>
+
+  <!-- terminal chip -->
+  <rect x="664" y="425" width="380" height="64" rx="12" fill="#0d0d0d" stroke="#383835" stroke-width="1.5"/>
+  <circle cx="692" cy="457" r="6" fill="#e34948"/>
+  <circle cx="712" cy="457" r="6" fill="#fab219"/>
+  <circle cx="732" cy="457" r="6" fill="#0ca30c"/>
+  <text x="756" y="466" font-family="ui-monospace, 'SF Mono', Menlo, monospace"
+        font-size="26" fill="#0ca30c">$ opossum up</text>
+
+  <!-- footer -->
+  <text x="664" y="560" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif"
+        font-size="22" fill="#898781">macOS 26 · Apple silicon · runs your docker-compose.yml</text>
+</svg>

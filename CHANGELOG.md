@@ -6,6 +6,38 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-09
+
+### Added
+
+- Multiple `-f` compose files are merged in order, and a `compose.override.yaml`
+  (or `docker-compose.override.yml`) beside the base file is applied automatically.
+- `logs --follow` across several services multiplexes their output into a single
+  stream with per-service prefixes.
+- `config` honors `--profile` / `COMPOSE_PROFILES`, showing only the services
+  that would start.
+- Resource limits are applied: `mem_limit` / `cpus` and
+  `deploy.resources.limits.{memory,cpus}` are passed to the runtime as `-m` / `-c`.
+
+- On an interactive terminal, `up` shows a "still working" spinner during long
+  silent build phases (context transfer, base-image pull) so it no longer looks
+  frozen. Piped/redirected output is unchanged.
+- When a build fails from a corrupted builder cache or from the builder running
+  out of resources, `up` prints an actionable hint (reset the builder, or give it
+  more CPU/memory) instead of leaving you with the raw builder error.
+- README troubleshooting for builds: giving the shared builder more CPU/memory
+  when a heavy build is slow or fails with `Unavailable`/`EOF`, resetting a
+  corrupted builder cache, and trimming a large build context.
+
+### Fixed
+
+- A bare container port in `ports` (e.g. `- "3000"`) now works: it's published
+  as `3000:3000` instead of failing with `invalid publish value` (Apple
+  `container` requires a host port).
+- The Postgres named-volume warning is now actionable: it says the service
+  won't start, names the fix (set `PGDATA` to a subdirectory), and tells you to
+  re-run `up` — and no longer includes an internal tracking number.
+
 ## [0.4.0] - 2026-07-08
 
 ### Added
@@ -203,7 +235,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/suruseas/opossum/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/suruseas/opossum/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/suruseas/opossum/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/suruseas/opossum/compare/v0.1.0...v0.2.0

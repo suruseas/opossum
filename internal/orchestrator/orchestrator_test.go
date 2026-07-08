@@ -113,6 +113,12 @@ case "$1" in
     [ -n "$VOLUME_LS_FAIL" ] && exit 1
     [ "$2" = ls ] && printf '%s\n' "$VOLUME_LS"
     ;;
+  logs)
+    # emit one line tagged with the container name (last arg) so log multiplexing
+    # and per-service prefixing can be verified.
+    for a in "$@"; do last="$a"; done
+    echo "log-line $last"
+    ;;
   ls)
     # container list: emit a summary per name in $LS_CONTAINERS (labeled with
     # project $LS_PROJECT) and $LS_FOREIGN (labeled with a different project, to
@@ -1188,7 +1194,7 @@ func TestWarnsPostgresDatadirNamedVolume(t *testing.T) {
 	// A named volume mounted directly at Postgres's data dir will fail initdb, so
 	// `up` warns and suggests the PGDATA subdirectory workaround — but only for
 	// Postgres, only for named volumes, and only when the workaround isn't set (#103).
-	const want = "will fail Postgres initdb"
+	const want = "won't start as written"
 	run := func(svc *compose.Service, top map[string]compose.VolumeDecl) string {
 		rt, _ := fakeShim(t)
 		p := project("demo", map[string]*compose.Service{"db": svc})
@@ -1221,6 +1227,18 @@ func TestWarnsPostgresDatadirNamedVolume(t *testing.T) {
 		if got != c.warn {
 			t.Errorf("%s: warned=%v, want %v", c.desc, got, c.warn)
 		}
+	}
+
+	// The warning is actionable: it names the fix (PGDATA subdirectory) and tells
+	// the user to re-run up. It must not leak an internal tracking number.
+	msg := run(&compose.Service{Image: "postgres:16", Volumes: []string{"pgdata:/var/lib/postgresql/data"}}, nil)
+	for _, must := range []string{"PGDATA=/var/lib/postgresql/data/pgdata", "opossum up` again"} {
+		if !strings.Contains(msg, must) {
+			t.Errorf("warning missing %q; got: %s", must, msg)
+		}
+	}
+	if strings.Contains(msg, "(#") {
+		t.Errorf("warning leaks an internal issue number: %s", msg)
 	}
 }
 
@@ -2063,19 +2081,25 @@ func TestLogsSelectedServiceWithFollow(t *testing.T) {
 	}
 }
 
-func TestLogsFollowMultipleRejected(t *testing.T) {
-	rt, log := fakeShim(t)
+// `logs -f` across several services multiplexes their streams into one output,
+// each line prefixed with the service name (#148).
+func TestLogsFollowMultipleMultiplexed(t *testing.T) {
+	rt, _ := fakeShim(t)
 	p := project("demo", map[string]*compose.Service{
-		"db":  {Image: "postgres:16"},
 		"web": {Image: "web:latest"},
+		"api": {Image: "api:latest"}, // same length as web → no prefix padding
 	})
-	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
-	err := o.Logs(nil, runtime.LogsOptions{Follow: true}) // all services + follow
-	if err == nil {
-		t.Fatal("expected an error: -f cannot follow multiple services")
+	var out bytes.Buffer
+	o := orchestrator.New(p, rt, "opossum", &out)
+	if err := o.Logs(nil, runtime.LogsOptions{Follow: true}); err != nil { // all services + follow
+		t.Fatalf("Logs: %v", err)
 	}
-	if len(log()) != 0 {
-		t.Errorf("no logs command should be emitted when the request is rejected, got %v", log())
+	s := out.String()
+	if !strings.Contains(s, "web | log-line web.demo.opossum") {
+		t.Errorf("web logs should be multiplexed with a service prefix, got:\n%s", s)
+	}
+	if !strings.Contains(s, "api | log-line api.demo.opossum") {
+		t.Errorf("api logs should be multiplexed with a service prefix, got:\n%s", s)
 	}
 }
 

@@ -6,13 +6,41 @@ package runtime
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
+
+// recordWriter records each Write call separately, to verify FollowLogs emits one
+// whole line per Write (so concurrent streams can't interleave mid-line).
+type recordWriter struct{ writes []string }
+
+func (rw *recordWriter) Write(p []byte) (int, error) {
+	rw.writes = append(rw.writes, string(p))
+	return len(p), nil
+}
+
+func TestFollowLogsWholeLineWrites(t *testing.T) {
+	shim := filepath.Join(t.TempDir(), "c.sh")
+	if err := os.WriteFile(shim, []byte("#!/bin/sh\nprintf 'a\\nbb\\nccc\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := &Runtime{Bin: shim}
+	rec := &recordWriter{}
+	if err := r.FollowLogs(context.Background(), "x", LogsOptions{Follow: true}, rec, "P | "); err != nil {
+		t.Fatalf("FollowLogs: %v", err)
+	}
+	// Each line is written once, whole, with the prefix — no torn writes.
+	want := []string{"P | a\n", "P | bb\n", "P | ccc\n"}
+	if !reflect.DeepEqual(rec.writes, want) {
+		t.Errorf("each line should be one whole write, got %q want %q", rec.writes, want)
+	}
+}
 
 // exitShim returns a Runtime whose `container` just exits 0 — for exercising the
 // verbose command trace without caring about output.

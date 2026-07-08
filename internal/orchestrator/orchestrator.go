@@ -7,11 +7,15 @@ import (
 	"context"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"net"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -116,7 +120,7 @@ func configHash(o runtime.RunOptions) string {
 		write(cp...)
 	}
 	write("image", o.Image, "platform", o.Platform, "network", o.Network,
-		"dns", o.DNSDomain, o.DNSSearch)
+		"dns", o.DNSDomain, o.DNSSearch, "memory", o.Memory, "cpus", o.CPUs)
 	writeSorted("env", o.Env)
 	writeSorted("ports", o.Ports)
 	writeSorted("volumes", o.Volumes)
@@ -157,6 +161,44 @@ func (o *Orchestrator) enabled(name string, named map[string]bool) bool {
 		}
 	}
 	return false
+}
+
+// EnabledServices reports which services are active under the current profiles
+// (nothing is "named" in a config context), so `config` can mirror what `up`
+// would actually start.
+func (o *Orchestrator) EnabledServices() map[string]bool {
+	set := map[string]bool{}
+	for name := range o.Project.Services {
+		if o.enabled(name, nil) {
+			set[name] = true
+		}
+	}
+	return set
+}
+
+// validateProfileDeps errors if any of the named services depends on one whose
+// profile isn't active (and which wasn't itself named) — docker compose treats a
+// gated-inactive dependency as undefined. Both `up` and `config` use this so they
+// agree on what's a valid project.
+func (o *Orchestrator) validateProfileDeps(names []string, named map[string]bool) error {
+	for _, name := range names {
+		for _, dep := range o.Project.Services[name].DependsOn {
+			if !o.enabled(dep.Name, named) {
+				return fmt.Errorf("service %q depends on %q, whose profile is not active — enable it with --profile or COMPOSE_PROFILES, or name it explicitly", name, dep.Name)
+			}
+		}
+	}
+	return nil
+}
+
+// ValidateProfiles errors if any enabled service depends on a gated-inactive one,
+// so `config` rejects the same projects `up` does.
+func (o *Orchestrator) ValidateProfiles() error {
+	var names []string
+	for name := range o.EnabledServices() {
+		names = append(names, name)
+	}
+	return o.validateProfileDeps(names, nil)
 }
 
 // interrupted returns a rollback-triggering error if up's context has been
@@ -235,12 +277,8 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 		}
 		order = kept
 	}
-	for _, name := range order {
-		for _, dep := range o.Project.Services[name].DependsOn {
-			if !o.enabled(dep.Name, named) {
-				return fmt.Errorf("service %q depends on %q, whose profile is not active — enable it with --profile or COMPOSE_PROFILES, or name it explicitly", name, dep.Name)
-			}
-		}
+	if err := o.validateProfileDeps(order, named); err != nil {
+		return err
 	}
 
 	// Compose fields we don't act on don't affect startup, and a warning for each
@@ -378,6 +416,7 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 			}
 		}
 
+		mem, cpu, _ := svc.Resources() // validated at load
 		runOpts := runtime.RunOptions{
 			Name:       cname,
 			Image:      image,
@@ -392,6 +431,8 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 			Command:    svc.Command,
 			Entrypoint: svc.Entrypoint,
 			Labels:     []string{projectLabel + "=" + o.Project.Name},
+			Memory:     mem,
+			CPUs:       cpu,
 			Detach:     detach,
 		}
 		hash := configHash(runOpts)
@@ -851,9 +892,10 @@ func (o *Orchestrator) warnPostgresDatadir(name string, svc *compose.Service) {
 		if hasPGDATASubdir(svc) {
 			continue // the workaround is already in place
 		}
-		o.logf("warning: service %q: a named volume mounted at %s will fail Postgres initdb "+
-			"(the mount point isn't empty). Redirect PGDATA to a subdirectory, e.g. "+
-			"environment: PGDATA=%s/pgdata (#57)\n", name, postgresDataDir, postgresDataDir)
+		o.logf("warning: service %q won't start as written: a named volume mounted at %s "+
+			"makes Postgres initdb fail (the mount point isn't empty). To fix it, keep the "+
+			"data in a subdirectory — add `environment: PGDATA=%s/pgdata` to the service — "+
+			"then run `opossum up` again.\n", name, postgresDataDir, postgresDataDir)
 	}
 }
 
@@ -966,8 +1008,10 @@ func (o *Orchestrator) Logs(services []string, opts runtime.LogsOptions) error {
 	if err != nil {
 		return err
 	}
+	// Following several services multiplexes their streams into one output, each
+	// line prefixed with the service name (docker compose style); Ctrl-C stops all.
 	if opts.Follow && len(targets) > 1 {
-		return fmt.Errorf("logs -f follows a single stream; name exactly one service (got %d)", len(targets))
+		return o.followMultiplexed(targets, opts)
 	}
 	for _, name := range targets {
 		if len(targets) > 1 {
@@ -978,6 +1022,54 @@ func (o *Orchestrator) Logs(services []string, opts runtime.LogsOptions) error {
 		}
 	}
 	return nil
+}
+
+// syncWriter serializes concurrent writes from several log-follow goroutines onto
+// one underlying writer.
+type syncWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (s *syncWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
+}
+
+// followMultiplexed follows every target concurrently, prefixing each line with
+// the (padded) service name and merging into o.out. A single stream ending
+// doesn't stop the others; Ctrl-C (SIGINT/SIGTERM) cancels them all.
+func (o *Orchestrator) followMultiplexed(targets []string, opts runtime.LogsOptions) error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	width := 0
+	for _, name := range targets {
+		if len(name) > width {
+			width = len(name)
+		}
+	}
+	out := &syncWriter{w: o.out}
+	var wg sync.WaitGroup
+	errs := make([]error, len(targets))
+	for i, name := range targets {
+		wg.Add(1)
+		prefix := fmt.Sprintf("%-*s | ", width, name)
+		go func(i int, name, prefix string) {
+			defer wg.Done()
+			errs[i] = o.rt.FollowLogs(ctx, o.containerName(name), opts, out, prefix)
+		}(i, name, prefix)
+	}
+	wg.Wait()
+	// A clean Ctrl-C leaves all errs nil. If every stream genuinely failed, surface
+	// it (non-zero exit); a partial failure still showed its diagnostic per stream.
+	for _, e := range errs {
+		if e == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("could not follow logs for any of the %d service(s)", len(targets))
 }
 
 // Stats streams live resource usage (CPU / memory / net / block I/O / pids) for
@@ -1072,6 +1164,7 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 	o.ensureBindDirs(svc.Volumes)
 	o.seedVolumes(service, image, svc.Volumes)
 	o.logf("Running one-off %s\n", service)
+	mem, cpu, _ := svc.Resources() // validated at load
 	runErr := o.rt.Run(runtime.RunOptions{
 		Name:       cname,
 		Image:      image,
@@ -1085,6 +1178,8 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 		Command:    cmd,
 		Entrypoint: svc.Entrypoint,
 		Labels:     []string{projectLabel + "=" + o.Project.Name},
+		Memory:     mem,
+		CPUs:       cpu,
 		Detach:     false, // foreground / attached
 		// No published ports for a one-off (matches docker-compose run).
 	})
