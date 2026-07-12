@@ -7,13 +7,13 @@
 
   <!-- kicker -->
   <text x="42" y="66" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif"
-        font-size="16" font-weight="600" letter-spacing="3" fill="#898781">APPLE CONTAINER · MACOS 26 · NO DOCKER DESKTOP</text>
+        font-size="16" font-weight="600" letter-spacing="3" fill="#898781">APPLE CONTAINER 1.0 · MACOS 26 · 29 COMPOSE SAMPLES, MEASURED</text>
 
   <!-- headline -->
   <text x="40" y="128" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif"
-        font-size="50" font-weight="800" fill="#ffffff">29 real docker-compose projects,</text>
+        font-size="50" font-weight="800" fill="#ffffff">Apple container hit 1.0 —</text>
   <text x="40" y="186" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif"
-        font-size="50" font-weight="800" fill="#c3c2b7">run unmodified. What broke?</text>
+        font-size="50" font-weight="800" fill="#c3c2b7">switch your dev stack yet?</text>
 
   <!-- stacked bar: 29 projects, px-per-project = 912/29 = 31.448
        segments: 14 / 4 / 3 / 5 / 3, 2px surface gaps between fills -->

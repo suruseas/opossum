@@ -16,6 +16,7 @@ import (
 	"github.com/suruseas/opossum/internal/compose"
 	"github.com/suruseas/opossum/internal/orchestrator"
 	"github.com/suruseas/opossum/internal/runtime"
+	"golang.org/x/term"
 )
 
 // version is overridable at build time with -ldflags "-X main.version=...".
@@ -262,6 +263,15 @@ func configCmd() *cobra.Command {
 	return cmd
 }
 
+// stdinIsTerminal reports whether our stdin is an interactive terminal — the
+// cue for `run` to allocate a TTY (-t). Piped or /dev/null stdin (scripts,
+// stdio protocols, tests) must NOT get one: a pseudo-terminal would echo input
+// back into the stream. A char-device check is not enough (/dev/null is one),
+// so ask the terminal driver.
+func stdinIsTerminal() bool {
+	return term.IsTerminal(int(os.Stdin.Fd()))
+}
+
 func runCmd() *cobra.Command {
 	var rm, noDeps bool
 	var profiles []string
@@ -270,13 +280,16 @@ func runCmd() *cobra.Command {
 		Short: "Run a one-off command in a new container for a service",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			o, err := loadOrchestrator(cmd.OutOrStdout())
+			// Progress goes to stderr: a one-off's stdout belongs to the container
+			// (docker compose does the same), so piping `opossum run` output —
+			// e.g. an MCP server's JSON-RPC over stdio — stays clean.
+			o, err := loadOrchestrator(cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
 			o.EnableProfiles(profiles)
 			o.EnableProfiles(strings.Split(os.Getenv("COMPOSE_PROFILES"), ","))
-			return o.RunOneOff(args[0], args[1:], orchestrator.RunOneOffOptions{Rm: rm, NoDeps: noDeps})
+			return o.RunOneOff(args[0], args[1:], orchestrator.RunOneOffOptions{Rm: rm, NoDeps: noDeps, TTY: stdinIsTerminal()})
 		},
 	}
 	cmd.Flags().BoolVar(&rm, "rm", false, "remove the container after it exits")

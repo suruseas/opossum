@@ -420,11 +420,34 @@ func TestRunCLIOneOff(t *testing.T) {
 		t.Fatalf("run: %v", err)
 	}
 	joined := strings.Join(readLog(), "\n")
-	if !strings.Contains(joined, "run --name web-run.demo.opossum") || !strings.Contains(joined, "web:latest ls -la") {
+	if !strings.Contains(joined, "run -i --name web-run.demo.opossum") || !strings.Contains(joined, "web:latest ls -la") {
 		t.Errorf("one-off run should override the command, got:\n%s", joined)
 	}
 	if !strings.Contains(joined, "delete --force web-run.demo.opossum") {
 		t.Errorf("--rm should remove the one-off, got:\n%s", joined)
+	}
+}
+
+func TestRunCLIKeepsStdoutClean(t *testing.T) {
+	// `run` is the CLI's stdio bridge: a piped caller (e.g. an MCP client
+	// speaking JSON-RPC to a containerized server) reads the container's stdout.
+	// opossum's own progress ("Running one-off …") must therefore go to stderr,
+	// never stdout.
+	fakeShim(t)
+	compose := writeCompose(t, "name: demo\nservices:\n  web:\n    image: web:latest\n")
+	root := newRootCmd()
+	var out, errBuf strings.Builder
+	root.SetOut(&out)
+	root.SetErr(&errBuf)
+	root.SetArgs([]string{"-f", compose, "run", "--rm", "web", "true"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if strings.Contains(out.String(), "Running one-off") {
+		t.Errorf("progress leaked to stdout (pollutes piped stdio):\n%s", out.String())
+	}
+	if !strings.Contains(errBuf.String(), "Running one-off web") {
+		t.Errorf("progress should still be visible on stderr, got:\n%s", errBuf.String())
 	}
 }
 

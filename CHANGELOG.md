@@ -6,6 +6,21 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-07-13
+
+### Fixed
+
+- `run` now keeps the container's stdin connected (piped input reaches the
+  process instead of hitting an immediate EOF) and prints its own progress to
+  stderr, so the container's stdout comes through clean. Together these let
+  stdio-based tools run as one-offs — e.g. an MCP server: point your MCP
+  client's command at `opossum run --rm <service>`. A TTY is allocated only
+  when opossum's own stdin is an interactive terminal (so `opossum run web sh`
+  still gets a proper shell). One caveat: if the run first has to build the
+  image or start dependencies, that output still reaches stdout — for a clean
+  stdio pipe, use a service without a `build:` (or pre-build) and `--no-deps`
+  (or pre-start the deps with `up`).
+
 ## [0.6.0] - 2026-07-09
 
 ### Added
@@ -249,7 +264,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/suruseas/opossum/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/suruseas/opossum/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/suruseas/opossum/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/suruseas/opossum/compare/v0.3.0...v0.4.0

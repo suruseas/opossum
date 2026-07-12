@@ -11,10 +11,11 @@ reproduce with the commands shown. See also
 
 ## Where opossum is ahead
 
-- **Idle memory is ~10× lighter.** With nothing running, Docker Desktop's host
-  processes hold ~490 MB *plus a resident Linux VM*; Apple `container`'s
-  background services hold ~50 MB and there's **no always-on VM** (it starts a
-  VM per container, on demand). Idle CPU is ~0 % for both.
+- **Idle memory is 10–40× lighter.** With nothing running, Docker Desktop
+  holds ~0.3–0.7 GB of host processes **plus its resident VM** (~1.1 GB
+  right after boot — under "Virtual Machine Service for Docker"); Apple
+  `container`'s background services hold ~50 MB and there's **no always-on
+  VM** (it starts a VM per container, on demand). Idle CPU is ~0 % for both.
 
   ```sh
   ps -Ao rss,comm | grep -i docker      # ~490 MB host, + the VM
@@ -33,30 +34,46 @@ model*: Apple `container` runs **one VM per container** (a fixed default cap of
 **1 GiB** each, though it only uses what it needs), while Docker Desktop runs
 **one shared VM** whose memory pool all containers draw from.
 
-Measured host memory (actual RSS, not the reserved cap) for N idle
-`nginx:alpine` containers on a 16 GB M2. VM memory ballooning makes point-in-time
-RSS noisy, so treat these as ranges:
+Measured host memory for N idle `nginx:alpine` containers on a 16 GB M2.
 
-| N containers | Apple `container` | Docker Desktop |
-|--------------|-------------------|----------------|
-| 0 (idle) | ~50 MB (no VM) | ~640 MB (resident VM + host) |
-| 1 | ~400 MB | ~680 MB |
-| 3 | ~800 MB–1.3 GB | ~760 MB |
-| 6 | ~1.4 GB | ~890 MB |
-| 10 (projected) | ~2.5 GB | ~1.06 GB |
+**Measure both VMs the same way — and beware the process name.** Both runtimes
+use Apple's Virtualization framework, and macOS attributes each VM's guest
+memory to a `com.apple.Virtualization.VirtualMachine` process (Activity Monitor
+shows it as "Virtual Machine Service for …"). Attribution is verified in both
+directions: writing 300 MB of incompressible data inside a VM grows that
+process's physical footprint by exactly that (Apple: 254.1 M → 556.9 M; Docker:
+1.1 G → 1.4 G). **A docker-name-only grep misses Docker's VM process
+entirely** — an earlier revision of this doc made exactly that mistake and
+understated Docker by ~1 GB.
 
-Roughly: **Apple ≈ 250–400 MB × N** (each container is a full VM) vs **Docker ≈
-640 MB + ~42 MB × N** (containers share the VM). So:
+The two runtimes still *behave* differently:
 
-- **Idle or 1–2 containers → Apple is lighter** (no always-on VM tax).
-- **The crossover is early — around 3 containers**, not the hundreds you'd
-  expect if a container only cost tens of MB. Each Apple container is a whole VM.
-- **A typical multi-service compose (5–10 services) uses *more* total memory on
-  Apple `container` than on Docker.** Worth saying plainly.
+| | Apple `container` (exact, linear) | Docker Desktop (elastic base) |
+|---|---|---|
+| Nothing running | **~50 MB** (no VM) | helpers ~0.3–0.7 GB + VM ~1.1 GB fresh-boot (total ~**1.4–2.1 GB** warm; compresses down only over long idle) |
+| Each added small container | **+~290 MB** (its own VM: ~270 MB + ~20 MB helper) | ~**+0** (shared pool; +6 nginx moved the total by ~10 MB) |
+| After a memory-heavy workload | VM freed on container exit | VM **ratchets**: held its +300 MB after the container was removed |
+
+Apple is cleanly linear (~290 MB × N; alpine floor ~235–255 MB/VM; occasional
+ballooning to ~400 MB observed). Docker is a big elastic base with near-zero
+marginal cost. So:
+
+- **Idle or 1–2 small containers → Apple is clearly lighter.**
+- **The crossover depends on Docker's VM state**: against a long-idle,
+  paged-down Docker (~0.4 GB visible) it's ~2 containers; against a warm
+  Docker (~1.4–2.1 GB) it's ~5–7. **At a typical 5–10 service stack the two
+  are comparable** (Apple ~1.5–3 GB vs Docker ~1.4–2.1 GB); past ~10 services
+  Docker's shared pool clearly wins.
+- **Memory alone no longer decides the dev-stack question — speed does** (see
+  the next section).
 
 ```sh
-# per-container host memory: diff the process list before/after `container run -d`.
-# each container adds a `com.apple.Virtualization.VirtualMachine` process (~250-400 MB).
+# Per-VM cost, SAME method for both runtimes: find the VM process and read its
+# physical footprint (guest pages are attributed to it — verified ±300 MB):
+pgrep -fl com.apple.Virtualization.VirtualMachine  # one per Apple container, one for Docker
+vmmap --summary <pid> | grep "Physical footprint"  # ~270 MB per idle nginx VM (Apple)
+# Don't sum only com.docker.* processes — Docker's VM lives under the
+# Virtualization framework process ("Virtual Machine Service for Docker").
 ```
 
 **One memory-hungry container** shows the flip side: Docker can hand a single
@@ -66,10 +83,13 @@ capped at 1 GiB by default — you raise it per service with `mem_limit` / `cpus
 service. The upside of the per-VM model is isolation: a runaway container can't
 starve its neighbors of the shared pool.
 
-**Takeaway for the article:** don't oversell idle footprint. Apple `container`
-wins when idle and for a handful of containers; Docker's shared pool wins once
-several run at once. The real story is *per-container VM isolation with a fixed
-cap* vs *a shared, over-committable pool*.
+**Takeaway for the article:** don't oversell idle footprint — and don't
+oversell the crossover either. Apple `container` wins when idle and for a
+couple of containers; at dev-stack scale (5–10 services) total memory is
+**roughly comparable** and state-dependent; past ~10 services Docker's shared
+pool wins. The durable memory story is the *model*: exact, linear,
+per-container VMs with a fixed cap vs one big elastic, over-committable pool.
+The decisive dev-stack difference is speed, not memory.
 
 ## Honest tradeoffs (Docker is faster or richer here)
 
@@ -109,12 +129,14 @@ gaps:
 
 ## Article angles, by decision impact
 
-1. **Memory: idle vs. at scale** — the sharpest, most honest story. ~10× lighter
-   idle and for 1–2 containers, but the per-container VM model means it crosses
-   over Docker's shared pool at ~3 containers; a 5–10 service compose uses more.
-   Lead with the nuance, not just the idle number.
-2. **Throwaway-container speed** — 4–10× slower, and parallelism doesn't help.
-   Matters most for test suites that churn containers.
+1. **Throwaway-container speed** — 4–10× slower, and parallelism doesn't help.
+   Matters most for test suites that churn containers. Now the sharpest
+   dev-stack differentiator.
+2. **Memory: exact-linear vs elastic-base** — much lighter idle and for 1–2
+   containers; roughly comparable at 5–10 services (crossover ~2–7 depending
+   on Docker's VM state); Docker wins past ~10. Lead with the model and the
+   measurement pitfall (Docker's VM hides under "Virtual Machine Service"),
+   not a single crossover number.
 3. **Disk model** — native APFS vs a growing `Docker.raw`. A nuanced win, minus
    the missing aggregate `df`.
 4. **Builder cold start** — the first build of a session pays ~6 s for the

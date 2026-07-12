@@ -1,32 +1,43 @@
 ---
-title: "I ran 29 real docker-compose projects on Apple's container runtime. Here's what broke"
+title: "Apple's container hit 1.0. Should it be your dev environment yet? I measured."
 published: false
 tags: docker, macos, devops, containers
 canonical_url:
 cover_image: # upload assets/cover-29-compose-survey.png when posting
 ---
 
-Docker Desktop keeps a **~7.8 GB Linux VM** provisioned the entire time it's
-running — even when zero containers are up. Apple's new
-[`container`](https://github.com/apple/container) runtime idles at **~58 MB** of
-helper processes and only spends memory while a container actually runs, because
-it boots a lightweight VM *per container*, on demand. It hit 1.0 in June, and on
-macOS 26 containers can finally talk to each other, which makes multi-service
-dev stacks possible.
+Apple's [`container`](https://github.com/apple/container) runtime reached **1.0**
+in June, and on macOS 26 containers can finally talk to each other — which is the
+last piece needed to run a multi-service dev stack. The pieces are, genuinely,
+all here now.
 
-So the question stopped being "is it interesting?" and became: **is it
-compatible enough to run the `docker-compose.yml` files people actually have?**
+So I wanted an honest answer to the practical question: **should you switch your
+daily dev environment to it today?** I measured two things that decide that —
+*compatibility* (does your `docker-compose.yml` run?) and *performance* (is it
+actually pleasant to live in?). The short version, up front, so I'm not burying
+the lede:
 
-Instead of guessing, I measured. I took Docker's own
+> **Compatibility is real — about half of the compose files I tried ran
+> unmodified, and ~60% within a one-line fix. But performance is behind
+> today**, and for a normal multi-service dev stack that's the part you feel.
+> If you want a Docker Desktop replacement *right now*, Docker itself, Colima,
+> or OrbStack (the established alternatives — all built on the same shared-VM
+> model as Docker) are the pragmatic picks. Apple `container` is the better
+> choice today in exactly one shape: **a small image or two, run occasionally.**
+> I'd watch it closely — but I wouldn't move my main dev stack onto it yet.
+
+Here's the data behind that.
+
+## Part 1 — Compatibility: better than I expected
+
+I took Docker's own
 [awesome-compose](https://github.com/docker/awesome-compose) repository — the
 official collection of sample compose projects (WordPress, React+Express+Mongo,
 Spring+Postgres, Prometheus+Grafana, …) — and ran **29 of its samples,
 unmodified**, on Apple `container`. An alphabetical slice, no cherry-picking:
 every sample from `nextcloud-postgres` through `wordpress-mysql`.
 
-Here's the breakdown, and — more useful — *why* each failure failed.
-
-## Setup
+### Setup
 
 Apple's `container` is a runtime, not an orchestrator: it has no `compose`
 subcommand, no dependency ordering, no service discovery. For that I used
@@ -47,7 +58,7 @@ Method: macOS 26 on Apple silicon, Apple `container` 1.0. For each sample:
 categorize, `down`, next. Every failure got a second look to find the actual
 root cause — the interesting part is *whose fault* each one was.
 
-## The results
+### The results
 
 | Outcome | Count | |
 |---|---:|---|
@@ -58,7 +69,7 @@ root cause — the interesting part is *whose fault* each one was.
 | ⚙️ Environment / setup | 2 | placeholder path, host port already taken |
 | 🐌 Build outlasted my timeout | 1 | a 10–15 min Rust→Wasm build (no errors — I got impatient) |
 
-The headline: **18 of 29 real-world stacks run on Apple's runtime today, 14 of
+The headline: **18 of the 29 samples run on Apple's runtime today, 14 of
 them without touching a single line.** And of the 11 that didn't, *not one*
 failed because of the runtime's container execution or networking — every
 failure traced to the sample itself, to Docker-specific host features, or to my
@@ -67,9 +78,9 @@ environment.
 Let's look at the categories, because a couple of them teach you something
 about how Apple's runtime actually differs from Docker.
 
-## The one-line fixes (and what they reveal)
+### The one-line fixes (and what they reveal)
 
-### Postgres refuses its data volume (3 samples)
+#### Postgres refuses its data volume (3 samples)
 
 `nextcloud-postgres`, `nginx-golang-postgres`, and `spring-postgres` all define
 the classic:
@@ -96,7 +107,7 @@ This pattern is *everywhere* in self-hosted app composes (Gitea, Nextcloud,
 MySQL and MariaDB tolerate the mount point, which is why the WordPress and
 MySQL samples sailed through.
 
-### amd64-only images (1 sample)
+#### amd64-only images (1 sample)
 
 `nginx-nodejs-redis` uses `redismod`, an image published only for x86-64. The
 fix is the same line you'd add for Docker on Apple silicon:
@@ -108,7 +119,7 @@ platform: linux/amd64
 opossum passes the platform through and automatically enables Rosetta
 translation for the container, so the x86-64 image runs on the arm64 VM.
 
-## The ones that were broken before I arrived (5 samples)
+### The ones that were broken before I arrived (5 samples)
 
 This was the fun discovery. Five samples fail *on any runtime* today, because
 they pin nothing and the world moved:
@@ -127,7 +138,7 @@ museum of what happens to unmaintained compose files after a few years. If
 your own stack pins its images and dependencies, this whole category doesn't
 apply to you.
 
-## Can't run by design (3 samples)
+### Can't run by design (3 samples)
 
 Full honesty, because this is where the model genuinely differs:
 
@@ -142,7 +153,7 @@ Full honesty, because this is where the model genuinely differs:
 If your compose file is "a normal app + database + cache", none of this
 touches you. If it's host-level infrastructure tooling, stay on Docker.
 
-## The rest
+### The rest
 
 - `plex` ships a placeholder bind path (`/media/your/plex/path`) you're meant
   to edit — environment, not compatibility.
@@ -154,7 +165,7 @@ touches you. If it's host-level infrastructure tooling, stay on Docker.
   90-second patience ran out, so it goes in the "almost certainly fine" pile,
   not the failure pile.
 
-## Gotchas beyond this sample set
+### Gotchas beyond this sample set
 
 Two more differences worth knowing before you try your own stack, found in
 wider testing:
@@ -169,39 +180,97 @@ wider testing:
   expects — it dies at launch before any config applies. A runtime/JDK
   incompatibility with no workaround I know of.
 
-And the trade-offs cut both ways — this isn't "Docker but better":
+## Part 2 — Performance: this is where it's behind today
+
+Compatibility was the good news. Performance is the honest bad news, and it's
+the part you actually feel day to day. All numbers below are from one machine
+(M2, 16 GB) — reproduce them yourself; the point is the *shape*, not the third
+decimal.
+
+**Memory doesn't work the way the idle number suggests.** The headline "~50 MB
+idle vs Docker's multi-GB VM" is true, but it's only the start of the story,
+because the two runtimes allocate memory completely differently. Apple `container` runs **one VM
+per container**, and that cost is exact and verifiable: an idle `nginx:alpine`
+VM has a **~270 MB** physical footprint (a bare alpine idles at ~235–255 MB —
+that's the fixed guest-kernel floor, and lowering the `-m` cap doesn't lower
+it), it scales dead linearly (six containers = six VMs ≈ 1.6 GB + ~20 MB of
+helpers each), and macOS genuinely attributes the guest's memory to the VM
+process — I held 300 MB of incompressible data inside one and watched its
+footprint grow by exactly that (254 M → 557 M).
+
+Docker runs **one shared VM** all containers draw from — and measuring it
+honestly has a trap I fell into myself: Docker's guest memory doesn't show up
+under any `com.docker.*` process. It lives in a process Activity Monitor calls
+**"Virtual Machine Service for Docker"** (both runtimes use Apple's
+Virtualization framework), and the same 300 MB test grows *that* process by
+exactly 0.3 GB (1.1 G → 1.4 G). Sum it correctly and Docker looks like this:
+
+| | Apple `container` (exact, linear) | Docker Desktop (elastic base) |
+|---|---|---|
+| Nothing running | **~50 MB** | ~1.4–2.1 GB warm (helpers + VM; shrinks only over long idle) |
+| Each added small container | **+~290 MB** | ~**+0** (six more nginx moved it ~10 MB) |
+| Heavy workload ends | VM freed with the container | VM **keeps** its high-water mark |
+
+So the honest memory verdict is subtler than either camp's pitch: Apple wins
+clearly when idle or running 1–2 things; **at a typical 5–10 service stack the
+totals are comparable** (Apple ~1.5–3 GB of exact, linear cost vs Docker's
+~1.4–2.1 GB elastic base); past ~10 services Docker's shared pool wins. The
+crossover lands anywhere from ~2 to ~7 containers depending on how warm
+Docker's VM is. The per-VM model's real upside is isolation (a runaway
+container can't starve its neighbors) and *predictability* — you can point at
+the exact process each container costs you.
+
+**What actually decides the dev-stack question is speed, not memory.** Same
+machine:
 
 | | Docker Desktop | Apple `container` |
 |---|---|---|
-| Idle memory | ~373 MB host procs + **~7.8 GB VM** | **~58 MB**, no always-on VM |
 | Single container start | **~0.19 s** | ~0.81 s (boots a fresh micro-VM) |
+| 10× `run --rm`, sequential | **2.1 s** | 8.3 s (~4× slower) |
+| 10× `run --rm`, in parallel | **0.75 s** | 7.6 s (~10× — a shared daemon parallelizes, per-VM doesn't) |
+| First build in a session | warm | +~6 s builder-VM cold start |
 | Bind-mount small-file I/O | slow | slightly **slower** (same host↔VM model) |
-| Isolation | shared VM kernel | per-container VM |
-| License | paid for larger orgs | open source |
 
-Docker still wins if you churn many short-lived containers or hammer bind
-mounts. Apple's runtime wins on footprint and isolation. (Numbers from one
-machine — [method and caveats here](https://github.com/suruseas/opossum/blob/main/docs/benchmarks.md).)
+The throwaway-container gap is architectural — one lightweight VM per container —
+so it won't simply close with a point release. For anything that churns
+short-lived containers (test suites, CI-like loops) it's a real tax today.
 
-## Try it on your own compose file
+So the pieces are all present, but the performance envelope says: **not yet for
+a daily multi-service dev stack.** ([Full method and the wider comparison](https://github.com/suruseas/opossum/blob/main/docs/vs-docker-desktop.md).)
 
-The whole experiment, reproduced on your project, is three commands:
+## The verdict: when to pick it (and when not to, yet)
+
+| Your situation | Today's pick |
+|---|---|
+| Daily multi-service dev stack (app + DB + cache + …) | **Docker / Colima / OrbStack** — faster where it counts (memory is roughly comparable at this scale) |
+| Churning lots of short-lived containers (tests) | **Docker** — per-VM start cost hurts here |
+| Needs `docker.sock`, `NET_ADMIN`, host kernel | **Docker** — Apple `container` can't, by design |
+| A small image or two, run occasionally, mostly idle | **Apple `container`** — genuinely lighter, cleaner isolation, no license |
+| You want per-container VM isolation and no always-on VM | **Apple `container`** — the one thing nothing else here gives you |
+
+That's the honest 2026 read: **the 1.0 pieces are in place, compatibility is
+real, but the performance envelope means Docker and the established alternatives
+are the practical choice for a normal dev environment right now.** Apple
+`container`'s current sweet spot is narrow — small, occasional, idle-most-of-the-
+time workloads — and its structural advantage (VM-per-container isolation with no
+resident VM) is worth watching as the runtime matures. I'd revisit this in a few
+releases; I wouldn't move my main stack over today.
+
+## Try it yourself — it's safe next to Docker
+
+If you want to see where your own compose lands, it's three commands, and it
+won't touch your Docker state (Apple's runtime keeps entirely separate images,
+containers, and volumes; `opossum down -v` only ever removes its own):
 
 ```sh
 brew install suruseas/opossum/opossum
 cd your-project        # with its existing docker-compose.yml
+opossum config         # optional: preview which fields (if any) get ignored
 opossum up
 ```
 
-It's safe to try next to Docker: Apple's runtime keeps entirely separate
-images, containers, and volumes, so your Docker state isn't touched. `opossum
-config` shows you up front which compose fields (if any) it will ignore, and
-`down` cleans everything up.
-
-Based on this sample: **48% of real-world stacks ran with zero changes, 62%
-with at most one line** — and the failures concentrated in stale samples and
-Docker-specific tooling, not in the runtime.
-
-Repo: <https://github.com/suruseas/opossum> — and I'd genuinely like to grow
-this survey: if you run `opossum up` on a real compose file and it breaks,
-tell me what broke (here or in an issue). The failure catalog is the product.
+Repo: <https://github.com/suruseas/opossum>. I'd genuinely like to grow this
+survey — if you run `opossum up` on a real compose file and it breaks, tell me
+what broke (here or in an issue). And if you re-run these perf numbers on your
+hardware and get something different, I want to know that too. The point is an
+honest picture, not a pitch.

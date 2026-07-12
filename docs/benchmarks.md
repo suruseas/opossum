@@ -19,7 +19,7 @@ you can re-measure on yours.
 | Single-container start (`run --rm alpine true`, median of 7) | **0.19 s** | 0.81 s |
 | Idle host-side daemon memory (RSS) | ~373 MB of `com.docker.*` host processes | **~58 MB** of `container-*` helpers |
 | Always-on Linux VM | **~7.8 GB** guest RAM provisioned (`docker info` `MemTotal`), running whenever Docker Desktop is up | **none** — a lightweight VM is started per container, on demand |
-| Added memory per running container | shares the one VM | ~+22 MB (its own micro-VM) |
+| Added memory per running container | shares the one VM | **~250–400 MB** (its own micro-VM; ~270 MB typical for nginx:alpine, plus ~20 MB of helpers) |
 | Isolation boundary | shared VM kernel | **per-container VM** |
 | License | Docker Desktop requires a paid subscription for larger orgs | Apple `container` is open source, no subscription |
 
@@ -54,11 +54,16 @@ mounts are best kept for source you edit from the host.
   already running, so `docker run` just launches a process inside it. Apple
   `container` boots a fresh lightweight VM per container, which costs ~0.6 s more
   — that is the price of per-container VM isolation.
-- **Apple `container` is dramatically lighter at rest.** Docker Desktop keeps a
-  multi-gigabyte Linux VM resident the whole time it is running; Apple
-  `container` has only ~58 MB of helper processes at idle and allocates memory
-  **only while containers actually run** (~22 MB each). On a laptop that idles
-  most of the day, that is the difference between ~8 GB reserved and ~0.
+- **Apple `container` is dramatically lighter at rest — but each running
+  container is a whole VM.** Docker Desktop keeps a multi-gigabyte Linux VM
+  resident the whole time it is running; Apple `container` has only ~58 MB of
+  helper processes at idle and allocates memory **only while containers
+  actually run** — but at **~250–400 MB per container** (a full guest kernel;
+  the floor doesn't drop with `-m`). On a laptop that idles most of the day
+  running a container or two, that is still a big win; once several containers
+  run at once, Docker's shared pool is lighter — see
+  [vs-docker-desktop.md](vs-docker-desktop.md) for the measured scaling table
+  and the crossover (~2–3 containers).
 
 **When Apple `container` (+ opossum) wins:** you want a compose-style workflow
 without a heavy always-on VM, you value per-container VM isolation, or you'd
@@ -76,6 +81,14 @@ for i in $(seq 7); do /usr/bin/time -p container run --rm alpine:3.20 true; done
 ps -Ao rss,comm | grep -iE "com.docker|Docker.app" | awk '{s+=$1} END{print int(s/1024)"MB"}'
 ps -Ao rss,comm | grep -iE "container-apiserver|container-network|machine-apiserver|container-core|container-runtime" \
   | awk '{s+=$1} END{print int(s/1024)"MB"}'
+
+# Per-container memory: each running container adds a
+# com.apple.Virtualization.VirtualMachine process; its guest memory is fully
+# attributed to that process (verified), so read its physical footprint:
+pgrep -f com.apple.Virtualization.VirtualMachine          # diff before/after a run
+vmmap --summary <pid> | grep "Physical footprint"         # ~270 MB per idle nginx VM
+# (The helper-only grep above misses these VM processes — summing helpers alone
+# understates per-container cost by >10x.)
 
 # Docker's always-on Linux VM RAM
 docker info --format '{{.MemTotal}}'   # bytes of guest RAM provisioned

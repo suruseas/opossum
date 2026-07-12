@@ -312,6 +312,12 @@ type RunOptions struct {
 	Memory     string   // -m memory limit (e.g. "512M")
 	CPUs       string   // -c CPU count (integer)
 	Detach     bool
+	// Interactive (-i) keeps the container's stdin connected to ours. Foreground
+	// one-off runs set it so piped input reaches the process — without it the
+	// child sees an immediate EOF, which breaks stdin-driven tools (e.g. an MCP
+	// server speaking JSON-RPC over stdio).
+	Interactive bool
+	TTY         bool // -t: allocate a pseudo-terminal (only when our stdin is one)
 }
 
 // Run starts a container.
@@ -319,6 +325,12 @@ func (r *Runtime) Run(o RunOptions) error {
 	args := []string{"run"}
 	if o.Detach {
 		args = append(args, "-d")
+	}
+	if o.Interactive {
+		args = append(args, "-i")
+	}
+	if o.TTY {
+		args = append(args, "-t")
 	}
 	if o.Name != "" {
 		args = append(args, "--name", o.Name)

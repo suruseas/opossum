@@ -1168,6 +1168,7 @@ func buildFailed(service string, err error) error {
 type RunOneOffOptions struct {
 	Rm     bool // remove the container after it exits
 	NoDeps bool // don't start the service's dependencies first
+	TTY    bool // allocate a TTY (the CLI sets this when its own stdin is a terminal)
 }
 
 // RunOneOff starts a single throwaway container for a service in the foreground,
@@ -1243,6 +1244,11 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 		Memory:     mem,
 		CPUs:       cpu,
 		Detach:     false, // foreground / attached
+		// Keep stdin connected (docker compose run parity): piped input must
+		// reach the process, so stdin-driven tools (e.g. MCP servers speaking
+		// JSON-RPC over stdio) work as one-offs.
+		Interactive: true,
+		TTY:         opts.TTY,
 		// No published ports for a one-off (matches docker-compose run).
 	})
 	if opts.Rm {

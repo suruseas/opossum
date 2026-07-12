@@ -727,17 +727,35 @@ func TestRunOneOffStartsDepsAndOverridesCommand(t *testing.T) {
 	lines := log()
 	// Dependency db is started first (detached), then the one-off runs foreground
 	// under a distinct name, with the overridden command and no published ports.
+	// The one-off keeps stdin connected (-i) so piped input reaches the process,
+	// but gets no TTY unless asked (a pty would echo into piped streams).
 	dbRun := indexOf(lines, "run -d --name db.demo.opossum")
-	oneOff := indexOf(lines, "run --name web-run.demo.opossum")
+	oneOff := indexOf(lines, "run -i --name web-run.demo.opossum")
 	if dbRun < 0 || oneOff < 0 || dbRun > oneOff {
 		t.Fatalf("db should start before the one-off (db=%d one-off=%d) in %v", dbRun, oneOff, lines)
 	}
-	if !hasLine(lines, "run --name web-run.demo.opossum --network demo-net --dns-domain opossum --dns-search demo.opossum -l opossum.project=demo web:latest echo hi") {
+	if !hasLine(lines, "run -i --name web-run.demo.opossum --network demo-net --dns-domain opossum --dns-search demo.opossum -l opossum.project=demo web:latest echo hi") {
 		t.Errorf("one-off run mismatch, got %v", lines)
 	}
 	// The one-off is foreground (no -d) and publishes no ports.
 	if indexOf(lines, "run -d --name web-run.demo.opossum") >= 0 {
 		t.Error("one-off must run in the foreground (no -d)")
+	}
+	// The dependency (a service, not a one-off) must NOT get -i.
+	if indexOf(lines, "run -d -i") >= 0 {
+		t.Errorf("detached services must not attach stdin, got %v", lines)
+	}
+}
+
+func TestRunOneOffTTY(t *testing.T) {
+	// With TTY requested (CLI stdin is a terminal), the one-off gets -i AND -t.
+	rt, log := fakeShim(t)
+	o := orchestrator.New(runOneOffProject(), rt, "opossum", &bytes.Buffer{})
+	if err := o.RunOneOff("web", nil, orchestrator.RunOneOffOptions{NoDeps: true, TTY: true}); err != nil {
+		t.Fatalf("RunOneOff: %v", err)
+	}
+	if indexOf(log(), "run -i -t --name web-run.demo.opossum") < 0 {
+		t.Errorf("TTY one-off should pass -i -t, got %v", log())
 	}
 }
 
@@ -752,7 +770,7 @@ func TestRunOneOffNoDeps(t *testing.T) {
 		t.Errorf("--no-deps must not start db, got %v", lines)
 	}
 	// Falls back to the service's own command when none is given.
-	if !hasLine(lines, "run --name web-run.demo.opossum --network demo-net --dns-domain opossum --dns-search demo.opossum -l opossum.project=demo web:latest serve") {
+	if !hasLine(lines, "run -i --name web-run.demo.opossum --network demo-net --dns-domain opossum --dns-search demo.opossum -l opossum.project=demo web:latest serve") {
 		t.Errorf("expected the service command, got %v", lines)
 	}
 }
@@ -781,7 +799,7 @@ func TestRunOneOffRmDeletesAfter(t *testing.T) {
 		t.Fatalf("RunOneOff: %v", err)
 	}
 	lines := log()
-	oneOff := indexOf(lines, "run --name web-run.demo.opossum")
+	oneOff := indexOf(lines, "run -i --name web-run.demo.opossum")
 	del := -1
 	for i := oneOff + 1; i < len(lines); i++ {
 		if strings.Contains(lines[i], "delete --force web-run.demo.opossum") {

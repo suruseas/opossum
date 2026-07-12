@@ -37,7 +37,7 @@ Measured on one Mac (macOS 26, Apple silicon; container 1.0.0 vs Docker Engine
 
 | | Docker Desktop | Apple `container` (opossum) |
 |---|---|---|
-| Memory at idle | ~373 MB host procs **+ ~7.8 GB provisioned always-on Linux VM** (`docker info` MemTotal) | **~58 MB** helpers, **no always-on VM** (memory only while containers run, ~22 MB each) |
+| Memory at idle | ~373 MB host procs **+ ~7.8 GB provisioned always-on Linux VM** (`docker info` MemTotal) | **~58 MB** helpers, **no always-on VM** (memory only while containers run — each is its own VM at ~250–400 MB) |
 | Single-container start | **~0.19 s** | ~0.81 s |
 | Isolation | shared VM kernel | **per-container VM** |
 | License | paid subscription for larger orgs | open source, none |
@@ -96,7 +96,7 @@ compose.yaml ─▶ compose.Load ─▶ StartupOrder ─▶ orchestrator ─▶ 
 - macOS 26+ on Apple silicon
 - [`container`](https://github.com/apple/container) installed, started
   (`container system start`), and on `PATH`
-- Go 1.24+ (to build)
+- Go 1.25+ (to build)
 
 ## Install
 
