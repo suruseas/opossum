@@ -32,6 +32,18 @@ type Runtime struct {
 	// DockerBin is the docker CLI used only by ImportFromDocker (empty = "docker").
 	// It's a seam for tests; the normal path never shells out to docker.
 	DockerBin string
+	// Out redirects a streamed child's stdout (nil = os.Stdout). `run` sets it to
+	// stderr while starting dependencies and building, so the one-off's own stdout
+	// (e.g. an MCP server's JSON-RPC over stdio) stays clean.
+	Out io.Writer
+}
+
+// stdoutW is where a streamed child's stdout goes (Out when set, else os.Stdout).
+func (r *Runtime) stdoutW() io.Writer {
+	if r.Out != nil {
+		return r.Out
+	}
+	return os.Stdout
 }
 
 // dockerBin returns the docker CLI to invoke for image import.
@@ -109,7 +121,7 @@ func (r *Runtime) stream(args ...string) error {
 	r.trace(args)
 	cmd := exec.CommandContext(r.baseCtx(), r.Bin, args...)
 	cmd.WaitDelay = 2 * time.Second // don't hang on a lingering child after cancel
-	cmd.Stdout = os.Stdout
+	cmd.Stdout = r.stdoutW()
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
 	return cmd.Run()
@@ -127,11 +139,11 @@ func (r *Runtime) streamHeartbeat(label string, tee io.Writer, args ...string) e
 	cmd := exec.CommandContext(r.baseCtx(), r.Bin, args...)
 	cmd.WaitDelay = 2 * time.Second
 	cmd.Stdin = os.Stdin
-	out, errw := io.Writer(os.Stdout), io.Writer(os.Stderr)
+	out, errw := r.stdoutW(), io.Writer(os.Stderr)
 	if tee != nil {
 		// Feed a copy of the output to tee (a build-error detector) without
 		// altering what the user sees.
-		out = io.MultiWriter(os.Stdout, tee)
+		out = io.MultiWriter(out, tee)
 		errw = io.MultiWriter(os.Stderr, tee)
 	}
 	hb := newHeartbeat(os.Stderr, defaultHeartbeatIdle, label)
@@ -210,6 +222,12 @@ func (r *Runtime) DeleteImage(ref string) {
 	r.capture("image", "delete", "--force", ref)
 }
 
+// Copy copies files between a container and the host via `container cp`. src and
+// dst are each a host path or `<container>:<path>`.
+func (r *Runtime) Copy(src, dst string) error {
+	return r.stream("cp", src, dst)
+}
+
 // VolumeExists reports whether a named volume already exists. It gates seeding
 // (which copies image contents into a volume), so on a query error it fails
 // SAFE — reporting "exists" — rather than risk re-seeding a volume that's really
@@ -237,6 +255,12 @@ func (r *Runtime) SeedVolume(volume, image, srcPath string) {
 	const dst = "/__opossum_seed__"
 	script := fmt.Sprintf("[ -d %q ] && cp -a %q/. %q/ 2>/dev/null || true", srcPath, srcPath, dst)
 	r.capture("run", "--rm", "-v", volume+":"+dst, image, "sh", "-c", script)
+}
+
+// Output runs a container subcommand and returns its combined output, for
+// diagnostics (`doctor`) that interpret the CLI's output.
+func (r *Runtime) Output(args ...string) (string, error) {
+	return r.capture(args...)
 }
 
 // DNSDomainExists reports whether a local DNS domain has been created (via
@@ -318,6 +342,10 @@ type RunOptions struct {
 	// server speaking JSON-RPC over stdio).
 	Interactive bool
 	TTY         bool // -t: allocate a pseudo-terminal (only when our stdin is one)
+	// SSH forwards the host's SSH agent socket into the container (--ssh), so a
+	// service can clone/push private git over SSH using the host's keys without
+	// baking them into the image.
+	SSH bool
 }
 
 // Run starts a container.
@@ -331,6 +359,10 @@ func (r *Runtime) Run(o RunOptions) error {
 	}
 	if o.TTY {
 		args = append(args, "-t")
+	}
+	if o.SSH {
+		// Forward the host SSH agent so private git over SSH works in the container.
+		args = append(args, "--ssh")
 	}
 	if o.Name != "" {
 		args = append(args, "--name", o.Name)

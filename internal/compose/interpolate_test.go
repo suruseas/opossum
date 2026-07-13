@@ -289,3 +289,101 @@ services:
 		t.Fatal("expected Load to fail when a required variable is unset")
 	}
 }
+
+// envValue returns the value of KEY from a normalized KEY=value list, or "".
+func envValue(env []string, key string) string {
+	for _, kv := range env {
+		if k, v, ok := strings.Cut(kv, "="); ok && k == key {
+			return v
+		}
+	}
+	return ""
+}
+
+// stubHostGateway overrides the built-in host-gateway resolver for a test.
+func stubHostGateway(t *testing.T, addr string) {
+	t.Helper()
+	prev := hostGatewayFunc
+	hostGatewayFunc = func() string { return addr }
+	t.Cleanup(func() { hostGatewayFunc = prev })
+}
+
+// The built-in OPOSSUM_HOST_GATEWAY resolves to the host's reachable address so a
+// compose file can point a container at a service running on the host.
+func TestLoadInjectsHostGateway(t *testing.T) {
+	stubHostGateway(t, "192.168.11.22")
+	p := writeProject(t, `
+services:
+  app:
+    image: app
+    environment:
+      OLLAMA_HOST: http://${OPOSSUM_HOST_GATEWAY}:11434
+`, "")
+	proj, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := envValue(proj.Services["app"].Environment, "OLLAMA_HOST"); got != "http://192.168.11.22:11434" {
+		t.Errorf("OLLAMA_HOST = %q, want host gateway injected", got)
+	}
+}
+
+// A shell env var of the same name overrides the built-in, so users keep control.
+func TestLoadHostGatewayShellOverrides(t *testing.T) {
+	stubHostGateway(t, "192.168.11.22")
+	t.Setenv("OPOSSUM_HOST_GATEWAY", "10.0.0.5")
+	p := writeProject(t, `
+services:
+  app:
+    image: app
+    environment:
+      OLLAMA_HOST: http://${OPOSSUM_HOST_GATEWAY}:11434
+`, "")
+	proj, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := envValue(proj.Services["app"].Environment, "OLLAMA_HOST"); got != "http://10.0.0.5:11434" {
+		t.Errorf("OLLAMA_HOST = %q, want shell env to override built-in", got)
+	}
+}
+
+// A `.env` entry of the same name also overrides the built-in — this pins the
+// third precedence tier (shell > .env > built-in), not just shell > built-in.
+func TestLoadHostGatewayDotEnvOverrides(t *testing.T) {
+	stubHostGateway(t, "192.168.11.22")
+	p := writeProject(t, `
+services:
+  app:
+    image: app
+    environment:
+      OLLAMA_HOST: http://${OPOSSUM_HOST_GATEWAY}:11434
+`, "OPOSSUM_HOST_GATEWAY=10.1.2.3\n")
+	proj, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := envValue(proj.Services["app"].Environment, "OLLAMA_HOST"); got != "http://10.1.2.3:11434" {
+		t.Errorf("OLLAMA_HOST = %q, want .env to override built-in", got)
+	}
+}
+
+// When the host address can't be determined the variable stays unset, so a `:-`
+// default still applies (e.g. an offline host).
+func TestLoadHostGatewayUnsetUsesDefault(t *testing.T) {
+	stubHostGateway(t, "")
+	p := writeProject(t, `
+services:
+  app:
+    image: app
+    environment:
+      OLLAMA_HOST: http://${OPOSSUM_HOST_GATEWAY:-host.example}:11434
+`, "")
+	proj, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := envValue(proj.Services["app"].Environment, "OLLAMA_HOST"); got != "http://host.example:11434" {
+		t.Errorf("OLLAMA_HOST = %q, want default applied when gateway unknown", got)
+	}
+}

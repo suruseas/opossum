@@ -7,13 +7,16 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
 	"github.com/spf13/cobra"
 	"github.com/suruseas/opossum/internal/compose"
+	"github.com/suruseas/opossum/internal/doctor"
 	"github.com/suruseas/opossum/internal/orchestrator"
 	"github.com/suruseas/opossum/internal/runtime"
 	"golang.org/x/term"
@@ -50,7 +53,7 @@ func newRootCmd() *cobra.Command {
 		upCmd(), downCmd(), psCmd(), imagesCmd(), logsCmd(), statsCmd(),
 		stopCmd(), restartCmd(), startCmd(), execCmd(),
 		buildCmd(), pullCmd(), killCmd(), runCmd(),
-		importCmd(), configCmd(),
+		importCmd(), configCmd(), doctorCmd(), cpCmd(),
 	)
 	return root
 }
@@ -82,6 +85,57 @@ func pullCmd() *cobra.Command {
 func importCmd() *cobra.Command {
 	return servicesCmd("import [service...]", "Import services' Docker-built images (reuse Docker builds, skip Apple's builder)",
 		func(o *orchestrator.Orchestrator, args []string) error { return o.Import(args...) })
+}
+
+func cpCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "cp <src> <dst>",
+		Short: "Copy files between a service's container and the host (each path is a host path or service:path)",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			o, err := loadOrchestrator(cmd.OutOrStdout())
+			if err != nil {
+				return err
+			}
+			return o.Copy(args[0], args[1])
+		},
+	}
+}
+
+func doctorCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "doctor",
+		Short: "Diagnose the environment for common problems (runtime, DNS, network, builder, memory)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			rt := runtime.New()
+			rt.Verbose = verbose
+			// A compose file is optional — it only enables the memory estimate.
+			var proj *compose.Project
+			if o, err := loadOrchestrator(io.Discard); err == nil {
+				proj = o.Project
+			}
+			if !doctor.Run(cmd.OutOrStdout(), rt, dnsDomain, proj, hostMemMB()) {
+				// A failed check (❌) means the environment isn't ready — exit
+				// non-zero so `opossum doctor && …` and CI gate on it. The report
+				// above already explains what and how to fix.
+				os.Exit(1)
+			}
+			return nil
+		},
+	}
+}
+
+// hostMemMB returns the Mac's physical RAM in MB, or 0 if it can't be read.
+func hostMemMB() int {
+	out, err := exec.Command("sysctl", "-n", "hw.memsize").Output()
+	if err != nil {
+		return 0
+	}
+	b, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return int(b / (1024 * 1024))
 }
 
 func startCmd() *cobra.Command {
@@ -273,7 +327,7 @@ func stdinIsTerminal() bool {
 }
 
 func runCmd() *cobra.Command {
-	var rm, noDeps bool
+	var rm, noDeps, noTTY, ssh bool
 	var profiles []string
 	cmd := &cobra.Command{
 		Use:   "run [--rm] [--no-deps] <service> [command...]",
@@ -289,12 +343,14 @@ func runCmd() *cobra.Command {
 			}
 			o.EnableProfiles(profiles)
 			o.EnableProfiles(strings.Split(os.Getenv("COMPOSE_PROFILES"), ","))
-			return o.RunOneOff(args[0], args[1:], orchestrator.RunOneOffOptions{Rm: rm, NoDeps: noDeps, TTY: stdinIsTerminal()})
+			return o.RunOneOff(args[0], args[1:], orchestrator.RunOneOffOptions{Rm: rm, NoDeps: noDeps, TTY: stdinIsTerminal() && !noTTY, SSH: ssh})
 		},
 	}
 	cmd.Flags().BoolVar(&rm, "rm", false, "remove the container after it exits")
 	cmd.Flags().BoolVar(&noDeps, "no-deps", false, "don't start linked services")
+	cmd.Flags().BoolVarP(&noTTY, "no-tty", "T", false, "don't allocate a pseudo-terminal, so piped output (e.g. opossum run web cmd | jq) stays clean")
 	cmd.Flags().StringArrayVar(&profiles, "profile", nil, "enable services gated behind this compose profile (repeatable; also honors COMPOSE_PROFILES)")
+	cmd.Flags().BoolVar(&ssh, "ssh", false, "forward the host SSH agent into the container, so private git over SSH works with your host keys")
 	// Flags after the service name belong to the executed command, not opossum.
 	cmd.Flags().SetInterspersed(false)
 	return cmd

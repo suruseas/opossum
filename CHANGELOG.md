@@ -6,6 +6,41 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `ssh: true` on a service (and `opossum run --ssh`) forwards the host's SSH
+  agent into the container (`container run --ssh`), so a service can `git
+  clone`/`push` private repositories over SSH with your host keys — without
+  copying keys into the image.
+- `${OPOSSUM_HOST_GATEWAY}` built-in interpolation variable expands to the
+  address a container can use to reach a service running on the host (Apple
+  `container` has no `host.docker.internal`), so a compose file can point a
+  container at, e.g., a model server running natively on the host. Overridable
+  via shell env or `.env`; a `examples/local-ai-stack` shows the pattern.
+- `opossum run -T` / `--no-tty` disables the pseudo-terminal (like `docker
+  compose run -T`), so `opossum run web cmd | jq` from a terminal isn't polluted
+  by tty echo/CRLF.
+- `opossum cp <src> <dst>` copies files between a service's container and the
+  host (each path is a host path or `service:path`), like `docker compose cp` —
+  a thin wrapper over `container cp` with service-name resolution.
+- `opossum doctor` diagnoses the environment in one command: the `container`
+  runtime, the DNS domain registration, outbound network/DNS from a probe
+  container (catching a wedged default network), the build VM's memory, and — if
+  a compose file is present — a rough memory estimate for the stack. Each check
+  prints ✅/⚠️/❌ with a one-line fix.
+- `up` warns when two services share the same named volume. Apple `container`
+  attaches a named volume to only one running container at a time, so the others
+  fail to start with an opaque VM error — the warning names the volume and the
+  services and suggests a bind mount (or baking the data into the image).
+
+### Fixed
+
+- `run`'s stdout is now clean even when it starts dependencies or builds an
+  image: dependency-startup, build, and volume-seeding progress go to stderr, so
+  only the one-off's own stdout remains — completing the stdio bridge for tools
+  like an MCP server speaking JSON-RPC over stdio (previously the build's final
+  image tag leaked to stdout).
+
 ## [0.6.1] - 2026-07-13
 
 ### Fixed

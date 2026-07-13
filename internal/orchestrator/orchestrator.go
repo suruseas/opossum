@@ -131,6 +131,11 @@ func configHash(o runtime.RunOptions) string {
 	write(o.Command...)
 	write("entrypoint")
 	write(o.Entrypoint...)
+	// Only contribute when set, so existing (ssh-unset) services keep their hash
+	// and aren't recreated on upgrade — but toggling ssh on/off does recreate.
+	if o.SSH {
+		write("ssh")
+	}
 	return fmt.Sprintf("%x", h.Sum64())
 }
 
@@ -299,6 +304,7 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 	for _, name := range order {
 		o.warnPostgresDatadir(name, o.Project.Services[name])
 	}
+	o.warnSharedNamedVolumes(order)
 
 	// Containers for services no longer in the compose are removed with
 	// --remove-orphans, otherwise just flagged (docker compose parity).
@@ -447,6 +453,7 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 			Memory:     mem,
 			CPUs:       cpu,
 			Detach:     detach,
+			SSH:        svc.SSH,
 		}
 		hash := configHash(runOpts)
 		runOpts.Labels = append(runOpts.Labels, configHashLabel+"="+hash)
@@ -881,6 +888,51 @@ func isNamedVolume(src string) bool {
 	return src != "" && !isHostPath(src)
 }
 
+// warnSharedNamedVolumes warns when two or more services being started mount the
+// same named volume. Apple `container` attaches a named volume as an exclusive
+// block device, so only the first service to start gets it and the others fail to
+// bootstrap ("The storage device attachment is invalid"). Docker shares named
+// volumes; bind mounts (host paths) are shareable here too.
+func (o *Orchestrator) warnSharedNamedVolumes(order []string) {
+	// A one-shot (service_completed_successfully target) runs to completion and
+	// frees its volume before dependents start, so it can legitimately share a
+	// named volume (e.g. an init/seed step) — don't count it as a concurrent user.
+	oneShot := o.completedTargets()
+	users := map[string][]string{}
+	for _, name := range order {
+		if oneShot[name] {
+			continue
+		}
+		seen := map[string]bool{}
+		for _, v := range o.Project.Services[name].Volumes {
+			src := strings.SplitN(v, ":", 2)[0]
+			if isNamedVolume(src) && !seen[src] {
+				seen[src] = true
+				users[src] = append(users[src], name)
+			}
+		}
+	}
+	var shared []string
+	for src, svcs := range users {
+		if len(svcs) >= 2 {
+			shared = append(shared, src)
+		}
+	}
+	sort.Strings(shared)
+	for _, src := range shared {
+		svcs := append([]string(nil), users[src]...)
+		sort.Strings(svcs)
+		quoted := make([]string, len(svcs))
+		for i, s := range svcs {
+			quoted[i] = fmt.Sprintf("%q", s)
+		}
+		o.logf("warning: services %s share named volume %q, but Apple container attaches a "+
+			"named volume to only one running container at a time — the others fail to start. "+
+			"Use a bind mount (a host path) for shared data, or bake it into the image.\n",
+			strings.Join(quoted, ", "), src)
+	}
+}
+
 // postgresDataDir is Postgres's default data directory. A named volume mounted
 // there fails `initdb` because the mount point isn't empty (contains lost+found),
 // unless PGDATA points at a subdirectory. This is the single most common snag in
@@ -1100,6 +1152,26 @@ func (o *Orchestrator) Stats(services []string, noStream bool) error {
 	return o.rt.Stats(names, noStream)
 }
 
+// Copy copies files between a service's container and the host, like
+// `docker compose cp`, delegating to `container cp`. Each of src/dst is a host
+// path or `<service>:<path>`; a `<service>:` prefix naming a project service is
+// rewritten to that service's running container name.
+func (o *Orchestrator) Copy(src, dst string) error {
+	return o.rt.Copy(o.resolveCopyArg(src), o.resolveCopyArg(dst))
+}
+
+// resolveCopyArg rewrites a `<service>:<path>` argument to
+// `<container-name>:<path>` when the prefix names a project service; other
+// arguments (host paths, or a prefix that isn't a service) pass through.
+func (o *Orchestrator) resolveCopyArg(arg string) string {
+	if i := strings.IndexByte(arg, ':'); i > 0 {
+		if _, ok := o.Project.Services[arg[:i]]; ok {
+			return o.containerName(arg[:i]) + arg[i:]
+		}
+	}
+	return arg
+}
+
 // resolveServices resolves the requested service names (or all, in startup
 // order) and rejects any that the project doesn't define. Shared by logs, stop,
 // restart, and stats.
@@ -1169,6 +1241,7 @@ type RunOneOffOptions struct {
 	Rm     bool // remove the container after it exits
 	NoDeps bool // don't start the service's dependencies first
 	TTY    bool // allocate a TTY (the CLI sets this when its own stdin is a terminal)
+	SSH    bool // forward the host SSH agent (--ssh), on top of the service's own `ssh:`
 }
 
 // RunOneOff starts a single throwaway container for a service in the foreground,
@@ -1183,6 +1256,12 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 	if !o.rt.Available() {
 		return fmt.Errorf("the `container` CLI was not found on PATH; install Apple's container runtime first")
 	}
+
+	// Keep the one-off's own stdout clean (e.g. an MCP server's JSON-RPC over
+	// stdio): dependency startup, build, and volume-seeding progress all go to
+	// stderr; only the one-off body (below) writes to the real stdout.
+	o.rt.Out = os.Stderr
+	defer func() { o.rt.Out = nil }()
 
 	if !opts.NoDeps {
 		if deps := svc.DependsOn.Names(); len(deps) > 0 {
@@ -1227,6 +1306,7 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 	o.ensureBindDirs(svc.Volumes)
 	o.seedVolumes(service, image, svc.Volumes)
 	o.logf("Running one-off %s\n", service)
+	o.rt.Out = os.Stdout           // the one-off body's stdout is the real stdout (e.g. MCP JSON-RPC)
 	mem, cpu, _ := svc.Resources() // validated at load
 	runErr := o.rt.Run(runtime.RunOptions{
 		Name:       cname,
@@ -1249,6 +1329,8 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 		// JSON-RPC over stdio) work as one-offs.
 		Interactive: true,
 		TTY:         opts.TTY,
+		// Forward the SSH agent if the service asks for it or the caller passed --ssh.
+		SSH: svc.SSH || opts.SSH,
 		// No published ports for a one-off (matches docker-compose run).
 	})
 	if opts.Rm {

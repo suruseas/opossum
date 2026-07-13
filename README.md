@@ -286,6 +286,7 @@ startup, demonstrating name-based discovery.
 | `entrypoint` | ✅ | overrides the image ENTRYPOINT; string (shell-split) or list, same as `command` |
 | `profiles` | ✅ | a gated service starts only when one of its profiles is active (`--profile <name>`, `COMPOSE_PROFILES`, or naming the service); services with no `profiles` always start |
 | `mem_limit` / `cpus` | ✅ | passed to `container run` as `-m` / `-c`. Also reads `deploy.resources.limits.{memory,cpus}` (the two forms must agree); memory is rounded up to MiB, CPUs to a whole number (Apple's runtime allocates whole vCPUs) |
+| `ssh` | ✅ | `ssh: true` forwards the host's SSH agent into the container (`container run --ssh`), so a service can `git clone`/`push` private repos over SSH using your host keys — without baking keys into the image. Also available per one-off as `opossum run --ssh`. (An opossum extension; docker compose only has build-time `build.ssh`.) |
 | `${VAR}` interpolation | ✅ | `$VAR`, `${VAR}`, `${VAR:-default}`, `${VAR:?required}`, `$$` escape; values from a `.env` file next to the compose file (or `--env-file` paths, which replace `.env`; later files win), overridden by the shell |
 
 Other compose fields (e.g. `container_name`, `restart`, `networks`)
@@ -315,11 +316,13 @@ opossum mirrors the common `docker compose` subcommands, delegating each to the
 | `build [service…]` | ✅ | build images for services with `build:` |
 | `pull [service…]` | ✅ | pull images for services with `image:` |
 | `import [service…]` | ✅ (extra) | copy a service's Docker-built image into `container`'s store, so `up` skips the rebuild |
+| `doctor` | ✅ (extra) | diagnose the environment (runtime, DNS domain, outbound network, build VM memory, stack memory estimate); prints ✅/⚠️/❌ + a one-line fix each |
+| `cp <src> <dst>` | ✅ | copy files between a service's container and the host (each path is a host path or `service:path`), like `docker compose cp` |
 | `start [service…]` | ✅ | start existing (stopped) containers |
 | `stop [service…]` | ✅ | stop without removing |
 | `restart [service…]` | ✅ | stop then start in place |
 | `kill [service…]` | ✅ | send a signal (default KILL); `-s/--signal` |
-| `run [--rm] [--no-deps] <service> [cmd]` | ✅ | one-off foreground container; starts deps unless `--no-deps`; no published ports |
+| `run [--rm] [--no-deps] [-T] <service> [cmd]` | ✅ | one-off foreground container; starts deps unless `--no-deps`; `-T`/`--no-tty` disables the pseudo-terminal; progress goes to stderr so the one-off's stdout stays clean (usable as an MCP stdio bridge); no published ports |
 | `config [--services]` | ✅ | validate and print the resolved config (interpolation + env_file applied), noting ignored fields; mirrors what `up` starts, so `profiles:`-gated services appear only with `--profile` |
 
 Add `--verbose` to any command to print each underlying `container` invocation
@@ -354,7 +357,7 @@ features aren't supported. The detailed rationale for each is in
 - **DB data dirs**: Postgres `initdb` fails on a named-volume mount point — use a **subdirectory** (`PGDATA=/var/lib/postgresql/data/pgdata`). Very common in real app composes (gitea, nextcloud, …), so `up` **warns** when it sees a named volume at `/var/lib/postgresql/data` without a PGDATA subdirectory. (MySQL/MariaDB tolerate the mount point.)
 - **Volumes aren't seeded from the image**: Docker copies an image's directory contents into a *fresh* named or anonymous volume the first time it's used; Apple `container` mounts it **empty**. This breaks the common dev pattern of a bind-mounted source plus a `- /app/node_modules` volume to preserve the image's installed dependencies — on opossum that `node_modules` is empty and the app fails to start (`ng serve`/`vite`/etc. can't find their packages). Work around it by installing deps at container start (`command: sh -c "npm ci && npm start"`), or by not shadowing the dependency dir with a volume. Applies to **named volumes too**, not just anonymous ones.
 - **Build context**: Apple's builder can't read a context under `/private/tmp` or a symlinked directory — build from a real path under your home dir (`up` warns).
-- **Won't run at all**: composes that need Linux-host kernel access (WireGuard's `NET_ADMIN` + `/lib/modules`), or that bind-mount the Docker socket (`/var/run/docker.sock`, e.g. Portainer) — these depend on features Apple `container` doesn't provide (also true of Docker Desktop for the host-path cases).
+- **Won't run at all**: composes that need Linux-host kernel access (WireGuard's `NET_ADMIN` + `/lib/modules`) — Apple `container` doesn't provide it (also true of Docker Desktop for the host-path cases). Tools that drive Docker through `/var/run/docker.sock` (e.g. Portainer) also can't manage opossum's containers: bind-mounting a host Unix socket into a container *does* work now (since `container` 1.1.0), but Apple `container` exposes no Docker-compatible daemon socket — it talks to the host over XPC — so the mount has nothing on the other end.
 - **cgroup-sensitive JVM images (e.g. Elasticsearch 7.x)**: the container's bundled JDK reads the host cgroup to size the heap, and Apple `container`'s VM doesn't expose the cgroup mount the way it expects — the process crashes at launch with `CgroupInfo.getMountPoint() … null` before any config applies (`ES_JAVA_OPTS`/`JAVA_TOOL_OPTIONS` don't help; observed on Elasticsearch 7.16 and 7.17). `opossum ps` shows such a service as `stopped`; check `opossum logs <svc>`. This is a runtime/JDK–VM incompatibility, not an opossum limitation.
 - **Not parsed**: `configs`, `extends`, and the map form of `external`.
 
@@ -399,12 +402,28 @@ replacing) a container another project already owns.
   `down -v` — the user manages it. `external` takes the bool form; the volume
   must already exist (opossum doesn't create it). Other top-level volume settings
   (`driver`, `labels`, …) are not applied.
+- **A named volume can't be shared by two running containers.** `container`
+  attaches a named volume as an exclusive block device, so if two services mount
+  the same named volume, the first to start gets it and the others fail with `The
+  storage device attachment is invalid`. (Docker shares named volumes; a common
+  case is an app + nginx sharing a `public`/assets volume.) `up` **warns** when it
+  sees this — use a **bind mount** (a host path, which *is* shareable) for the
+  shared data, or bake it into the image.
 - **`networks:` is ignored** — every service joins the single per-project network
   (`<project>-net`), so they can all reach each other. Custom networks, aliases,
   or frontend/backend isolation are not applied (`up` warns).
 - **`restart:` policies are ignored** — opossum does not restart a container that
   exits (`up` warns). Also, `restart` (the command) reassigns a container's IP;
   its name and config are preserved, so name-based discovery is unaffected.
+- **No Docker-in-Docker / nested containers inside a service.** A service runs in
+  a `container run` VM with no nested virtualization (no `/dev/kvm`), so it can't
+  run its own containers — a build/test job that shells out to `docker` won't
+  work inside a service. Apple `container` *can* do nested virtualization, but
+  only through a separate `container machine --virtualization` VM, which needs
+  Apple silicon **M3 or newer** (with macOS 15+). opossum doesn't yet drive
+  container machines, so there's no supported nested-container path today. This is
+  a natural area to extend — **contributions welcome** (see the tracking issue for
+  agent/sandbox use cases).
 
 ### Health-gated startup
 
@@ -433,6 +452,45 @@ optional surrounding quotes), and the process environment overrides them — so
 (default only when unset), `${VAR:?message}` / `${VAR?message}` (fail if
 unset/empty), and `$$` for a literal `$`. An undefined variable with no default
 expands to an empty string.
+
+opossum also provides one built-in: **`${OPOSSUM_HOST_GATEWAY}`** — the address a
+container can use to reach a service running on the host (see below). A shell env
+var or `.env` entry of the same name overrides it.
+
+### Reaching a service on the host
+
+A common local-AI setup keeps the heavy piece — say an LLM server like Ollama or
+an MLX endpoint — running **natively on the host** (fastest access to the GPU),
+with the rest of the stack (app, vector DB, workers) in containers. The
+containers then need to call back to that host service.
+
+Apple `container`'s default network is NAT-only: there's no `host.docker.internal`
+name and no `--add-host`. But a container **can** reach the host at the host's own
+LAN address, so opossum exposes that as the built-in `${OPOSSUM_HOST_GATEWAY}`:
+
+```yaml
+services:
+  app:
+    image: my-rag-app
+    environment:
+      # resolves to the host's LAN IP at load time, e.g. http://192.168.11.22:11434
+      OLLAMA_HOST: http://${OPOSSUM_HOST_GATEWAY}:11434
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+```
+
+Two requirements for the host service to be reachable:
+
+- **Bind on `0.0.0.0`, not `127.0.0.1`.** A loopback-only bind is invisible to
+  the container. For Ollama, `OLLAMA_HOST=0.0.0.0 ollama serve`.
+- **The host needs a LAN address.** The value is the host's current outbound IP,
+  so it changes with the network and is empty when the host is offline. Guard
+  with a default if you need one: `${OPOSSUM_HOST_GATEWAY:-127.0.0.1}`. Run
+  `opossum config` to see the value that will be used.
+
+See [`examples/local-ai-stack`](examples/local-ai-stack) for a full stack.
 
 ## Troubleshooting builds
 

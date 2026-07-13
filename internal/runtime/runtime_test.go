@@ -373,6 +373,24 @@ func TestRunWithEntrypoint(t *testing.T) {
 	}
 }
 
+func TestRunForwardsSSHAgent(t *testing.T) {
+	rt, read := loggingShim(t)
+	if err := rt.Run(RunOptions{Name: "agent", Image: "alpine", SSH: true}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got, want := lastLine(t, read), "run --ssh --name agent alpine"; got != want {
+		t.Errorf("SSH argv mismatch\n got: %s\nwant: %s", got, want)
+	}
+	// Unset SSH must not emit the flag.
+	rt2, read2 := loggingShim(t)
+	if err := rt2.Run(RunOptions{Name: "plain", Image: "alpine"}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := lastLine(t, read2); strings.Contains(got, "--ssh") {
+		t.Errorf("--ssh should not appear when SSH is unset: %s", got)
+	}
+}
+
 func TestRunOmitsDetachAndDNSWhenUnset(t *testing.T) {
 	rt, read := loggingShim(t)
 	if err := rt.Run(RunOptions{Name: "solo", Image: "busybox", Network: "demo-net", Detach: false}); err != nil {

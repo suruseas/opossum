@@ -28,6 +28,7 @@ type configService struct {
 	Tmpfs       []string             `yaml:"tmpfs,omitempty"`
 	MemLimit    string               `yaml:"mem_limit,omitempty"`
 	CPUs        string               `yaml:"cpus,omitempty"`
+	SSH         bool                 `yaml:"ssh,omitempty"`
 	DependsOn   map[string]configDep `yaml:"depends_on,omitempty"`
 	Healthcheck *configHealthcheck   `yaml:"healthcheck,omitempty"`
 }
@@ -70,6 +71,7 @@ func RenderConfig(p *Project) (string, error) {
 			Tmpfs:       svc.Tmpfs,
 			MemLimit:    mem,
 			CPUs:        cpu,
+			SSH:         svc.SSH,
 		}
 		if svc.Build != nil {
 			cs.Build = &configBuild{Context: svc.Build.Context, Dockerfile: svc.Build.Dockerfile, Args: svc.Build.Args, Target: svc.Build.Target}

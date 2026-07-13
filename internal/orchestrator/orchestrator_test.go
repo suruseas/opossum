@@ -232,6 +232,27 @@ func indexOf(lines []string, sub string) int {
 	return -1
 }
 
+// A service with `ssh: true` forwards the host SSH agent (--ssh); others don't.
+func TestUpForwardsSSHWhenServiceOptsIn(t *testing.T) {
+	rt, log := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"builder": {Image: "ci:latest", SSH: true},
+		"plain":   {Image: "app:latest"},
+	})
+	var out bytes.Buffer
+	o := orchestrator.New(p, rt, "opossum", &out)
+	if err := o.Up(true); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	lines := log()
+	if i := indexOf(lines, "--name builder.demo.opossum"); i < 0 || !strings.Contains(lines[i], "--ssh") {
+		t.Errorf("builder run should include --ssh, got: %v", lines)
+	}
+	if i := indexOf(lines, "--name plain.demo.opossum"); i < 0 || strings.Contains(lines[i], "--ssh") {
+		t.Errorf("plain run should not include --ssh, got: %v", lines)
+	}
+}
+
 func TestUpEmitsOrderedCommands(t *testing.T) {
 	rt, log := fakeShim(t)
 	p := project("demo", map[string]*compose.Service{
@@ -756,6 +777,41 @@ func TestRunOneOffTTY(t *testing.T) {
 	}
 	if indexOf(log(), "run -i -t --name web-run.demo.opossum") < 0 {
 		t.Errorf("TTY one-off should pass -i -t, got %v", log())
+	}
+}
+
+func TestRunOneOffForwardsSSH(t *testing.T) {
+	// The --ssh flag forwards the agent for a one-off, even when the service
+	// itself didn't opt in.
+	rt, log := fakeShim(t)
+	o := orchestrator.New(runOneOffProject(), rt, "opossum", &bytes.Buffer{})
+	if err := o.RunOneOff("web", nil, orchestrator.RunOneOffOptions{NoDeps: true, SSH: true}); err != nil {
+		t.Fatalf("RunOneOff: %v", err)
+	}
+	if lines := log(); indexOf(lines, "--name web-run.demo.opossum") < 0 || indexOf(lines, "--ssh") < 0 {
+		t.Errorf("--ssh flag should forward the agent for a one-off, got %v", lines)
+	}
+
+	// A service with ssh: true forwards without the flag; a plain one never does.
+	p := project("demo", map[string]*compose.Service{
+		"sshsvc": {Image: "ci:latest", SSH: true},
+		"plain":  {Image: "app:latest"},
+	})
+	rt2, log2 := fakeShim(t)
+	o2 := orchestrator.New(p, rt2, "opossum", &bytes.Buffer{})
+	if err := o2.RunOneOff("sshsvc", nil, orchestrator.RunOneOffOptions{NoDeps: true}); err != nil {
+		t.Fatalf("RunOneOff: %v", err)
+	}
+	if lines := log2(); indexOf(lines, "--name sshsvc-run.demo.opossum") < 0 || indexOf(lines, "--ssh") < 0 {
+		t.Errorf("service ssh:true should forward for a one-off, got %v", lines)
+	}
+	rt3, log3 := fakeShim(t)
+	o3 := orchestrator.New(p, rt3, "opossum", &bytes.Buffer{})
+	if err := o3.RunOneOff("plain", nil, orchestrator.RunOneOffOptions{NoDeps: true}); err != nil {
+		t.Fatalf("RunOneOff: %v", err)
+	}
+	if i := indexOf(log3(), "--name plain-run.demo.opossum"); i < 0 || strings.Contains(log3()[i], "--ssh") {
+		t.Errorf("plain one-off should not forward ssh, got %v", log3())
 	}
 }
 

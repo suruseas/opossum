@@ -3,14 +3,57 @@ package compose
 import (
 	"bytes"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // varLookup resolves a variable name to its value and whether it was set at all.
 // An empty-but-set variable returns ("", true).
 type varLookup func(name string) (string, bool)
+
+// hostGatewayVar is a built-in interpolation variable that resolves to the
+// address a container can use to reach services running on the host. The default
+// network is NAT-only (no host.docker.internal, no --add-host), but a container
+// can reach the host at the host's own LAN address, so that is what this exposes.
+// Reference it from a compose file, e.g.
+//
+//	environment:
+//	  OLLAMA_HOST: http://${OPOSSUM_HOST_GATEWAY}:11434
+//
+// A shell env var or `.env` entry of the same name overrides it, and if the host
+// address can't be determined (e.g. offline) it stays unset so a `:-` default
+// applies.
+const hostGatewayVar = "OPOSSUM_HOST_GATEWAY"
+
+// hostGatewayFunc resolves the host gateway address; overridable in tests.
+var hostGatewayFunc = defaultHostGateway
+
+var (
+	hostGWOnce sync.Once
+	hostGWAddr string
+)
+
+// defaultHostGateway returns the host's primary LAN address — the source IP the
+// OS would pick for outbound traffic, which is also the address a container on
+// the default network reaches the host at. It opens no connection (UDP Dial just
+// selects a route) and is cached for the process. Returns "" if it can't be
+// determined, e.g. the host has no network.
+func defaultHostGateway() string {
+	hostGWOnce.Do(func() {
+		conn, err := net.Dial("udp", "1.1.1.1:80")
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		if a, ok := conn.LocalAddr().(*net.UDPAddr); ok && a.IP != nil {
+			hostGWAddr = a.IP.String()
+		}
+	})
+	return hostGWAddr
+}
 
 // loadEnv builds the variable lookup used for interpolation: values from a
 // `.env` file in dir, overlaid by the process environment (the shell wins, as in
@@ -44,8 +87,16 @@ func loadEnv(dir string, envFiles []string) (varLookup, error) {
 		if v, ok := os.LookupEnv(name); ok {
 			return v, true
 		}
-		v, ok := fromFile[name]
-		return v, ok
+		if v, ok := fromFile[name]; ok {
+			return v, true
+		}
+		// Built-in fallback, resolved lazily so it costs nothing unless referenced.
+		if name == hostGatewayVar {
+			if addr := hostGatewayFunc(); addr != "" {
+				return addr, true
+			}
+		}
+		return "", false
 	}, nil
 }
 

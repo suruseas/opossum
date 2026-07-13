@@ -7,6 +7,7 @@ Two bundled stacks, and a walkthrough of every subcommand.
 | [`hello.yaml`](hello.yaml) | no (image only) | `depends_on` ordering, bare-name service discovery, `entrypoint` + `command` |
 | [`compose.yaml`](compose.yaml) | yes (`web`) | `build`, `ports`, `environment`, `healthcheck`, `depends_on` conditions (`service_healthy`, `service_completed_successfully`), `.env` / `${VAR}` interpolation, string `command` |
 | [`app-stack/compose.yaml`](app-stack/compose.yaml) | no (all pre-built) | a realistic, browsable stack: Postgres + Redis + Adminer UI + a worker — health-gated startup, a published port, and a **persistent named volume** done right (`PGDATA` subdirectory) |
+| [`local-ai-stack/compose.yaml`](local-ai-stack/compose.yaml) | no (all pre-built) | LLM on the **host**, stack in containers: reaching a host service via the built-in `${OPOSSUM_HOST_GATEWAY}` alongside container-to-container discovery |
 
 `hello.yaml` runs anywhere `container` is up. `compose.yaml` additionally needs the
 image builder (`container builder start`) for its `web` service.

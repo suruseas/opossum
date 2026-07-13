@@ -46,7 +46,9 @@ type Service struct {
 	Profiles    []string      `yaml:"profiles"`  // service starts only when one of these profiles is active (empty = always)
 	MemLimit    scalarStr     `yaml:"mem_limit"` // legacy memory limit ("512m", "2g", …)
 	CPUs        scalarStr     `yaml:"cpus"`      // legacy CPU limit (may be fractional)
-	Deploy      *Deploy       `yaml:"deploy"`    // only deploy.resources.limits.{memory,cpus} is acted on
+	SSH         bool          `yaml:"ssh"`       // forward the host SSH agent (--ssh) for private git over SSH
+
+	Deploy *Deploy `yaml:"deploy"` // only deploy.resources.limits.{memory,cpus} is acted on
 
 	// Unsupported holds any compose keys opossum doesn't act on (e.g.
 	// container_name, restart), collected during parsing so it can warn rather

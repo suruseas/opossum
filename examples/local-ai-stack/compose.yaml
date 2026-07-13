@@ -1,0 +1,55 @@
+# A local-AI stack: the LLM runs natively on the host (fastest GPU access), the
+# rest of the stack runs in containers that call back to it.
+#
+#   # 1. Run a model server on the HOST, bound to 0.0.0.0 (not 127.0.0.1):
+#   OLLAMA_HOST=0.0.0.0 ollama serve &
+#   ollama pull llama3.2
+#
+#   # 2. Start the containers — they reach the host model via ${OPOSSUM_HOST_GATEWAY}:
+#   opossum -f examples/local-ai-stack/compose.yaml up
+#
+#   # See the address opossum resolved for the host:
+#   opossum -f examples/local-ai-stack/compose.yaml config | grep OLLAMA_HOST
+#
+# ${OPOSSUM_HOST_GATEWAY} is a built-in that expands to the host's LAN address —
+# the one a container on the default network can use to reach the host. There is
+# no host.docker.internal on Apple `container`, so this is how a container talks
+# back to a service on the host. Requirements: the host service must bind 0.0.0.0
+# (a 127.0.0.1 bind is unreachable from the container), and the host needs a LAN
+# address (it's empty when offline — add a `:-` default if you need a fallback).
+name: localaistack
+
+services:
+  # Vector DB for retrieval — a normal container, published so you can poke it.
+  # (No healthcheck here: the qdrant image ships neither wget nor curl, so rather
+  # than assume a probe tool inside it, the app polls /readyz itself below.)
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+
+  # Your app: retrieves from qdrant (bare service name) and generates with the
+  # host's model server via the built-in host-gateway address.
+  app:
+    image: alpine:3.20
+    depends_on:
+      - qdrant
+    environment:
+      QDRANT_URL: http://qdrant:6333
+      OLLAMA_HOST: http://${OPOSSUM_HOST_GATEWAY}:11434
+    # Stand-in for a real app: prove both hops work — the containerized vector DB
+    # by service name, and the host model server via ${OPOSSUM_HOST_GATEWAY}.
+    # `$$` escapes the compose interpolation so the container's shell sees the env
+    # vars ($QDRANT_URL / $OLLAMA_HOST) rather than opossum expanding them at load.
+    command:
+      - sh
+      - -c
+      - |
+        echo "qdrant (container) at $$QDRANT_URL:"
+        i=0
+        until wget -qO- -T2 "$$QDRANT_URL/readyz" && echo; do
+          i=$$((i+1)); [ $$i -ge 15 ] && break; sleep 2
+        done
+        echo "model server (host) at $$OLLAMA_HOST:"
+        wget -qO- -T5 "$$OLLAMA_HOST/api/tags" && echo || \
+          echo "  (start a model server on the host, bound to 0.0.0.0)"
