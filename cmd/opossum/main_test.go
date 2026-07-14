@@ -1,32 +1,40 @@
 package main
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// fakeShimBin is the compiled fake `container` shim, built once for the package.
+// A compiled binary spawns in ~1-2ms versus ~50-80ms for a /bin/sh script.
+var fakeShimBin string
+
+func TestMain(m *testing.M) {
+	d, err := os.MkdirTemp("", "opossum-cmd-test-")
+	if err != nil {
+		panic(err)
+	}
+	fakeShimBin = filepath.Join(d, "fakeshim")
+	if out, berr := exec.Command("go", "build", "-o", fakeShimBin, "./testdata/fakeshim").CombinedOutput(); berr != nil {
+		os.RemoveAll(d)
+		panic(fmt.Sprintf("building fake shim: %v\n%s", berr, out))
+	}
+	code := m.Run()
+	os.RemoveAll(d)
+	os.Exit(code)
+}
 
 // fakeShim writes a `container` stand-in that logs each invocation to $FAKE_LOG
 // and returns plausible output, then points OPOSSUM_CONTAINER_BIN at it.
 func fakeShim(t *testing.T) func() []string {
 	t.Helper()
 	dir := t.TempDir()
-	shim := filepath.Join(dir, "fake-container.sh")
 	logPath := filepath.Join(dir, "invocations.log")
-	script := `#!/bin/sh
-echo "$*" >> "$FAKE_LOG"
-case "$1" in
-  system) [ "$2" = dns ] && [ "$3" = list ] && printf 'DOMAIN\nopossum\n' ;;
-  network) [ "$2" = create ] && echo "$3" ;;
-  inspect) echo '[{"status":{"state":"running","networks":[{"ipv4Address":"192.168.66.9/24"}]},"configuration":{"labels":{},"publishedPorts":[{"containerPort":80,"hostAddress":"0.0.0.0","hostPort":8080,"proto":"tcp"}]}}]' ;;
-esac
-exit 0
-`
-	if err := os.WriteFile(shim, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("OPOSSUM_CONTAINER_BIN", shim)
+	t.Setenv("OPOSSUM_CONTAINER_BIN", fakeShimBin)
 	t.Setenv("FAKE_LOG", logPath)
 	return func() []string {
 		b, err := os.ReadFile(logPath)

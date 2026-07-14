@@ -48,7 +48,8 @@ type Service struct {
 	CPUs        scalarStr     `yaml:"cpus"`      // legacy CPU limit (may be fractional)
 	SSH         bool          `yaml:"ssh"`       // forward the host SSH agent (--ssh) for private git over SSH
 
-	Deploy *Deploy `yaml:"deploy"` // only deploy.resources.limits.{memory,cpus} is acted on
+	Deploy  *Deploy  `yaml:"deploy"`  // only deploy.resources.limits.{memory,cpus} is acted on
+	Develop *Develop `yaml:"develop"` // develop.watch drives `opossum watch` (file-change sync)
 
 	// Unsupported holds any compose keys opossum doesn't act on (e.g.
 	// container_name, restart), collected during parsing so it can warn rather
@@ -68,6 +69,23 @@ func (s *scalarStr) UnmarshalYAML(n *yaml.Node) error {
 // Deploy carries the one part of `deploy:` opossum acts on: resource limits.
 type Deploy struct {
 	Resources *DeployResources `yaml:"resources"`
+}
+
+// Develop is the compose `develop:` block; opossum acts on its `watch:` rules
+// (via `opossum watch`), which mirror host file changes into running containers.
+type Develop struct {
+	Watch []WatchRule `yaml:"watch"`
+}
+
+// WatchRule is one `develop.watch` entry: when files under Path change, opossum
+// takes Action. `sync` copies the changed file to Target inside the container;
+// other actions are recognized but not yet acted on. Ignore holds path globs
+// (matched against the path relative to Path) that are skipped.
+type WatchRule struct {
+	Action string   `yaml:"action"` // sync | rebuild | sync+restart (only sync acted on)
+	Path   string   `yaml:"path"`   // host path watched (relative to the compose dir)
+	Target string   `yaml:"target"` // container path files sync to (for action: sync)
+	Ignore []string `yaml:"ignore"` // globs (relative to Path) to skip
 }
 
 // DeployResources is deploy.resources; only limits are used (reservations ignored).

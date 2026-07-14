@@ -31,7 +31,7 @@ func (r *Runtime) ImportFromDocker(dockerRef, targetTag string) error {
 		return err
 	}
 	save := exec.CommandContext(r.baseCtx(), docker, "image", "save", dockerRef)
-	load := exec.CommandContext(r.baseCtx(), r.Bin, "image", "load")
+	load := r.newCmd(r.baseCtx(), "image", "load")
 	save.Stdout = pw
 	save.Stderr = os.Stderr // surface "No such image" / "Cannot connect to the Docker daemon"
 	load.Stdin = pr

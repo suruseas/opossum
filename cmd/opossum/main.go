@@ -53,9 +53,31 @@ func newRootCmd() *cobra.Command {
 		upCmd(), downCmd(), psCmd(), imagesCmd(), logsCmd(), statsCmd(),
 		stopCmd(), restartCmd(), startCmd(), execCmd(),
 		buildCmd(), pullCmd(), killCmd(), runCmd(),
-		importCmd(), configCmd(), doctorCmd(), cpCmd(),
+		importCmd(), configCmd(), doctorCmd(), cpCmd(), watchCmd(),
 	)
 	return root
+}
+
+func watchCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "watch",
+		Short: "Sync host file changes into running containers per each service's develop.watch rules",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			o, err := loadOrchestrator(cmd.OutOrStdout())
+			if err != nil {
+				return err
+			}
+			// Ctrl-C stops watching cleanly.
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			sig := make(chan os.Signal, 1)
+			signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+			defer signal.Stop(sig)
+			go func() { <-sig; cancel() }()
+			return o.Watch(ctx)
+		},
+	}
 }
 
 func servicesCmd(use, short string, fn func(*orchestrator.Orchestrator, []string) error) *cobra.Command {

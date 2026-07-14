@@ -9,12 +9,34 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
+
+// fakeShimBin is the compiled fake `container` shim, built once for the package.
+// A compiled binary spawns in ~1-2ms versus ~50-80ms for a /bin/sh script, and
+// the suite spawns it many times — so this dominates the runtime tests' cost.
+var fakeShimBin string
+
+func TestMain(m *testing.M) {
+	d, err := os.MkdirTemp("", "opossum-rt-test-")
+	if err != nil {
+		panic(err)
+	}
+	fakeShimBin = filepath.Join(d, "fakeshim")
+	if out, berr := exec.Command("go", "build", "-o", fakeShimBin, "./testdata/fakeshim").CombinedOutput(); berr != nil {
+		os.RemoveAll(d)
+		panic(fmt.Sprintf("building fake shim: %v\n%s", berr, out))
+	}
+	code := m.Run()
+	os.RemoveAll(d)
+	os.Exit(code)
+}
 
 // recordWriter records each Write call separately, to verify FollowLogs emits one
 // whole line per Write (so concurrent streams can't interleave mid-line).
@@ -26,11 +48,11 @@ func (rw *recordWriter) Write(p []byte) (int, error) {
 }
 
 func TestFollowLogsWholeLineWrites(t *testing.T) {
-	shim := filepath.Join(t.TempDir(), "c.sh")
-	if err := os.WriteFile(shim, []byte("#!/bin/sh\nprintf 'a\\nbb\\nccc\\n'\n"), 0o755); err != nil {
+	outFile := filepath.Join(t.TempDir(), "logs.txt")
+	if err := os.WriteFile(outFile, []byte("a\nbb\nccc\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	r := &Runtime{Bin: shim}
+	r := &Runtime{Bin: fakeShimBin, Env: []string{"SHIM_OUT=" + outFile}}
 	rec := &recordWriter{}
 	if err := r.FollowLogs(context.Background(), "x", LogsOptions{Follow: true}, rec, "P | "); err != nil {
 		t.Fatalf("FollowLogs: %v", err)
@@ -46,11 +68,8 @@ func TestFollowLogsWholeLineWrites(t *testing.T) {
 // verbose command trace without caring about output.
 func exitShim(t *testing.T) string {
 	t.Helper()
-	shim := filepath.Join(t.TempDir(), "container.sh")
-	if err := os.WriteFile(shim, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	return shim
+	// The compiled shim with no SHIM_* env just exits 0.
+	return fakeShimBin
 }
 
 func TestVerboseTracesCommands(t *testing.T) {
@@ -117,12 +136,7 @@ func replayShim(t *testing.T, output string, exit int) *Runtime {
 	if err := os.WriteFile(outFile, []byte(output), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	shim := filepath.Join(dir, "container.sh")
-	script := fmt.Sprintf("#!/bin/sh\ncat %s\nexit %d\n", outFile, exit)
-	if err := os.WriteFile(shim, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	return &Runtime{Bin: shim}
+	return &Runtime{Bin: fakeShimBin, Env: []string{"SHIM_OUT=" + outFile, "SHIM_EXIT=" + strconv.Itoa(exit)}}
 }
 
 // inspectShim returns a Runtime whose `container` prints the given JSON for any
@@ -134,11 +148,7 @@ func inspectShim(t *testing.T, json string) *Runtime {
 	if err := os.WriteFile(jsonFile, []byte(json), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	shim := filepath.Join(dir, "container.sh")
-	if err := os.WriteFile(shim, []byte("#!/bin/sh\ncat "+jsonFile+"\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	return &Runtime{Bin: shim}
+	return &Runtime{Bin: fakeShimBin, Env: []string{"SHIM_OUT=" + jsonFile}}
 }
 
 func TestInspectIPPrefersInterfaceOverPublishedPort(t *testing.T) {
@@ -244,11 +254,7 @@ func loggingShim(t *testing.T) (*Runtime, func() []string) {
 	t.Helper()
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "args.log")
-	shim := filepath.Join(dir, "container.sh")
-	script := "#!/bin/sh\necho \"$*\" >> \"" + logPath + "\"\nexit 0\n"
-	if err := os.WriteFile(shim, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	rt := &Runtime{Bin: fakeShimBin, Env: []string{"SHIM_LOG=" + logPath}}
 	read := func() []string {
 		b, err := os.ReadFile(logPath)
 		if err != nil {
@@ -259,7 +265,7 @@ func loggingShim(t *testing.T) (*Runtime, func() []string) {
 		}
 		return splitLines(string(b))
 	}
-	return &Runtime{Bin: shim}, read
+	return rt, read
 }
 
 func splitLines(s string) []string {

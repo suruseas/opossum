@@ -56,7 +56,7 @@ func TestImportBuildServicesOnly(t *testing.T) {
 // `up --from-docker` imports a build service's image instead of building it.
 func TestUpFromDockerImportsInsteadOfBuilding(t *testing.T) {
 	rt, calls := fakeShim(t)
-	t.Setenv("IMAGE_ABSENT", "pj-web:latest") // not present, so up would otherwise build
+	setShimEnv(rt, "IMAGE_ABSENT=pj-web:latest") // not present, so up would otherwise build
 	docker := filepath.Join(t.TempDir(), "docker")
 	if err := os.WriteFile(docker, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)

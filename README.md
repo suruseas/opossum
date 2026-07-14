@@ -287,6 +287,7 @@ startup, demonstrating name-based discovery.
 | `profiles` | ✅ | a gated service starts only when one of its profiles is active (`--profile <name>`, `COMPOSE_PROFILES`, or naming the service); services with no `profiles` always start |
 | `mem_limit` / `cpus` | ✅ | passed to `container run` as `-m` / `-c`. Also reads `deploy.resources.limits.{memory,cpus}` (the two forms must agree); memory is rounded up to MiB, CPUs to a whole number (Apple's runtime allocates whole vCPUs) |
 | `ssh` | ✅ | `ssh: true` forwards the host's SSH agent into the container (`container run --ssh`), so a service can `git clone`/`push` private repos over SSH using your host keys — without baking keys into the image. Also available per one-off as `opossum run --ssh`. (An opossum extension; docker compose only has build-time `build.ssh`.) |
+| `develop.watch` | ✅ (`sync`) | drives `opossum watch`: on host file changes under `path`, `action: sync` copies the changed file to `target` in the running container (with `ignore` globs; ignored subtrees aren't watched). Prefer a **directory** `path` — a single-file `path` can miss an editor's atomic save (rename). `rebuild`/`sync+restart` are parsed but not yet automated. |
 | `${VAR}` interpolation | ✅ | `$VAR`, `${VAR}`, `${VAR:-default}`, `${VAR:?required}`, `$$` escape; values from a `.env` file next to the compose file (or `--env-file` paths, which replace `.env`; later files win), overridden by the shell |
 
 Other compose fields (e.g. `container_name`, `restart`, `networks`)
@@ -318,6 +319,7 @@ opossum mirrors the common `docker compose` subcommands, delegating each to the
 | `import [service…]` | ✅ (extra) | copy a service's Docker-built image into `container`'s store, so `up` skips the rebuild |
 | `doctor` | ✅ (extra) | diagnose the environment (runtime, DNS domain, outbound network, build VM memory, stack memory estimate); prints ✅/⚠️/❌ + a one-line fix each |
 | `cp <src> <dst>` | ✅ | copy files between a service's container and the host (each path is a host path or `service:path`), like `docker compose cp` |
+| `watch` | ✅ | watch each service's `develop.watch` paths and sync changed files into the running containers (like `docker compose watch`, `sync` action); runs until Ctrl-C. Start the stack with `up` first |
 | `start [service…]` | ✅ | start existing (stopped) containers |
 | `stop [service…]` | ✅ | stop without removing |
 | `restart [service…]` | ✅ | stop then start in place |

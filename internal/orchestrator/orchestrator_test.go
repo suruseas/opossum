@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -53,106 +54,15 @@ func countLines(lines []string, sub string) int {
 func fakeShim(t *testing.T) (*runtime.Runtime, func() []string) {
 	t.Helper()
 	dir := t.TempDir()
-	shim := filepath.Join(dir, "fake-container.sh")
 	logPath := filepath.Join(dir, "invocations.log")
-	// `exec` simulates a healthcheck: it fails until the HEALTH_OK_AT-th call
-	// (default 1 = healthy immediately), letting evals drive the retry loop.
-	script := `#!/bin/sh
-echo "$*" >> "$FAKE_LOG"
-case "$1" in
-  inspect)
-    # Optionally attach an opossum.project label so evals can drive the
-    # foreign-project collision guard (default: unlabeled). A prior run records
-    # the container's config-hash under STATE_DIR, echoed back here so a second
-    # up can detect an unchanged container and skip recreating it.
-    lbl=""
-    [ -n "$INSPECT_PROJECT" ] && lbl='"opossum.project":"'"$INSPECT_PROJECT"'"'
-    if [ -n "$STATE_DIR" ] && [ -f "$STATE_DIR/$2.hash" ]; then
-      h=$(cat "$STATE_DIR/$2.hash")
-      [ -n "$lbl" ] && lbl="$lbl,"
-      lbl="$lbl"'"opossum.config-hash":"'"$h"'"'
-    fi
-    echo '[{"status":{"state":"'"${INSPECT_STATE:-running}"'","networks":[{"network":"n","ipv4Address":"192.168.64.10/24","ipv4Gateway":"192.168.64.1"}]},"configuration":{"labels":{'"$lbl"'},"publishedPorts":[{"containerPort":8080,"hostAddress":"0.0.0.0","hostPort":8080,"proto":"tcp"}]}}]'
-    ;;
-  network)
-    # NET_EXISTS makes create report the network already exists, so EnsureNetwork
-    # returns created=false (drives the no-rollback-of-network case).
-    if [ "$2" = create ]; then
-      [ -n "$NET_EXISTS" ] && { echo "network $3 already exists" >&2; exit 1; }
-      echo "created network $3"
-    fi
-    ;;
-  run)
-    # Record the container's config-hash (from -l opossum.config-hash=…) keyed by
-    # its --name, so a later inspect reports it and up idempotency can be tested.
-    if [ -n "$STATE_DIR" ]; then
-      cname=""; chash=""; prev=""
-      for a in $*; do
-        [ "$prev" = --name ] && cname="$a"
-        case "$a" in opossum.config-hash=*) chash="${a#opossum.config-hash=}" ;; esac
-        prev="$a"
-      done
-      [ -n "$cname" ] && [ -n "$chash" ] && echo "$chash" > "$STATE_DIR/$cname.hash"
-    fi
-    # Simulate a container whose process exits non-zero: a foreground run of
-    # $RUN_FAIL returns 1, letting evals drive the completed-successfully failure.
-    case " $* " in *" --name $RUN_FAIL "*) [ -n "$RUN_FAIL" ] && exit 1 ;; esac
-    ;;
-  exec)
-    # HEALTH_HANG makes the probe never return, to drive the per-attempt timeout.
-    [ -n "$HEALTH_HANG" ] && sleep 30
-    n=$(cat "$HEALTH_COUNTER" 2>/dev/null || echo 0)
-    n=$((n + 1))
-    echo "$n" > "$HEALTH_COUNTER"
-    [ "$n" -ge "${HEALTH_OK_AT:-1}" ] || exit 1
-    ;;
-  volume)
-    # volume ls lists the (newline-separated) names in VOLUME_LS, so evals can
-    # drive VolumeExists (default: no volumes exist yet). VOLUME_LS_FAIL makes it
-    # error, to drive the fail-safe path.
-    [ -n "$VOLUME_LS_FAIL" ] && exit 1
-    [ "$2" = ls ] && printf '%s\n' "$VOLUME_LS"
-    ;;
-  logs)
-    # emit one line tagged with the container name (last arg) so log multiplexing
-    # and per-service prefixing can be verified.
-    for a in "$@"; do last="$a"; done
-    echo "log-line $last"
-    ;;
-  ls)
-    # container list: emit a summary per name in $LS_CONTAINERS (labeled with
-    # project $LS_PROJECT) and $LS_FOREIGN (labeled with a different project, to
-    # verify orphan removal never touches another project's containers).
-    printf '['
-    first=1
-    for n in $LS_CONTAINERS; do
-      [ "$first" = 1 ] || printf ','
-      printf '{"status":{"state":"running"},"configuration":{"id":"%s","labels":{"opossum.project":"%s"}}}' "$n" "$LS_PROJECT"
-      first=0
-    done
-    for n in $LS_FOREIGN; do
-      [ "$first" = 1 ] || printf ','
-      printf '{"status":{"state":"running"},"configuration":{"id":"%s","labels":{"opossum.project":"otherproj"}}}' "$n"
-      first=0
-    done
-    printf ']'
-    ;;
-  image)
-    # image inspect exits 0 (present) unless the ref is listed in IMAGE_ABSENT,
-    # matching the real CLI (present=0, absent=1); drives ImageExists.
-    if [ "$2" = inspect ]; then
-      for m in $IMAGE_ABSENT; do [ "$3" = "$m" ] && exit 1; done
-    fi
-    ;;
-esac
-exit 0
-`
-	if err := os.WriteFile(shim, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("FAKE_LOG", logPath)
-	t.Setenv("HEALTH_COUNTER", filepath.Join(dir, "health.count"))
-	t.Setenv("STATE_DIR", dir) // remembers each run's config-hash for idempotency evals
+	// Steer the compiled shim through the Runtime's per-child Env (not the process
+	// environment), so tests need no t.Setenv and stay isolated. `exec` simulates a
+	// healthcheck that fails until the HEALTH_OK_AT-th call (default 1 = healthy now).
+	rt := &runtime.Runtime{Bin: fakeShimBin, Env: []string{
+		"FAKE_LOG=" + logPath,
+		"HEALTH_COUNTER=" + filepath.Join(dir, "health.count"),
+		"STATE_DIR=" + dir, // remembers each run's config-hash for idempotency evals
+	}}
 	read := func() []string {
 		b, err := os.ReadFile(logPath)
 		if err != nil {
@@ -170,7 +80,14 @@ exit 0
 		}
 		return lines
 	}
-	return &runtime.Runtime{Bin: shim}, read
+	return rt, read
+}
+
+// setShimEnv steers the fake shim by appending KEY=value entries to the
+// Runtime's per-child environment — the process-env-free replacement for
+// t.Setenv, so one test's shim settings never leak into another's.
+func setShimEnv(rt *runtime.Runtime, kv ...string) {
+	rt.Env = append(rt.Env, kv...)
 }
 
 // project builds a Project literal directly so evals control every field without
@@ -180,12 +97,22 @@ exit 0
 // write under a temp dir instead of polluting the real /tmp (#132).
 var testBaseDir string
 
+// fakeShimBin is the compiled fake `container` shim, built once for the whole
+// package. A compiled binary spawns in ~1-2ms versus ~50-80ms for a /bin/sh
+// script, and the suite spawns it thousands of times — so this dominates runtime.
+var fakeShimBin string
+
 func TestMain(m *testing.M) {
 	d, err := os.MkdirTemp("", "opossum-orch-test-")
 	if err != nil {
 		panic(err)
 	}
 	testBaseDir = d
+	fakeShimBin = filepath.Join(d, "fakeshim")
+	if out, err := exec.Command("go", "build", "-o", fakeShimBin, "./testdata/fakeshim").CombinedOutput(); err != nil {
+		os.RemoveAll(d)
+		panic(fmt.Sprintf("building fake shim: %v\n%s", err, out))
+	}
 	code := m.Run()
 	os.RemoveAll(d)
 	os.Exit(code)
@@ -476,7 +403,7 @@ func TestUpTopLevelIgnoredFieldsSilentUnlessVerbose(t *testing.T) {
 
 func TestUpBuildsAndTags(t *testing.T) {
 	rt, log := fakeShim(t)
-	t.Setenv("IMAGE_ABSENT", "demo-api:latest") // a fresh build: the image isn't present yet
+	setShimEnv(rt, "IMAGE_ABSENT=demo-api:latest") // a fresh build: the image isn't present yet
 	p := project("demo", map[string]*compose.Service{
 		"api": {Build: &compose.Build{Context: "/ctx"}},
 	})
@@ -498,7 +425,7 @@ func TestUpBuildTargetFlag(t *testing.T) {
 	// A multi-stage build target must reach `container build` as --target, so a
 	// service that pins a stage builds that stage rather than the final one (#75).
 	rt, log := fakeShim(t)
-	t.Setenv("IMAGE_ABSENT", "demo-api:latest")
+	setShimEnv(rt, "IMAGE_ABSENT=demo-api:latest")
 	p := project("demo", map[string]*compose.Service{
 		"api": {Build: &compose.Build{Context: "/ctx", Target: "builder"}},
 	})
@@ -516,7 +443,7 @@ func TestBuildContextUnreadableWarns(t *testing.T) {
 	// failure at COPY time (#83): under /private/tmp, or a symlinked directory.
 	t.Run("under /private/tmp", func(t *testing.T) {
 		rt, _ := fakeShim(t)
-		t.Setenv("IMAGE_ABSENT", "demo-api:latest")
+		setShimEnv(rt, "IMAGE_ABSENT=demo-api:latest")
 		var out bytes.Buffer
 		p := project("demo", map[string]*compose.Service{
 			"api": {Build: &compose.Build{Context: "/private/tmp/ctx"}},
@@ -541,7 +468,7 @@ func TestBuildContextUnreadableWarns(t *testing.T) {
 			t.Fatal(err)
 		}
 		rt, _ := fakeShim(t)
-		t.Setenv("IMAGE_ABSENT", "demo-api:latest")
+		setShimEnv(rt, "IMAGE_ABSENT=demo-api:latest")
 		var out bytes.Buffer
 		p := project("demo", map[string]*compose.Service{
 			"api": {Build: &compose.Build{Context: link}},
@@ -1155,7 +1082,7 @@ func TestUpSkipsSeedingWhenVolumeExists(t *testing.T) {
 	// An already-existing volume is left untouched — no re-seed — so user data and
 	// prior state are preserved across re-ups.
 	rt, log := fakeShim(t)
-	t.Setenv("VOLUME_LS", "demo_data") // pretend this volume already exists
+	setShimEnv(rt, "VOLUME_LS=demo_data") // pretend this volume already exists
 	p := project("demo", map[string]*compose.Service{
 		"web": {Image: "web:latest", Volumes: []string{"data:/var/data"}},
 	})
@@ -1172,7 +1099,7 @@ func TestUpSkipsSeedingWhenExistenceUnknown(t *testing.T) {
 	// so it fails SAFE and does not seed — never overwriting a volume that might be
 	// there with real data.
 	rt, log := fakeShim(t)
-	t.Setenv("VOLUME_LS_FAIL", "1")
+	setShimEnv(rt, "VOLUME_LS_FAIL=1")
 	p := project("demo", map[string]*compose.Service{
 		"web": {Image: "web:latest", Volumes: []string{"data:/var/data"}},
 	})
@@ -1241,7 +1168,7 @@ func TestDownWithoutRmiRemovesNoImages(t *testing.T) {
 
 func TestImagesListsBuiltAndPulled(t *testing.T) {
 	rt, _ := fakeShim(t)
-	t.Setenv("IMAGE_ABSENT", "postgres:16") // the pulled image isn't present locally
+	setShimEnv(rt, "IMAGE_ABSENT=postgres:16") // the pulled image isn't present locally
 	var out bytes.Buffer
 	if err := orchestrator.New(imageProject(), rt, "opossum", &out).Images(); err != nil {
 		t.Fatalf("Images: %v", err)
@@ -1432,7 +1359,7 @@ func TestPsShowsStoppedWhenExistsButNotRunning(t *testing.T) {
 	// A container that exists but whose state is "stopped" must read "stopped",
 	// not "absent" — the two are different situations.
 	rt, _ := fakeShim(t)
-	t.Setenv("INSPECT_STATE", "stopped")
+	setShimEnv(rt, "INSPECT_STATE=stopped")
 	p := project("demo", map[string]*compose.Service{"db": {Image: "postgres:16"}})
 	var out bytes.Buffer
 	if err := orchestrator.New(p, rt, "opossum", &out).Ps(); err != nil {
@@ -1480,7 +1407,7 @@ func healthyDepsProject() *compose.Project {
 
 func TestUpWaitsForHealthyDependency(t *testing.T) {
 	rt, log := fakeShim(t)
-	t.Setenv("HEALTH_OK_AT", "3") // db reports healthy only on the 3rd probe
+	setShimEnv(rt, "HEALTH_OK_AT=3") // db reports healthy only on the 3rd probe
 	var out bytes.Buffer
 	o := orchestrator.New(healthyDepsProject(), rt, "opossum", &out)
 	if err := o.Up(true); err != nil {
@@ -1513,7 +1440,7 @@ func TestUpWaitsForHealthyDependency(t *testing.T) {
 // bounded by the healthcheck's timeout, so up fails (after retries) instead (#139).
 func TestUpHealthProbeTimeoutDoesNotHang(t *testing.T) {
 	rt, _ := fakeShim(t)
-	t.Setenv("HEALTH_HANG", "1") // the healthcheck exec never returns
+	setShimEnv(rt, "HEALTH_HANG=1") // the healthcheck exec never returns
 	p := project("demo", map[string]*compose.Service{
 		"db": {
 			Image: "postgres:16",
@@ -1545,7 +1472,7 @@ func TestUpHealthProbeTimeoutDoesNotHang(t *testing.T) {
 // started container and the network — rather than leaving residue (#140).
 func TestUpRollsBackOnInterrupt(t *testing.T) {
 	rt, log := fakeShim(t)
-	t.Setenv("HEALTH_OK_AT", "100000") // db never reports healthy, so up stays in the probe loop
+	setShimEnv(rt, "HEALTH_OK_AT=100000") // db never reports healthy, so up stays in the probe loop
 	ctx, cancel := context.WithCancel(context.Background())
 	p := project("demo", map[string]*compose.Service{
 		"db": {
@@ -1686,7 +1613,7 @@ func TestUpBuildsOnlyWhenNeeded(t *testing.T) {
 	})
 	t.Run("no-build errors on a missing image", func(t *testing.T) {
 		rt, _ := fakeShim(t)
-		t.Setenv("IMAGE_ABSENT", "demo-api:latest")
+		setShimEnv(rt, "IMAGE_ABSENT=demo-api:latest")
 		p := project("demo", map[string]*compose.Service{"api": {Build: &compose.Build{Context: "/ctx"}}})
 		o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
 		o.SetUpOptions(false, false, true, false, false) // --no-build
@@ -1698,16 +1625,16 @@ func TestUpBuildsOnlyWhenNeeded(t *testing.T) {
 
 // orphanProject: current compose has only `web`; the runtime still holds an
 // `old` container from a since-removed service.
-func orphanProject(t *testing.T) *compose.Project {
+func orphanProject(t *testing.T, rt *runtime.Runtime) *compose.Project {
 	t.Helper()
-	t.Setenv("LS_CONTAINERS", "web.demo.opossum old.demo.opossum")
-	t.Setenv("LS_PROJECT", "demo")
+	setShimEnv(rt, "LS_CONTAINERS=web.demo.opossum old.demo.opossum")
+	setShimEnv(rt, "LS_PROJECT=demo")
 	return project("demo", map[string]*compose.Service{"web": {Image: "web:latest"}})
 }
 
 func TestUpWarnsAboutOrphans(t *testing.T) {
 	rt, _ := fakeShim(t)
-	p := orphanProject(t)
+	p := orphanProject(t, rt)
 	var out bytes.Buffer
 	if err := orchestrator.New(p, rt, "opossum", &out).Up(true); err != nil {
 		t.Fatalf("Up: %v", err)
@@ -1719,7 +1646,7 @@ func TestUpWarnsAboutOrphans(t *testing.T) {
 
 func TestUpRemovesOrphans(t *testing.T) {
 	rt, log := fakeShim(t)
-	p := orphanProject(t)
+	p := orphanProject(t, rt)
 	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
 	o.SetUpOptions(false, false, false, true, false) // --remove-orphans
 	if err := o.Up(true); err != nil {
@@ -1734,7 +1661,7 @@ func TestUpRemovesOrphans(t *testing.T) {
 
 func TestDownRemovesOrphans(t *testing.T) {
 	rt, log := fakeShim(t)
-	p := orphanProject(t)
+	p := orphanProject(t, rt)
 	if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Down(false, "", true); err != nil {
 		t.Fatalf("Down: %v", err)
 	}
@@ -1745,7 +1672,7 @@ func TestDownRemovesOrphans(t *testing.T) {
 
 func TestDownWithoutFlagLeavesOrphans(t *testing.T) {
 	rt, log := fakeShim(t)
-	p := orphanProject(t)
+	p := orphanProject(t, rt)
 	if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Down(false, "", false); err != nil {
 		t.Fatalf("Down: %v", err)
 	}
@@ -1757,14 +1684,14 @@ func TestDownWithoutFlagLeavesOrphans(t *testing.T) {
 // The safety invariant: --remove-orphans must never warn about or remove another
 // project's container (only this project's label is considered).
 func TestRemoveOrphansSparesOtherProjects(t *testing.T) {
+	rt, log := fakeShim(t)
 	newProj := func(t *testing.T) *compose.Project {
-		t.Setenv("LS_CONTAINERS", "web.demo.opossum")          // this project, current service
-		t.Setenv("LS_PROJECT", "demo")                         // its label
-		t.Setenv("LS_FOREIGN", "db.other.opossum otherproj-x") // a different project's containers
+		setShimEnv(rt, "LS_CONTAINERS=web.demo.opossum")          // this project, current service
+		setShimEnv(rt, "LS_PROJECT=demo")                         // its label
+		setShimEnv(rt, "LS_FOREIGN=db.other.opossum otherproj-x") // a different project's containers
 		return project("demo", map[string]*compose.Service{"web": {Image: "web:latest"}})
 	}
 
-	rt, log := fakeShim(t)
 	var out bytes.Buffer
 	o := orchestrator.New(newProj(t), rt, "opossum", &out)
 	o.SetUpOptions(false, false, false, true, false) // --remove-orphans
@@ -1899,8 +1826,8 @@ func TestRunProfilesDependencyOnDisabledErrors(t *testing.T) {
 
 func TestUpReportsExitedDependencyClearly(t *testing.T) {
 	rt, log := fakeShim(t)
-	t.Setenv("HEALTH_OK_AT", "999")      // probe never passes
-	t.Setenv("INSPECT_STATE", "stopped") // the dependency container has exited
+	setShimEnv(rt, "HEALTH_OK_AT=999")      // probe never passes
+	setShimEnv(rt, "INSPECT_STATE=stopped") // the dependency container has exited
 	p := project("demo", map[string]*compose.Service{
 		"db": {
 			Image:       "postgres:16",
@@ -1928,7 +1855,7 @@ func TestUpReportsExitedDependencyClearly(t *testing.T) {
 
 func TestUpFailsWhenDependencyNeverHealthy(t *testing.T) {
 	rt, log := fakeShim(t)
-	t.Setenv("HEALTH_OK_AT", "999") // never healthy within the retry budget
+	setShimEnv(rt, "HEALTH_OK_AT=999") // never healthy within the retry budget
 	p := project("demo", map[string]*compose.Service{
 		"db": {
 			Image: "postgres:16",
@@ -1963,7 +1890,7 @@ func TestUpFailsWhenDependencyNeverHealthy(t *testing.T) {
 
 func TestUpRollsBackOnFailure(t *testing.T) {
 	rt, log := fakeShim(t)
-	t.Setenv("RUN_FAIL", "web.demo.opossum") // web's run fails after db is up
+	setShimEnv(rt, "RUN_FAIL=web.demo.opossum") // web's run fails after db is up
 	p := project("demo", map[string]*compose.Service{
 		"db":  {Image: "postgres:16"},
 		"web": {Image: "web:latest", DependsOn: compose.DependsOn{{Name: "db"}}},
@@ -1985,8 +1912,8 @@ func TestUpRollsBackOnFailure(t *testing.T) {
 
 func TestUpDoesNotDeletePreexistingNetworkOnFailure(t *testing.T) {
 	rt, log := fakeShim(t)
-	t.Setenv("NET_EXISTS", "1")              // network was already there (not ours)
-	t.Setenv("RUN_FAIL", "web.demo.opossum") // and the up fails partway
+	setShimEnv(rt, "NET_EXISTS=1")              // network was already there (not ours)
+	setShimEnv(rt, "RUN_FAIL=web.demo.opossum") // and the up fails partway
 	p := project("demo", map[string]*compose.Service{
 		"db":  {Image: "postgres:16"},
 		"web": {Image: "web:latest", DependsOn: compose.DependsOn{{Name: "db"}}},
@@ -2007,7 +1934,7 @@ func TestUpDoesNotDeletePreexistingNetworkOnFailure(t *testing.T) {
 
 func TestUpRefusesForeignProjectContainer(t *testing.T) {
 	rt, log := fakeShim(t)
-	t.Setenv("INSPECT_PROJECT", "otherproj") // db.demo.opossum is owned by another project
+	setShimEnv(rt, "INSPECT_PROJECT=otherproj") // db.demo.opossum is owned by another project
 	p := project("demo", map[string]*compose.Service{
 		"db": {Image: "postgres:16"},
 	})
@@ -2029,7 +1956,7 @@ func TestUpRefusesForeignProjectContainer(t *testing.T) {
 
 func TestUpProceedsForSameProjectContainer(t *testing.T) {
 	rt, log := fakeShim(t)
-	t.Setenv("INSPECT_PROJECT", "demo") // existing db.demo.opossum belongs to THIS project
+	setShimEnv(rt, "INSPECT_PROJECT=demo") // existing db.demo.opossum belongs to THIS project
 	p := project("demo", map[string]*compose.Service{
 		"db": {Image: "postgres:16"},
 	})
@@ -2231,7 +2158,7 @@ func TestUpRunsCompletedDependencyToCompletion(t *testing.T) {
 
 func TestUpFailsWhenCompletedDependencyExitsNonZero(t *testing.T) {
 	rt, log := fakeShim(t)
-	t.Setenv("RUN_FAIL", "migrate.demo.opossum") // migrate's process exits non-zero
+	setShimEnv(rt, "RUN_FAIL=migrate.demo.opossum") // migrate's process exits non-zero
 	o := orchestrator.New(completedDepsProject(), rt, "opossum", &bytes.Buffer{})
 	err := o.Up(true)
 	if err == nil {

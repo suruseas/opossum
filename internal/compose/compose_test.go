@@ -19,6 +19,43 @@ func writeTemp(t *testing.T, body string) string {
 	return p
 }
 
+func TestLoadDevelopWatch(t *testing.T) {
+	p, err := Load(writeTemp(t, `
+name: demo
+services:
+  app:
+    image: app
+    develop:
+      watch:
+        - action: sync
+          path: ./src
+          target: /app/src
+          ignore:
+            - node_modules/
+        - action: rebuild
+          path: ./go.mod
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	d := p.Services["app"].Develop
+	if d == nil || len(d.Watch) != 2 {
+		t.Fatalf("Develop.Watch = %+v, want 2 rules", d)
+	}
+	if w := d.Watch[0]; w.Action != "sync" || w.Path != "./src" || w.Target != "/app/src" || len(w.Ignore) != 1 || w.Ignore[0] != "node_modules/" {
+		t.Errorf("watch[0] = %+v", w)
+	}
+	if w := d.Watch[1]; w.Action != "rebuild" || w.Path != "./go.mod" {
+		t.Errorf("watch[1] = %+v", w)
+	}
+	// `develop` is a known key, so it must not surface as an unsupported field.
+	for _, u := range p.Services["app"].Unsupported {
+		if u == "develop" {
+			t.Errorf("develop should be a supported key, got it in Unsupported")
+		}
+	}
+}
+
 func TestLoadAndOrder(t *testing.T) {
 	p, err := Load(writeTemp(t, `
 name: demo

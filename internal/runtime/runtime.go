@@ -36,6 +36,23 @@ type Runtime struct {
 	// stderr while starting dependencies and building, so the one-off's own stdout
 	// (e.g. an MCP server's JSON-RPC over stdio) stays clean.
 	Out io.Writer
+	// Env holds extra environment entries ("KEY=value") passed to every child
+	// process, on top of the parent's environment. It's a test seam: the fake
+	// shim is steered per-Runtime through Env instead of the process environment,
+	// so a test needs no t.Setenv and its shim behaviour stays isolated from others.
+	Env []string
+}
+
+// newCmd builds the exec.Cmd for a child `container` invocation, injecting r.Env
+// on top of the inherited environment when set. Centralizing this keeps every
+// exec site consistent and lets tests steer the fake shim without touching the
+// process environment.
+func (r *Runtime) newCmd(ctx context.Context, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, r.Bin, args...)
+	if len(r.Env) > 0 {
+		cmd.Env = append(os.Environ(), r.Env...)
+	}
+	return cmd
 }
 
 // stdoutW is where a streamed child's stdout goes (Out when set, else os.Stdout).
@@ -119,7 +136,7 @@ func (r *Runtime) Available() bool {
 // stream runs a command with stdio attached to the parent process.
 func (r *Runtime) stream(args ...string) error {
 	r.trace(args)
-	cmd := exec.CommandContext(r.baseCtx(), r.Bin, args...)
+	cmd := r.newCmd(r.baseCtx(), args...)
 	cmd.WaitDelay = 2 * time.Second // don't hang on a lingering child after cancel
 	cmd.Stdout = r.stdoutW()
 	cmd.Stderr = os.Stderr
@@ -136,7 +153,7 @@ func (r *Runtime) stream(args ...string) error {
 // a no-op unless stderr is a terminal, so piped/redirected output is unchanged.
 func (r *Runtime) streamHeartbeat(label string, tee io.Writer, args ...string) error {
 	r.trace(args)
-	cmd := exec.CommandContext(r.baseCtx(), r.Bin, args...)
+	cmd := r.newCmd(r.baseCtx(), args...)
 	cmd.WaitDelay = 2 * time.Second
 	cmd.Stdin = os.Stdin
 	out, errw := r.stdoutW(), io.Writer(os.Stderr)
@@ -157,7 +174,7 @@ func (r *Runtime) streamHeartbeat(label string, tee io.Writer, args ...string) e
 // capture runs a command and returns combined stdout+stderr.
 func (r *Runtime) capture(args ...string) (string, error) {
 	r.trace(args)
-	cmd := exec.CommandContext(r.baseCtx(), r.Bin, args...)
+	cmd := r.newCmd(r.baseCtx(), args...)
 	cmd.WaitDelay = 2 * time.Second // don't hang on a lingering child after cancel
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
@@ -435,7 +452,7 @@ func (r *Runtime) Exec(name string, args []string, timeout time.Duration) error 
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-	cmd := exec.CommandContext(ctx, r.Bin, full...)
+	cmd := r.newCmd(ctx, full...)
 	// After the deadline kills the process, don't wait indefinitely for a lingering
 	// child to release the output pipes — force them closed so Run() actually returns.
 	cmd.WaitDelay = timeout
@@ -510,7 +527,7 @@ func (r *Runtime) logsArgs(name string, o LogsOptions) []string {
 func (r *Runtime) FollowLogs(ctx context.Context, name string, o LogsOptions, w io.Writer, prefix string) error {
 	args := r.logsArgs(name, o)
 	r.trace(args)
-	cmd := exec.CommandContext(ctx, r.Bin, args...)
+	cmd := r.newCmd(ctx, args...)
 	// A real OS pipe (not an io.Writer) so the child writes directly and the reader
 	// sees EOF when it exits — stdout and stderr share it (logs may use either).
 	pr, pw, err := os.Pipe()
