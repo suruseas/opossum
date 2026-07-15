@@ -210,15 +210,15 @@ func TestFidelityDNSDomainExists(t *testing.T) {
 func TestFidelityEnsureNetwork(t *testing.T) {
 	// Real "already exists" failure must be treated as success, and reported as
 	// NOT created (so callers don't roll it back).
-	if created, err := replayShim(t, "Error: network demo-net already exists", 1).EnsureNetwork("demo-net"); err != nil || created {
+	if created, err := replayShim(t, "Error: network demo-net already exists", 1).EnsureNetwork("demo-net", false); err != nil || created {
 		t.Errorf("EnsureNetwork on existing should be (false, nil), got (%v, %v)", created, err)
 	}
 	// A fresh create (exit 0) succeeds and reports created.
-	if created, err := replayShim(t, "demo-net", 0).EnsureNetwork("demo-net"); err != nil || !created {
+	if created, err := replayShim(t, "demo-net", 0).EnsureNetwork("demo-net", false); err != nil || !created {
 		t.Errorf("EnsureNetwork on fresh create should be (true, nil), got (%v, %v)", created, err)
 	}
 	// An unexpected failure is surfaced.
-	if _, err := replayShim(t, "Error: something went wrong", 1).EnsureNetwork("demo-net"); err == nil {
+	if _, err := replayShim(t, "Error: something went wrong", 1).EnsureNetwork("demo-net", false); err == nil {
 		t.Error("EnsureNetwork should surface an unexpected error")
 	}
 }
@@ -310,6 +310,121 @@ func TestRunAssemblesFullArgv(t *testing.T) {
 		"-e A=1 -e B=2 -p 5432:5432 -v /host:/data -l opossum.project=demo postgres:16 postgres -c log=all"
 	if got != want {
 		t.Errorf("Run argv mismatch\n got: %s\nwant: %s", got, want)
+	}
+}
+
+// TestRunArgvBranches pins the run flags that TestRunAssemblesFullArgv leaves
+// unset: platform/rosetta, -m/-c, --tmpfs, -i/-t, --ssh. A regression that drops
+// or swaps any of these (e.g. mem_limit/cpus wiring) would otherwise ship green.
+func TestRunArgvBranches(t *testing.T) {
+	cases := []struct {
+		name string
+		opts RunOptions
+		want string
+	}{
+		{
+			"amd64 enables rosetta plus resource and stdio flags",
+			RunOptions{Name: "web", Image: "web:latest", Platform: "linux/amd64",
+				Memory: "512M", CPUs: "2", Tmpfs: []string{"/tmp"},
+				Interactive: true, TTY: true, SSH: true},
+			"run -i -t --ssh --name web --platform linux/amd64 --rosetta -m 512M -c 2 --tmpfs /tmp web:latest",
+		},
+		{
+			"arm64 does not add rosetta",
+			RunOptions{Name: "web", Image: "web:latest", Platform: "linux/arm64"},
+			"run --name web --platform linux/arm64 web:latest",
+		},
+		{
+			"memory and cpus map to -m and -c (not swapped)",
+			RunOptions{Name: "db", Image: "postgres:16", Memory: "1G", CPUs: "4", Detach: true},
+			"run -d --name db -m 1G -c 4 postgres:16",
+		},
+		{
+			"init/read-only/user/workdir/cap-add/cap-drop passthroughs",
+			RunOptions{Name: "app", Image: "app", Init: true, ReadOnly: true,
+				User: "1000:1000", WorkingDir: "/app",
+				CapAdd: []string{"NET_ADMIN"}, CapDrop: []string{"ALL"}},
+			"run --init --read-only --user 1000:1000 --workdir /app --cap-add NET_ADMIN --cap-drop ALL --name app app",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rt, read := loggingShim(t)
+			if err := rt.Run(c.opts); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if got := lastLine(t, read); got != c.want {
+				t.Errorf("argv mismatch\n got: %s\nwant: %s", got, c.want)
+			}
+		})
+	}
+}
+
+// List and VolumeExists must parse the REAL `container` output shapes, not only
+// the simplified fake-shim ones the orchestrator tests use. These replay captured
+// real output (see testdata/real-cli-output.md) through the parsers, so a refactor
+// that only fits the shim would be caught.
+func TestListParsesRealLsJSON(t *testing.T) {
+	// A real `ls -a --format json` object carries many extra fields; List reads
+	// only configuration.id, status.state, configuration.labels.
+	real := `[{"status":{"state":"running"},"configuration":{"id":"web.demo.opossum","image":{"reference":"nginx:latest"},"labels":{"opossum.project":"demo"},"dns":{"domain":"opossum"}}}]`
+	got := replayShim(t, real, 0).List()
+	if len(got) != 1 || got[0].Name != "web.demo.opossum" || got[0].State != "running" || got[0].Labels["opossum.project"] != "demo" {
+		t.Errorf("List of real ls json = %#v", got)
+	}
+}
+
+func TestVolumeExistsParsesRealTable(t *testing.T) {
+	// Real `container volume ls` is a table: a header row plus NAME/TYPE/DRIVER/OPTIONS
+	// columns. VolumeExists must find a volume by its first column and ignore the rest.
+	real := "NAME       TYPE       DRIVER  OPTIONS\n" +
+		"demo_data  named      local   \n" +
+		"anon-xyz   anonymous  local   \n"
+	rt := replayShim(t, real, 0)
+	if !rt.VolumeExists("demo_data") {
+		t.Error("should find demo_data in the real table output")
+	}
+	if rt.VolumeExists("missing") {
+		t.Error("should not report an unlisted volume as existing")
+	}
+}
+
+// Pin the argv of the previously-uncovered helper commands so a regression in
+// the subcommand/flags (e.g. `image delete` losing --force, or cp swapping args)
+// is caught.
+func TestRuntimeCommandArgv(t *testing.T) {
+	cases := []struct {
+		name, want string
+		call       func(*Runtime)
+	}{
+		{"ImageExists", "image inspect nginx:1", func(r *Runtime) { r.ImageExists("nginx:1") }},
+		{"DeleteImage", "image delete --force nginx:1", func(r *Runtime) { r.DeleteImage("nginx:1") }},
+		{"Copy", "cp /host/f web.demo.opossum:/f", func(r *Runtime) { _ = r.Copy("/host/f", "web.demo.opossum:/f") }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rt, read := loggingShim(t)
+			c.call(rt)
+			lines := read()
+			if len(lines) == 0 || lines[len(lines)-1] != c.want {
+				t.Errorf("%s argv = %v, want %q", c.name, lines, c.want)
+			}
+		})
+	}
+}
+
+// SeedVolume mounts the named volume and runs a copy inside a throwaway
+// container; pin the mount and image so the seed can't silently target nothing.
+func TestSeedVolumeArgv(t *testing.T) {
+	rt, read := loggingShim(t)
+	rt.SeedVolume("demo_data", "img:1", "/src")
+	lines := read()
+	if len(lines) == 0 {
+		t.Fatal("SeedVolume issued no command")
+	}
+	line := lines[len(lines)-1]
+	if !strings.HasPrefix(line, "run --rm -v demo_data:") || !strings.Contains(line, "img:1 sh -c") {
+		t.Errorf("SeedVolume argv = %q, want a `run --rm -v demo_data:… img:1 sh -c …`", line)
 	}
 }
 
@@ -578,7 +693,7 @@ func TestDeleteVolumeArgv(t *testing.T) {
 
 func TestEnsureAndDeleteNetworkArgv(t *testing.T) {
 	rt, read := loggingShim(t)
-	if _, err := rt.EnsureNetwork("demo-net"); err != nil {
+	if _, err := rt.EnsureNetwork("demo-net", false); err != nil {
 		t.Fatalf("EnsureNetwork: %v", err)
 	}
 	if got := lastLine(t, read); got != "network create demo-net" {

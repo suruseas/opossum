@@ -64,6 +64,20 @@ func TestDoctorRuntimeDownSkipsRest(t *testing.T) {
 	}
 }
 
+// The middle network branch: the internet is reachable (IP-OK) but DNS fails.
+// Previously only both-OK and both-FAIL were tested, so a misclassification of
+// the DNS-only case would ship green.
+func TestDoctorNetworkDNSOnlyFailure(t *testing.T) {
+	m := mock{status: "status running\n", dns: true, probe: "DNS-FAIL\nIP-OK\n", builder: "buildkit img running 4 8192 MB\n"}
+	var b bytes.Buffer
+	if Run(&b, m, "opossum", nil, 16384) {
+		t.Error("a DNS-only network failure should fail the checks")
+	}
+	if s := b.String(); !strings.Contains(s, "❌ network") || !strings.Contains(s, "DNS resolution is failing") {
+		t.Errorf("expected a DNS-specific network failure, got:\n%s", s)
+	}
+}
+
 func TestDoctorDNSNetworkBuilderProblems(t *testing.T) {
 	m := mock{status: "status running\n", dns: false, probe: "DNS-FAIL\nIP-FAIL\n", builder: "buildkit img running 2 2048 MB\n"}
 	var b bytes.Buffer

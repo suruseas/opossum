@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -124,6 +125,10 @@ func cpCmd() *cobra.Command {
 	}
 }
 
+// errEnvUnhealthy makes `opossum doctor` exit non-zero when a check fails, in a
+// way tests can assert (vs. calling os.Exit, which would kill the test process).
+var errEnvUnhealthy = errors.New("environment checks failed (see the report above)")
+
 func doctorCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "doctor",
@@ -137,10 +142,10 @@ func doctorCmd() *cobra.Command {
 				proj = o.Project
 			}
 			if !doctor.Run(cmd.OutOrStdout(), rt, dnsDomain, proj, hostMemMB()) {
-				// A failed check (❌) means the environment isn't ready — exit
-				// non-zero so `opossum doctor && …` and CI gate on it. The report
-				// above already explains what and how to fix.
-				os.Exit(1)
+				// A failed check (❌) means the environment isn't ready — return an
+				// error so the process exits non-zero and `opossum doctor && …` / CI
+				// gate on it. The report above already explains what and how to fix.
+				return errEnvUnhealthy
 			}
 			return nil
 		},

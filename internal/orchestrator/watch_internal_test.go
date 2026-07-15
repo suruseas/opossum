@@ -9,9 +9,104 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/suruseas/opossum/internal/compose"
 	"github.com/suruseas/opossum/internal/runtime"
 )
+
+// targetFor picks the first rule whose tree contains the path.
+func TestTargetForFindsContainingRule(t *testing.T) {
+	ts := []watchTarget{{service: "app", hostDir: filepath.FromSlash("/a/src")}, {service: "web", hostDir: filepath.FromSlash("/a/web")}}
+	if tgt, ok := targetFor(ts, filepath.FromSlash("/a/src/x.js")); !ok || tgt.service != "app" {
+		t.Errorf("in-tree path should match app, got %v ok=%v", tgt.service, ok)
+	}
+	if _, ok := targetFor(ts, filepath.FromSlash("/a/other/x.js")); ok {
+		t.Error("a path under no rule must not match")
+	}
+}
+
+// addSubtree must not register ignored directories with the watcher (so a large
+// node_modules doesn't flood it) — the exclusion the flood-prevention relies on.
+func TestAddSubtreeSkipsIgnoredDirs(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "node_modules", "dep"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	w, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	if err := addSubtree(w, watchTarget{hostDir: dir, ignore: []string{"node_modules/"}}, dir); err != nil {
+		t.Fatal(err)
+	}
+	var srcWatched bool
+	for _, p := range w.WatchList() {
+		if strings.Contains(p, "node_modules") {
+			t.Errorf("ignored subtree must not be watched, but %q is", p)
+		}
+		if strings.HasSuffix(p, string(filepath.Separator)+"src") {
+			srcWatched = true
+		}
+	}
+	if !srcWatched {
+		t.Errorf("a non-ignored subdir should be watched, WatchList=%v", w.WatchList())
+	}
+}
+
+// When two services watch the same path, only the first (in startup order) acts
+// — never both.
+func TestHandleChangeFirstServiceWins(t *testing.T) {
+	rt, log := watchShim(t)
+	dir := t.TempDir()
+	p := &compose.Project{Name: "demo", Services: map[string]*compose.Service{
+		"a": {Name: "a", Image: "a", Develop: &compose.Develop{Watch: []compose.WatchRule{{Action: "sync", Path: dir, Target: "/x"}}}},
+		"b": {Name: "b", Image: "b", Develop: &compose.Develop{Watch: []compose.WatchRule{{Action: "sync", Path: dir, Target: "/y"}}}},
+	}}
+	o := New(p, rt, "opossum", &bytes.Buffer{})
+	o.handleChange(filepath.Join(dir, "f.js"))
+	got := log()
+	if n := strings.Count(got, "a.demo.opossum:") + strings.Count(got, "b.demo.opossum:"); n != 1 {
+		t.Errorf("exactly one service should sync (first-match), got %d cp targets in %q", n, got)
+	}
+}
+
+// A directory created while watching must be picked up (fsnotify isn't recursive).
+func TestWatchWatchesNewlyCreatedDirectory(t *testing.T) {
+	rt, log := watchShim(t)
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	o := New(watchProject(src, "sync"), rt, "opossum", &bytes.Buffer{})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- o.Watch(ctx) }()
+	time.Sleep(300 * time.Millisecond) // let the watcher register src before we act
+
+	newdir := filepath.Join(src, "feature")
+	if err := os.MkdirAll(newdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Re-write y.js each iteration at an interval longer than the 100ms debounce:
+	// once the new dir's Create event registers newdir with the watcher, a later
+	// write is caught — so the test doesn't hinge on write-before-register timing,
+	// and the interval is long enough not to keep re-arming the debounce timer.
+	deadline := time.Now().Add(6 * time.Second)
+	for time.Now().Before(deadline) && !strings.Contains(log(), "feature") {
+		_ = os.WriteFile(filepath.Join(newdir, "y.js"), []byte("hi"), 0o644)
+		time.Sleep(250 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	if want := "app.demo.opossum:/app/src/feature/y.js"; !strings.Contains(log(), want) {
+		t.Errorf("a file in a newly created directory should sync to %q, got: %q", want, log())
+	}
+}
 
 func TestIgnored(t *testing.T) {
 	cases := []struct {
@@ -101,8 +196,8 @@ func TestHandleChangeSyncsToContainer(t *testing.T) {
 	o := New(watchProject(dir, "sync"), rt, "opossum", &bytes.Buffer{})
 
 	changed := filepath.Join(dir, "components", "x.js")
-	if !o.handleChange(changed) {
-		t.Fatal("expected the change to match a watch rule")
+	if svc, kind, matched := o.handleChange(changed); !matched || svc != "" || kind != "" {
+		t.Fatalf("sync change: (svc=%q, kind=%q, matched=%v), want ('','',true)", svc, kind, matched)
 	}
 	// The sync copies the host file to <container>:<target>/<relative path>.
 	want := "cp " + changed + " app.demo.opossum:/app/src/components/x.js"
@@ -116,7 +211,7 @@ func TestHandleChangeSkipsIgnored(t *testing.T) {
 	dir := t.TempDir()
 	o := New(watchProject(dir, "sync"), rt, "opossum", &bytes.Buffer{})
 
-	if o.handleChange(filepath.Join(dir, "node_modules", "dep", "index.js")) {
+	if _, _, matched := o.handleChange(filepath.Join(dir, "node_modules", "dep", "index.js")); matched {
 		t.Error("an ignored path must not match/sync")
 	}
 	if strings.Contains(log(), "cp ") {
@@ -173,19 +268,122 @@ func TestWatchDispatchesFilesystemEvent(t *testing.T) {
 	}
 }
 
-func TestHandleChangeRebuildIsNoticedNotSynced(t *testing.T) {
+// A `rebuild` rule doesn't sync; it returns the service so the caller batches
+// one rebuild for a burst of edits.
+func TestHandleChangeRebuildReturnsService(t *testing.T) {
 	rt, log := watchShim(t)
 	dir := t.TempDir()
-	var out bytes.Buffer
-	o := New(watchProject(dir, "rebuild"), rt, "opossum", &out)
+	o := New(watchProject(dir, "rebuild"), rt, "opossum", &bytes.Buffer{})
 
-	if !o.handleChange(filepath.Join(dir, "main.go")) {
-		t.Fatal("a rebuild rule should still match")
+	svc, kind, matched := o.handleChange(filepath.Join(dir, "main.go"))
+	if !matched || svc != "app" || kind != "rebuild" {
+		t.Fatalf("rebuild change: (svc=%q, kind=%q, matched=%v), want (app, rebuild, true)", svc, kind, matched)
 	}
 	if strings.Contains(log(), "cp ") {
 		t.Errorf("rebuild must not run cp, got: %q", log())
 	}
-	if !strings.Contains(out.String(), "rebuild") {
-		t.Errorf("rebuild should print an actionable notice, got: %q", out.String())
+}
+
+// applyChanges batches follow-ups: a burst of edits under one rebuild rule
+// rebuilds the service once, not per file.
+func TestApplyChangesBatchesRebuild(t *testing.T) {
+	rt, log := watchShim(t)
+	dir := t.TempDir()
+	p := &compose.Project{Name: "demo", Services: map[string]*compose.Service{
+		"app": {Name: "app", Build: &compose.Build{Context: "."}, Develop: &compose.Develop{Watch: []compose.WatchRule{
+			{Action: "rebuild", Path: dir},
+		}}},
+	}}
+	o := New(p, rt, "opossum", &bytes.Buffer{})
+
+	o.applyChanges([]string{filepath.Join(dir, "a.go"), filepath.Join(dir, "b.go"), filepath.Join(dir, "c.go")})
+	if n := strings.Count(log(), "run -d --name app.demo.opossum"); n != 1 {
+		t.Errorf("three edits should rebuild app once, got %d recreations: %q", n, log())
+	}
+}
+
+// A service rebuilt in the same batch skips its restart (the rebuild already
+// recreated the container).
+func TestApplyChangesRebuildSkipsRestart(t *testing.T) {
+	rt, log := watchShim(t)
+	dir := t.TempDir()
+	p := &compose.Project{Name: "demo", Services: map[string]*compose.Service{
+		"app": {Name: "app", Build: &compose.Build{Context: "."}, Develop: &compose.Develop{Watch: []compose.WatchRule{
+			{Action: "rebuild", Path: filepath.Join(dir, "src")},
+			{Action: "sync+restart", Path: filepath.Join(dir, "conf")},
+		}}},
+	}}
+	o := New(p, rt, "opossum", &bytes.Buffer{})
+
+	o.applyChanges([]string{filepath.Join(dir, "src", "main.go"), filepath.Join(dir, "conf", "app.conf")})
+	// The rebuild recreates the container; a restart on top would be redundant.
+	if strings.Contains(log(), "stop app.demo.opossum") {
+		t.Errorf("a rebuilt service must not also be restarted, got: %q", log())
+	}
+}
+
+// sync+restart both copies the file and asks for a container restart.
+func TestHandleChangeSyncRestart(t *testing.T) {
+	rt, log := watchShim(t)
+	dir := t.TempDir()
+	o := New(watchProject(dir, "sync+restart"), rt, "opossum", &bytes.Buffer{})
+
+	svc, kind, matched := o.handleChange(filepath.Join(dir, "app.conf"))
+	if !matched || svc != "app" || kind != "restart" {
+		t.Fatalf("sync+restart: (svc=%q, kind=%q, matched=%v), want (app, restart, true)", svc, kind, matched)
+	}
+	if !strings.Contains(log(), "cp ") {
+		t.Errorf("sync+restart should also copy the file, got: %q", log())
+	}
+}
+
+// rebuildService rebuilds the image and recreates the container (build +
+// force-recreate), scoped to the one service, then restores up options.
+func TestRebuildServiceBuildsAndRecreates(t *testing.T) {
+	rt, log := watchShim(t)
+	p := &compose.Project{Name: "demo", Services: map[string]*compose.Service{
+		"app": {Name: "app", Build: &compose.Build{Context: "."}},
+	}}
+	o := New(p, rt, "opossum", &bytes.Buffer{})
+
+	if err := o.rebuildService("app"); err != nil {
+		t.Fatalf("rebuildService: %v", err)
+	}
+	got := log()
+	if !strings.Contains(got, "build") {
+		t.Errorf("rebuild should build the image, got: %q", got)
+	}
+	// force-recreate deletes the old container and runs a fresh one.
+	if !strings.Contains(got, "delete --force app.demo.opossum") || !strings.Contains(got, "run -d --name app.demo.opossum") {
+		t.Errorf("rebuild should recreate the container, got: %q", got)
+	}
+	// up options are restored (not left in build/force-recreate mode).
+	if o.up != (upOptions{}) {
+		t.Errorf("up options should be restored after rebuild, got %+v", o.up)
+	}
+}
+
+// Rebuilding a service must NOT touch its dependencies: editing app's source
+// must never rebuild or recreate the (already running) db it depends on.
+func TestRebuildServiceLeavesDependenciesAlone(t *testing.T) {
+	rt, log := watchShim(t)
+	p := &compose.Project{Name: "demo", Services: map[string]*compose.Service{
+		"app": {Name: "app", Build: &compose.Build{Context: "."}, DependsOn: compose.DependsOn{{Name: "db"}}},
+		"db":  {Name: "db", Build: &compose.Build{Context: "."}},
+	}}
+	o := New(p, rt, "opossum", &bytes.Buffer{})
+
+	if err := o.rebuildService("app"); err != nil {
+		t.Fatalf("rebuildService: %v", err)
+	}
+	got := log()
+	if !strings.Contains(got, "run -d --name app.demo.opossum") {
+		t.Errorf("app should be recreated, got: %q", got)
+	}
+	// The dependency db must be left running untouched.
+	for _, forbidden := range []string{"demo-db:latest", "delete --force db.demo.opossum", "run -d --name db.demo.opossum"} {
+		if strings.Contains(got, forbidden) {
+			t.Errorf("rebuilding app must not touch dependency db (found %q), got: %q", forbidden, got)
+		}
 	}
 }

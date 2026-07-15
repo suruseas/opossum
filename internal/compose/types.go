@@ -19,34 +19,48 @@ type Project struct {
 	Name     string
 	BaseDir  string // directory the compose file lives in; build/volume paths resolve against it
 	Services map[string]*Service
-	Secrets  map[string]Secret     // top-level file-based secrets, mounted at /run/secrets/<name> (#76)
-	Volumes  map[string]VolumeDecl // top-level volume declarations; only `external` is acted on (#64)
+	Secrets  map[string]Secret      // top-level file-based secrets, mounted at /run/secrets/<name> (#76)
+	Volumes  map[string]VolumeDecl  // top-level volume declarations; only `external` is acted on (#64)
+	Networks map[string]NetworkDecl // top-level network declarations; opossum acts on `internal`/`external`/`name`
 
 	// Unsupported holds top-level compose keys opossum doesn't act on (e.g.
 	// networks, volumes), collected so it can warn rather than silently ignore.
 	Unsupported []string
 }
 
+// NetworkModeNone is the only network_mode opossum acts on: it isolates a
+// service from all networking (mapped to `container run --network none`), the
+// full-egress-block floor for sandboxing an untrusted workload.
+const NetworkModeNone = "none"
+
 // Service is a single service definition.
 type Service struct {
-	Name        string        `yaml:"-"`
-	Image       string        `yaml:"image"`
-	Platform    string        `yaml:"platform"` // e.g. linux/amd64; runs via Rosetta on Apple silicon
-	Build       *Build        `yaml:"build"`
-	Command     Command       `yaml:"command"`
-	Entrypoint  Command       `yaml:"entrypoint"`
-	Environment Environment   `yaml:"environment"`
-	EnvFile     EnvFiles      `yaml:"env_file"`
-	Ports       []string      `yaml:"ports"`
-	Volumes     Volumes       `yaml:"volumes"`
-	Tmpfs       StringOrSlice `yaml:"tmpfs"` // service-level tmpfs targets (#93); volume-form `type: tmpfs` folds in (#79)
-	Secrets     SecretRefs    `yaml:"secrets"`
-	DependsOn   DependsOn     `yaml:"depends_on"`
-	Healthcheck *Healthcheck  `yaml:"healthcheck"`
-	Profiles    []string      `yaml:"profiles"`  // service starts only when one of these profiles is active (empty = always)
-	MemLimit    scalarStr     `yaml:"mem_limit"` // legacy memory limit ("512m", "2g", …)
-	CPUs        scalarStr     `yaml:"cpus"`      // legacy CPU limit (may be fractional)
-	SSH         bool          `yaml:"ssh"`       // forward the host SSH agent (--ssh) for private git over SSH
+	Name        string          `yaml:"-"`
+	Image       string          `yaml:"image"`
+	Platform    string          `yaml:"platform"` // e.g. linux/amd64; runs via Rosetta on Apple silicon
+	Build       *Build          `yaml:"build"`
+	Command     Command         `yaml:"command"`
+	Entrypoint  Command         `yaml:"entrypoint"`
+	Environment Environment     `yaml:"environment"`
+	EnvFile     EnvFiles        `yaml:"env_file"`
+	Ports       []string        `yaml:"ports"`
+	Volumes     Volumes         `yaml:"volumes"`
+	Tmpfs       StringOrSlice   `yaml:"tmpfs"` // service-level tmpfs targets (#93); volume-form `type: tmpfs` folds in (#79)
+	Secrets     SecretRefs      `yaml:"secrets"`
+	DependsOn   DependsOn       `yaml:"depends_on"`
+	Healthcheck *Healthcheck    `yaml:"healthcheck"`
+	Profiles    []string        `yaml:"profiles"`     // service starts only when one of these profiles is active (empty = always)
+	MemLimit    scalarStr       `yaml:"mem_limit"`    // legacy memory limit ("512m", "2g", …)
+	CPUs        scalarStr       `yaml:"cpus"`         // legacy CPU limit (may be fractional)
+	SSH         bool            `yaml:"ssh"`          // forward the host SSH agent (--ssh) for private git over SSH
+	User        string          `yaml:"user"`         // --user (name|uid[:gid]) the process runs as
+	WorkingDir  string          `yaml:"working_dir"`  // --workdir the process starts in
+	Init        bool            `yaml:"init"`         // --init: run a tini-like init as PID 1 to reap zombies
+	ReadOnly    bool            `yaml:"read_only"`    // --read-only root filesystem
+	CapAdd      StringOrSlice   `yaml:"cap_add"`      // --cap-add Linux capabilities
+	CapDrop     StringOrSlice   `yaml:"cap_drop"`     // --cap-drop Linux capabilities
+	NetworkMode string          `yaml:"network_mode"` // only "none" acted on: full network isolation (--network none)
+	Networks    ServiceNetworks `yaml:"networks"`     // declared networks this service joins (opossum: at most one)
 
 	Deploy  *Deploy  `yaml:"deploy"`  // only deploy.resources.limits.{memory,cpus} is acted on
 	Develop *Develop `yaml:"develop"` // develop.watch drives `opossum watch` (file-change sync)
@@ -365,6 +379,55 @@ func (v *Volumes) UnmarshalYAML(value *yaml.Node) error {
 type VolumeDecl struct {
 	External bool   `yaml:"external"`
 	Name     string `yaml:"name"`
+}
+
+// NetworkDecl is a top-level `networks:` entry. opossum namespaces and creates a
+// declared network per project (like the default), acting on:
+//   - `internal: true` — a host-only network created with `container network
+//     create --internal`: no internet egress, though the host stays reachable.
+//     Put an untrusted workload here and force its egress through a host proxy
+//     reachable via ${OPOSSUM_HOST_GATEWAY}. (Peers on an internal network can't
+//     resolve each other by name — the DNS resolver is unreachable — so use IPs.)
+//   - `external: true` / `name` — a pre-existing network, used by its real name
+//     and never namespaced, created, or removed by opossum.
+type NetworkDecl struct {
+	Internal bool   `yaml:"internal"`
+	External bool   `yaml:"external"`
+	Name     string `yaml:"name"`
+}
+
+// ServiceNetworks is a service's `networks:` — the declared networks it joins.
+// Both the list form (`[backend]`) and the map form (`{backend: {aliases: […]}}`,
+// keys only — aliases aren't acted on) decode to the network names.
+type ServiceNetworks []string
+
+func (n *ServiceNetworks) UnmarshalYAML(value *yaml.Node) error {
+	switch value.Kind {
+	case yaml.ScalarNode:
+		// A null/empty `networks:` value means no networks (not an error).
+		if value.Tag == "!!null" || value.Value == "" {
+			*n = nil
+			return nil
+		}
+	case yaml.SequenceNode:
+		var out []string
+		if err := value.Decode(&out); err != nil {
+			return err
+		}
+		*n = out
+		return nil
+	case yaml.MappingNode:
+		// Keys are the network names; the values (aliases, ipv4_address, …) aren't
+		// acted on. Sort so the parse is deterministic.
+		out := make([]string, 0, len(value.Content)/2)
+		for i := 0; i+1 < len(value.Content); i += 2 {
+			out = append(out, value.Content[i].Value)
+		}
+		sort.Strings(out)
+		*n = out
+		return nil
+	}
+	return fmt.Errorf("expected a list or map for networks, got yaml kind %d", value.Kind)
 }
 
 // Secret is a top-level compose secret. opossum supports only file-based

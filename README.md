@@ -287,10 +287,16 @@ startup, demonstrating name-based discovery.
 | `profiles` | ✅ | a gated service starts only when one of its profiles is active (`--profile <name>`, `COMPOSE_PROFILES`, or naming the service); services with no `profiles` always start |
 | `mem_limit` / `cpus` | ✅ | passed to `container run` as `-m` / `-c`. Also reads `deploy.resources.limits.{memory,cpus}` (the two forms must agree); memory is rounded up to MiB, CPUs to a whole number (Apple's runtime allocates whole vCPUs) |
 | `ssh` | ✅ | `ssh: true` forwards the host's SSH agent into the container (`container run --ssh`), so a service can `git clone`/`push` private repos over SSH using your host keys — without baking keys into the image. Also available per one-off as `opossum run --ssh`. (An opossum extension; docker compose only has build-time `build.ssh`.) |
-| `develop.watch` | ✅ (`sync`) | drives `opossum watch`: on host file changes under `path`, `action: sync` copies the changed file to `target` in the running container (with `ignore` globs; ignored subtrees aren't watched). Prefer a **directory** `path` — a single-file `path` can miss an editor's atomic save (rename). `rebuild`/`sync+restart` are parsed but not yet automated. |
+| `develop.watch` | ✅ | drives `opossum watch`: on host file changes under `path`, `action: sync` copies the changed file to `target` in the running container; `rebuild` rebuilds the image and recreates the container; `sync+restart` copies then restarts the container. Rebuilds/restarts are batched (a burst of edits triggers one). `ignore` globs are honored and ignored subtrees aren't watched. Prefer a **directory** `path` — a single-file `path` can miss an editor's atomic save (rename). |
+| `user` / `working_dir` | ✅ | passed to `container run` as `--user` (`name\|uid[:gid]`) and `--workdir` |
+| `init` | ✅ | `init: true` → `--init`: run a tini-like init as PID 1 to reap zombies |
+| `read_only` | ✅ | `read_only: true` → `--read-only` root filesystem |
+| `cap_add` / `cap_drop` | ✅ | Linux capabilities → `--cap-add` / `--cap-drop` (e.g. `NET_ADMIN`, or `ALL`) |
+| `network_mode` | ✅ (`none`) | `network_mode: none` → `--network none`: full network isolation (loopback only, no egress and no name resolution) — the floor for sandboxing an untrusted workload. Other values (e.g. `host`) are rejected at load. |
+| `networks` (top-level + per-service) | ✅ | declare networks and place a service on one. A top-level `internal: true` network is created host-only (`container network create --internal`): no internet egress, though the host stays reachable — see [Constraining egress](#constraining-egress-agent-sandboxes). `external: true` (with optional `name`) uses a pre-existing network by its real name (never created or removed). opossum joins a service to **at most one** network today; peers on an internal network can't resolve each other by name (use IPs). |
 | `${VAR}` interpolation | ✅ | `$VAR`, `${VAR}`, `${VAR:-default}`, `${VAR:?required}`, `$$` escape; values from a `.env` file next to the compose file (or `--env-file` paths, which replace `.env`; later files win), overridden by the shell |
 
-Other compose fields (e.g. `container_name`, `restart`, `networks`)
+Other compose fields (e.g. `container_name`, `restart`)
 are parsed but not acted on — `opossum config` (or `opossum up --verbose`) lists
 the ignored fields, so a `docker-compose.yml` runs without surprises.
 
@@ -319,7 +325,7 @@ opossum mirrors the common `docker compose` subcommands, delegating each to the
 | `import [service…]` | ✅ (extra) | copy a service's Docker-built image into `container`'s store, so `up` skips the rebuild |
 | `doctor` | ✅ (extra) | diagnose the environment (runtime, DNS domain, outbound network, build VM memory, stack memory estimate); prints ✅/⚠️/❌ + a one-line fix each |
 | `cp <src> <dst>` | ✅ | copy files between a service's container and the host (each path is a host path or `service:path`), like `docker compose cp` |
-| `watch` | ✅ | watch each service's `develop.watch` paths and sync changed files into the running containers (like `docker compose watch`, `sync` action); runs until Ctrl-C. Start the stack with `up` first |
+| `watch` | ✅ | watch each service's `develop.watch` paths and act on changes (like `docker compose watch`): `sync` copies files in, `rebuild` rebuilds + recreates, `sync+restart` copies + restarts; runs until Ctrl-C. Start the stack with `up` first |
 | `start [service…]` | ✅ | start existing (stopped) containers |
 | `stop [service…]` | ✅ | stop without removing |
 | `restart [service…]` | ✅ | stop then start in place |
@@ -388,6 +394,61 @@ keeps names from colliding. As a backstop for the no-DNS-domain case
 `opossum.project=<name>` and opossum **refuses to start** (rather than silently
 replacing) a container another project already owns.
 
+## Run your MCP servers on Apple container
+
+MCP servers are exactly the shape Apple `container` is good at: small images,
+several of them, ~99% idle, each isolated in its own VM — and third-party code
+that holds your tokens, kept per-VM. If you're running a couple of them today,
+you're probably keeping Docker Desktop (multiple GB of always-on RAM) alive just
+for that. Apple `container` has no always-on base VM: an on-demand stdio server
+costs memory only while it runs, and an HTTP server only while it's `up` (each
+running server is its own ~250–400 MB VM, freed on `down`).
+
+**Start with the raw command — opossum earns its place at a boundary, not before
+it.** A single, secret-free, stdio MCP server needs no opossum:
+
+```jsonc
+// .mcp.json — a raw one-off, honestly the right tool here
+{ "mcpServers": { "terraform": {
+    "command": "container",
+    "args": ["run", "-i", "--rm", "hashicorp/terraform-mcp-server"] } } }
+```
+
+Graduate to a compose file (see [`examples/mcp-stack`](examples/mcp-stack)) when
+you hit any of:
+
+1. **a secret** — a token you don't want inline in a committed `.mcp.json`;
+2. **several servers** — one file to `pull` / `config` / manage lifecycle;
+3. **HTTP transport** — a long-running server you `up`/`down`/`ps`/`logs`.
+
+**A token-bearing stdio server** — the token stays in `.env` (git-ignored), and
+your `.mcp.json` just invokes opossum, which injects it:
+
+```jsonc
+// .mcp.json
+{ "mcpServers": { "github": {
+    "command": "opossum",
+    "args": ["-f", "/path/to/mcp-stack/compose.yaml", "run", "--rm", "github"] } } }
+```
+
+**An HTTP (streamable) server** — `opossum up` it once, then point your client at
+the URL (the server must bind `0.0.0.0`, e.g. `--transport-host 0.0.0.0`, so the
+published port reaches it):
+
+```sh
+opossum -f mcp-stack/compose.yaml up          # starts the HTTP servers
+```
+```jsonc
+// .mcp.json
+{ "mcpServers": { "terraform-http": { "url": "http://localhost:8080/mcp" } } }
+```
+
+> **"Connected, but tool calls fail"?** stdio is transport-independent of the
+> guest network, so a server can report *connected* while the container can't
+> reach the internet — usually a **wedged default network** after long runtime
+> uptime. Run `opossum doctor` (it probes exactly this) and, if flagged,
+> `container system stop && container system start`.
+
 ## Known limitations
 
 - **Named volumes are mount points, so a database's data directory can't sit
@@ -411,9 +472,14 @@ replacing) a container another project already owns.
   case is an app + nginx sharing a `public`/assets volume.) `up` **warns** when it
   sees this — use a **bind mount** (a host path, which *is* shareable) for the
   shared data, or bake it into the image.
-- **`networks:` is ignored** — every service joins the single per-project network
-  (`<project>-net`), so they can all reach each other. Custom networks, aliases,
-  or frontend/backend isolation are not applied (`up` warns).
+- **`networks:` supports one network per service.** A service with no `networks:`
+  joins the single per-project network (`<project>-net`); one that names a declared
+  network joins that instead (`internal:` for host-only egress control, or
+  `external:` to reuse a pre-existing network — see [Constraining
+  egress](#constraining-egress-agent-sandboxes)). opossum joins a service to **at
+  most one** network today, and network **aliases** aren't applied. On an
+  `internal:` network, peers can't resolve each other by name (the DNS resolver is
+  unreachable) — use IPs.
 - **`restart:` policies are ignored** — opossum does not restart a container that
   exits (`up` warns). Also, `restart` (the command) reassigns a container's IP;
   its name and config are preserved, so name-based discovery is unaffected.
@@ -493,6 +559,61 @@ Two requirements for the host service to be reachable:
   `opossum config` to see the value that will be used.
 
 See [`examples/local-ai-stack`](examples/local-ai-stack) for a full stack.
+
+### Constraining egress (agent sandboxes)
+
+When you run an untrusted workload — a coding agent, an LLM tool-runner, anything
+that executes code it wrote — the question is what it can reach on the network.
+There are two levels opossum lets you declare:
+
+**Full isolation.** `network_mode: none` gives the container loopback only — no
+egress at all, and no name resolution. Use it when the workload needs nothing off
+-box:
+
+```yaml
+services:
+  sandbox:
+    image: my-agent
+    network_mode: none
+```
+
+**Host-only, egress through a proxy you control.** Apple `container` has no
+per-destination allowlist, but an **internal** network (`container network create
+--internal`) removes the route to the internet while leaving the host reachable.
+Put the agent on an internal network and it *physically cannot* reach the internet
+directly — its only way out is a proxy you run on the host, reachable via
+`${OPOSSUM_HOST_GATEWAY}`. Because the internet route is gone, the allowlist is
+**enforced**, not merely advised (the agent can't bypass the proxy by dialing a
+destination itself):
+
+```yaml
+networks:
+  caged:
+    internal: true          # host-only: no internet egress
+services:
+  agent:
+    image: my-agent
+    networks: [caged]
+    environment:
+      # the only route out — a host allowlist proxy at :8080
+      HTTPS_PROXY: http://${OPOSSUM_HOST_GATEWAY}:8080
+      HTTP_PROXY: http://${OPOSSUM_HOST_GATEWAY}:8080
+```
+
+Run an allowlist proxy (e.g. a filtering forward proxy) on the host bound to
+`0.0.0.0:8080`, and only the destinations it permits get through. Pair this with
+`cap_drop: [ALL]` and a non-root `user:` to keep the workload from reconfiguring
+its own networking.
+
+Two things to know about internal networks:
+
+- **No name resolution.** The DNS resolver sits on the network gateway, which an
+  internal network can't route to — so peers can't resolve each other by service
+  name. Reach the host proxy by `${OPOSSUM_HOST_GATEWAY}` (an IP), and address any
+  in-network peer by IP.
+- **Changing `internal:` on an existing network needs a `down` first.** opossum
+  doesn't reconfigure a network that already exists; `opossum down` then `up`
+  recreates it with the new setting.
 
 ## Troubleshooting builds
 

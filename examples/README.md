@@ -8,6 +8,7 @@ Two bundled stacks, and a walkthrough of every subcommand.
 | [`compose.yaml`](compose.yaml) | yes (`web`) | `build`, `ports`, `environment`, `healthcheck`, `depends_on` conditions (`service_healthy`, `service_completed_successfully`), `.env` / `${VAR}` interpolation, string `command` |
 | [`app-stack/compose.yaml`](app-stack/compose.yaml) | no (all pre-built) | a realistic, browsable stack: Postgres + Redis + Adminer UI + a worker — health-gated startup, a published port, and a **persistent named volume** done right (`PGDATA` subdirectory) |
 | [`local-ai-stack/compose.yaml`](local-ai-stack/compose.yaml) | no (all pre-built) | LLM on the **host**, stack in containers: reaching a host service via the built-in `${OPOSSUM_HOST_GATEWAY}` alongside container-to-container discovery |
+| [`mcp-stack/compose.yaml`](mcp-stack/compose.yaml) | no (all pre-built) | host MCP servers on Apple container instead of an always-on Docker Desktop: an HTTP (streamable) server via `up` + published port, and token-bearing / plain stdio servers via `opossum run --rm` (secrets in `.env`, not `.mcp.json`) |
 
 `hello.yaml` runs anywhere `container` is up. `compose.yaml` additionally needs the
 image builder (`container builder start`) for its `web` service.

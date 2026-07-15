@@ -124,3 +124,24 @@ $ container exec <name> redis-cli ping   # -> PONG（Rosetta で稼働）
 ```
 → `runtime.Run` は `RunOptions.Platform` があれば `--platform <p>` を発行し、`p` に `amd64`/`x86_64` を含めば
 `--rosetta` も付与。`orchestrator` は compose `platform:`（`Service.Platform`）を配線。
+
+## `container ls -a --format json` (2026-07-15, v1.1.0)
+
+Array of objects; opossum's `List` reads only `configuration.id` (the container
+name), `status.state`, and `configuration.labels` — the rest is ignored.
+
+```json
+[{"configuration":{"id":"probe.hgtest-sst9.opossum","labels":{},"image":{"reference":"docker.io/library/alpine:3.20"},"dns":{"domain":"opossum","searchDomains":["hgtest-sst9.opossum"]}},"status":{"state":"running"}}]
+```
+
+## `container volume ls` (2026-07-15, v1.1.0)
+
+A table with a header row and NAME/TYPE/DRIVER/OPTIONS columns (not JSON).
+`VolumeExists` matches the first column of each line.
+
+```
+NAME                                  TYPE       DRIVER  OPTIONS
+vz_tmp                                named      local
+nmcheck                               named      local
+53f55c9f-57c1-40da-bebc-6ba37f66d917  anonymous  local
+```

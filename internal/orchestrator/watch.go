@@ -96,10 +96,12 @@ func (t watchTarget) containerTarget(rel string) string {
 
 // handleChange dispatches a changed host path to the first matching watch rule
 // (so if two services watch the same path, only the first in startup order
-// syncs). For `sync` it copies the file into the container; other actions are
-// reported as not-yet-supported (so the user knows to rebuild manually). It
-// returns whether any rule matched.
-func (o *Orchestrator) handleChange(changed string) bool {
+// acts). It copies the file for `sync` and `sync+restart` immediately, and
+// returns a follow-up the caller batches across a burst of edits: kind
+// "rebuild" (rebuild the image + recreate) or "restart" (restart the container
+// after the sync); kind "" means nothing further. matched reports whether any
+// rule applied.
+func (o *Orchestrator) handleChange(changed string) (svc, kind string, matched bool) {
 	for _, t := range o.watchTargets() {
 		rel, ok := t.match(changed)
 		if !ok {
@@ -107,18 +109,70 @@ func (o *Orchestrator) handleChange(changed string) bool {
 		}
 		switch t.action {
 		case "sync":
-			dst := t.service + ":" + t.containerTarget(rel)
-			fmt.Fprintf(o.out, "sync %s → %s\n", changed, dst)
-			if err := o.Copy(changed, dst); err != nil {
-				fmt.Fprintf(o.out, "warning: sync failed: %v\n", err)
-			}
+			o.syncFile(t, changed, rel)
+		case "sync+restart":
+			o.syncFile(t, changed, rel)
+			return t.service, "restart", true
+		case "rebuild":
+			return t.service, "rebuild", true
 		default:
 			fmt.Fprintf(o.out, "watch: %q change needs action %q for %s, which isn't automated yet — re-run `opossum up --build`\n",
 				changed, t.action, t.service)
 		}
-		return true
+		return "", "", true
 	}
-	return false
+	return "", "", false
+}
+
+// applyChanges dispatches a batch of changed paths: `sync` copies run per file
+// (inside handleChange), while the heavier follow-ups are de-duplicated so a
+// burst of edits triggers just one rebuild/restart per service. A service that's
+// rebuilt (which recreates its container) skips a same-batch restart.
+func (o *Orchestrator) applyChanges(paths []string) {
+	rebuilds, restarts := map[string]struct{}{}, map[string]struct{}{}
+	for _, p := range paths {
+		svc, kind, _ := o.handleChange(p)
+		switch kind {
+		case "rebuild":
+			rebuilds[svc] = struct{}{}
+		case "restart":
+			restarts[svc] = struct{}{}
+		}
+	}
+	for svc := range rebuilds {
+		fmt.Fprintf(o.out, "rebuilding %s…\n", svc)
+		if err := o.rebuildService(svc); err != nil {
+			fmt.Fprintf(o.out, "warning: rebuild %s failed: %v\n", svc, err)
+		}
+	}
+	for svc := range restarts {
+		if _, alsoRebuilt := rebuilds[svc]; alsoRebuilt {
+			continue // a rebuild already recreated it
+		}
+		if err := o.Restart([]string{svc}); err != nil {
+			fmt.Fprintf(o.out, "warning: restart %s failed: %v\n", svc, err)
+		}
+	}
+}
+
+// syncFile copies a changed host file into the container at its mapped target.
+func (o *Orchestrator) syncFile(t watchTarget, changed, rel string) {
+	dst := t.service + ":" + t.containerTarget(rel)
+	fmt.Fprintf(o.out, "sync %s → %s\n", changed, dst)
+	if err := o.Copy(changed, dst); err != nil {
+		fmt.Fprintf(o.out, "warning: sync failed: %v\n", err)
+	}
+}
+
+// rebuildService rebuilds a service's image and recreates its container, reusing
+// the `up` path scoped to that one service: build + force-recreate, and noDeps
+// so a dependency (already running) is never rebuilt or recreated. The `up`
+// options are restored afterwards so a long-running watch stays stateless.
+func (o *Orchestrator) rebuildService(name string) error {
+	prev := o.up
+	o.up = upOptions{forceRecreate: true, build: true, noDeps: true}
+	defer func() { o.up = prev }()
+	return o.Up(true, name)
 }
 
 // Watch mirrors host file changes into running containers per each service's
@@ -149,10 +203,12 @@ func (o *Orchestrator) Watch(ctx context.Context) error {
 	pending := map[string]struct{}{}
 	var timer <-chan time.Time
 	flush := func() {
+		paths := make([]string, 0, len(pending))
 		for p := range pending {
-			o.handleChange(p)
+			paths = append(paths, p)
 			delete(pending, p)
 		}
+		o.applyChanges(paths)
 	}
 	for {
 		select {

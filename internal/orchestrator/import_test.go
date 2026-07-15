@@ -82,6 +82,32 @@ func TestUpFromDockerImportsInsteadOfBuilding(t *testing.T) {
 	}
 }
 
+// For a build+`image:` service, `up --from-docker` imports the Docker `image:`
+// ref (how Docker tags it), not the built tag. The Import() path covers this;
+// this guards the identical branch in the up path.
+func TestUpFromDockerUsesImageRefForBuildImageService(t *testing.T) {
+	rt, _ := fakeShim(t)
+	setShimEnv(rt, "IMAGE_ABSENT=pj-api:latest") // built tag absent, so up would import
+	docker := filepath.Join(t.TempDir(), "docker")
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rt.DockerBin = docker
+
+	p := project("pj", map[string]*compose.Service{
+		"api": {Build: &compose.Build{Context: "."}, Image: "myco/api:9"},
+	})
+	var out bytes.Buffer
+	o := orchestrator.New(p, rt, "opossum", &out)
+	o.SetUpOptions(false, false, false, false, true) // --from-docker
+	if err := o.Up(true); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	if s := out.String(); !strings.Contains(s, "Importing api from Docker (myco/api:9)") {
+		t.Errorf("build+image service should import by its image: ref, got: %s", s)
+	}
+}
+
 // --from-docker doesn't import (or build) a service whose image is already
 // present — nothing to bring over.
 func TestUpFromDockerSkipsWhenImagePresent(t *testing.T) {

@@ -248,10 +248,24 @@ func TestUpForegroundRejectsMultipleLongRunning(t *testing.T) {
 }
 
 func TestUpForegroundAllowsSingleService(t *testing.T) {
-	rt, _ := fakeShim(t)
+	rt, log := fakeShim(t)
 	p := project("demo", map[string]*compose.Service{"web": {Image: "web:latest"}})
 	if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(false); err != nil {
 		t.Errorf("foreground up of a single service should be allowed, got %v", err)
+	}
+	// Foreground means attached: the container must run WITHOUT -d, else "up to
+	// date"/logs behaviour differs from what the user asked for.
+	var runLine string
+	for _, l := range log() {
+		if strings.Contains(l, "--name web.demo.opossum") && strings.HasPrefix(l, "run") {
+			runLine = l
+		}
+	}
+	if runLine == "" {
+		t.Fatalf("web was never run, got %v", log())
+	}
+	if strings.HasPrefix(runLine, "run -d") {
+		t.Errorf("foreground up must not detach, got: %s", runLine)
 	}
 }
 
@@ -566,6 +580,125 @@ func TestUpWithoutDNSDomainUsesBareNames(t *testing.T) {
 	}
 }
 
+// network_mode: none isolates a service — it must reach `--network none` (not the
+// project network) and, being networkless, carry no DNS flags. A sibling on the
+// default network still joins the project net and resolves peers by name, so the
+// isolation is per-service.
+func TestUpNetworkModeNoneIsolatesService(t *testing.T) {
+	rt, log := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"agent": {Image: "agent:latest", NetworkMode: compose.NetworkModeNone},
+		"peer":  {Image: "peer:latest"},
+	})
+	if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	lines := log()
+	if !hasLine(lines, "run -d --name agent.demo.opossum --network none -l opossum.project=demo agent:latest") {
+		t.Errorf("isolated service should get --network none and no DNS flags, got %v", lines)
+	}
+	for _, l := range lines {
+		if strings.Contains(l, "agent.demo.opossum") && (strings.Contains(l, "--dns-domain") || strings.Contains(l, "--dns-search") || strings.Contains(l, "demo-net")) {
+			t.Errorf("isolated service must not join the project net or get DNS flags: %q", l)
+		}
+	}
+	// The sibling still joins the project network with DNS for name resolution.
+	if !hasLine(lines, "run -d --name peer.demo.opossum --network demo-net --dns-domain opossum --dns-search demo.opossum -l opossum.project=demo peer:latest") {
+		t.Errorf("default-network sibling should keep project net + DNS, got %v", lines)
+	}
+}
+
+// A service on a declared internal network joins the namespaced host-only network
+// (created with --internal), while a sibling with no `networks:` stays on the
+// default project net. `up` also warns that the internal network blocks egress.
+func TestUpInternalNetworkCreatesAndAttaches(t *testing.T) {
+	rt, log := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"agent": {Image: "agent:latest", Networks: compose.ServiceNetworks{"caged"}},
+		"peer":  {Image: "peer:latest"},
+	})
+	p.Networks = map[string]compose.NetworkDecl{"caged": {Internal: true}}
+	var out bytes.Buffer
+	if err := orchestrator.New(p, rt, "opossum", &out).Up(true); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	lines := log()
+	// The internal network is created host-only, namespaced <project>-<name>.
+	if !hasLine(lines, "network create --internal demo-caged") {
+		t.Errorf("internal network should be created with --internal, got %v", lines)
+	}
+	// The default project net is still created for the sibling.
+	if !hasLine(lines, "network create demo-net") {
+		t.Errorf("default project net should still be created, got %v", lines)
+	}
+	// agent joins the internal net; peer stays on the default net.
+	if !hasLine(lines, "run -d --name agent.demo.opossum --network demo-caged --dns-domain opossum --dns-search demo.opossum -l opossum.project=demo agent:latest") {
+		t.Errorf("agent should join the namespaced internal net, got %v", lines)
+	}
+	if !hasLine(lines, "run -d --name peer.demo.opossum --network demo-net --dns-domain opossum --dns-search demo.opossum -l opossum.project=demo peer:latest") {
+		t.Errorf("peer should stay on the default net, got %v", lines)
+	}
+	// The internal-network egress caveat is surfaced to the user.
+	if !strings.Contains(out.String(), "internal (host-only)") || !strings.Contains(out.String(), "no internet egress") {
+		t.Errorf("up should warn that the internal network blocks egress, got:\n%s", out.String())
+	}
+}
+
+// An external network is used by its real name and never created or deleted by
+// opossum (it's owned outside the project).
+func TestExternalNetworkNotManaged(t *testing.T) {
+	rt, log := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"app": {Image: "app:latest", Networks: compose.ServiceNetworks{"shared"}},
+	})
+	p.Networks = map[string]compose.NetworkDecl{"shared": {External: true, Name: "prod-shared"}}
+	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
+	if err := o.Up(true); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	lines := log()
+	if !hasLine(lines, "run -d --name app.demo.opossum --network prod-shared --dns-domain opossum --dns-search demo.opossum -l opossum.project=demo app:latest") {
+		t.Errorf("service should join the external net by its real name, got %v", lines)
+	}
+	for _, l := range lines {
+		if strings.Contains(l, "network create") && strings.Contains(l, "prod-shared") {
+			t.Errorf("opossum must not create an external network: %q", l)
+		}
+	}
+	// down must not delete the external network either.
+	rt2, log2 := fakeShim(t)
+	o2 := orchestrator.New(p, rt2, "opossum", &bytes.Buffer{})
+	if err := o2.Down(false, "", false); err != nil {
+		t.Fatalf("Down: %v", err)
+	}
+	for _, l := range log2() {
+		if strings.Contains(l, "network delete") && strings.Contains(l, "prod-shared") {
+			t.Errorf("opossum must not delete an external network: %q", l)
+		}
+	}
+}
+
+// down removes the default project net and every declared non-external network
+// opossum namespaces, so a re-`up` starts clean.
+func TestDownDeletesDeclaredNetworks(t *testing.T) {
+	rt, log := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"agent": {Image: "agent:latest", Networks: compose.ServiceNetworks{"caged"}},
+	})
+	p.Networks = map[string]compose.NetworkDecl{"caged": {Internal: true}}
+	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
+	if err := o.Down(false, "", false); err != nil {
+		t.Fatalf("Down: %v", err)
+	}
+	lines := log()
+	if !hasLine(lines, "network delete demo-net") {
+		t.Errorf("down should delete the default project net, got %v", lines)
+	}
+	if !hasLine(lines, "network delete demo-caged") {
+		t.Errorf("down should delete the declared namespaced net, got %v", lines)
+	}
+}
+
 func TestDownTearsDownInReverse(t *testing.T) {
 	rt, log := fakeShim(t)
 	p := project("demo", map[string]*compose.Service{
@@ -739,6 +872,53 @@ func TestRunOneOffForwardsSSH(t *testing.T) {
 	}
 	if i := indexOf(log3(), "--name plain-run.demo.opossum"); i < 0 || strings.Contains(log3()[i], "--ssh") {
 		t.Errorf("plain one-off should not forward ssh, got %v", log3())
+	}
+}
+
+// A one-off of a network_mode: none service is isolated the same way `up` is:
+// `--network none` and no DNS flags (the docs promise up/run parity).
+func TestRunOneOffNetworkModeNone(t *testing.T) {
+	rt, log := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"agent": {Image: "agent:latest", NetworkMode: compose.NetworkModeNone},
+	})
+	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
+	if err := o.RunOneOff("agent", nil, orchestrator.RunOneOffOptions{NoDeps: true}); err != nil {
+		t.Fatalf("RunOneOff: %v", err)
+	}
+	lines := log()
+	if !hasLine(lines, "run -i --name agent-run.demo.opossum --network none -l opossum.project=demo agent:latest") {
+		t.Errorf("isolated one-off should get --network none and no DNS flags, got %v", lines)
+	}
+	if i := indexOf(lines, "--name agent-run.demo.opossum"); i >= 0 {
+		if l := lines[i]; strings.Contains(l, "demo-net") || strings.Contains(l, "--dns-domain") || strings.Contains(l, "--dns-search") {
+			t.Errorf("isolated one-off must not join the project net or get DNS flags: %q", l)
+		}
+	}
+}
+
+// A one-off on a declared internal network joins the namespaced host-only net and
+// gets the same egress/name-resolution warning `up` emits (up/run parity).
+func TestRunOneOffInternalNetworkWarnsAndAttaches(t *testing.T) {
+	rt, log := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"agent": {Image: "agent:latest", Networks: compose.ServiceNetworks{"caged"}},
+	})
+	p.Networks = map[string]compose.NetworkDecl{"caged": {Internal: true}}
+	var out bytes.Buffer
+	o := orchestrator.New(p, rt, "opossum", &out)
+	if err := o.RunOneOff("agent", nil, orchestrator.RunOneOffOptions{NoDeps: true}); err != nil {
+		t.Fatalf("RunOneOff: %v", err)
+	}
+	lines := log()
+	if !hasLine(lines, "network create --internal demo-caged") {
+		t.Errorf("one-off should create the internal net with --internal, got %v", lines)
+	}
+	if i := indexOf(lines, "--name agent-run.demo.opossum"); i < 0 || !strings.Contains(lines[i], "--network demo-caged") {
+		t.Errorf("one-off should join the namespaced internal net, got %v", lines)
+	}
+	if !strings.Contains(out.String(), "internal (host-only)") || !strings.Contains(out.String(), "no internet egress") {
+		t.Errorf("one-off on an internal net should warn about egress, got:\n%s", out.String())
 	}
 }
 
@@ -1582,19 +1762,83 @@ func TestUpForceRecreateRecreates(t *testing.T) {
 }
 
 // A configuration change (here: environment) recreates the service.
+// A change to ANY field that feeds the config-hash must recreate the container
+// on the next up (idempotency correctness). Guards against a refactor silently
+// dropping a field from configHash — previously only the env case was tested.
 func TestUpRecreatesOnConfigChange(t *testing.T) {
+	cases := []struct {
+		field  string
+		change func(*compose.Service)
+	}{
+		{"environment", func(s *compose.Service) { s.Environment = compose.Environment{"NEW=1"} }},
+		{"ports", func(s *compose.Service) { s.Ports = []string{"8080:8080"} }},
+		{"volumes", func(s *compose.Service) { s.Volumes = []string{"data:/data"} }},
+		{"tmpfs", func(s *compose.Service) { s.Tmpfs = []string{"/tmp"} }},
+		{"command", func(s *compose.Service) { s.Command = compose.Command{"serve"} }},
+		{"entrypoint", func(s *compose.Service) { s.Entrypoint = compose.Command{"/app/run"} }},
+		{"platform", func(s *compose.Service) { s.Platform = "linux/amd64" }},
+		{"ssh", func(s *compose.Service) { s.SSH = true }},
+		{"user", func(s *compose.Service) { s.User = "1000" }},
+		{"working_dir", func(s *compose.Service) { s.WorkingDir = "/app" }},
+		{"init", func(s *compose.Service) { s.Init = true }},
+		{"read_only", func(s *compose.Service) { s.ReadOnly = true }},
+		{"cap_add", func(s *compose.Service) { s.CapAdd = compose.StringOrSlice{"NET_ADMIN"} }},
+		{"cap_drop", func(s *compose.Service) { s.CapDrop = compose.StringOrSlice{"ALL"} }},
+		{"network_mode", func(s *compose.Service) { s.NetworkMode = compose.NetworkModeNone }},
+		{"networks", func(s *compose.Service) { s.Networks = compose.ServiceNetworks{"other"} }},
+	}
+	for _, c := range cases {
+		t.Run(c.field, func(t *testing.T) {
+			rt, log := fakeShim(t)
+			svc := &compose.Service{Image: "web:latest"}
+			p := project("demo", map[string]*compose.Service{"web": svc})
+			o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
+			if err := o.Up(true); err != nil {
+				t.Fatalf("first up: %v", err)
+			}
+			c.change(svc) // config changed
+			if err := o.Up(true); err != nil {
+				t.Fatalf("second up: %v", err)
+			}
+			// Count run lines by "--name web.demo.opossum" so intervening flags
+			// (e.g. --ssh inserted before --name) don't hide a recreation.
+			if n := countLines(log(), "--name web.demo.opossum"); n != 2 {
+				t.Errorf("changing %s should recreate the container, want 2 runs got %d", c.field, n)
+			}
+		})
+	}
+}
+
+// mem_limit / cpus (and deploy.resources) must reach `container run` as -m / -c
+// and not be dropped or swapped. Loaded from YAML since the resource fields are
+// unexported scalars.
+func TestUpPassesResourceLimits(t *testing.T) {
 	rt, log := fakeShim(t)
-	p := project("demo", map[string]*compose.Service{"web": {Image: "web:latest"}})
+	dir := t.TempDir()
+	f := filepath.Join(dir, "compose.yaml")
+	if err := os.WriteFile(f, []byte("name: demo\nservices:\n  web:\n    image: web:latest\n    mem_limit: 512m\n    cpus: 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, err := compose.Load(f)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
 	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
 	if err := o.Up(true); err != nil {
-		t.Fatalf("first up: %v", err)
+		t.Fatalf("up: %v", err)
 	}
-	p.Services["web"].Environment = compose.Environment{"NEW=1"} // config changed
-	if err := o.Up(true); err != nil {
-		t.Fatalf("second up: %v", err)
+	line, ok := "", false
+	for _, l := range log() {
+		if strings.Contains(l, "run -d --name web.demo.opossum") {
+			line, ok = l, true
+		}
 	}
-	if n := countLines(log(), "run -d --name web.demo.opossum"); n != 2 {
-		t.Errorf("a changed service should be recreated, want 2 runs got %d", n)
+	if !ok {
+		t.Fatalf("no run line, got %v", log())
+	}
+	// 512m → 512 MiB → "512M"; cpus 2 → "2". Assert both flags with the right values.
+	if !strings.Contains(line, "-m 512M") || !strings.Contains(line, "-c 2") {
+		t.Errorf("run line should carry -m 512M and -c 2, got: %s", line)
 	}
 }
 

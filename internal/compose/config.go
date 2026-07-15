@@ -14,6 +14,13 @@ import (
 type configOutput struct {
 	Name     string                   `yaml:"name,omitempty"`
 	Services map[string]configService `yaml:"services"`
+	Networks map[string]configNetwork `yaml:"networks,omitempty"`
+}
+
+type configNetwork struct {
+	Internal bool   `yaml:"internal,omitempty"`
+	External bool   `yaml:"external,omitempty"`
+	Name     string `yaml:"name,omitempty"`
 }
 
 type configService struct {
@@ -29,6 +36,14 @@ type configService struct {
 	MemLimit    string               `yaml:"mem_limit,omitempty"`
 	CPUs        string               `yaml:"cpus,omitempty"`
 	SSH         bool                 `yaml:"ssh,omitempty"`
+	User        string               `yaml:"user,omitempty"`
+	WorkingDir  string               `yaml:"working_dir,omitempty"`
+	Init        bool                 `yaml:"init,omitempty"`
+	ReadOnly    bool                 `yaml:"read_only,omitempty"`
+	CapAdd      []string             `yaml:"cap_add,omitempty"`
+	CapDrop     []string             `yaml:"cap_drop,omitempty"`
+	NetworkMode string               `yaml:"network_mode,omitempty"`
+	Networks    []string             `yaml:"networks,omitempty"`
 	DependsOn   map[string]configDep `yaml:"depends_on,omitempty"`
 	Healthcheck *configHealthcheck   `yaml:"healthcheck,omitempty"`
 }
@@ -72,6 +87,14 @@ func RenderConfig(p *Project) (string, error) {
 			MemLimit:    mem,
 			CPUs:        cpu,
 			SSH:         svc.SSH,
+			User:        svc.User,
+			WorkingDir:  svc.WorkingDir,
+			Init:        svc.Init,
+			ReadOnly:    svc.ReadOnly,
+			CapAdd:      svc.CapAdd,
+			CapDrop:     svc.CapDrop,
+			NetworkMode: svc.NetworkMode,
+			Networks:    svc.Networks,
 		}
 		if svc.Build != nil {
 			cs.Build = &configBuild{Context: svc.Build.Context, Dockerfile: svc.Build.Dockerfile, Args: svc.Build.Args, Target: svc.Build.Target}
@@ -99,6 +122,12 @@ func RenderConfig(p *Project) (string, error) {
 			}
 		}
 		out.Services[name] = cs
+	}
+	if len(p.Networks) > 0 {
+		out.Networks = map[string]configNetwork{}
+		for name, decl := range p.Networks {
+			out.Networks[name] = configNetwork{Internal: decl.Internal, External: decl.External, Name: decl.Name}
+		}
 	}
 
 	body, err := yaml.Marshal(out)

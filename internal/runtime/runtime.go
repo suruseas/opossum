@@ -185,9 +185,16 @@ func (r *Runtime) capture(args ...string) (string, error) {
 
 // EnsureNetwork creates the network if it does not already exist. It reports
 // whether it actually created it (false = it was already there), so callers can
-// roll back only a network they themselves created.
-func (r *Runtime) EnsureNetwork(name string) (created bool, err error) {
-	out, cerr := r.capture("network", "create", name)
+// roll back only a network they themselves created. An internal network is
+// created host-only (`--network create --internal`): no internet egress, though
+// the host stays reachable — the enforcement point for allowlist egress.
+func (r *Runtime) EnsureNetwork(name string, internal bool) (created bool, err error) {
+	args := []string{"network", "create"}
+	if internal {
+		args = append(args, "--internal")
+	}
+	args = append(args, name)
+	out, cerr := r.capture(args...)
 	if cerr == nil {
 		return true, nil
 	}
@@ -363,6 +370,14 @@ type RunOptions struct {
 	// service can clone/push private git over SSH using the host's keys without
 	// baking them into the image.
 	SSH bool
+	// Thin passthroughs of common compose run options to the matching
+	// `container run` flags.
+	User       string   // --user (name|uid[:gid])
+	WorkingDir string   // --workdir
+	Init       bool     // --init (reap zombies)
+	ReadOnly   bool     // --read-only root filesystem
+	CapAdd     []string // --cap-add
+	CapDrop    []string // --cap-drop
 }
 
 // Run starts a container.
@@ -380,6 +395,24 @@ func (r *Runtime) Run(o RunOptions) error {
 	if o.SSH {
 		// Forward the host SSH agent so private git over SSH works in the container.
 		args = append(args, "--ssh")
+	}
+	if o.Init {
+		args = append(args, "--init")
+	}
+	if o.ReadOnly {
+		args = append(args, "--read-only")
+	}
+	if o.User != "" {
+		args = append(args, "--user", o.User)
+	}
+	if o.WorkingDir != "" {
+		args = append(args, "--workdir", o.WorkingDir)
+	}
+	for _, c := range o.CapAdd {
+		args = append(args, "--cap-add", c)
+	}
+	for _, c := range o.CapDrop {
+		args = append(args, "--cap-drop", c)
 	}
 	if o.Name != "" {
 		args = append(args, "--name", o.Name)

@@ -1,13 +1,29 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// doctor's ❌→non-zero-exit contract (which CI and `opossum doctor && …` depend
+// on) must return an error, not silently succeed. Pointing at a missing runtime
+// makes the environment check fail.
+func TestDoctorExitsNonZeroWhenUnhealthy(t *testing.T) {
+	t.Setenv("OPOSSUM_CONTAINER_BIN", filepath.Join(t.TempDir(), "no-such-container"))
+	root := newRootCmd()
+	root.SetArgs([]string{"doctor"})
+	root.SetOut(io.Discard)
+	root.SetErr(io.Discard)
+	if err := root.Execute(); !errors.Is(err, errEnvUnhealthy) {
+		t.Errorf("doctor should return errEnvUnhealthy (exit 1) when unhealthy, got %v", err)
+	}
+}
 
 // fakeShimBin is the compiled fake `container` shim, built once for the package.
 // A compiled binary spawns in ~1-2ms versus ~50-80ms for a /bin/sh script.
@@ -417,6 +433,29 @@ func TestMultipleComposeFilesCLI(t *testing.T) {
 	}
 	if !strings.Contains(out, "image: web:2") {
 		t.Errorf("a later -f should override an earlier one, got:\n%s", out)
+	}
+}
+
+// `run --ssh` must forward the flag to the underlying `container run` (it was
+// wired but never asserted at the CLI level).
+func TestRunSSHCLI(t *testing.T) {
+	readLog := fakeShim(t)
+	compose := writeCompose(t, "name: demo\nservices:\n  web:\n    image: web:latest\n")
+	if _, err := run(t, "-f", compose, "run", "--rm", "--ssh", "web", "true"); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if joined := strings.Join(readLog(), "\n"); !strings.Contains(joined, "--ssh") {
+		t.Errorf("run --ssh should reach the container run, got:\n%s", joined)
+	}
+}
+
+// --build and --no-build contradict each other and must error, not silently
+// pick one.
+func TestUpBuildNoBuildConflict(t *testing.T) {
+	fakeShim(t)
+	compose := writeCompose(t, "name: demo\nservices:\n  web:\n    image: web:latest\n")
+	if _, err := run(t, "-f", compose, "up", "--build", "--no-build"); err == nil {
+		t.Error("up --build --no-build should be rejected as contradictory")
 	}
 }
 

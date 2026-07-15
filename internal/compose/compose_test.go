@@ -56,6 +56,178 @@ services:
 	}
 }
 
+// The thin run-option passthroughs parse into the right fields (and are known
+// keys, so they don't surface as unsupported).
+func TestLoadRunOptions(t *testing.T) {
+	p, err := Load(writeTemp(t, `
+services:
+  app:
+    image: app
+    user: "1000:1000"
+    working_dir: /srv
+    init: true
+    read_only: true
+    cap_add: [NET_ADMIN, SYS_TIME]
+    cap_drop: [ALL]
+    network_mode: none
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	s := p.Services["app"]
+	if s.User != "1000:1000" || s.WorkingDir != "/srv" || !s.Init || !s.ReadOnly {
+		t.Errorf("user/working_dir/init/read_only = %q/%q/%v/%v", s.User, s.WorkingDir, s.Init, s.ReadOnly)
+	}
+	if s.NetworkMode != NetworkModeNone {
+		t.Errorf("network_mode = %q, want %q", s.NetworkMode, NetworkModeNone)
+	}
+	if !reflect.DeepEqual([]string(s.CapAdd), []string{"NET_ADMIN", "SYS_TIME"}) {
+		t.Errorf("cap_add = %v", s.CapAdd)
+	}
+	if !reflect.DeepEqual([]string(s.CapDrop), []string{"ALL"}) {
+		t.Errorf("cap_drop = %v", s.CapDrop)
+	}
+	for _, u := range s.Unsupported {
+		switch u {
+		case "user", "working_dir", "init", "read_only", "cap_add", "cap_drop", "network_mode":
+			t.Errorf("%q should be a supported key, not in Unsupported", u)
+		}
+	}
+}
+
+// Only network_mode: none is acted on; any other value is rejected at load
+// (rather than silently ignored) since it has no faithful mapping today.
+func TestLoadRejectsUnsupportedNetworkMode(t *testing.T) {
+	_, err := Load(writeTemp(t, `
+services:
+  app:
+    image: app
+    network_mode: host
+`))
+	if err == nil || !strings.Contains(err.Error(), "network_mode") {
+		t.Fatalf("expected an error naming network_mode, got %v", err)
+	}
+}
+
+// Top-level networks: (internal/external/name) and per-service networks: (list
+// and map forms) parse; a declared network is not listed as an ignored key.
+func TestLoadNetworks(t *testing.T) {
+	p, err := Load(writeTemp(t, `
+name: demo
+networks:
+  caged:
+    internal: true
+  shared:
+    external: true
+    name: prod-shared
+services:
+  agent:
+    image: agent
+    networks: [caged]
+  gw:
+    image: gw
+    networks:
+      shared:
+        aliases: [edge]
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if d := p.Networks["caged"]; !d.Internal || d.External {
+		t.Errorf("caged decl = %+v, want internal", d)
+	}
+	if d := p.Networks["shared"]; !d.External || d.Name != "prod-shared" {
+		t.Errorf("shared decl = %+v, want external name=prod-shared", d)
+	}
+	if got := []string(p.Services["agent"].Networks); len(got) != 1 || got[0] != "caged" {
+		t.Errorf("agent networks (list form) = %v, want [caged]", got)
+	}
+	if got := []string(p.Services["gw"].Networks); len(got) != 1 || got[0] != "shared" {
+		t.Errorf("gw networks (map form) = %v, want [shared]", got)
+	}
+	for _, u := range p.Unsupported {
+		if u == "networks" {
+			t.Errorf("networks should be acted on, not listed as ignored")
+		}
+	}
+}
+
+func TestLoadRejectsUndefinedNetwork(t *testing.T) {
+	_, err := Load(writeTemp(t, `
+services:
+  app:
+    image: app
+    networks: [missing]
+`))
+	if err == nil || !strings.Contains(err.Error(), "undefined network") {
+		t.Fatalf("expected an undefined-network error, got %v", err)
+	}
+}
+
+func TestLoadRejectsMultipleNetworks(t *testing.T) {
+	_, err := Load(writeTemp(t, `
+networks:
+  a: {}
+  b: {}
+services:
+  app:
+    image: app
+    networks: [a, b]
+`))
+	if err == nil || !strings.Contains(err.Error(), "at most one network") {
+		t.Fatalf("expected a one-network-per-service error, got %v", err)
+	}
+}
+
+// internal + external on one network is contradictory (external is used as-is,
+// so internal — and its egress guarantee — would be silently dropped).
+func TestLoadRejectsInternalAndExternalNetwork(t *testing.T) {
+	_, err := Load(writeTemp(t, `
+networks:
+  bad:
+    internal: true
+    external: true
+services:
+  app:
+    image: app
+    networks: [bad]
+`))
+	if err == nil || !strings.Contains(err.Error(), "internal and external") {
+		t.Fatalf("expected an internal+external conflict error, got %v", err)
+	}
+}
+
+// A null/empty `networks:` value is benign (no networks), not a parse error.
+func TestLoadNullNetworksIsEmpty(t *testing.T) {
+	p, err := Load(writeTemp(t, `
+services:
+  app:
+    image: app
+    networks:
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := p.Services["app"].Networks; len(got) != 0 {
+		t.Errorf("null networks should be empty, got %v", got)
+	}
+}
+
+func TestLoadRejectsNetworkModeNoneWithNetworks(t *testing.T) {
+	_, err := Load(writeTemp(t, `
+networks:
+  a: {}
+services:
+  app:
+    image: app
+    network_mode: none
+    networks: [a]
+`))
+	if err == nil || !strings.Contains(err.Error(), "network_mode: none and networks") {
+		t.Fatalf("expected a none+networks conflict error, got %v", err)
+	}
+}
+
 func TestLoadAndOrder(t *testing.T) {
 	p, err := Load(writeTemp(t, `
 name: demo
@@ -543,6 +715,33 @@ services:
 	}
 	if !before(order, "db", "web") || !before(order, "cache", "web") {
 		t.Errorf("deps should precede web: %v", order)
+	}
+}
+
+// NONE disables the healthcheck (which gates whether a service_healthy
+// dependency is even valid), and CMD-SHELL wraps the command in `sh -c`.
+// Previously only CMD and the bare-string forms were tested.
+func TestHealthcheckNoneAndCmdShell(t *testing.T) {
+	p, err := Load(writeTemp(t, `
+services:
+  off:
+    image: x
+    healthcheck:
+      test: ["NONE"]
+  shell:
+    image: y
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost || exit 1"]
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if hc := p.Services["off"].Healthcheck; hc == nil || !hc.Disabled {
+		t.Errorf("NONE should disable the healthcheck, got %+v", hc)
+	}
+	if hc := p.Services["shell"].Healthcheck; hc == nil ||
+		!reflect.DeepEqual(hc.Test, []string{"sh", "-c", "curl -f http://localhost || exit 1"}) {
+		t.Errorf("CMD-SHELL should wrap in sh -c, got %v", hc)
 	}
 }
 

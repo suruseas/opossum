@@ -1,0 +1,43 @@
+# Run your MCP servers on Apple `container` instead of an always-on Docker
+# Desktop (which parks multiple GB of RAM just to host a few mostly-idle
+# servers). MCP servers are the shape Apple `container` is good at: small
+# images, several of them, ~99% idle, each in its own VM — and third-party code
+# that holds your credentials, isolated per VM.
+#
+# A single, secret-free, stdio MCP server needs no opossum — a raw
+# `container run -i --rm <image>` is the honest answer. Graduate to this compose
+# when you hit any of:
+#   1. a secret — a token you don't want inline in a committed .mcp.json
+#   2. several servers — one file to pull / list / manage their lifecycle
+#   3. HTTP transport — a long-running server you up/down/ps/logs
+#
+# See the README's "Run your MCP servers on Apple container" section for the
+# matching .mcp.json snippets.
+name: mcp-stack
+
+services:
+  # HTTP (streamable) transport: long-running, so `up` starts it and publishes a
+  # port. Point your client at the URL http://localhost:8080/mcp .
+  # Note --transport-host 0.0.0.0: the server must bind all interfaces for the
+  # published port to reach it (its default 127.0.0.1 is invisible from the host).
+  terraform-http:
+    image: hashicorp/terraform-mcp-server
+    command: ["streamable-http", "--transport-host", "0.0.0.0"]
+    ports:
+      - "8080:8080"
+
+  # A token-bearing stdio server. The token lives in .env (git-ignored), NOT in a
+  # committed .mcp.json — that's the whole reason to graduate off the raw command.
+  # Driven on demand:  opossum run --rm github
+  github:
+    image: ghcr.io/github/github-mcp-server
+    environment:
+      GITHUB_PERSONAL_ACCESS_TOKEN: ${GITHUB_TOKEN:-}
+    profiles: ["stdio"] # not started by `up`; it's a one-off `run`
+
+  # A plain stdio server with no secret — simple enough that a raw
+  # `container run -i --rm hashicorp/terraform-mcp-server` also works. It's here
+  # so `pull` / `config` / lifecycle see the whole stack in one place.
+  terraform:
+    image: hashicorp/terraform-mcp-server
+    profiles: ["stdio"]

@@ -6,6 +6,48 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-16
+
+### Added
+
+- **Declared networks, including host-only (`internal`) networks for egress
+  control.** A top-level `networks:` block plus a per-service `networks: [name]`
+  now place a service on a named network instead of the default per-project one.
+  An `internal: true` network is created host-only (`container network create
+  --internal`): no internet egress, though the host stays reachable — so an
+  untrusted workload on it can only reach out through a proxy you run on the host
+  (via `${OPOSSUM_HOST_GATEWAY}`), making the allowlist enforced rather than
+  advisory. `external: true` (with optional `name:`) reuses a pre-existing network
+  by its real name (never created or removed). opossum joins a service to at most
+  one network today; on an internal network, peers can't resolve each other by
+  name (use IPs). See the new "Constraining egress (agent sandboxes)" README
+  section.
+- `network_mode: none` now isolates a service from all networking (mapped to
+  `container run --network none`): loopback only — no egress and no name
+  resolution. It's the floor for sandboxing an untrusted workload, honored on
+  both `up` and `run`, and toggling it recreates the container. Other
+  `network_mode` values (e.g. `host`) are rejected at load rather than silently
+  ignored.
+- More compose run options are now applied, each a thin passthrough to the
+  matching `container run` flag: `user` / `working_dir` (`--user` / `--workdir`),
+  `init` (`--init`, a tini-like PID 1 that reaps zombies), `read_only`
+  (`--read-only` root filesystem), and `cap_add` / `cap_drop` (`--cap-add` /
+  `--cap-drop`). They're honored on both `up` and `run`, and a change to any of
+  them recreates the container.
+- `examples/mcp-stack` and a README section, "Run your MCP servers on Apple
+  container": host MCP servers (small, idle, credential-holding) on Apple
+  `container` instead of an always-on Docker Desktop. Shows the graduation ladder
+  — a raw `container run` for a single secret-free stdio server, moving to a
+  compose file for secrets (token in `.env`, not a committed `.mcp.json`),
+  several servers, or an HTTP (streamable) server you `up`/publish a port and
+  point a client at `http://localhost:8080/mcp`. Verified end-to-end with
+  `hashicorp/terraform-mcp-server` (stdio and streamable-http).
+- `opossum watch` now automates the `rebuild` and `sync+restart` actions
+  (previously sync-only): a change under a `rebuild` rule rebuilds the service's
+  image and recreates its container; `sync+restart` copies the file, then
+  restarts the container. Rebuilds and restarts are batched, so a burst of edits
+  triggers one per service.
+
 ## [0.7.0] - 2026-07-13
 
 ### Added
@@ -307,7 +349,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/suruseas/opossum/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/suruseas/opossum/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/suruseas/opossum/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/suruseas/opossum/compare/v0.5.0...v0.6.0

@@ -12,10 +12,11 @@ import (
 )
 
 type composeFile struct {
-	Name     string                `yaml:"name"`
-	Services map[string]*Service   `yaml:"services"`
-	Secrets  map[string]Secret     `yaml:"secrets"`
-	Volumes  map[string]VolumeDecl `yaml:"volumes"`
+	Name     string                 `yaml:"name"`
+	Services map[string]*Service    `yaml:"services"`
+	Secrets  map[string]Secret      `yaml:"secrets"`
+	Volumes  map[string]VolumeDecl  `yaml:"volumes"`
+	Networks map[string]NetworkDecl `yaml:"networks"`
 }
 
 // DefaultFileNames are the compose file names opossum looks for when none is
@@ -57,7 +58,7 @@ func ignoredTopLevel(data []byte) []string {
 	var out []string
 	for k := range top {
 		switch {
-		case k == "name" || k == "services" || k == "version" || k == "secrets":
+		case k == "name" || k == "services" || k == "version" || k == "secrets" || k == "networks":
 		case strings.HasPrefix(k, "x-"):
 		default:
 			out = append(out, k)
@@ -247,7 +248,16 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 		Services:    f.Services,
 		Secrets:     f.Secrets,
 		Volumes:     f.Volumes,
+		Networks:    f.Networks,
 		Unsupported: ignoredTopLevel(data),
+	}
+	// A declared network can't be both host-only (internal) and external: an
+	// external network is used as-is, so `internal` would be silently dropped —
+	// and with it the egress guarantee a caller likely set `internal` to get.
+	for name, decl := range f.Networks {
+		if decl.Internal && decl.External {
+			return nil, fmt.Errorf("network %q: internal and external cannot both be set (an external network is used as-is)", name)
+		}
 	}
 	for name, svc := range f.Services {
 		svc.Name = name
@@ -257,6 +267,25 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 		// Validate resource limits early (conflict / bad units), like docker compose.
 		if _, _, err := svc.Resources(); err != nil {
 			return nil, err
+		}
+		// network_mode: only "none" (full isolation) is acted on today; reject other
+		// values rather than silently ignoring them (e.g. "host" has no equivalent).
+		if svc.NetworkMode != "" && svc.NetworkMode != NetworkModeNone {
+			return nil, fmt.Errorf("service %q: unsupported network_mode %q (only %q is supported)", name, svc.NetworkMode, NetworkModeNone)
+		}
+		// networks: opossum joins a service to at most one declared network today
+		// (multiple networks per service isn't supported yet). A named network must
+		// be declared top-level, and can't combine with full isolation.
+		if len(svc.Networks) > 1 {
+			return nil, fmt.Errorf("service %q: opossum supports at most one network per service, got %v", name, []string(svc.Networks))
+		}
+		if len(svc.Networks) == 1 {
+			if svc.NetworkMode == NetworkModeNone {
+				return nil, fmt.Errorf("service %q: network_mode: none and networks: cannot both be set", name)
+			}
+			if _, ok := f.Networks[svc.Networks[0]]; !ok {
+				return nil, fmt.Errorf("service %q references undefined network %q (declare it under top-level networks:)", name, svc.Networks[0])
+			}
 		}
 		// Give bare container ports a host port (Apple's `container` requires one),
 		// then drop duplicates the merge couldn't see because it dedups raw text

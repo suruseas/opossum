@@ -75,6 +75,43 @@ func TestLoadFilesMergeEnvMixedForm(t *testing.T) {
 }
 
 // A port restated identically in the override collapses to one entry.
+// Volumes are deduped only at merge time (unlike ports, which are re-deduped
+// during load), so this is the sole guard against an override restating a mount
+// producing a doubled -v.
+func TestLoadFilesDedupsVolumes(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "base.yml")
+	over := filepath.Join(dir, "over.yml")
+	mustWriteFile(t, base, "services:\n  web:\n    image: w\n    volumes: [\"data:/data\"]\n")
+	mustWriteFile(t, over, "services:\n  web:\n    image: w\n    volumes: [\"data:/data\", \"logs:/logs\"]\n")
+
+	p, err := LoadFiles([]string{base, over}, nil)
+	if err != nil {
+		t.Fatalf("LoadFiles: %v", err)
+	}
+	if vols := p.Services["web"].Volumes; len(vols) != 2 { // data:/data (deduped) + logs:/logs
+		t.Errorf("an override restating a volume should dedup, got %v", vols)
+	}
+}
+
+// entrypoint replaces (not appends) across files — it's a single value, not a
+// list to accumulate. Previously only `command` replacement was tested.
+func TestLoadFilesReplacesEntrypoint(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "base.yml")
+	over := filepath.Join(dir, "over.yml")
+	mustWriteFile(t, base, "services:\n  web:\n    image: w\n    entrypoint: [\"/base\", \"--old\"]\n")
+	mustWriteFile(t, over, "services:\n  web:\n    image: w\n    entrypoint: [\"/override\"]\n")
+
+	p, err := LoadFiles([]string{base, over}, nil)
+	if err != nil {
+		t.Fatalf("LoadFiles: %v", err)
+	}
+	if ep := []string(p.Services["web"].Entrypoint); len(ep) != 1 || ep[0] != "/override" {
+		t.Errorf("entrypoint should be replaced by the override, got %v", ep)
+	}
+}
+
 func TestLoadFilesDedupsPorts(t *testing.T) {
 	dir := t.TempDir()
 	base := filepath.Join(dir, "base.yml")

@@ -46,6 +46,7 @@ type upOptions struct {
 	noBuild       bool // --no-build: never build (error if an image is missing)
 	removeOrphans bool // --remove-orphans: remove containers for services no longer in the compose
 	fromDocker    bool // --from-docker: import a build service's image from Docker instead of building it
+	noDeps        bool // don't pull in depends_on services (used by rebuild-on-watch to touch only the named service)
 }
 
 // orphans returns the project's containers (by label) whose names don't match any
@@ -131,10 +132,28 @@ func configHash(o runtime.RunOptions) string {
 	write(o.Command...)
 	write("entrypoint")
 	write(o.Entrypoint...)
-	// Only contribute when set, so existing (ssh-unset) services keep their hash
-	// and aren't recreated on upgrade — but toggling ssh on/off does recreate.
+	// Only contribute when set, so existing services keep their hash and aren't
+	// recreated on upgrade — but toggling any of these does recreate.
 	if o.SSH {
 		write("ssh")
+	}
+	if o.Init {
+		write("init")
+	}
+	if o.ReadOnly {
+		write("read_only")
+	}
+	if o.User != "" {
+		write("user", o.User)
+	}
+	if o.WorkingDir != "" {
+		write("workdir", o.WorkingDir)
+	}
+	if len(o.CapAdd) > 0 {
+		writeSorted("cap_add", o.CapAdd)
+	}
+	if len(o.CapDrop) > 0 {
+		writeSorted("cap_drop", o.CapDrop)
 	}
 	return fmt.Sprintf("%x", h.Sum64())
 }
@@ -220,9 +239,82 @@ func (o *Orchestrator) logf(format string, a ...interface{}) {
 	fmt.Fprintf(o.out, format, a...)
 }
 
-// networkName is the per-project network all services share.
+// networkName is the default per-project network services share when they don't
+// name a network of their own.
 func (o *Orchestrator) networkName() string {
 	return o.Project.Name + "-net"
+}
+
+// resolvedNetwork is the runtime network a service joins, plus how opossum
+// manages it (whether it's host-only, and whether opossum creates/deletes it).
+type resolvedNetwork struct {
+	name     string // the actual `container` network name (namespaced unless external)
+	internal bool   // created with --internal (host-only): no internet egress
+	external bool   // pre-existing; opossum never creates or deletes it
+}
+
+// networkFor resolves which network a service joins. A service with no
+// `networks:` uses the default per-project network; one that names a declared
+// network joins that (namespaced `<project>-<name>`, unless it's external, in
+// which case its real name is used verbatim). Callers handle `network_mode: none`
+// before this (an isolated service joins no network).
+func (o *Orchestrator) networkFor(svc *compose.Service) resolvedNetwork {
+	if len(svc.Networks) == 0 {
+		return resolvedNetwork{name: o.networkName()}
+	}
+	key := svc.Networks[0]
+	decl := o.Project.Networks[key]
+	if decl.External {
+		real := decl.Name
+		if real == "" {
+			real = key
+		}
+		return resolvedNetwork{name: real, external: true}
+	}
+	return resolvedNetwork{name: o.Project.Name + "-" + key, internal: decl.Internal}
+}
+
+// serviceNetwork resolves the network and DNS settings for one service. Normally
+// a service joins its network (the default project net, or a declared one) and
+// resolves peers by bare name; a service with `network_mode: none` is fully
+// isolated (`--network none`) with no networking at all, so it gets no DNS domain
+// or search suffix either (name resolution can't apply to an isolated container).
+func (o *Orchestrator) serviceNetwork(svc *compose.Service) (network, dnsDomain, dnsSearch string) {
+	if svc.NetworkMode == compose.NetworkModeNone {
+		return compose.NetworkModeNone, "", ""
+	}
+	return o.networkFor(svc).name, o.DNSDomain, o.searchDomain()
+}
+
+// warnInternalNetwork surfaces the host-only network's caveats: no internet
+// egress, and no name resolution (the DNS resolver is unreachable from an
+// internal network) — so use IPs, or reach a host proxy via the gateway var.
+func (o *Orchestrator) warnInternalNetwork(name string) {
+	o.logf("warning: network %s is internal (host-only): services on it have no internet egress\n"+
+		"         and can't resolve peers by name — use IPs, or reach a host proxy via ${OPOSSUM_HOST_GATEWAY}.\n", name)
+}
+
+// managedNetworks returns the networks opossum must create for the given
+// services, keyed by runtime name, with the internal flag. Isolated
+// (`network_mode: none`) and external networks are skipped — opossum creates
+// neither. The result is deterministic (sorted) so `up` output is stable.
+func (o *Orchestrator) managedNetworks(services []string) []resolvedNetwork {
+	seen := map[string]bool{}
+	var nets []resolvedNetwork
+	for _, name := range services {
+		svc := o.Project.Services[name]
+		if svc.NetworkMode == compose.NetworkModeNone {
+			continue
+		}
+		rn := o.networkFor(svc)
+		if rn.external || seen[rn.name] {
+			continue
+		}
+		seen[rn.name] = true
+		nets = append(nets, rn)
+	}
+	sort.Slice(nets, func(i, j int) bool { return nets[i].name < nets[j].name })
+	return nets
 }
 
 // containerName builds the container's name. When a DNS domain is set, opossum
@@ -355,16 +447,27 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 		}
 	}
 
-	net := o.networkName()
-	o.logf("Creating network %s\n", net)
-	created, nerr := o.rt.EnsureNetwork(net)
-	if nerr != nil {
-		return nerr
+	// Create every network the selected services need (the default project net
+	// and any declared networks they join). An internal network is host-only — warn
+	// that services on it have no internet egress and can't resolve peers by name.
+	var createdNets []string
+	for _, rn := range o.managedNetworks(order) {
+		o.logf("Creating network %s\n", rn.name)
+		created, nerr := o.rt.EnsureNetwork(rn.name, rn.internal)
+		if nerr != nil {
+			return nerr
+		}
+		if created {
+			createdNets = append(createdNets, rn.name)
+		}
+		if rn.internal {
+			o.warnInternalNetwork(rn.name)
+		}
 	}
 
 	// Roll back this invocation's work if up fails partway: tear down the
-	// containers we started (reverse order) and remove the network if we created
-	// it, so a failed up leaves no residue behind.
+	// containers we started (reverse order) and remove any networks we created,
+	// so a failed up leaves no residue behind.
 	var started []string
 	defer func() {
 		if err == nil {
@@ -378,8 +481,8 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 			o.rt.Stop(started[i])
 			o.rt.Delete(started[i])
 		}
-		if created {
-			o.rt.DeleteNetwork(net)
+		for _, n := range createdNets {
+			o.rt.DeleteNetwork(n)
 		}
 	}()
 
@@ -436,13 +539,14 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 		}
 
 		mem, cpu, _ := svc.Resources() // validated at load
+		svcNet, dnsDomain, dnsSearch := o.serviceNetwork(svc)
 		runOpts := runtime.RunOptions{
 			Name:       cname,
 			Image:      image,
 			Platform:   svc.Platform,
-			Network:    net,
-			DNSDomain:  o.DNSDomain,
-			DNSSearch:  o.searchDomain(),
+			Network:    svcNet,
+			DNSDomain:  dnsDomain,
+			DNSSearch:  dnsSearch,
 			Env:        svc.Environment,
 			Ports:      svc.Ports,
 			Volumes:    append(o.resolveVolumes(name, svc.Volumes), o.secretMounts(svc)...),
@@ -454,6 +558,12 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 			CPUs:       cpu,
 			Detach:     detach,
 			SSH:        svc.SSH,
+			User:       svc.User,
+			WorkingDir: svc.WorkingDir,
+			Init:       svc.Init,
+			ReadOnly:   svc.ReadOnly,
+			CapAdd:     svc.CapAdd,
+			CapDrop:    svc.CapDrop,
 		}
 		hash := configHash(runOpts)
 		runOpts.Labels = append(runOpts.Labels, configHashLabel+"="+hash)
@@ -653,19 +763,27 @@ func (o *Orchestrator) selectServices(order, requested []string) ([]string, erro
 		}
 	}
 	want := map[string]bool{}
-	var visit func(name string)
-	visit = func(name string) {
-		if want[name] {
-			return
+	if o.up.noDeps {
+		// Scope to exactly the requested services: their dependencies are already
+		// running (rebuild-on-watch must not rebuild/recreate a dependency).
+		for _, r := range requested {
+			want[r] = true
 		}
-		want[name] = true
-		// StartupOrder already rejected cycles, so this recursion terminates.
-		for _, dep := range o.Project.Services[name].DependsOn {
-			visit(dep.Name)
+	} else {
+		var visit func(name string)
+		visit = func(name string) {
+			if want[name] {
+				return
+			}
+			want[name] = true
+			// StartupOrder already rejected cycles, so this recursion terminates.
+			for _, dep := range o.Project.Services[name].DependsOn {
+				visit(dep.Name)
+			}
 		}
-	}
-	for _, r := range requested {
-		visit(r)
+		for _, r := range requested {
+			visit(r)
+		}
 	}
 	out := make([]string, 0, len(want))
 	for _, name := range order {
@@ -796,7 +914,16 @@ func (o *Orchestrator) Down(removeVolumes bool, rmi string, removeOrphans bool) 
 	if removeOrphans {
 		o.removeOrphans(o.orphans())
 	}
+	// Remove the default project net and every declared network opossum created
+	// (skipping external ones, which it never owns). Deletion is best-effort and
+	// silent when a network is already gone or still in use.
 	o.rt.DeleteNetwork(o.networkName())
+	for key, decl := range o.Project.Networks {
+		if decl.External {
+			continue
+		}
+		o.rt.DeleteNetwork(o.Project.Name + "-" + key)
+	}
 	if removeVolumes {
 		for _, v := range o.namedVolumes() {
 			o.logf("Removing volume %s\n", v)
@@ -1280,9 +1407,18 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 		}
 	}
 
-	net := o.networkName()
-	if _, err := o.rt.EnsureNetwork(net); err != nil {
-		return err
+	// Create the network the one-off joins (its declared network, or the default
+	// project net). An isolated (`network_mode: none`) or external network is not
+	// created by opossum.
+	if svc.NetworkMode != compose.NetworkModeNone {
+		if rn := o.networkFor(svc); !rn.external {
+			if _, err := o.rt.EnsureNetwork(rn.name, rn.internal); err != nil {
+				return err
+			}
+			if rn.internal {
+				o.warnInternalNetwork(rn.name)
+			}
+		}
 	}
 
 	image := svc.Image
@@ -1308,13 +1444,14 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 	o.logf("Running one-off %s\n", service)
 	o.rt.Out = os.Stdout           // the one-off body's stdout is the real stdout (e.g. MCP JSON-RPC)
 	mem, cpu, _ := svc.Resources() // validated at load
+	svcNet, dnsDomain, dnsSearch := o.serviceNetwork(svc)
 	runErr := o.rt.Run(runtime.RunOptions{
 		Name:       cname,
 		Image:      image,
 		Platform:   svc.Platform,
-		Network:    net,
-		DNSDomain:  o.DNSDomain,
-		DNSSearch:  o.searchDomain(),
+		Network:    svcNet,
+		DNSDomain:  dnsDomain,
+		DNSSearch:  dnsSearch,
 		Env:        svc.Environment,
 		Volumes:    append(o.resolveVolumes(service, svc.Volumes), o.secretMounts(svc)...),
 		Tmpfs:      svc.Tmpfs,
@@ -1330,7 +1467,13 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 		Interactive: true,
 		TTY:         opts.TTY,
 		// Forward the SSH agent if the service asks for it or the caller passed --ssh.
-		SSH: svc.SSH || opts.SSH,
+		SSH:        svc.SSH || opts.SSH,
+		User:       svc.User,
+		WorkingDir: svc.WorkingDir,
+		Init:       svc.Init,
+		ReadOnly:   svc.ReadOnly,
+		CapAdd:     svc.CapAdd,
+		CapDrop:    svc.CapDrop,
 		// No published ports for a one-off (matches docker-compose run).
 	})
 	if opts.Rm {

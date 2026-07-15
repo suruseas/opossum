@@ -63,7 +63,7 @@ func run(args []string) int {
 				fmt.Fprintf(os.Stderr, "network %s already exists\n", arg(2))
 				return 1
 			}
-			fmt.Printf("created network %s\n", arg(2))
+			fmt.Println(arg(2)) // real CLI echoes the network name on success
 		}
 
 	case "run":
