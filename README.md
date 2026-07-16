@@ -274,7 +274,7 @@ startup, demonstrating name-based discovery.
 | `image` | ✅ | |
 | `build` | ✅ | string context or `{context, dockerfile, args, target}` (multi-stage `target`) |
 | `platform` | ✅ | passed to `container run --platform`; `linux/amd64` also enables `--rosetta` so x86-64-only images run on Apple silicon |
-| `ports` | ✅ | passed to `container run -p` |
+| `ports` | ✅ | passed to `container run -p`; both the short form (`"8080:80"`, `"3000"`) and the long mapping form (`{target, published, protocol, host_ip}`) are accepted. A bare container port gets a host port (Apple's runtime requires one). |
 | `environment` | ✅ | list or map form; null value passes host value through |
 | `env_file` | ✅ | string or list (short, or long `{path, required}`); `KEY=VALUE` files folded in, `environment` overrides them. Missing file errors unless `required: false` |
 | `volumes` | ✅ | bind mounts (host paths resolved against the compose dir; `~` expanded; a missing source directory is created), named volumes (namespaced `<project>_<volume>`), and `type: tmpfs` (mounted via `--tmpfs`); short `src:dst[:ro]` or long form (`{type, source, target, read_only}`) |
@@ -292,8 +292,8 @@ startup, demonstrating name-based discovery.
 | `init` | ✅ | `init: true` → `--init`: run a tini-like init as PID 1 to reap zombies |
 | `read_only` | ✅ | `read_only: true` → `--read-only` root filesystem |
 | `cap_add` / `cap_drop` | ✅ | Linux capabilities → `--cap-add` / `--cap-drop` (e.g. `NET_ADMIN`, or `ALL`) |
-| `network_mode` | ✅ (`none`) | `network_mode: none` → `--network none`: full network isolation (loopback only, no egress and no name resolution) — the floor for sandboxing an untrusted workload. Other values (e.g. `host`) are rejected at load. |
-| `networks` (top-level + per-service) | ✅ | declare networks and place a service on one. A top-level `internal: true` network is created host-only (`container network create --internal`): no internet egress, though the host stays reachable — see [Constraining egress](#constraining-egress-agent-sandboxes). `external: true` (with optional `name`) uses a pre-existing network by its real name (never created or removed). opossum joins a service to **at most one** network today; peers on an internal network can't resolve each other by name (use IPs). |
+| `network_mode` | ✅ (`none`) | `network_mode: none` → `--network none`: full network isolation (loopback only, no egress and no name resolution) — the floor for sandboxing an untrusted workload. Other values (e.g. `host`) have no equivalent on Apple `container`, so they're ignored (the service joins the project network) and listed among the ignored fields — the file still loads. |
+| `networks` (top-level + per-service) | ✅ | declare networks and place services on them (a service may join several — one `--network` each, in declaration order). A top-level `internal: true` network is created host-only (`container network create --internal`): no internet egress, though the host stays reachable — see [Constraining egress](#constraining-egress-agent-sandboxes). `external: true` (with optional `name`) uses a pre-existing network by its real name (never created or removed). Peers on an internal network can't resolve each other by name (use IPs). Network **aliases** aren't applied. |
 | `${VAR}` interpolation | ✅ | `$VAR`, `${VAR}`, `${VAR:-default}`, `${VAR:?required}`, `$$` escape; values from a `.env` file next to the compose file (or `--env-file` paths, which replace `.env`; later files win), overridden by the shell |
 
 Other compose fields (e.g. `container_name`, `restart`)
@@ -318,7 +318,7 @@ opossum mirrors the common `docker compose` subcommands, delegating each to the
 | `ps` | ✅ | service / container / IP / ports / status |
 | `images` | ✅ | each service's image, whether opossum builds it, and whether it's present locally |
 | `logs [service…]` | ✅ | `--follow` (several services multiplexed, each line prefixed with its name), `-n/--tail` |
-| `stats [service…]` | ✅ | live CPU / memory / net / block I/O / pids (streams; `--no-stream` for a snapshot) |
+| `stats [service…]` | ✅ | live CPU / memory / net / block I/O / pids (streams; `--no-stream` for a snapshot). `--host` shows each service's **host** memory footprint — the resident size of its VM on your Mac — which a shared-VM tool can't report per service (see below) |
 | `exec [-it] <service> <cmd…>` | ✅ | run a command in a running service |
 | `build [service…]` | ✅ | build images for services with `build:` |
 | `pull [service…]` | ✅ | pull images for services with `image:` |
@@ -336,6 +336,28 @@ opossum mirrors the common `docker compose` subcommands, delegating each to the
 Add `--verbose` to any command to print each underlying `container` invocation
 (as `+ container …`) to stderr — handy when filing a bug report, so you can see
 exactly what opossum ran.
+
+### What is this service actually costing my Mac? (`stats --host`)
+
+Plain `opossum stats` shows the **guest** view: how much of its RAM limit each
+container uses inside its VM. What you often really want on a Mac is the **host**
+view: how much memory this service is taking from your machine. Because Apple
+`container` gives every container its own VM, that's a real, separable number —
+and `opossum stats --host` reports it per service:
+
+```
+SERVICE  GUEST MEM      HOST FOOTPRINT
+web      1.9MiB / 1GiB  330.4MiB
+db       1.9MiB / 1GiB  330.7MiB
+         total          661.2MiB
+```
+
+A shared-VM tool (Docker Desktop, Colima, OrbStack) structurally can't break this
+down per service — all containers live in one VM. The figure is the resident size
+of the service's VM process (what Activity Monitor shows for "Virtual Machine
+Service…"), read from the host; it's **approximate and host-derived**, and a
+service whose VM can't be mapped shows `—` rather than failing. (`opossum doctor`
+gives a rougher, introspection-free estimate.)
 
 ## Differences from docker compose
 
@@ -472,12 +494,12 @@ opossum -f mcp-stack/compose.yaml up          # starts the HTTP servers
   case is an app + nginx sharing a `public`/assets volume.) `up` **warns** when it
   sees this — use a **bind mount** (a host path, which *is* shareable) for the
   shared data, or bake it into the image.
-- **`networks:` supports one network per service.** A service with no `networks:`
-  joins the single per-project network (`<project>-net`); one that names a declared
-  network joins that instead (`internal:` for host-only egress control, or
+- **`networks:` — network aliases aren't applied.** A service with no `networks:`
+  joins the single per-project network (`<project>-net`); one that names declared
+  networks joins each of them (`internal:` for host-only egress control, or
   `external:` to reuse a pre-existing network — see [Constraining
-  egress](#constraining-egress-agent-sandboxes)). opossum joins a service to **at
-  most one** network today, and network **aliases** aren't applied. On an
+  egress](#constraining-egress-agent-sandboxes)). Multiple networks per service are
+  supported (one `--network` each), but per-network **aliases** are not. On an
   `internal:` network, peers can't resolve each other by name (the DNS resolver is
   unreachable) — use IPs.
 - **`restart:` policies are ignored** — opossum does not restart a container that

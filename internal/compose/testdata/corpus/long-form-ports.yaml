@@ -1,0 +1,17 @@
+# Long-form ports (the {target, published, protocol, host_ip} mapping) — common
+# in real compose files; must load and normalize like the short form. (Added
+# when opossum gained long-form port support; guards it against regression.)
+name: longports
+services:
+  web:
+    image: nginx:alpine
+    ports:
+      - target: 80
+        published: 8080
+        protocol: tcp
+      - target: 443
+        published: 8443
+      - target: 5353
+        published: 5353
+        host_ip: 127.0.0.1
+        protocol: udp

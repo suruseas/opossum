@@ -1,0 +1,57 @@
+# A disposable workroom for an autonomous coding agent. The whole point of this
+# example is that **the compose file is the declaration of what the agent can
+# touch**: the bind mount is the files it sees, the env is the secrets it holds,
+# and the network is how far it can reach. Everything an agent needs to be boxed
+# in is already ordinary compose vocabulary.
+#
+# Intended use is a one-off:  opossum run --rm agent claude -p "…your task…"
+# See the README for the quickstart, the two auth options, and the limits.
+name: agent-sandbox
+
+networks:
+  # Host-only network for the caged variant below: no direct internet, so the
+  # agent's only way out is a host proxy. See the README "Constraining egress".
+  caged:
+    internal: true
+
+services:
+  # The workroom. Reaches the Claude API directly — the simplest thing that runs.
+  agent:
+    build: .
+    user: node # non-root: Claude Code refuses --dangerously-skip-permissions as root
+    working_dir: /work
+    volumes:
+      - ./work:/work # the ONLY host files the agent sees; results land here
+    # Default guest RAM (~1 GiB) is tight for node + build + test — give it room.
+    mem_limit: 4g
+    cpus: 4
+    environment:
+      # BYO auth — values live in a git-ignored .env, never inline here. Supply
+      # ONE of these (see README): a long-term OAuth token from `claude
+      # setup-token`, or an API key.
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+
+  # The same workroom, but on a host-only network: the agent has NO direct
+  # internet. Its only egress is a host allowlist proxy at ${OPOSSUM_HOST_GATEWAY}
+  # — so the allowlist is enforced, not merely advised. Reuses the image `agent`
+  # builds (run `opossum build` first). Profiled, so a plain `up`/`run agent`
+  # never starts it and its internal network isn't created unless you ask for it:
+  #   opossum run --rm agent-caged claude -p "…"
+  agent-caged:
+    image: agent-sandbox-agent:latest
+    user: node
+    working_dir: /work
+    volumes:
+      - ./work:/work
+    mem_limit: 4g
+    cpus: 4
+    networks: [caged]
+    environment:
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Run an allowlist forward proxy on the host at :8080 (0.0.0.0). With no
+      # internet route, the agent can't bypass it.
+      HTTPS_PROXY: http://${OPOSSUM_HOST_GATEWAY}:8080
+      HTTP_PROXY: http://${OPOSSUM_HOST_GATEWAY}:8080
+    profiles: ["caged"]

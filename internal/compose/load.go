@@ -268,23 +268,27 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 		if _, _, err := svc.Resources(); err != nil {
 			return nil, err
 		}
-		// network_mode: only "none" (full isolation) is acted on today; reject other
-		// values rather than silently ignoring them (e.g. "host" has no equivalent).
+		// network_mode: only "none" (full isolation) is acted on. Any other value
+		// (host, bridge, service:x, …) has no faithful mapping on Apple `container`,
+		// so ignore it — the service joins the project network — and report it as an
+		// ignored field rather than failing the whole file. Rejecting it outright
+		// would break real-world compose files (e.g. a `network_mode: host` service)
+		// that otherwise run fine; "run a docker-compose.yml without surprises" wins.
 		if svc.NetworkMode != "" && svc.NetworkMode != NetworkModeNone {
-			return nil, fmt.Errorf("service %q: unsupported network_mode %q (only %q is supported)", name, svc.NetworkMode, NetworkModeNone)
+			svc.NetworkMode = "" // don't let an unsupported value reach the orchestrator
+			svc.Unsupported = append(svc.Unsupported, "network_mode")
+			sort.Strings(svc.Unsupported)
 		}
-		// networks: opossum joins a service to at most one declared network today
-		// (multiple networks per service isn't supported yet). A named network must
-		// be declared top-level, and can't combine with full isolation.
-		if len(svc.Networks) > 1 {
-			return nil, fmt.Errorf("service %q: opossum supports at most one network per service, got %v", name, []string(svc.Networks))
-		}
-		if len(svc.Networks) == 1 {
+		// networks: a service joins the declared networks it names. Each must be
+		// declared top-level, and `networks:` can't combine with full isolation.
+		if len(svc.Networks) > 0 {
 			if svc.NetworkMode == NetworkModeNone {
 				return nil, fmt.Errorf("service %q: network_mode: none and networks: cannot both be set", name)
 			}
-			if _, ok := f.Networks[svc.Networks[0]]; !ok {
-				return nil, fmt.Errorf("service %q references undefined network %q (declare it under top-level networks:)", name, svc.Networks[0])
+			for _, netName := range svc.Networks {
+				if _, ok := f.Networks[netName]; !ok {
+					return nil, fmt.Errorf("service %q references undefined network %q (declare it under top-level networks:)", name, netName)
+				}
 			}
 		}
 		// Give bare container ports a host port (Apple's `container` requires one),

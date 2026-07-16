@@ -1,0 +1,14 @@
+# network_mode: host has no Apple `container` equivalent — it must be ignored
+# (the service joins the project network), not reject the whole file. (plex)
+name: media
+services:
+  plex:
+    image: plexinc/pms-docker
+    network_mode: host
+    environment:
+      PLEX_CLAIM: "${PLEX_CLAIM:-}"
+    volumes:
+      - config:/config
+    restart: unless-stopped
+volumes:
+  config:

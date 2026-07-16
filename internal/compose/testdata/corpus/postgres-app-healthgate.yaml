@@ -1,0 +1,30 @@
+# Postgres with its data on a named volume (PGDATA points at a subdirectory so
+# initdb works), a CMD-SHELL healthcheck using $$ escaping, and an app gated on
+# the db becoming healthy. (Umami / gitea shape)
+services:
+  app:
+    image: ghcr.io/example/app:latest
+    ports: ["3000:3000"]
+    environment:
+      DATABASE_URL: postgresql://app:app@db:5432/app
+    depends_on:
+      db:
+        condition: service_healthy
+    init: true
+    restart: always
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: app
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+volumes:
+  db-data:

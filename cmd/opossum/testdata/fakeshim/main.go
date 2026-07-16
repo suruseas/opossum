@@ -36,5 +36,25 @@ func main() {
 		}
 	case "inspect":
 		fmt.Println(`[{"status":{"state":"running","networks":[{"ipv4Address":"192.168.66.9/24"}]},"configuration":{"labels":{},"publishedPorts":[{"containerPort":80,"hostAddress":"0.0.0.0","hostPort":8080,"proto":"tcp"}]}}]`)
+	case "stats":
+		// `stats --no-stream --format json <names…>` returns a guest-view JSON array.
+		jsonForm := false
+		var names []string
+		for i, a := range args[1:] {
+			switch {
+			case a == "json" && args[i] == "--format":
+				jsonForm = true
+			case strings.HasPrefix(a, "-") || a == "json":
+			default:
+				names = append(names, a)
+			}
+		}
+		if jsonForm {
+			var objs []string
+			for _, n := range names {
+				objs = append(objs, fmt.Sprintf(`{"id":"%s","memoryUsageBytes":49283072,"memoryLimitBytes":1073741824}`, n))
+			}
+			fmt.Printf("[%s]\n", strings.Join(objs, ","))
+		}
 	}
 }

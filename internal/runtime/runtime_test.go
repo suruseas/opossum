@@ -292,7 +292,7 @@ func TestRunAssemblesFullArgv(t *testing.T) {
 	err := rt.Run(RunOptions{
 		Name:      "db.demo.opossum",
 		Image:     "postgres:16",
-		Network:   "demo-net",
+		Networks:  []string{"demo-net"},
 		DNSDomain: "opossum",
 		DNSSearch: "demo.opossum",
 		Env:       []string{"A=1", "B=2"},
@@ -514,7 +514,7 @@ func TestRunForwardsSSHAgent(t *testing.T) {
 
 func TestRunOmitsDetachAndDNSWhenUnset(t *testing.T) {
 	rt, read := loggingShim(t)
-	if err := rt.Run(RunOptions{Name: "solo", Image: "busybox", Network: "demo-net", Detach: false}); err != nil {
+	if err := rt.Run(RunOptions{Name: "solo", Image: "busybox", Networks: []string{"demo-net"}, Detach: false}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	got := lastLine(t, read)
@@ -702,5 +702,21 @@ func TestEnsureAndDeleteNetworkArgv(t *testing.T) {
 	rt.DeleteNetwork("demo-net") // shim exits 0, so no warning path
 	if got := lastLine(t, read); got != "network delete demo-net" {
 		t.Errorf("DeleteNetwork argv = %q", got)
+	}
+}
+
+func TestStatsSnapshotParses(t *testing.T) {
+	js := `[{"id":"web.demo.opossum","memoryUsageBytes":49283072,"memoryLimitBytes":1073741824},` +
+		`{"id":"db.demo.opossum","memoryUsageBytes":188743680,"memoryLimitBytes":1073741824}]`
+	stats, err := replayShim(t, js, 0).StatsSnapshot([]string{"web.demo.opossum", "db.demo.opossum"})
+	if err != nil {
+		t.Fatalf("StatsSnapshot: %v", err)
+	}
+	if len(stats) != 2 || stats[0].ID != "web.demo.opossum" || stats[0].MemoryUsageBytes != 49283072 || stats[1].MemoryLimitBytes != 1073741824 {
+		t.Errorf("parsed stats = %+v", stats)
+	}
+	// A runtime error surfaces (not silently empty).
+	if _, err := replayShim(t, "boom", 1).StatsSnapshot(nil); err == nil {
+		t.Error("StatsSnapshot should surface a runtime error")
 	}
 }

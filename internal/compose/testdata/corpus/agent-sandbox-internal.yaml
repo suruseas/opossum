@@ -1,0 +1,19 @@
+# Host-only internal network + hardening knobs (agent sandbox shape).
+name: sandbox
+networks:
+  caged:
+    internal: true
+services:
+  agent:
+    image: node:22-bookworm-slim
+    user: node
+    working_dir: /work
+    read_only: true
+    cap_drop: [ALL]
+    networks: [caged]
+    environment:
+      HTTPS_PROXY: http://${OPOSSUM_HOST_GATEWAY}:8080
+    volumes:
+      - ./work:/work
+    mem_limit: 4g
+    cpus: 4

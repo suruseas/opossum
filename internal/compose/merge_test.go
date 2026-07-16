@@ -6,6 +6,39 @@ import (
 	"testing"
 )
 
+// Deep (non-env) nested mappings merge recursively: `build.args` from two files
+// combine, and a key only the base sets (build.context) is preserved. This
+// exercises mergeMap's map-in-map recursion, distinct from the env special case.
+func TestLoadFilesMergeNestedMapping(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "base.yml")
+	over := filepath.Join(dir, "over.yml")
+	mustWriteFile(t, base, "services:\n"+
+		"  web:\n"+
+		"    build:\n"+
+		"      context: .\n"+
+		"      args: {A: \"1\", B: \"2\"}\n")
+	mustWriteFile(t, over, "services:\n"+
+		"  web:\n"+
+		"    build:\n"+
+		"      args: {B: \"20\", C: \"3\"}\n")
+
+	p, err := LoadFiles([]string{base, over}, nil)
+	if err != nil {
+		t.Fatalf("LoadFiles: %v", err)
+	}
+	b := p.Services["web"].Build
+	if b == nil || b.Context != "." { // base-only nested key survives the merge
+		t.Fatalf("build.context should be preserved, got %+v", b)
+	}
+	args := strings.Join(b.Args, ",") // nested map merged per key (later wins on B)
+	for _, want := range []string{"A=1", "B=20", "C=3"} {
+		if !strings.Contains(args, want) {
+			t.Errorf("build.args should merge per key, missing %q in %q", want, args)
+		}
+	}
+}
+
 // Multiple -f files merge with docker compose semantics: scalars later-win,
 // mappings merge by key, most sequences append, command/entrypoint replace, and a
 // service only in the override is added.
@@ -130,12 +163,22 @@ func TestLoadFilesDedupsPorts(t *testing.T) {
 }
 
 func TestDiscoverOverride(t *testing.T) {
-	dir := t.TempDir()
-	if got := DiscoverOverride(dir); got != "" {
+	if got := DiscoverOverride(t.TempDir()); got != "" {
 		t.Errorf("no override present, got %q", got)
 	}
-	mustWriteFile(t, filepath.Join(dir, "compose.override.yaml"), "services: {}\n")
-	if got := DiscoverOverride(dir); got == "" {
-		t.Error("should discover compose.override.yaml")
+	// Each recognized override filename is auto-discovered (each in a fresh dir so
+	// they don't shadow one another).
+	for _, name := range []string{
+		"compose.override.yaml",
+		"compose.override.yml",
+		"docker-compose.override.yaml",
+		"docker-compose.override.yml",
+	} {
+		dir := t.TempDir()
+		path := filepath.Join(dir, name)
+		mustWriteFile(t, path, "services: {}\n")
+		if got := DiscoverOverride(dir); got != path {
+			t.Errorf("should discover %s, got %q", name, got)
+		}
 	}
 }

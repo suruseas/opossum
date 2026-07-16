@@ -348,8 +348,9 @@ func configCmd() *cobra.Command {
 // cue for `run` to allocate a TTY (-t). Piped or /dev/null stdin (scripts,
 // stdio protocols, tests) must NOT get one: a pseudo-terminal would echo input
 // back into the stream. A char-device check is not enough (/dev/null is one),
-// so ask the terminal driver.
-func stdinIsTerminal() bool {
+// so ask the terminal driver. It's a var so tests can force the terminal case
+// (a test's stdin is never a real TTY).
+var stdinIsTerminal = func() bool {
 	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 
@@ -453,7 +454,7 @@ func logsCmd() *cobra.Command {
 }
 
 func statsCmd() *cobra.Command {
-	var noStream bool
+	var noStream, host bool
 	cmd := &cobra.Command{
 		Use:   "stats [service...]",
 		Short: "Show live resource usage (CPU / memory / net / block I/O) for services",
@@ -462,10 +463,17 @@ func statsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if host {
+				// Host view: a one-shot table of each service's real memory cost to
+				// the Mac (its VM's resident size) — something a shared-VM tool can't
+				// report per service.
+				return o.StatsHost(args)
+			}
 			return o.Stats(args, noStream)
 		},
 	}
 	cmd.Flags().BoolVar(&noStream, "no-stream", false, "print a single snapshot instead of streaming live")
+	cmd.Flags().BoolVar(&host, "host", false, "show each service's host memory footprint (its VM's resident size on the Mac) instead of streaming guest-view stats")
 	return cmd
 }
 

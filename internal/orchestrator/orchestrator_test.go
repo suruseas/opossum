@@ -644,6 +644,71 @@ func TestUpInternalNetworkCreatesAndAttaches(t *testing.T) {
 	}
 }
 
+// A service may join several declared networks: each becomes a `--network` (in
+// declaration order), and every non-external one is created.
+func TestUpAttachesMultipleNetworks(t *testing.T) {
+	rt, log := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"app": {Image: "app:latest", Networks: compose.ServiceNetworks{"front", "back"}},
+	})
+	p.Networks = map[string]compose.NetworkDecl{"front": {}, "back": {Internal: true}}
+	if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	lines := log()
+	// Both networks created (front plain, back internal).
+	if !hasLine(lines, "network create demo-front") {
+		t.Errorf("expected plain network demo-front created, got %v", lines)
+	}
+	if !hasLine(lines, "network create --internal demo-back") {
+		t.Errorf("expected internal network demo-back created, got %v", lines)
+	}
+	// The service joins both, in declaration order (front then back).
+	if !hasLine(lines, "run -d --name app.demo.opossum --network demo-front --network demo-back --dns-domain opossum --dns-search demo.opossum -l opossum.project=demo app:latest") {
+		t.Errorf("service should get one --network per declared net in order, got %v", lines)
+	}
+}
+
+// Swapping a service's network set recreates it (the config hash covers the set).
+func TestUpRecreatesOnNetworkSetChange(t *testing.T) {
+	rt, log := fakeShim(t)
+	svc := &compose.Service{Image: "app:latest", Networks: compose.ServiceNetworks{"a"}}
+	p := project("demo", map[string]*compose.Service{"app": svc})
+	p.Networks = map[string]compose.NetworkDecl{"a": {}, "b": {}}
+	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
+	if err := o.Up(true); err != nil {
+		t.Fatalf("first up: %v", err)
+	}
+	svc.Networks = compose.ServiceNetworks{"a", "b"} // joined an extra network
+	if err := o.Up(true); err != nil {
+		t.Fatalf("second up: %v", err)
+	}
+	if n := countLines(log(), "--name app.demo.opossum"); n != 2 {
+		t.Errorf("adding a network should recreate the container, want 2 runs got %d", n)
+	}
+}
+
+// Reordering a service's networks changes which one becomes eth0, so the emitted
+// --network order (and thus the container) must change — the config hash tracks
+// declaration order, not just set membership.
+func TestUpRecreatesOnNetworkReorder(t *testing.T) {
+	rt, log := fakeShim(t)
+	svc := &compose.Service{Image: "app:latest", Networks: compose.ServiceNetworks{"a", "b"}}
+	p := project("demo", map[string]*compose.Service{"app": svc})
+	p.Networks = map[string]compose.NetworkDecl{"a": {}, "b": {}}
+	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
+	if err := o.Up(true); err != nil {
+		t.Fatalf("first up: %v", err)
+	}
+	svc.Networks = compose.ServiceNetworks{"b", "a"} // same set, different order
+	if err := o.Up(true); err != nil {
+		t.Fatalf("second up: %v", err)
+	}
+	if n := countLines(log(), "--name app.demo.opossum"); n != 2 {
+		t.Errorf("reordering networks should recreate the container, want 2 runs got %d", n)
+	}
+}
+
 // An external network is used by its real name and never created or deleted by
 // opossum (it's owned outside the project).
 func TestExternalNetworkNotManaged(t *testing.T) {
@@ -1081,6 +1146,11 @@ func TestRestartStopsThenStarts(t *testing.T) {
 	// Dependencies start before dependents.
 	if d, w := indexOf(lines, "start db.demo.opossum"), indexOf(lines, "start web.demo.opossum"); d > w {
 		t.Errorf("db should start before web (db=%d web=%d)", d, w)
+	}
+	// Stops go in reverse dependency order (dependents first): web before db, so a
+	// dependency isn't pulled out from under a still-running dependent.
+	if w, d := indexOf(lines, "stop web.demo.opossum"), indexOf(lines, "stop db.demo.opossum"); w < 0 || d < 0 || w > d {
+		t.Errorf("web should stop before db (web=%d db=%d) in %v", w, d, lines)
 	}
 }
 
@@ -1987,6 +2057,41 @@ func TestUpProfilesGatedByDefault(t *testing.T) {
 	}
 }
 
+// A network used only by a profile-gated service isn't created when that profile
+// is inactive — so an example can carry a "caged" (internal-net) variant behind a
+// profile without a plain `up` creating a stray host-only network. Activating the
+// profile does create it.
+func TestUpSkipsNetworkForInactiveProfile(t *testing.T) {
+	newProj := func() *compose.Project {
+		p := project("demo", map[string]*compose.Service{
+			"web":   {Image: "web:latest"},
+			"caged": {Image: "caged:latest", Networks: compose.ServiceNetworks{"cage"}, Profiles: []string{"cage"}},
+		})
+		p.Networks = map[string]compose.NetworkDecl{"cage": {Internal: true}}
+		return p
+	}
+	// Inactive profile: the internal net is never created.
+	rt, log := fakeShim(t)
+	if err := orchestrator.New(newProj(), rt, "opossum", &bytes.Buffer{}).Up(true); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	for _, l := range log() {
+		if strings.Contains(l, "network create") && strings.Contains(l, "demo-cage") {
+			t.Errorf("inactive-profile internal net must not be created: %q", l)
+		}
+	}
+	// Active profile: now it is.
+	rt2, log2 := fakeShim(t)
+	o2 := orchestrator.New(newProj(), rt2, "opossum", &bytes.Buffer{})
+	o2.EnableProfiles([]string{"cage"})
+	if err := o2.Up(true); err != nil {
+		t.Fatalf("Up (profile active): %v", err)
+	}
+	if !hasLine(log2(), "network create --internal demo-cage") {
+		t.Errorf("active-profile internal net should be created, got %v", log2())
+	}
+}
+
 func TestUpProfilesActivatedStart(t *testing.T) {
 	rt, log := fakeShim(t)
 	o := orchestrator.New(profilesProject(), rt, "opossum", &bytes.Buffer{})
@@ -2415,5 +2520,68 @@ func TestUpFailsWhenCompletedDependencyExitsNonZero(t *testing.T) {
 	// web must never start once its one-shot dependency failed.
 	if indexOf(lines, "run -d --name web.demo.opossum") >= 0 {
 		t.Errorf("web must NOT start when migrate fails, got %v", lines)
+	}
+}
+
+// fakeFootprinter is an injected HostFootprinter returning fixed host bytes.
+type fakeFootprinter map[string]int64
+
+func (f fakeFootprinter) Footprints() map[string]int64 { return f }
+
+// stats --host pairs each service's guest-view usage (from the runtime) with the
+// host memory its VM occupies (from the footprinter), sums the mapped ones, and
+// renders an em dash for any it can't map — never failing.
+func TestStatsHost(t *testing.T) {
+	rt, _ := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"web":   {Image: "web:latest"},
+		"db":    {Image: "db:latest"},
+		"cache": {Image: "cache:latest"}, // unmapped -> "—", excluded from total
+	})
+	var out bytes.Buffer
+	o := orchestrator.New(p, rt, "opossum", &out)
+	o.HostFP = fakeFootprinter{
+		"web.demo.opossum": 305 * 1024 * 1024,
+		"db.demo.opossum":  340 * 1024 * 1024,
+	}
+	if err := o.StatsHost(nil); err != nil {
+		t.Fatalf("StatsHost: %v", err)
+	}
+	s := out.String()
+	for _, want := range []string{"305MiB", "340MiB"} { // each mapped host footprint
+		if !strings.Contains(s, want) {
+			t.Errorf("host footprint %s should render, got:\n%s", want, s)
+		}
+	}
+	if !strings.Contains(s, "1GiB") { // guest limit from the stats snapshot
+		t.Errorf("guest limit should render, got:\n%s", s)
+	}
+	if !strings.Contains(s, "—") { // cache couldn't be mapped
+		t.Errorf("an unmapped service should render an em dash, got:\n%s", s)
+	}
+	// The total is the exact sum of the mapped footprints only (305+340=645), not a
+	// double-count and not inflated by the unmapped cache.
+	if !strings.Contains(s, "total") || !strings.Contains(s, "645MiB") {
+		t.Errorf("total should be the exact sum of mapped footprints (645MiB), got:\n%s", s)
+	}
+}
+
+// With nothing mappable (not on macOS, or all VMs gone), stats --host still
+// renders — every host cell an em dash, no total — and returns no error.
+func TestStatsHostAllUnmapped(t *testing.T) {
+	rt, _ := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{"web": {Image: "web:latest"}})
+	var out bytes.Buffer
+	o := orchestrator.New(p, rt, "opossum", &out)
+	o.HostFP = fakeFootprinter{} // maps nothing
+	if err := o.StatsHost(nil); err != nil {
+		t.Fatalf("StatsHost: %v", err)
+	}
+	s := out.String()
+	if !strings.Contains(s, "—") {
+		t.Errorf("host cell should be an em dash when unmapped, got:\n%s", s)
+	}
+	if strings.Contains(s, "total") {
+		t.Errorf("no total line when nothing is mapped, got:\n%s", s)
 	}
 }

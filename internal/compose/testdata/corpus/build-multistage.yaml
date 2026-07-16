@@ -1,0 +1,19 @@
+# build with context/dockerfile/args/target, and depends_on a one-shot migrate
+# that must run to completion first.
+name: webapp
+services:
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      target: prod
+      args:
+        NODE_ENV: production
+    ports:
+      - "8080:80"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+  migrate:
+    build: ./web
+    command: ["./migrate.sh"]

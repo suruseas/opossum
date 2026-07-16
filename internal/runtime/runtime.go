@@ -183,6 +183,20 @@ func (r *Runtime) capture(args ...string) (string, error) {
 	return buf.String(), err
 }
 
+// captureStdout runs a command and returns stdout only (stderr goes to the
+// process's stderr). Used when the output is parsed (e.g. JSON), so a warning the
+// child writes to stderr on an otherwise-successful run can't corrupt the parse.
+func (r *Runtime) captureStdout(args ...string) (string, error) {
+	r.trace(args)
+	cmd := r.newCmd(r.baseCtx(), args...)
+	cmd.WaitDelay = 2 * time.Second
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = os.Stderr
+	err := cmd.Run()
+	return buf.String(), err
+}
+
 // EnsureNetwork creates the network if it does not already exist. It reports
 // whether it actually created it (false = it was already there), so callers can
 // roll back only a network they themselves created. An internal network is
@@ -346,10 +360,10 @@ func (r *Runtime) Build(o BuildOptions) error {
 type RunOptions struct {
 	Name       string
 	Image      string
-	Platform   string // --platform (e.g. linux/amd64); amd64 also enables --rosetta
-	Network    string
-	DNSDomain  string // --dns-domain (the registered local domain)
-	DNSSearch  string // --dns-search (per-project subdomain for bare-name resolution)
+	Platform   string   // --platform (e.g. linux/amd64); amd64 also enables --rosetta
+	Networks   []string // one --network per entry (a service may join several); "none" for full isolation
+	DNSDomain  string   // --dns-domain (the registered local domain)
+	DNSSearch  string   // --dns-search (per-project subdomain for bare-name resolution)
 	Env        []string
 	Ports      []string
 	Volumes    []string
@@ -431,8 +445,8 @@ func (r *Runtime) Run(o RunOptions) error {
 	if o.CPUs != "" {
 		args = append(args, "-c", o.CPUs)
 	}
-	if o.Network != "" {
-		args = append(args, "--network", o.Network)
+	for _, n := range o.Networks {
+		args = append(args, "--network", n)
 	}
 	if o.DNSDomain != "" {
 		// Register the container under the local (registered) DNS domain.
@@ -620,6 +634,33 @@ func (r *Runtime) Stats(names []string, noStream bool) error {
 	}
 	args = append(args, names...)
 	return r.stream(args...)
+}
+
+// ContainerStat is one container's guest-view resource snapshot, as reported by
+// `container stats --no-stream --format json`. Only the fields opossum uses are
+// decoded; the guest sees its own memory usage against its RAM limit (not the
+// host memory the container's VM actually occupies — see host footprint).
+type ContainerStat struct {
+	ID               string `json:"id"`
+	MemoryUsageBytes int64  `json:"memoryUsageBytes"`
+	MemoryLimitBytes int64  `json:"memoryLimitBytes"`
+}
+
+// StatsSnapshot captures a single (non-streaming) guest-view stats reading for
+// the named containers, parsed for further processing (e.g. rendering alongside
+// host footprint). An empty names list asks the runtime for all running ones.
+func (r *Runtime) StatsSnapshot(names []string) ([]ContainerStat, error) {
+	args := append([]string{"stats", "--no-stream", "--format", "json"}, names...)
+	// stdout-only: the output is JSON, so a stderr warning must not corrupt it.
+	out, err := r.captureStdout(args...)
+	if err != nil {
+		return nil, fmt.Errorf("container stats: %w", err)
+	}
+	var stats []ContainerStat
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &stats); err != nil {
+		return nil, fmt.Errorf("parsing container stats: %w", err)
+	}
+	return stats, nil
 }
 
 // Pull fetches an image, streaming progress.

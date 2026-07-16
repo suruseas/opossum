@@ -136,6 +136,30 @@ func run(args []string) int {
 		}
 		fmt.Printf("[%s]", strings.Join(items, ","))
 
+	case "stats":
+		// `stats --no-stream --format json <names…>` returns a guest-view JSON
+		// array, one entry per named container (echoing the id back so callers can
+		// join it to a service). The streaming form (no --format json) just logs.
+		jsonForm := false
+		var names []string
+		for i, a := range args[1:] {
+			switch {
+			case a == "json" && i > 0 && args[i] == "--format":
+				jsonForm = true
+			case strings.HasPrefix(a, "-") || a == "json":
+				// flag or its value — not a container name
+			default:
+				names = append(names, a)
+			}
+		}
+		if jsonForm {
+			var objs []string
+			for _, n := range names {
+				objs = append(objs, fmt.Sprintf(`{"id":"%s","memoryUsageBytes":49283072,"memoryLimitBytes":1073741824}`, n))
+			}
+			fmt.Printf("[%s]\n", strings.Join(objs, ","))
+		}
+
 	case "image":
 		if arg(1) == "inspect" {
 			for _, m := range strings.Fields(os.Getenv("IMAGE_ABSENT")) {

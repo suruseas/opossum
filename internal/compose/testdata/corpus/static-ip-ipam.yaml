@@ -1,0 +1,24 @@
+# Static IPs and an ipam subnet under networks: opossum doesn't apply these, but
+# the file must still load. cap_add exercises capabilities. (pihole shape)
+name: dns
+networks:
+  dnsnet:
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+services:
+  cloudflared:
+    image: visibilityspots/cloudflared
+    networks:
+      dnsnet:
+        ipv4_address: 172.20.0.2
+  pihole:
+    image: pihole/pihole:latest
+    cap_add: [NET_ADMIN]
+    ports:
+      - "5353:53/tcp"
+      - "5353:53/udp"
+    networks:
+      dnsnet:
+        ipv4_address: 172.20.0.3
+    depends_on: [cloudflared]

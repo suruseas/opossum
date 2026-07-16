@@ -43,7 +43,7 @@ type Service struct {
 	Entrypoint  Command         `yaml:"entrypoint"`
 	Environment Environment     `yaml:"environment"`
 	EnvFile     EnvFiles        `yaml:"env_file"`
-	Ports       []string        `yaml:"ports"`
+	Ports       Ports           `yaml:"ports"`
 	Volumes     Volumes         `yaml:"volumes"`
 	Tmpfs       StringOrSlice   `yaml:"tmpfs"` // service-level tmpfs targets (#93); volume-form `type: tmpfs` folds in (#79)
 	Secrets     SecretRefs      `yaml:"secrets"`
@@ -316,6 +316,65 @@ func deployHasExtra(n yaml.Node) bool {
 // appear in a real volume spec, so it never collides with a bind/named mount and
 // never escapes parsing (#79).
 const tmpfsMarker = "\x00tmpfs\x00"
+
+// Ports is a service's published ports. Each entry is normalized to the short
+// `[host_ip:]host:container[/proto]` string opossum's runtime understands, so
+// both compose forms are accepted: the short scalar (`"8080:80"`, `"3000"`, or a
+// bare number `3000`) and the long mapping (`{target, published, protocol,
+// host_ip}`) that real compose files commonly use. A bare container port still
+// gets a host port later (normalizePort), so the long and short forms converge.
+type Ports []string
+
+func (p *Ports) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind != yaml.SequenceNode {
+		return fmt.Errorf("ports must be a list, got %v", value.Tag)
+	}
+	out := make(Ports, 0, len(value.Content))
+	for _, item := range value.Content {
+		// Short form: a string ("8080:80", "3000") or a bare number (3000) — the
+		// scalar's text is the spec, normalized later.
+		if item.Kind == yaml.ScalarNode {
+			out = append(out, item.Value)
+			continue
+		}
+		// Long form: {target, published, protocol, host_ip}. target/published are
+		// scalarStr so a numeric `target: 80` (not quoted) decodes cleanly.
+		var lf struct {
+			Target    scalarStr `yaml:"target"`
+			Published scalarStr `yaml:"published"`
+			Protocol  string    `yaml:"protocol"`
+			HostIP    string    `yaml:"host_ip"`
+		}
+		if err := item.Decode(&lf); err != nil {
+			return err
+		}
+		target := string(lf.Target)
+		if target == "" {
+			return fmt.Errorf("port entry is missing a target")
+		}
+		pub := string(lf.Published)
+		spec := target
+		switch {
+		case lf.HostIP != "":
+			if pub == "" {
+				pub = target // host_ip with no published: mirror the target port
+			}
+			host := lf.HostIP
+			if strings.Contains(host, ":") {
+				host = "[" + host + "]" // bracket an IPv6 host (e.g. ::1 -> [::1])
+			}
+			spec = host + ":" + pub + ":" + target
+		case pub != "":
+			spec = pub + ":" + target
+		}
+		if lf.Protocol != "" {
+			spec += "/" + lf.Protocol
+		}
+		out = append(out, spec)
+	}
+	*p = out
+	return nil
+}
 
 // Volumes is a service's volume mounts. Each entry is normalized to the short
 // `source:target[:ro]` string opossum's orchestrator already understands, so

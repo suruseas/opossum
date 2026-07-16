@@ -570,3 +570,158 @@ func TestNoComposeFileWithoutFlagErrors(t *testing.T) {
 		t.Fatal("expected an error when no compose file can be discovered")
 	}
 }
+
+// COMPOSE_PROFILES activates profiles the same way --profile does, on every
+// command that honors profiles (config here; up/run share the identical wiring).
+// An unset/empty value must NOT activate anything (strings.Split("", ",") yields
+// [""], which EnableProfiles must treat as no profile).
+func TestComposeProfilesEnvCLI(t *testing.T) {
+	fakeShim(t)
+	compose := writeCompose(t, "name: demo\nservices:\n  web:\n    image: web\n  debug:\n    image: dbg\n    profiles: [debug]\n")
+
+	// Empty/unset COMPOSE_PROFILES: the gated service stays hidden.
+	t.Setenv("COMPOSE_PROFILES", "")
+	out, err := run(t, "-f", compose, "config")
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	if strings.Contains(out, "debug:") {
+		t.Errorf("empty COMPOSE_PROFILES must not activate a gated service, got:\n%s", out)
+	}
+
+	// COMPOSE_PROFILES=debug activates it, no --profile needed.
+	t.Setenv("COMPOSE_PROFILES", "debug")
+	out, err = run(t, "-f", compose, "config")
+	if err != nil {
+		t.Fatalf("config with COMPOSE_PROFILES: %v", err)
+	}
+	if !strings.Contains(out, "debug:") {
+		t.Errorf("COMPOSE_PROFILES=debug should activate the gated service, got:\n%s", out)
+	}
+}
+
+// COMPOSE_PROFILES also reaches `up` (the same EnableProfiles wiring), so a gated
+// service starts without --profile.
+func TestComposeProfilesEnvUpCLI(t *testing.T) {
+	readLog := fakeShim(t)
+	compose := writeCompose(t, "name: demo\nservices:\n  web:\n    image: web\n  debug:\n    image: dbg\n    profiles: [debug]\n")
+	t.Setenv("COMPOSE_PROFILES", "debug")
+	if _, err := run(t, "-f", compose, "up"); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	if joined := strings.Join(readLog(), "\n"); !strings.Contains(joined, "--name debug.demo.opossum") {
+		t.Errorf("COMPOSE_PROFILES=debug should start the gated service, got:\n%s", joined)
+	}
+}
+
+// `run` allocates a TTY (-t) only when our stdin is a terminal, and -T/--no-tty
+// suppresses it even then. A test's stdin is never a real terminal, so we force
+// the terminal case through the stdinIsTerminal seam.
+func TestRunTTYAndNoTTYCLI(t *testing.T) {
+	compose := writeCompose(t, "name: demo\nservices:\n  web:\n    image: web:latest\n")
+	orig := stdinIsTerminal
+	stdinIsTerminal = func() bool { return true }
+	defer func() { stdinIsTerminal = orig }()
+
+	// Terminal stdin, no -T: the one-off gets -i -t.
+	readLog := fakeShim(t)
+	if _, err := run(t, "-f", compose, "run", "--rm", "web", "sh"); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if joined := strings.Join(readLog(), "\n"); !strings.Contains(joined, "run -i -t --name web-run.demo.opossum") {
+		t.Errorf("a terminal stdin should allocate a TTY, got:\n%s", joined)
+	}
+
+	// -T suppresses the TTY even with a terminal stdin: -i but no -t.
+	readLog = fakeShim(t)
+	if _, err := run(t, "-f", compose, "run", "--rm", "-T", "web", "sh"); err != nil {
+		t.Fatalf("run -T: %v", err)
+	}
+	joined := strings.Join(readLog(), "\n")
+	if !strings.Contains(joined, "run -i --name web-run.demo.opossum") || strings.Contains(joined, "run -i -t --name web-run.demo.opossum") {
+		t.Errorf("-T should suppress the TTY (-i, no -t), got:\n%s", joined)
+	}
+}
+
+// Thin-CLI coverage: each of these commands parses and dispatches to the runtime.
+// The fake shim logs the invocation and returns success.
+func TestPullCLI(t *testing.T) {
+	readLog := fakeShim(t)
+	compose := writeCompose(t, "name: demo\nservices:\n  web:\n    image: web:latest\n")
+	if _, err := run(t, "-f", compose, "pull"); err != nil {
+		t.Fatalf("pull: %v", err)
+	}
+	if joined := strings.Join(readLog(), "\n"); !strings.Contains(joined, "pull web:latest") {
+		t.Errorf("pull should reach `container pull <image>`, got:\n%s", joined)
+	}
+}
+
+func TestStatsCLI(t *testing.T) {
+	readLog := fakeShim(t)
+	compose := writeCompose(t, "name: demo\nservices:\n  web:\n    image: web:latest\n")
+	if _, err := run(t, "-f", compose, "stats", "--no-stream"); err != nil {
+		t.Fatalf("stats: %v", err)
+	}
+	if joined := strings.Join(readLog(), "\n"); !strings.Contains(joined, "stats") {
+		t.Errorf("stats should reach `container stats`, got:\n%s", joined)
+	}
+}
+
+func TestCpCLI(t *testing.T) {
+	readLog := fakeShim(t)
+	compose := writeCompose(t, "name: demo\nservices:\n  web:\n    image: web:latest\n")
+	// A `service:path` argument is rewritten to the namespaced container name.
+	if _, err := run(t, "-f", compose, "cp", "./local.txt", "web:/app/local.txt"); err != nil {
+		t.Fatalf("cp: %v", err)
+	}
+	if joined := strings.Join(readLog(), "\n"); !strings.Contains(joined, "cp ./local.txt web.demo.opossum:/app/local.txt") {
+		t.Errorf("cp should rewrite service:path to the container name, got:\n%s", joined)
+	}
+}
+
+// `watch` with no develop.watch rules fails fast (rather than blocking on an
+// empty watcher), which also makes its CLI wiring observable.
+func TestWatchNoRulesErrorsCLI(t *testing.T) {
+	fakeShim(t)
+	compose := writeCompose(t, "name: demo\nservices:\n  web:\n    image: web:latest\n")
+	if _, err := run(t, "-f", compose, "watch"); err == nil {
+		t.Fatal("watch with no develop.watch rules should error, not block")
+	}
+}
+
+// --foreground refuses to attach when more than one long-running service would
+// start (the runtime's foreground run blocks on the first). CLI-level wiring.
+func TestUpForegroundMultipleRejectedCLI(t *testing.T) {
+	fakeShim(t)
+	compose := writeCompose(t, "name: demo\nservices:\n  a:\n    image: a\n  b:\n    image: b\n")
+	if _, err := run(t, "-f", compose, "up", "--foreground"); err == nil {
+		t.Fatal("--foreground with two long-running services should be rejected")
+	}
+}
+
+// down --remove-orphans parses and runs (removing the project network); with no
+// orphans present the scan is a no-op, but the flag path is exercised.
+func TestDownRemoveOrphansCLI(t *testing.T) {
+	readLog := fakeShim(t)
+	compose := writeCompose(t, "name: demo\nservices:\n  web:\n    image: web:latest\n")
+	if _, err := run(t, "-f", compose, "down", "--remove-orphans"); err != nil {
+		t.Fatalf("down --remove-orphans: %v", err)
+	}
+	if joined := strings.Join(readLog(), "\n"); !strings.Contains(joined, "network delete demo-net") {
+		t.Errorf("down should tear down the project network, got:\n%s", joined)
+	}
+}
+
+// `stats --host` dispatches to the host-footprint table (the header renders
+// regardless of whether any VM can be mapped on the test machine).
+func TestStatsHostCLI(t *testing.T) {
+	fakeShim(t)
+	compose := writeCompose(t, "name: demo\nservices:\n  web:\n    image: web:latest\n")
+	out, err := run(t, "-f", compose, "stats", "--host")
+	if err != nil {
+		t.Fatalf("stats --host: %v", err)
+	}
+	if !strings.Contains(out, "HOST FOOTPRINT") || !strings.Contains(out, "GUEST MEM") {
+		t.Errorf("stats --host should render the host-footprint table, got:\n%s", out)
+	}
+}

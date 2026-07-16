@@ -1,0 +1,7 @@
+# The token lives here — never commit it.
+.env
+
+# The agent's scratch/output directory (bind-mounted at /work). Keep the folder,
+# ignore its contents.
+work/*
+!work/.gitkeep

@@ -95,17 +95,40 @@ services:
 	}
 }
 
-// Only network_mode: none is acted on; any other value is rejected at load
-// (rather than silently ignored) since it has no faithful mapping today.
-func TestLoadRejectsUnsupportedNetworkMode(t *testing.T) {
-	_, err := Load(writeTemp(t, `
+// Only network_mode: none is acted on; any other value (e.g. host) is ignored —
+// the service loads and joins the project network, and network_mode is reported
+// as an ignored field — rather than failing the whole file. Rejecting it would
+// break real-world compose files (e.g. plex uses network_mode: host).
+func TestLoadIgnoresUnsupportedNetworkMode(t *testing.T) {
+	p, err := Load(writeTemp(t, `
 services:
   app:
     image: app
     network_mode: host
 `))
-	if err == nil || !strings.Contains(err.Error(), "network_mode") {
-		t.Fatalf("expected an error naming network_mode, got %v", err)
+	if err != nil {
+		t.Fatalf("an unsupported network_mode should load (ignored), got error: %v", err)
+	}
+	s := p.Services["app"]
+	if s.NetworkMode != "" {
+		t.Errorf("unsupported network_mode should be cleared so it doesn't reach the orchestrator, got %q", s.NetworkMode)
+	}
+	found := false
+	for _, u := range s.Unsupported {
+		if u == "network_mode" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("network_mode should be reported as ignored, got Unsupported=%v", s.Unsupported)
+	}
+	// network_mode: none is still acted on (not reported as ignored).
+	pn, err := Load(writeTemp(t, "services:\n  app:\n    image: app\n    network_mode: none\n"))
+	if err != nil {
+		t.Fatalf("network_mode: none should load: %v", err)
+	}
+	if pn.Services["app"].NetworkMode != NetworkModeNone {
+		t.Errorf("network_mode: none should be preserved, got %q", pn.Services["app"].NetworkMode)
 	}
 }
 
@@ -164,8 +187,9 @@ services:
 	}
 }
 
-func TestLoadRejectsMultipleNetworks(t *testing.T) {
-	_, err := Load(writeTemp(t, `
+// A service may join several declared networks; all must be declared top-level.
+func TestLoadMultipleNetworks(t *testing.T) {
+	p, err := Load(writeTemp(t, `
 networks:
   a: {}
   b: {}
@@ -174,8 +198,26 @@ services:
     image: app
     networks: [a, b]
 `))
-	if err == nil || !strings.Contains(err.Error(), "at most one network") {
-		t.Fatalf("expected a one-network-per-service error, got %v", err)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := []string(p.Services["app"].Networks); len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Errorf("app networks = %v, want [a b]", got)
+	}
+}
+
+// Every named network — even in a multi-entry list — must be declared top-level.
+func TestLoadRejectsUndefinedNetworkInList(t *testing.T) {
+	_, err := Load(writeTemp(t, `
+networks:
+  a: {}
+services:
+  app:
+    image: app
+    networks: [a, missing]
+`))
+	if err == nil || !strings.Contains(err.Error(), "undefined network") {
+		t.Fatalf("expected an undefined-network error, got %v", err)
 	}
 }
 

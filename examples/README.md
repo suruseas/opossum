@@ -9,6 +9,7 @@ Two bundled stacks, and a walkthrough of every subcommand.
 | [`app-stack/compose.yaml`](app-stack/compose.yaml) | no (all pre-built) | a realistic, browsable stack: Postgres + Redis + Adminer UI + a worker — health-gated startup, a published port, and a **persistent named volume** done right (`PGDATA` subdirectory) |
 | [`local-ai-stack/compose.yaml`](local-ai-stack/compose.yaml) | no (all pre-built) | LLM on the **host**, stack in containers: reaching a host service via the built-in `${OPOSSUM_HOST_GATEWAY}` alongside container-to-container discovery |
 | [`mcp-stack/compose.yaml`](mcp-stack/compose.yaml) | no (all pre-built) | host MCP servers on Apple container instead of an always-on Docker Desktop: an HTTP (streamable) server via `up` + published port, and token-bearing / plain stdio servers via `opossum run --rm` (secrets in `.env`, not `.mcp.json`) |
+| [`agent-sandbox/compose.yaml`](agent-sandbox/compose.yaml) | yes (`agent`) | run Claude Code fully autonomously inside a VM: the compose file **is** the agent's permission boundary — `./work` bind mount (files), `.env` token (secret), `networks:` (egress, incl. a host-only `internal:` "caged" variant), `mem_limit`/`cpus` (resources). One-off `opossum run --rm agent` |
 
 `hello.yaml` runs anywhere `container` is up. `compose.yaml` additionally needs the
 image builder (`container builder start`) for its `web` service.

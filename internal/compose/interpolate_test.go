@@ -61,6 +61,30 @@ func TestInterpolateRequiredVar(t *testing.T) {
 	}
 }
 
+// The colon-less required form `${VAR?}` errors only when the variable is truly
+// unset — unlike `${VAR:?}`, a set-but-empty value satisfies it (mirroring the
+// `-` vs `:-` distinction).
+func TestInterpolateRequiredVarNoColon(t *testing.T) {
+	// Unset -> error, with the default message when none is given.
+	_, err := interpolate([]byte("image: ${NEEDED?}"), lk(nil))
+	if err == nil || !strings.Contains(err.Error(), "NEEDED") {
+		t.Fatalf("unset ${VAR?} should error naming the var, got: %v", err)
+	}
+	// Set-but-empty satisfies the no-colon form (returns empty, no error).
+	got, err := interpolate([]byte("x: ${NEEDED?}"), lk(map[string]string{"NEEDED": ""}))
+	if err != nil || string(got) != "x: " {
+		t.Errorf("set-but-empty ${VAR?} should be accepted, got %q err %v", got, err)
+	}
+	// The colon form rejects the same empty value.
+	if _, err := interpolate([]byte("x: ${NEEDED:?}"), lk(map[string]string{"NEEDED": ""})); err == nil {
+		t.Error("${VAR:?} should reject a set-but-empty value")
+	}
+	// A real value satisfies both forms.
+	if got, err := interpolate([]byte("image: ${NEEDED?}"), lk(map[string]string{"NEEDED": "x"})); err != nil || string(got) != "image: x" {
+		t.Errorf("${VAR?} with value: got %q err %v", got, err)
+	}
+}
+
 func TestInterpolateUnterminated(t *testing.T) {
 	if _, err := interpolate([]byte("image: ${OOPS"), lk(nil)); err == nil {
 		t.Fatal("expected an error for an unterminated ${ reference")

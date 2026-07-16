@@ -37,6 +37,9 @@ type Orchestrator struct {
 	ctx       context.Context     // cancelled on Ctrl-C so a partial `up` rolls back
 	profiles  map[string]bool     // active compose profiles (--profile / COMPOSE_PROFILES)
 	up        upOptions           // per-invocation `up` flags
+	// HostFP supplies per-service host memory footprints for `stats --host`. Left
+	// nil in production (the real macOS introspector is used); tests inject a fake.
+	HostFP HostFootprinter
 }
 
 // upOptions holds the `up` recreate/build flags.
@@ -121,8 +124,16 @@ func configHash(o runtime.RunOptions) string {
 		write(tag)
 		write(cp...)
 	}
-	write("image", o.Image, "platform", o.Platform, "network", o.Network,
-		"dns", o.DNSDomain, o.DNSSearch, "memory", o.Memory, "cpus", o.CPUs)
+	// Networks are hashed in declaration order under the "network" tag — the same
+	// order they reach `container run` as `--network` flags. So the fingerprint
+	// tracks the emitted command exactly: adding, removing, or reordering a
+	// network recreates the container (reordering changes which network is eth0).
+	// For a single network the byte stream is identical to the old single-string
+	// form, so existing containers keep their hash across the upgrade.
+	write("image", o.Image, "platform", o.Platform)
+	write("network")
+	write(o.Networks...)
+	write("dns", o.DNSDomain, o.DNSSearch, "memory", o.Memory, "cpus", o.CPUs)
 	writeSorted("env", o.Env)
 	writeSorted("ports", o.Ports)
 	writeSorted("volumes", o.Volumes)
@@ -253,16 +264,10 @@ type resolvedNetwork struct {
 	external bool   // pre-existing; opossum never creates or deletes it
 }
 
-// networkFor resolves which network a service joins. A service with no
-// `networks:` uses the default per-project network; one that names a declared
-// network joins that (namespaced `<project>-<name>`, unless it's external, in
-// which case its real name is used verbatim). Callers handle `network_mode: none`
-// before this (an isolated service joins no network).
-func (o *Orchestrator) networkFor(svc *compose.Service) resolvedNetwork {
-	if len(svc.Networks) == 0 {
-		return resolvedNetwork{name: o.networkName()}
-	}
-	key := svc.Networks[0]
+// resolveNetwork maps one declared network key to its runtime network. External
+// networks use their real name verbatim; others are namespaced `<project>-<key>`
+// and carry the decl's internal flag.
+func (o *Orchestrator) resolveNetwork(key string) resolvedNetwork {
 	decl := o.Project.Networks[key]
 	if decl.External {
 		real := decl.Name
@@ -274,16 +279,36 @@ func (o *Orchestrator) networkFor(svc *compose.Service) resolvedNetwork {
 	return resolvedNetwork{name: o.Project.Name + "-" + key, internal: decl.Internal}
 }
 
-// serviceNetwork resolves the network and DNS settings for one service. Normally
-// a service joins its network (the default project net, or a declared one) and
+// networksFor resolves which networks a service joins. A service with no
+// `networks:` uses the default per-project network; one that names declared
+// networks joins each (in declaration order). Callers handle `network_mode: none`
+// before this (an isolated service joins no network).
+func (o *Orchestrator) networksFor(svc *compose.Service) []resolvedNetwork {
+	if len(svc.Networks) == 0 {
+		return []resolvedNetwork{{name: o.networkName()}}
+	}
+	nets := make([]resolvedNetwork, 0, len(svc.Networks))
+	for _, key := range svc.Networks {
+		nets = append(nets, o.resolveNetwork(key))
+	}
+	return nets
+}
+
+// serviceNetworks resolves the networks and DNS settings for one service. Normally
+// a service joins its network(s) (the default project net, or declared ones) and
 // resolves peers by bare name; a service with `network_mode: none` is fully
 // isolated (`--network none`) with no networking at all, so it gets no DNS domain
 // or search suffix either (name resolution can't apply to an isolated container).
-func (o *Orchestrator) serviceNetwork(svc *compose.Service) (network, dnsDomain, dnsSearch string) {
+func (o *Orchestrator) serviceNetworks(svc *compose.Service) (networks []string, dnsDomain, dnsSearch string) {
 	if svc.NetworkMode == compose.NetworkModeNone {
-		return compose.NetworkModeNone, "", ""
+		return []string{compose.NetworkModeNone}, "", ""
 	}
-	return o.networkFor(svc).name, o.DNSDomain, o.searchDomain()
+	rns := o.networksFor(svc)
+	names := make([]string, len(rns))
+	for i, rn := range rns {
+		names[i] = rn.name
+	}
+	return names, o.DNSDomain, o.searchDomain()
 }
 
 // warnInternalNetwork surfaces the host-only network's caveats: no internet
@@ -306,12 +331,13 @@ func (o *Orchestrator) managedNetworks(services []string) []resolvedNetwork {
 		if svc.NetworkMode == compose.NetworkModeNone {
 			continue
 		}
-		rn := o.networkFor(svc)
-		if rn.external || seen[rn.name] {
-			continue
+		for _, rn := range o.networksFor(svc) {
+			if rn.external || seen[rn.name] {
+				continue
+			}
+			seen[rn.name] = true
+			nets = append(nets, rn)
 		}
-		seen[rn.name] = true
-		nets = append(nets, rn)
 	}
 	sort.Slice(nets, func(i, j int) bool { return nets[i].name < nets[j].name })
 	return nets
@@ -539,12 +565,12 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 		}
 
 		mem, cpu, _ := svc.Resources() // validated at load
-		svcNet, dnsDomain, dnsSearch := o.serviceNetwork(svc)
+		svcNets, dnsDomain, dnsSearch := o.serviceNetworks(svc)
 		runOpts := runtime.RunOptions{
 			Name:       cname,
 			Image:      image,
 			Platform:   svc.Platform,
-			Network:    svcNet,
+			Networks:   svcNets,
 			DNSDomain:  dnsDomain,
 			DNSSearch:  dnsSearch,
 			Env:        svc.Environment,
@@ -1407,11 +1433,14 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 		}
 	}
 
-	// Create the network the one-off joins (its declared network, or the default
-	// project net). An isolated (`network_mode: none`) or external network is not
-	// created by opossum.
+	// Create the network(s) the one-off joins (its declared networks, or the
+	// default project net). Isolated (`network_mode: none`) and external networks
+	// are not created by opossum.
 	if svc.NetworkMode != compose.NetworkModeNone {
-		if rn := o.networkFor(svc); !rn.external {
+		for _, rn := range o.networksFor(svc) {
+			if rn.external {
+				continue
+			}
 			if _, err := o.rt.EnsureNetwork(rn.name, rn.internal); err != nil {
 				return err
 			}
@@ -1444,12 +1473,12 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 	o.logf("Running one-off %s\n", service)
 	o.rt.Out = os.Stdout           // the one-off body's stdout is the real stdout (e.g. MCP JSON-RPC)
 	mem, cpu, _ := svc.Resources() // validated at load
-	svcNet, dnsDomain, dnsSearch := o.serviceNetwork(svc)
+	svcNets, dnsDomain, dnsSearch := o.serviceNetworks(svc)
 	runErr := o.rt.Run(runtime.RunOptions{
 		Name:       cname,
 		Image:      image,
 		Platform:   svc.Platform,
-		Network:    svcNet,
+		Networks:   svcNets,
 		DNSDomain:  dnsDomain,
 		DNSSearch:  dnsSearch,
 		Env:        svc.Environment,

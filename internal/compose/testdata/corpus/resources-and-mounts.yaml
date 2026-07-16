@@ -1,0 +1,21 @@
+# Resource limits (both legacy and deploy forms, agreeing), tmpfs, ssh, env_file.
+name: worker
+services:
+  worker:
+    image: example/worker:latest
+    env_file:
+      - path: ./worker.env
+        required: false
+    mem_limit: 512m
+    cpus: "1"
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "1"
+    tmpfs:
+      - /tmp
+    ssh: true
+    volumes:
+      - type: tmpfs
+        target: /scratch

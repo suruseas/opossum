@@ -17,6 +17,11 @@ go.work
 go.work.sum
 vendor/
 
+# Secrets — never commit a real .env (tokens, keys). examples/.env is an
+# intentional, non-secret demo (interpolation values), so it stays tracked.
+.env
+!examples/.env
+
 # Logs
 *.log
 

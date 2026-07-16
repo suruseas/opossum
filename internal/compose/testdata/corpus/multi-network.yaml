@@ -1,0 +1,24 @@
+# A service on several declared networks (frontend/backend split).
+name: split
+networks:
+  frontend: {}
+  backend:
+    internal: true
+services:
+  proxy:
+    image: nginx:alpine
+    networks: [frontend]
+    ports: ["8080:80"]
+  api:
+    image: example/api:latest
+    networks: [frontend, backend]
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: secret
+      PGDATA: /var/lib/postgresql/data/pgdata
+    networks: [backend]
+    volumes:
+      - data:/var/lib/postgresql/data
+volumes:
+  data:

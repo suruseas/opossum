@@ -6,6 +6,39 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-16
+
+### Added
+
+- `opossum stats --host` reports each service's **host** memory footprint — the
+  resident size of its VM on your Mac — alongside the guest-view usage. Because
+  Apple `container` runs each container in its own VM, this per-service cost to
+  the host is a real number a shared-VM tool (Docker Desktop, Colima, OrbStack)
+  can't break down per service. It's host-derived and approximate; a service
+  whose VM can't be mapped shows `—` rather than failing.
+- A service can now join **multiple declared networks** (`networks: [a, b]`) —
+  each becomes a `container run --network`, in declaration order. Previously a
+  service was limited to one network. (Per-network aliases are still not applied.)
+- `examples/agent-sandbox`: run Claude Code fully autonomously inside an Apple
+  `container` VM, where the compose file **is** the agent's permission boundary —
+  a `./work` bind mount (the files it sees), a `.env` token (the secret it holds),
+  `networks:` (how far it reaches, including a host-only `internal:` "caged"
+  variant that forces egress through a host proxy), and `mem_limit`/`cpus`. Driven
+  as a one-off with `opossum run --rm agent`. Includes a README covering the two
+  bring-your-own auth options and what the VM does and doesn't protect.
+- The **long mapping form of `ports:`** (`{target, published, protocol,
+  host_ip}`) is now accepted, alongside the short string form. Real-world compose
+  files that use it previously failed to load (`cannot unmarshal !!map into
+  string`); they now normalize to the same `host:container` spec.
+
+### Fixed
+
+- An unsupported `network_mode` (e.g. `host`, which several real-world compose
+  files use) no longer fails the whole file at load. It's ignored — the service
+  joins the project network — and listed among the ignored fields, so a
+  `docker-compose.yml` loads without surprises. Only `network_mode: none` is
+  acted on.
+
 ## [0.8.0] - 2026-07-16
 
 ### Added
@@ -349,7 +382,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/suruseas/opossum/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/suruseas/opossum/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/suruseas/opossum/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/suruseas/opossum/compare/v0.6.0...v0.6.1
