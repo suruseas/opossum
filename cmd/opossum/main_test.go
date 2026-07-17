@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -22,6 +23,40 @@ func TestDoctorExitsNonZeroWhenUnhealthy(t *testing.T) {
 	root.SetErr(io.Discard)
 	if err := root.Execute(); !errors.Is(err, errEnvUnhealthy) {
 		t.Errorf("doctor should return errEnvUnhealthy (exit 1) when unhealthy, got %v", err)
+	}
+}
+
+// doctor --format json must (a) emit valid JSON to stdout and (b) preserve the
+// ❌→non-zero-exit contract: an unhealthy environment still returns errEnvUnhealthy,
+// with the JSON reporting healthy:false and the failing check as status:"fail".
+func TestDoctorJSONExitsNonZeroWhenUnhealthy(t *testing.T) {
+	t.Setenv("OPOSSUM_CONTAINER_BIN", filepath.Join(t.TempDir(), "no-such-container"))
+	root := newRootCmd()
+	var out strings.Builder
+	root.SetOut(&out)
+	root.SetErr(io.Discard)
+	root.SetArgs([]string{"doctor", "--format", "json"})
+	if err := root.Execute(); !errors.Is(err, errEnvUnhealthy) {
+		t.Errorf("doctor --format json should return errEnvUnhealthy when unhealthy, got %v", err)
+	}
+
+	var rep struct {
+		Healthy bool `json:"healthy"`
+		Checks  []struct {
+			ID, Status, Detail, Fix string
+		} `json:"checks"`
+	}
+	if err := json.Unmarshal([]byte(out.String()), &rep); err != nil {
+		t.Fatalf("stdout is not valid JSON: %v\n%s", err, out.String())
+	}
+	if rep.Healthy {
+		t.Error("healthy should be false when the runtime is unavailable")
+	}
+	if len(rep.Checks) == 0 || rep.Checks[0].ID != "runtime" || rep.Checks[0].Status != "fail" {
+		t.Errorf("expected a runtime check with status fail; got %+v", rep.Checks)
+	}
+	if rep.Checks[0].Fix == "" {
+		t.Error("a failing check should carry a non-empty fix hint")
 	}
 }
 
@@ -723,5 +758,35 @@ func TestStatsHostCLI(t *testing.T) {
 	}
 	if !strings.Contains(out, "HOST FOOTPRINT") || !strings.Contains(out, "GUEST MEM") {
 		t.Errorf("stats --host should render the host-footprint table, got:\n%s", out)
+	}
+}
+
+// TestUpDryRunCLI exercises the full CLI path for `up --dry-run`: it prints the
+// plan (startup order and the run commands) and the fake runtime receives no
+// mutating invocation (run/create/delete).
+func TestUpDryRunCLI(t *testing.T) {
+	readLog := fakeShim(t)
+	compose := writeCompose(t, `
+name: demo
+services:
+  db:
+    image: postgres:16
+  web:
+    image: web:latest
+    depends_on: [db]
+`)
+	out, err := run(t, "-f", compose, "up", "--dry-run")
+	if err != nil {
+		t.Fatalf("up --dry-run: %v", err)
+	}
+	if !strings.Contains(out, "Dry run") ||
+		!strings.Contains(out, "run -d --name web.demo.opossum") {
+		t.Errorf("--dry-run should print the plan, got:\n%s", out)
+	}
+	joined := strings.Join(readLog(), "\n")
+	for _, verb := range []string{"run -d", "network create", "delete --force"} {
+		if strings.Contains(joined, verb) {
+			t.Errorf("--dry-run must not issue %q to the runtime, got log:\n%s", verb, joined)
+		}
 	}
 }

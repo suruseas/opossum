@@ -6,6 +6,45 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-17
+
+### Added
+
+- opossum's warnings and recovery-relevant errors now carry a stable
+  `[OPSM-NNN]` code (e.g. `[OPSM-101]` for the Postgres data-dir volume trap,
+  `[OPSM-204]` for a Docker-socket mount). The codes are add-only and map 1:1 to
+  `AGENTS.md`'s failure-signature / diagnostic-codes tables, so an agent (or a
+  human) can jump straight to the fix. Message wording is unchanged apart from
+  the prefix.
+- `opossum doctor --format json` prints the environment checks as
+  machine-readable JSON — a top-level `{healthy, checks[]}` where each check has
+  `{id, status, detail, fix}` (status is `ok`/`warn`/`fail`) — so scripts and
+  agents can decide from one call. The default output stays human-readable, and
+  a failed check still exits non-zero in both formats.
+- `AGENTS.md` — a high-density, facts-only reference for driving opossum from an
+  AI agent: the command surface (with exit-code behavior), the
+  supported/ignored/rejected compose fields, a failure-signature→fix table, and
+  the sandboxing/egress vocabulary. README points agents at it. A test keeps it
+  in sync with the actual CLI (every command must be documented).
+- `opossum up --dry-run` **prints the plan without executing anything**: the
+  service startup order, the recreate/skip decisions, and the exact `container`
+  commands it would issue — but it creates, starts, and deletes nothing. It fills
+  the gap between `config` (resolves the configuration only) and `--verbose`
+  (shows commands while running them), so you can validate what `up` will do
+  before acting. (A `--format json` variant may follow.)
+- `up` now **warns when a service mounts the Docker socket** (`docker.sock`).
+  Apple `container` has no Docker daemon socket, so the mount fails at runtime
+  with an opaque error — the warning explains the real reason up front (tools
+  that drive Docker over its socket, e.g. Portainer, can't work here).
+
+### Changed
+
+- When a dependency fails to become healthy because its container has exited,
+  `up` now **embeds that container's last log lines in the error** — so you see
+  the real cause (e.g. a Postgres `initdb` failure) immediately. It no longer
+  points you at `opossum logs`, which wouldn't work: a failed `up` rolls back and
+  removes the container.
+
 ## [0.9.0] - 2026-07-16
 
 ### Added
@@ -382,7 +421,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/suruseas/opossum/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/suruseas/opossum/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/suruseas/opossum/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/suruseas/opossum/compare/v0.6.1...v0.7.0

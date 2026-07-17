@@ -16,6 +16,16 @@ import (
 // docker is invoked ONLY here: opossum's normal path never shells out to docker,
 // and this reports a clear message when the CLI is missing.
 func (r *Runtime) ImportFromDocker(dockerRef, targetTag string) error {
+	// A dry-run must not touch Docker or the runtime store. Import runs its
+	// `docker image save | container image load` (+ tag) directly, outside the
+	// recording seam, so record the plan here and execute nothing.
+	if r.DryRun {
+		r.Plan = append(r.Plan, "image load  # from docker image save "+dockerRef)
+		if targetTag != "" && targetTag != dockerRef {
+			r.Plan = append(r.Plan, "image tag "+dockerRef+" "+targetTag)
+		}
+		return nil
+	}
 	docker := r.dockerBin()
 	if _, err := exec.LookPath(docker); err != nil {
 		return fmt.Errorf("the docker CLI isn't installed, which is needed to export %q from "+

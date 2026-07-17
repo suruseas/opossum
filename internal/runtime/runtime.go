@@ -41,6 +41,48 @@ type Runtime struct {
 	// shim is steered per-Runtime through Env instead of the process environment,
 	// so a test needs no t.Setenv and its shim behaviour stays isolated from others.
 	Env []string
+	// DryRun makes the runtime plan instead of act: a mutating invocation (run,
+	// build, create, delete, stop, …) is recorded to Plan and NOT executed, while
+	// read-only queries (inspect, ls, image inspect, …) still run so a caller can
+	// compute the plan from real runtime state. Set by `up --dry-run`.
+	DryRun bool
+	// Plan accumulates the argv of every mutating invocation suppressed under
+	// DryRun (each an "container"-relative arg list, space-joined), in the order
+	// they would have run — the "commands that would run" a dry-run prints.
+	Plan []string
+}
+
+// mutating reports whether a `container` invocation changes runtime (or host)
+// state, so a dry-run records it instead of executing. Only read-only queries
+// (inspect, ls, logs, stats, exec, image inspect, volume ls, system dns list)
+// return false — a dry-run still runs those to resolve its plan.
+func mutating(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	switch args[0] {
+	case "run", "build", "stop", "start", "kill", "delete", "cp":
+		return true
+	case "network":
+		return len(args) > 1 && (args[1] == "create" || args[1] == "delete")
+	case "volume":
+		return len(args) > 1 && args[1] == "delete"
+	case "image":
+		return len(args) > 1 && (args[1] == "delete" || args[1] == "pull" ||
+			args[1] == "tag" || args[1] == "load" || args[1] == "import")
+	}
+	return false
+}
+
+// recordIfDryRun returns true (and appends the invocation to Plan) when a dry-run
+// should suppress this mutating command; the exec helpers then skip spawning the
+// child and return a benign success.
+func (r *Runtime) recordIfDryRun(args []string) bool {
+	if !r.DryRun || !mutating(args) {
+		return false
+	}
+	r.Plan = append(r.Plan, strings.Join(args, " "))
+	return true
 }
 
 // newCmd builds the exec.Cmd for a child `container` invocation, injecting r.Env
@@ -135,6 +177,9 @@ func (r *Runtime) Available() bool {
 
 // stream runs a command with stdio attached to the parent process.
 func (r *Runtime) stream(args ...string) error {
+	if r.recordIfDryRun(args) {
+		return nil
+	}
 	r.trace(args)
 	cmd := r.newCmd(r.baseCtx(), args...)
 	cmd.WaitDelay = 2 * time.Second // don't hang on a lingering child after cancel
@@ -152,6 +197,9 @@ func (r *Runtime) stream(args ...string) error {
 // (exec, stats) keep their real terminal fds and get no spinner. The spinner is
 // a no-op unless stderr is a terminal, so piped/redirected output is unchanged.
 func (r *Runtime) streamHeartbeat(label string, tee io.Writer, args ...string) error {
+	if r.recordIfDryRun(args) {
+		return nil
+	}
 	r.trace(args)
 	cmd := r.newCmd(r.baseCtx(), args...)
 	cmd.WaitDelay = 2 * time.Second
@@ -173,6 +221,9 @@ func (r *Runtime) streamHeartbeat(label string, tee io.Writer, args ...string) e
 
 // capture runs a command and returns combined stdout+stderr.
 func (r *Runtime) capture(args ...string) (string, error) {
+	if r.recordIfDryRun(args) {
+		return "", nil
+	}
 	r.trace(args)
 	cmd := r.newCmd(r.baseCtx(), args...)
 	cmd.WaitDelay = 2 * time.Second // don't hang on a lingering child after cancel
@@ -187,6 +238,9 @@ func (r *Runtime) capture(args ...string) (string, error) {
 // process's stderr). Used when the output is parsed (e.g. JSON), so a warning the
 // child writes to stderr on an otherwise-successful run can't corrupt the parse.
 func (r *Runtime) captureStdout(args ...string) (string, error) {
+	if r.recordIfDryRun(args) {
+		return "", nil
+	}
 	r.trace(args)
 	cmd := r.newCmd(r.baseCtx(), args...)
 	cmd.WaitDelay = 2 * time.Second
@@ -552,6 +606,22 @@ func (r *Runtime) Logs(name string, o LogsOptions) error {
 	}
 	args = append(args, name)
 	return r.stream(args...)
+}
+
+// CaptureLogs returns the last `tail` lines of a container's logs, captured (not
+// streamed). Best-effort: it returns "" on any error. Used to show why a
+// container died directly in an error message, before teardown removes it.
+func (r *Runtime) CaptureLogs(name string, tail int) string {
+	args := []string{"logs"}
+	if tail > 0 {
+		args = append(args, "-n", strconv.Itoa(tail))
+	}
+	args = append(args, name)
+	out, err := r.capture(args...)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
 }
 
 func (r *Runtime) logsArgs(name string, o LogsOptions) []string {

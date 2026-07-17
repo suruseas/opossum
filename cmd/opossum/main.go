@@ -130,7 +130,8 @@ func cpCmd() *cobra.Command {
 var errEnvUnhealthy = errors.New("environment checks failed (see the report above)")
 
 func doctorCmd() *cobra.Command {
-	return &cobra.Command{
+	var format string
+	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Diagnose the environment for common problems (runtime, DNS, network, builder, memory)",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -141,15 +142,30 @@ func doctorCmd() *cobra.Command {
 			if o, err := loadOrchestrator(io.Discard); err == nil {
 				proj = o.Project
 			}
-			if !doctor.Run(cmd.OutOrStdout(), rt, dnsDomain, proj, hostMemMB()) {
-				// A failed check (❌) means the environment isn't ready — return an
-				// error so the process exits non-zero and `opossum doctor && …` / CI
-				// gate on it. The report above already explains what and how to fix.
+			var healthy bool
+			switch format {
+			case "text":
+				healthy = doctor.Run(cmd.OutOrStdout(), rt, dnsDomain, proj, hostMemMB())
+			case "json":
+				var err error
+				if healthy, err = doctor.RunJSON(cmd.OutOrStdout(), rt, dnsDomain, proj, hostMemMB()); err != nil {
+					return err
+				}
+			default:
+				return fmt.Errorf("unknown --format %q (want \"text\" or \"json\")", format)
+			}
+			if !healthy {
+				// A failed check (❌ / status:"fail") means the environment isn't ready —
+				// return an error so the process exits non-zero and `opossum doctor && …`
+				// / CI gate on it, regardless of --format. The report already explains
+				// what and how to fix.
 				return errEnvUnhealthy
 			}
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&format, "format", "text", `output format: "text" (default, human-readable) or "json" (machine-readable)`)
+	return cmd
 }
 
 // hostMemMB returns the Mac's physical RAM in MB, or 0 if it can't be read.
@@ -188,7 +204,7 @@ func main() {
 func upCmd() *cobra.Command {
 	var foreground bool
 	var profiles []string
-	var forceRecreate, build, noBuild, removeOrphans, fromDocker bool
+	var forceRecreate, build, noBuild, removeOrphans, fromDocker, dryRun bool
 	cmd := &cobra.Command{
 		Use:   "up [service...]",
 		Short: "Build and start services in dependency order (all, or the named services plus their dependencies)",
@@ -201,6 +217,10 @@ func upCmd() *cobra.Command {
 				return err
 			}
 			o.SetUpOptions(forceRecreate, build, noBuild, removeOrphans, fromDocker)
+			// --dry-run resolves everything but executes nothing: it prints the plan
+			// (startup order, recreate/skip decisions, and the container commands it
+			// would issue) so the plan can be validated before acting.
+			o.SetDryRun(dryRun)
 			// Activate compose profiles from --profile and COMPOSE_PROFILES so
 			// `profiles:`-gated services start.
 			o.EnableProfiles(profiles)
@@ -229,6 +249,7 @@ func upCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&noBuild, "no-build", false, "don't build images (error if one is missing)")
 	cmd.Flags().BoolVar(&removeOrphans, "remove-orphans", false, "remove containers for services no longer in the compose file")
 	cmd.Flags().BoolVar(&fromDocker, "from-docker", false, "for services with a build, import the image from Docker instead of building it (needs the docker CLI)")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "resolve and print the plan (startup order and the container commands that would run) without executing anything")
 	return cmd
 }
 

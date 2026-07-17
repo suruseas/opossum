@@ -50,6 +50,7 @@ type upOptions struct {
 	removeOrphans bool // --remove-orphans: remove containers for services no longer in the compose
 	fromDocker    bool // --from-docker: import a build service's image from Docker instead of building it
 	noDeps        bool // don't pull in depends_on services (used by rebuild-on-watch to touch only the named service)
+	dryRun        bool // --dry-run: resolve and print the plan, but execute nothing against the runtime
 }
 
 // orphans returns the project's containers (by label) whose names don't match any
@@ -100,6 +101,16 @@ func (o *Orchestrator) OnSignal(ctx context.Context) {
 // SetUpOptions configures `up`'s recreate/build behavior from the command flags.
 func (o *Orchestrator) SetUpOptions(forceRecreate, build, noBuild, removeOrphans, fromDocker bool) {
 	o.up = upOptions{forceRecreate: forceRecreate, build: build, noBuild: noBuild, removeOrphans: removeOrphans, fromDocker: fromDocker}
+}
+
+// SetDryRun switches `up` to plan-only mode: it resolves the whole project and
+// prints what it would do — the startup order, the recreate/skip decisions, and
+// the exact `container` commands it would issue — but suppresses every mutating
+// runtime call, so nothing is built, created, started, or deleted. Call it after
+// SetUpOptions (which resets the option block). It's a no-op on other commands.
+func (o *Orchestrator) SetDryRun(v bool) {
+	o.up.dryRun = v
+	o.rt.DryRun = v
 }
 
 // configHashLabel stamps a container with a fingerprint of its spec, so a later
@@ -315,7 +326,7 @@ func (o *Orchestrator) serviceNetworks(svc *compose.Service) (networks []string,
 // egress, and no name resolution (the DNS resolver is unreachable from an
 // internal network) — so use IPs, or reach a host proxy via the gateway var.
 func (o *Orchestrator) warnInternalNetwork(name string) {
-	o.logf("warning: network %s is internal (host-only): services on it have no internet egress\n"+
+	o.warnf(codeInternalEgress, "network %s is internal (host-only): services on it have no internet egress\n"+
 		"         and can't resolve peers by name — use IPs, or reach a host proxy via ${OPOSSUM_HOST_GATEWAY}.\n", name)
 }
 
@@ -411,16 +422,17 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 	// warn unconditionally below.
 	if o.rt.Verbose {
 		if u := o.Project.Unsupported; len(u) > 0 {
-			o.logf("warning: ignoring unsupported top-level field(s): %s\n", strings.Join(u, ", "))
+			o.warnf(codeIgnoredTopField, "ignoring unsupported top-level field(s): %s\n", strings.Join(u, ", "))
 		}
 		for _, name := range order {
 			if u := o.Project.Services[name].Unsupported; len(u) > 0 {
-				o.logf("warning: service %q: ignoring unsupported field(s): %s\n", name, strings.Join(u, ", "))
+				o.warnf(codeIgnoredField, "service %q: ignoring unsupported field(s): %s\n", name, strings.Join(u, ", "))
 			}
 		}
 	}
 	for _, name := range order {
 		o.warnPostgresDatadir(name, o.Project.Services[name])
+		o.warnDockerSocket(name, o.Project.Services[name])
 	}
 	o.warnSharedNamedVolumes(order)
 
@@ -430,7 +442,7 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 		if o.up.removeOrphans {
 			o.removeOrphans(orphans)
 		} else {
-			o.logf("warning: found orphan container(s) not defined in the compose file: %s\n"+
+			o.warnf(codeOrphans, "found orphan container(s) not defined in the compose file: %s\n"+
 				"         remove them with `opossum down --remove-orphans` (or `up --remove-orphans`)\n",
 				strings.Join(orphans, ", "))
 		}
@@ -473,6 +485,15 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 		}
 	}
 
+	// In dry-run, announce the plan up front: the rest of Up runs unchanged, but
+	// the runtime records mutating commands instead of issuing them, so the
+	// "Creating network …"/"Starting …" lines below narrate what WOULD happen.
+	if o.up.dryRun {
+		o.logf("Dry run — no changes will be made.\n")
+		o.logf("Startup order: %s\n\n", strings.Join(order, ", "))
+		o.logf("Planned actions:\n")
+	}
+
 	// Create every network the selected services need (the default project net
 	// and any declared networks they join). An internal network is host-only — warn
 	// that services on it have no internet egress and can't resolve peers by name.
@@ -513,7 +534,7 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 	}()
 
 	if o.DNSDomain != "" && !o.rt.DNSDomainExists(o.DNSDomain) {
-		o.logf("warning: DNS domain %q not found — services won't resolve each other by name.\n"+
+		o.warnf(codeDNSDomainAbsent, "DNS domain %q not found — services won't resolve each other by name.\n"+
 			"         Create it once with:  sudo container system dns create %s\n",
 			o.DNSDomain, o.DNSDomain)
 	}
@@ -527,9 +548,13 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 		svc := o.Project.Services[name]
 		cname := o.containerName(name)
 
-		// Gate startup on any dependency that must be healthy first.
-		if err := o.awaitHealthyDeps(name, svc); err != nil {
-			return err
+		// Gate startup on any dependency that must be healthy first. A dry-run
+		// starts nothing, so there's no running container to probe — skip the wait
+		// (it would otherwise `exec` against a container that isn't there).
+		if !o.up.dryRun {
+			if err := o.awaitHealthyDeps(name, svc); err != nil {
+				return err
+			}
 		}
 
 		// Build the image only when it's missing or --build was given (docker
@@ -605,12 +630,17 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 			}
 		}
 
-		// Create any missing bind-mount host directories (docker compose does; the
-		// runtime errors on a missing bind source).
-		o.ensureBindDirs(svc.Volumes)
-
+		// A dry-run must not touch the host filesystem: skip creating bind-mount
+		// directories (a real side effect, outside the runtime's recording seam).
+		if !o.up.dryRun {
+			// Create any missing bind-mount host directories (docker compose does; the
+			// runtime errors on a missing bind source).
+			o.ensureBindDirs(svc.Volumes)
+		}
 		// Seed fresh named/anonymous volumes from the image before the container
-		// mounts them (Apple `container` mounts them empty, unlike Docker).
+		// mounts them (Apple `container` mounts them empty, unlike Docker). This runs
+		// through the runtime, so under dry-run its `run --rm` is recorded (not
+		// executed) and appears in the plan.
 		o.seedVolumes(name, image, svc.Volumes)
 
 		// Replace any stale container left by a previous run of THIS project (the
@@ -642,7 +672,24 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 			o.logf("  ↳ %s on the host: %s\n", name, strings.Join(addrs, ", "))
 		}
 	}
+	if o.up.dryRun {
+		o.printPlan()
+	}
 	return nil
+}
+
+// printPlan lists the exact `container` invocations a dry-run recorded but did
+// not run — the argv `up` would have issued, in order. Read-only queries (the
+// inspects that resolve recreate/skip) aren't listed; only the mutating commands
+// (network create, delete, run, build, …) that a real up would execute.
+func (o *Orchestrator) printPlan() {
+	if len(o.rt.Plan) == 0 {
+		return
+	}
+	o.logf("\nCommands that would run:\n")
+	for _, argv := range o.rt.Plan {
+		o.logf("  %s %s\n", o.rt.Bin, argv)
+	}
 }
 
 // hostPublishAddrs turns published port specs into host-facing "addr:port"
@@ -711,8 +758,8 @@ func (o *Orchestrator) checkHostPorts(order []string) error {
 		}
 	}
 	if len(conflicts) > 0 {
-		return fmt.Errorf("host port already in use:\n  - %s\nfree the port or remap it in the compose file, then retry",
-			strings.Join(conflicts, "\n  - "))
+		return fmt.Errorf("[%s] host port already in use:\n  - %s\nfree the port or remap it in the compose file, then retry",
+			codeHostPortInUse, strings.Join(conflicts, "\n  - "))
 	}
 	return nil
 }
@@ -859,7 +906,7 @@ func (o *Orchestrator) awaitHealthyDeps(name string, svc *compose.Service) error
 		hc := o.Project.Services[dep.Name].Healthcheck
 		if hc == nil || hc.Disabled || len(hc.Test) == 0 {
 			// Load-time validation rejects this; guard defensively anyway.
-			o.logf("warning: %s wants %s healthy but it has no healthcheck — not waiting\n", name, dep.Name)
+			o.warnf(codeDepNoHealth, "%s wants %s healthy but it has no healthcheck — not waiting\n", name, dep.Name)
 			continue
 		}
 		o.logf("Waiting for %s to be healthy\n", dep.Name)
@@ -912,7 +959,13 @@ func (o *Orchestrator) waitHealthy(name string, hc *compose.Healthcheck) error {
 		// If the container has exited, it won't recover by polling — fail fast
 		// with the real cause instead of an opaque "healthcheck did not pass".
 		if info := o.rt.Inspect(cname); info.Exists && info.State != "" && info.State != "running" {
-			return fmt.Errorf("container is not running (state %q); check `opossum logs %s`", info.State, name)
+			// Grab its last logs now, before a failed-up rollback removes the
+			// container — otherwise the usual "check `opossum logs`" hint points at a
+			// container that's already gone.
+			if logs := o.rt.CaptureLogs(cname, 15); logs != "" {
+				return fmt.Errorf("[OPSM-401] container is not running (state %q); its last log lines:\n%s", info.State, indentLines(logs))
+			}
+			return fmt.Errorf("[%s] container is not running (state %q)", codeDepNotRunning, info.State)
 		}
 	}
 	return fmt.Errorf("healthcheck did not pass after %d attempt(s): %w", attempts, last)
@@ -1079,7 +1132,7 @@ func (o *Orchestrator) warnSharedNamedVolumes(order []string) {
 		for i, s := range svcs {
 			quoted[i] = fmt.Sprintf("%q", s)
 		}
-		o.logf("warning: services %s share named volume %q, but Apple container attaches a "+
+		o.warnf(codeSharedVolume, "services %s share named volume %q, but Apple container attaches a "+
 			"named volume to only one running container at a time — the others fail to start. "+
 			"Use a bind mount (a host path) for shared data, or bake it into the image.\n",
 			strings.Join(quoted, ", "), src)
@@ -1110,11 +1163,32 @@ func (o *Orchestrator) warnPostgresDatadir(name string, svc *compose.Service) {
 		if hasPGDATASubdir(svc) {
 			continue // the workaround is already in place
 		}
-		o.logf("warning: service %q won't start as written: a named volume mounted at %s "+
+		o.warnf(codePGDATADatadir, "service %q won't start as written: a named volume mounted at %s "+
 			"makes Postgres initdb fail (the mount point isn't empty). To fix it, keep the "+
 			"data in a subdirectory — add `environment: PGDATA=%s/pgdata` to the service — "+
 			"then run `opossum up` again.\n", name, postgresDataDir, postgresDataDir)
 	}
+}
+
+// warnDockerSocket warns when a service mounts the Docker daemon socket. Apple
+// `container` has no Docker socket to expose, so the mount fails at runtime with
+// an opaque virtiofs error — surface the real reason up front. (Tools like
+// Portainer that talk to Docker over the socket can't work here.)
+func (o *Orchestrator) warnDockerSocket(name string, svc *compose.Service) {
+	for _, v := range svc.Volumes {
+		if strings.Contains(v, "docker.sock") {
+			o.warnf(codeDockerSocket, "service %q mounts the Docker socket (%s), but Apple `container` "+
+				"has no Docker daemon socket to share — the container can't reach Docker, and "+
+				"the mount will fail. Tools that drive Docker over its socket don't work here.\n", name, v)
+			return
+		}
+	}
+}
+
+// indentLines prefixes each line of s with two spaces, for embedding a captured
+// block (e.g. container logs) inside an error message.
+func indentLines(s string) string {
+	return "  " + strings.ReplaceAll(s, "\n", "\n  ")
 }
 
 // hasPGDATASubdir reports whether the service sets PGDATA to a path below the
@@ -1652,10 +1726,10 @@ func (o *Orchestrator) buildOptions(tag string, b *compose.Build) runtime.BuildO
 func (o *Orchestrator) warnUnreadableContext(ctx string) {
 	switch {
 	case ctx == "/private/tmp" || strings.HasPrefix(ctx, "/private/tmp/"):
-		o.logf("warning: build context %q is under /private/tmp, which the container builder can't read — run from a real path under your home directory (or /tmp)\n", ctx)
+		o.warnf(codeBuildTmpContext, "build context %q is under /private/tmp, which the container builder can't read — run from a real path under your home directory (or /tmp)\n", ctx)
 	default:
 		if fi, err := os.Lstat(ctx); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-			o.logf("warning: build context %q is a symlink; the container builder may reject it — use its real path\n", ctx)
+			o.warnf(codeBuildSymlink, "build context %q is a symlink; the container builder may reject it — use its real path\n", ctx)
 		}
 	}
 }

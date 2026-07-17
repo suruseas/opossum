@@ -916,3 +916,45 @@ services:
 		t.Fatal("expected error: a service can't be both run-to-completion and required healthy")
 	}
 }
+
+// YAML anchors and merge keys (`<<: *anchor`) — which real projects like Apache
+// Airflow use heavily for DRY — must resolve: a service that merges an anchor
+// inherits the anchor's fields (image, environment, depends_on) plus its own
+// overrides. yaml.v3 handles merge keys, but only if opossum keeps decoding in a
+// way that preserves them — this guards against a change that would drop them.
+func TestLoadYAMLMergeKeys(t *testing.T) {
+	p, err := Load(writeTemp(t, `
+name: dry
+x-common: &common
+  image: apache/airflow:3.0.0
+  environment:
+    KEY: value
+  depends_on:
+    db:
+      condition: service_healthy
+services:
+  scheduler:
+    <<: *common
+    command: ["scheduler"]
+  db:
+    image: postgres:16
+    healthcheck:
+      test: ["CMD", "pg_isready"]
+`))
+	if err != nil {
+		t.Fatalf("merge-key compose should load: %v", err)
+	}
+	s := p.Services["scheduler"]
+	if s.Image != "apache/airflow:3.0.0" { // inherited from the anchor
+		t.Errorf("scheduler.image = %q, want the anchored image", s.Image)
+	}
+	if len(s.Environment) != 1 || s.Environment[0] != "KEY=value" { // inherited env
+		t.Errorf("scheduler.environment = %v, want [KEY=value] from the anchor", s.Environment)
+	}
+	if len(s.Command) != 1 || s.Command[0] != "scheduler" { // its own override
+		t.Errorf("scheduler.command = %v, want [scheduler]", s.Command)
+	}
+	if len(s.DependsOn) != 1 || s.DependsOn[0].Name != "db" || s.DependsOn[0].Condition != ConditionHealthy {
+		t.Errorf("scheduler.depends_on = %+v, want db service_healthy from the anchor", s.DependsOn)
+	}
+}

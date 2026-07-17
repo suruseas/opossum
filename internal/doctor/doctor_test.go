@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -143,6 +144,105 @@ func TestCheckMemoryOvercommitWarns(t *testing.T) {
 	}
 	if c := checkMemory(&compose.Project{Services: svcs}, 8192); c.status != warn {
 		t.Errorf("40 services on 8 GB should warn; got status %d, detail %s", c.status, c.detail)
+	}
+}
+
+// TestRunJSONShape pins the machine-readable contract: the top-level object has
+// `healthy` and `checks`, each check carries exactly {id, status, detail, fix}
+// with the ok/warn/fail vocabulary, and the ids are the stable slugs agents key
+// on. A healthy run reports healthy:true with no "fail" statuses.
+func TestRunJSONShape(t *testing.T) {
+	m := mock{status: "status running\n", dns: true, probe: "DNS-OK\nIP-OK\n", builder: "buildkit img running 4 8192 MB\n"}
+	p := &compose.Project{Services: map[string]*compose.Service{"a": {Image: "x"}}}
+	var b bytes.Buffer
+	healthy, err := RunJSON(&b, m, "opossum", p, 16384)
+	if err != nil {
+		t.Fatalf("RunJSON: %v", err)
+	}
+	if !healthy {
+		t.Fatalf("expected healthy run; got:\n%s", b.String())
+	}
+
+	var rep Report
+	if err := json.Unmarshal(b.Bytes(), &rep); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, b.String())
+	}
+	if !rep.Healthy {
+		t.Errorf("healthy field should be true; got %+v", rep)
+	}
+	wantIDs := []string{"runtime", "dns", "network", "builder", "memory"}
+	if len(rep.Checks) != len(wantIDs) {
+		t.Fatalf("got %d checks, want %d: %+v", len(rep.Checks), len(wantIDs), rep.Checks)
+	}
+	for i, c := range rep.Checks {
+		if c.ID != wantIDs[i] {
+			t.Errorf("check %d: id = %q, want %q", i, c.ID, wantIDs[i])
+		}
+		switch c.Status {
+		case "ok", "warn", "fail":
+		default:
+			t.Errorf("check %q: status = %q, want ok/warn/fail", c.ID, c.Status)
+		}
+		if c.Status == "fail" {
+			t.Errorf("healthy run should have no fail; %q is fail", c.ID)
+		}
+	}
+
+	// Assert the exact key set per check (no extra/renamed keys leak into the
+	// contract) by round-tripping through a generic map.
+	var raw struct {
+		Checks []map[string]any `json:"checks"`
+	}
+	if err := json.Unmarshal(b.Bytes(), &raw); err != nil {
+		t.Fatalf("re-parse: %v", err)
+	}
+	for _, c := range raw.Checks {
+		if len(c) != 4 {
+			t.Errorf("check has %d keys, want 4 {id,status,detail,fix}: %v", len(c), c)
+		}
+		for _, k := range []string{"id", "status", "detail", "fix"} {
+			if _, ok := c[k]; !ok {
+				t.Errorf("check missing key %q: %v", k, c)
+			}
+		}
+	}
+}
+
+// TestRunJSONStatusMapping is the mutation-style guard: each status value must
+// land in the JSON as the right string, a failing check must carry its fix and
+// flip healthy:false, and a passing check must have an empty fix.
+func TestRunJSONStatusMapping(t *testing.T) {
+	// dns fails, builder warns (2048 MB), runtime/network ok.
+	m := mock{status: "status running\n", dns: false, probe: "DNS-OK\nIP-OK\n", builder: "buildkit img running 2 2048 MB\n"}
+	var b bytes.Buffer
+	healthy, err := RunJSON(&b, m, "opossum", nil, 0)
+	if err != nil {
+		t.Fatalf("RunJSON: %v", err)
+	}
+	if healthy {
+		t.Error("a failing dns check must make the report unhealthy")
+	}
+
+	var rep Report
+	if err := json.Unmarshal(b.Bytes(), &rep); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, b.String())
+	}
+	if rep.Healthy {
+		t.Error("healthy field should be false when a check fails")
+	}
+	byID := map[string]CheckResult{}
+	for _, c := range rep.Checks {
+		byID[c.ID] = c
+	}
+
+	if c := byID["runtime"]; c.Status != "ok" || c.Fix != "" {
+		t.Errorf("runtime should be ok with empty fix; got %+v", c)
+	}
+	if c := byID["dns"]; c.Status != "fail" || !strings.Contains(c.Fix, "dns create opossum") {
+		t.Errorf("dns should be fail with its create fix; got %+v", c)
+	}
+	if c := byID["builder"]; c.Status != "warn" || c.Fix == "" {
+		t.Errorf("builder should be warn with a fix; got %+v", c)
 	}
 }
 

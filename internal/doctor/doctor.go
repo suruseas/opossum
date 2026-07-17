@@ -7,6 +7,7 @@
 package doctor
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"strconv"
@@ -45,6 +46,19 @@ func (s status) icon() string {
 	}
 }
 
+// String is the machine-readable status vocabulary used by `--format json`:
+// "ok" / "warn" / "fail".
+func (s status) String() string {
+	switch s {
+	case ok:
+		return "ok"
+	case warn:
+		return "warn"
+	default:
+		return "fail"
+	}
+}
+
 type check struct {
 	name        string
 	status      status
@@ -60,11 +74,29 @@ type Runner interface {
 
 var _ Runner = (*runtime.Runtime)(nil)
 
-// Run executes the checks against rt and writes a report to w. dnsDomain is the
-// domain to verify; project (nil if none was found) drives the memory estimate;
-// hostMemMB is the machine's RAM in MB (0 = unknown). It returns false if any
-// check failed.
-func Run(w io.Writer, rt Runner, dnsDomain string, project *compose.Project, hostMemMB int) bool {
+// CheckResult is one environment check in machine-readable form (`--format json`).
+// ID is a stable slug (matching the human report's name column), Status is one of
+// "ok"/"warn"/"fail", Detail is the human explanation, and Fix is the remediation
+// hint (empty when Status is "ok").
+type CheckResult struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+	Detail string `json:"detail"`
+	Fix    string `json:"fix"`
+}
+
+// Report is the machine-readable result of the environment checks. Healthy is
+// false when any check failed — the same condition that makes the process exit
+// non-zero — so an agent can decide from this one field.
+type Report struct {
+	Healthy bool          `json:"healthy"`
+	Checks  []CheckResult `json:"checks"`
+}
+
+// runChecks executes the environment checks against rt. dnsDomain is the domain
+// to verify; project (nil if none was found) drives the memory estimate;
+// hostMemMB is the machine's RAM in MB (0 = unknown).
+func runChecks(rt Runner, dnsDomain string, project *compose.Project, hostMemMB int) []check {
 	checks := []check{checkRuntime(rt)}
 	if checks[0].status != fail { // pointless to probe further if the runtime is down
 		checks = append(checks, checkDNS(rt, dnsDomain), checkNetwork(rt), checkBuilder(rt))
@@ -72,6 +104,13 @@ func Run(w io.Writer, rt Runner, dnsDomain string, project *compose.Project, hos
 	if project != nil {
 		checks = append(checks, checkMemory(project, hostMemMB))
 	}
+	return checks
+}
+
+// Run executes the checks against rt and writes a human report to w. It returns
+// false if any check failed. See runChecks for the parameters.
+func Run(w io.Writer, rt Runner, dnsDomain string, project *compose.Project, hostMemMB int) bool {
+	checks := runChecks(rt, dnsDomain, project, hostMemMB)
 
 	allOK := true
 	for _, c := range checks {
@@ -84,6 +123,27 @@ func Run(w io.Writer, rt Runner, dnsDomain string, project *compose.Project, hos
 		}
 	}
 	return allOK
+}
+
+// RunJSON executes the checks against rt and writes a machine-readable Report to
+// w as indented JSON. It returns false if any check failed (mirroring Run's exit
+// signal) plus any encoding error. See runChecks for the parameters.
+func RunJSON(w io.Writer, rt Runner, dnsDomain string, project *compose.Project, hostMemMB int) (bool, error) {
+	checks := runChecks(rt, dnsDomain, project, hostMemMB)
+
+	rep := Report{Healthy: true, Checks: make([]CheckResult, len(checks))}
+	for i, c := range checks {
+		rep.Checks[i] = CheckResult{ID: c.name, Status: c.status.String(), Detail: c.detail, Fix: c.fix}
+		if c.status == fail {
+			rep.Healthy = false
+		}
+	}
+	b, err := json.MarshalIndent(rep, "", "  ")
+	if err != nil {
+		return rep.Healthy, err
+	}
+	fmt.Fprintln(w, string(b))
+	return rep.Healthy, nil
 }
 
 func checkRuntime(rt Runner) check {

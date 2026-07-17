@@ -142,7 +142,7 @@ func (o *Orchestrator) applyChanges(paths []string) {
 	for svc := range rebuilds {
 		fmt.Fprintf(o.out, "rebuilding %s…\n", svc)
 		if err := o.rebuildService(svc); err != nil {
-			fmt.Fprintf(o.out, "warning: rebuild %s failed: %v\n", svc, err)
+			o.warnf(codeWatchRebuild, "rebuild %s failed: %v\n", svc, err)
 		}
 	}
 	for svc := range restarts {
@@ -150,7 +150,7 @@ func (o *Orchestrator) applyChanges(paths []string) {
 			continue // a rebuild already recreated it
 		}
 		if err := o.Restart([]string{svc}); err != nil {
-			fmt.Fprintf(o.out, "warning: restart %s failed: %v\n", svc, err)
+			o.warnf(codeWatchRestart, "restart %s failed: %v\n", svc, err)
 		}
 	}
 }
@@ -160,7 +160,7 @@ func (o *Orchestrator) syncFile(t watchTarget, changed, rel string) {
 	dst := t.service + ":" + t.containerTarget(rel)
 	fmt.Fprintf(o.out, "sync %s → %s\n", changed, dst)
 	if err := o.Copy(changed, dst); err != nil {
-		fmt.Fprintf(o.out, "warning: sync failed: %v\n", err)
+		o.warnf(codeWatchSync, "sync failed: %v\n", err)
 	}
 }
 
@@ -195,7 +195,7 @@ func (o *Orchestrator) Watch(ctx context.Context) error {
 	// so a large dependency dir doesn't flood the watcher with events.
 	for _, t := range targets {
 		if err := addTree(w, t); err != nil {
-			fmt.Fprintf(o.out, "warning: watching %s: %v\n", t.hostDir, err)
+			o.warnf(codeWatchSetup, "watching %s: %v\n", t.hostDir, err)
 		}
 		fmt.Fprintf(o.out, "watching %s (%s → %s:%s)\n", t.hostDir, t.action, t.service, t.target)
 	}
@@ -240,7 +240,7 @@ func (o *Orchestrator) Watch(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
-			fmt.Fprintf(o.out, "warning: watch error: %v\n", err)
+			o.warnf(codeWatchError, "watch error: %v\n", err)
 		}
 	}
 }

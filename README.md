@@ -10,6 +10,11 @@ reach each other by name.
 opossum is compatible with Docker Compose files (`docker-compose.yml`) and
 implements a subset of the open [Compose specification](https://compose-spec.io).
 
+> **Using opossum from an AI agent?** Point it at [`AGENTS.md`](AGENTS.md) — a
+> high-density, facts-only reference (command surface, the supported/ignored/
+> rejected compose fields, and failure-signature→fix table) meant to drop into an
+> agent's context window. The human quickstart below still applies.
+
 > **Why this works now:** container-to-container networking and name resolution
 > rely on features in **macOS 26**. On macOS 15 containers are network-isolated,
 > so this kind of orchestration isn't possible. `container` reached 1.0 in
@@ -323,7 +328,7 @@ opossum mirrors the common `docker compose` subcommands, delegating each to the
 | `build [service…]` | ✅ | build images for services with `build:` |
 | `pull [service…]` | ✅ | pull images for services with `image:` |
 | `import [service…]` | ✅ (extra) | copy a service's Docker-built image into `container`'s store, so `up` skips the rebuild |
-| `doctor` | ✅ (extra) | diagnose the environment (runtime, DNS domain, outbound network, build VM memory, stack memory estimate); prints ✅/⚠️/❌ + a one-line fix each |
+| `doctor` | ✅ (extra) | diagnose the environment (runtime, DNS domain, outbound network, build VM memory, stack memory estimate); prints ✅/⚠️/❌ + a one-line fix each. `--format json` emits machine-readable `{healthy, checks[]}` for scripts/agents; a failed check exits non-zero in either format |
 | `cp <src> <dst>` | ✅ | copy files between a service's container and the host (each path is a host path or `service:path`), like `docker compose cp` |
 | `watch` | ✅ | watch each service's `develop.watch` paths and act on changes (like `docker compose watch`): `sync` copies files in, `rebuild` rebuilds + recreates, `sync+restart` copies + restarts; runs until Ctrl-C. Start the stack with `up` first |
 | `start [service…]` | ✅ | start existing (stopped) containers |

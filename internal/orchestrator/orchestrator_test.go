@@ -299,8 +299,8 @@ func TestUpFailsWhenHostPortInUse(t *testing.T) {
 		"web": {Image: "web:latest", Ports: []string{fmt.Sprintf("127.0.0.1:%d:80", port)}},
 	})
 	err = orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true)
-	if err == nil || !strings.Contains(err.Error(), "already in use") {
-		t.Errorf("up should fail when a published host port is in use, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "already in use") || !strings.Contains(err.Error(), "[OPSM-201]") {
+		t.Errorf("up should fail with code OPSM-201 when a published host port is in use, got %v", err)
 	}
 }
 
@@ -1483,7 +1483,7 @@ func TestWarnsPostgresDatadirNamedVolume(t *testing.T) {
 	// The warning is actionable: it names the fix (PGDATA subdirectory) and tells
 	// the user to re-run up. It must not leak an internal tracking number.
 	msg := run(&compose.Service{Image: "postgres:16", Volumes: []string{"pgdata:/var/lib/postgresql/data"}}, nil)
-	for _, must := range []string{"PGDATA=/var/lib/postgresql/data/pgdata", "opossum up` again"} {
+	for _, must := range []string{"[OPSM-101]", "PGDATA=/var/lib/postgresql/data/pgdata", "opossum up` again"} {
 		if !strings.Contains(msg, must) {
 			t.Errorf("warning missing %q; got: %s", must, msg)
 		}
@@ -2192,9 +2192,15 @@ func TestUpReportsExitedDependencyClearly(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected Up to fail when the dependency has exited")
 	}
-	// The error names the real cause and points at logs, not an opaque "healthcheck".
-	if !strings.Contains(err.Error(), "not running") || !strings.Contains(err.Error(), "opossum logs db") {
-		t.Errorf("error should report the exited container and suggest logs, got: %v", err)
+	// The error names the real cause and embeds the container's last logs (rather
+	// than an opaque "healthcheck" or a stale `opossum logs` hint the rollback
+	// breaks — the container is removed on failed up).
+	msg := err.Error()
+	if !strings.Contains(msg, "[OPSM-401]") || !strings.Contains(msg, "not running") || !strings.Contains(msg, "last log lines") || !strings.Contains(msg, "log-line db.demo.opossum") {
+		t.Errorf("error should carry code OPSM-401 and embed the exited container's captured logs, got: %v", err)
+	}
+	if strings.Contains(msg, "opossum logs") {
+		t.Errorf("error should not suggest `opossum logs` (rollback removes the container): %v", err)
 	}
 	// Fails fast: it bails after the first failed probe, not all 15.
 	if n := countLines(log(), "exec db.demo.opossum"); n != 1 {
@@ -2583,5 +2589,131 @@ func TestStatsHostAllUnmapped(t *testing.T) {
 	}
 	if strings.Contains(s, "total") {
 		t.Errorf("no total line when nothing is mapped, got:\n%s", s)
+	}
+}
+
+// A service mounting the Docker socket gets an up-front warning: Apple container
+// has no Docker socket, so the mount fails and Docker-driving tools can't work.
+func TestUpWarnsOnDockerSocketMount(t *testing.T) {
+	rt, _ := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"portainer": {Image: "portainer/portainer-ce", Volumes: []string{"/var/run/docker.sock:/var/run/docker.sock"}},
+	})
+	var out bytes.Buffer
+	if err := orchestrator.New(p, rt, "opossum", &out).Up(true); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	if !strings.Contains(out.String(), "[OPSM-204]") || !strings.Contains(out.String(), "docker.sock") || !strings.Contains(out.String(), "no Docker daemon socket") {
+		t.Errorf("mounting the Docker socket should warn with code OPSM-204, got:\n%s", out.String())
+	}
+}
+
+// mutatingVerbs are the container subcommands `up --dry-run` must never issue.
+var mutatingVerbs = []string{"run ", "network create", "delete", "build ", "stop ", "kill ", "network delete", "volume delete"}
+
+// A dry-run resolves the whole project but executes nothing: the fake shim
+// records every invocation it actually receives, and none of the mutating verbs
+// (run/create/delete/…) may appear. The read-only inspects that compute the plan
+// are fine.
+func TestUpDryRunExecutesNothing(t *testing.T) {
+	rt, log := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"db":  {Image: "postgres:16"},
+		"web": {Image: "web:latest", DependsOn: compose.DependsOn{{Name: "db"}}},
+	})
+	var out bytes.Buffer
+	o := orchestrator.New(p, rt, "opossum", &out)
+	o.SetDryRun(true)
+	if err := o.Up(true); err != nil {
+		t.Fatalf("Up (dry-run): %v", err)
+	}
+	lines := log()
+	for _, verb := range mutatingVerbs {
+		if n := countLines(lines, verb); n > 0 {
+			t.Errorf("dry-run must not invoke %q, but the runtime received it %d time(s): %v", verb, n, lines)
+		}
+	}
+	// The plan is surfaced to the user: the startup order and the run commands.
+	s := out.String()
+	if !strings.Contains(s, "Dry run") || !strings.Contains(s, "Startup order: db, web") {
+		t.Errorf("dry-run should print a header and the startup order, got:\n%s", s)
+	}
+	if !strings.Contains(s, "run -d --name db.demo.opossum") ||
+		!strings.Contains(s, "run -d --name web.demo.opossum") {
+		t.Errorf("dry-run should print the run commands it would issue, got:\n%s", s)
+	}
+}
+
+// A dry-run's recorded plan is exactly what a real up would issue: every command
+// the dry-run says it would run appears (verbatim, config-hash aside) in the
+// invocation log of a real up over the same compose. This guards the (b) eval —
+// dry-run output ⊆ real execution — so the plan can't drift from reality.
+func TestUpDryRunPlanMatchesRealUp(t *testing.T) {
+	svcs := func() map[string]*compose.Service {
+		return map[string]*compose.Service{
+			"db":    {Image: "postgres:16", Environment: compose.Environment{"POSTGRES_PASSWORD=secret"}},
+			"cache": {Image: "redis:7"},
+			"web": {
+				Image:     "web:latest",
+				Ports:     []string{"8080:8080"},
+				DependsOn: compose.DependsOn{{Name: "db"}, {Name: "cache"}},
+			},
+		}
+	}
+
+	// Dry-run: capture the recorded plan (the argv it would issue).
+	rtDry, _ := fakeShim(t)
+	oDry := orchestrator.New(project("demo", svcs()), rtDry, "opossum", &bytes.Buffer{})
+	oDry.SetDryRun(true)
+	if err := oDry.Up(true); err != nil {
+		t.Fatalf("Up (dry-run): %v", err)
+	}
+	if len(rtDry.Plan) == 0 {
+		t.Fatal("dry-run recorded no planned commands")
+	}
+
+	// Real up over the same compose: the fake shim logs what actually ran.
+	rtReal, logReal := fakeShim(t)
+	if err := orchestrator.New(project("demo", svcs()), rtReal, "opossum", &bytes.Buffer{}).Up(true); err != nil {
+		t.Fatalf("Up (real): %v", err)
+	}
+	realLog := logReal() // already config-hash-stripped by fakeShim's reader
+
+	for _, planned := range rtDry.Plan {
+		planned = stripConfigHash(planned)
+		if !hasLine(realLog, planned) {
+			t.Errorf("planned command not issued by a real up:\n planned: %q\n log:     %v", planned, realLog)
+		}
+	}
+	// Sanity: the plan actually covers the runs (not just the network).
+	if countLines(rtDry.Plan, "run -d --name") != 3 {
+		t.Errorf("dry-run plan should record all three service runs, got: %v", rtDry.Plan)
+	}
+}
+
+// The --from-docker import path issues `container image load`/`image tag` (and a
+// `docker image save`) OUTSIDE the recording seam, so a dry-run must guard it
+// explicitly: nothing may execute, and the plan records the import.
+func TestUpDryRunFromDockerExecutesNothing(t *testing.T) {
+	rt, log := fakeShim(t)
+	setShimEnv(rt, "IMAGE_ABSENT=demo-api:latest") // the build image isn't present -> import path
+	p := project("demo", map[string]*compose.Service{
+		"api": {Build: &compose.Build{Context: "."}},
+	})
+	var out bytes.Buffer
+	o := orchestrator.New(p, rt, "opossum", &out)
+	o.SetUpOptions(false, false, false, false, true) // --from-docker (must precede SetDryRun)
+	o.SetDryRun(true)
+	if err := o.Up(true); err != nil {
+		t.Fatalf("Up (dry-run --from-docker): %v", err)
+	}
+	lines := log()
+	for _, v := range []string{"image load", "image tag", "run -d"} {
+		if n := countLines(lines, v); n > 0 {
+			t.Errorf("dry-run --from-docker must not execute %q, ran it %d time(s): %v", v, n, lines)
+		}
+	}
+	if !strings.Contains(out.String(), "image load") {
+		t.Errorf("dry-run --from-docker should record the import in the plan, got:\n%s", out.String())
 	}
 }
