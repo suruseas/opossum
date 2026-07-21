@@ -32,9 +32,24 @@ services:
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
 
+  # The allowlist forward proxy: the caged agent's single, enforced exit. It sits
+  # on the DEFAULT (internet-facing) network so it can reach the outside, and
+  # republishes its port to the host — the caged agent, which has no internet of
+  # its own, reaches it via ${OPOSSUM_HOST_GATEWAY}. The allowlist is bind-mounted
+  # (proxy/allowlist), so what the agent may reach is declared in this repo, not
+  # hidden in an image. Default-deny: edit proxy/allowlist to widen it.
+  proxy:
+    build: ./proxy
+    ports:
+      - "8080:8888" # host :8080 -> tinyproxy :8888
+    volumes:
+      - ./proxy/allowlist:/etc/tinyproxy/allowlist:ro
+    profiles: ["caged"]
+
   # The same workroom, but on a host-only network: the agent has NO direct
-  # internet. Its only egress is a host allowlist proxy at ${OPOSSUM_HOST_GATEWAY}
-  # — so the allowlist is enforced, not merely advised. Reuses the image `agent`
+  # internet. Its only egress is the `proxy` above, reached at
+  # ${OPOSSUM_HOST_GATEWAY}:8080 — so the allowlist is enforced, not merely
+  # advised (the internet route is physically gone). Reuses the image `agent`
   # builds (run `opossum build` first). Profiled, so a plain `up`/`run agent`
   # never starts it and its internal network isn't created unless you ask for it:
   #   opossum run --rm agent-caged claude -p "…"
@@ -47,11 +62,12 @@ services:
     mem_limit: 4g
     cpus: 4
     networks: [caged]
+    depends_on: [proxy] # bring the exit up first (`run` starts dependencies)
     environment:
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      # Run an allowlist forward proxy on the host at :8080 (0.0.0.0). With no
-      # internet route, the agent can't bypass it.
+      # The proxy is the only way out. With no internet route, the agent can't
+      # bypass it — HTTPS (CONNECT) is gated by destination against proxy/allowlist.
       HTTPS_PROXY: http://${OPOSSUM_HOST_GATEWAY}:8080
       HTTP_PROXY: http://${OPOSSUM_HOST_GATEWAY}:8080
     profiles: ["caged"]

@@ -30,7 +30,9 @@ func fakeShimInspect(t *testing.T, out string, code int) *runtime.Runtime {
 	t.Helper()
 	dir := t.TempDir()
 	shim := filepath.Join(dir, "c.sh")
-	script := fmt.Sprintf("#!/bin/sh\ncase \"$1\" in\n  inspect) echo %q; exit %d ;;\nesac\nexit 0\n", out, code)
+	// `system status` answers "running" so Ps/Images' liveness probe passes; the
+	// fixed inspect output/code is what the test is actually exercising.
+	script := fmt.Sprintf("#!/bin/sh\ncase \"$1\" in\n  inspect) echo %q; exit %d ;;\n  system) echo 'status running' ;;\nesac\nexit 0\n", out, code)
 	if err := os.WriteFile(shim, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -1602,6 +1604,45 @@ func TestPsHidesMissingContainers(t *testing.T) {
 	// The header is still printed (an empty table, like docker compose).
 	if !strings.Contains(got, "SERVICE") {
 		t.Errorf("expected the header even when empty, got:\n%s", got)
+	}
+}
+
+func TestPsErrorsWhenSystemStopped(t *testing.T) {
+	// The CLI is installed but its daemon is stopped, so every inspect fails. Ps
+	// must NOT render an empty table (which reads as "nothing is running") — it must
+	// fail loudly with the coded [OPSM-405] error. This is the mutation guard for
+	// the SystemRunning probe: drop it and Ps returns an empty table with nil error.
+	rt, _ := fakeShim(t)
+	setShimEnv(rt, "SYSTEM_STOPPED=1")
+	p := project("demo", map[string]*compose.Service{"db": {Image: "postgres:16"}})
+	var out bytes.Buffer
+	err := orchestrator.New(p, rt, "opossum", &out).Ps()
+	if err == nil {
+		t.Fatalf("Ps must error when the container system is stopped, got nil (output: %q)", out.String())
+	}
+	if !strings.Contains(err.Error(), "OPSM-405") {
+		t.Errorf("Ps error should carry the OPSM-405 code, got %q", err.Error())
+	}
+	if strings.Contains(out.String(), "db") {
+		t.Errorf("Ps must not list containers when it couldn't reach the runtime, got:\n%s", out.String())
+	}
+}
+
+func TestImagesErrorsWhenSystemStopped(t *testing.T) {
+	// Same contract as Ps: a stopped daemon makes `image inspect` unanswerable, so
+	// Images must fail with [OPSM-405] rather than print a confident PRESENT=no.
+	rt, _ := fakeShim(t)
+	setShimEnv(rt, "SYSTEM_STOPPED=1")
+	var out bytes.Buffer
+	err := orchestrator.New(imageProject(), rt, "opossum", &out).Images()
+	if err == nil {
+		t.Fatalf("Images must error when the container system is stopped, got nil (output: %q)", out.String())
+	}
+	if !strings.Contains(err.Error(), "OPSM-405") {
+		t.Errorf("Images error should carry the OPSM-405 code, got %q", err.Error())
+	}
+	if strings.Contains(out.String(), "PRESENT") {
+		t.Errorf("Images must not render its table when it couldn't reach the runtime, got:\n%s", out.String())
 	}
 }
 

@@ -383,7 +383,7 @@ func (o *Orchestrator) searchDomain() string {
 // plus their transitive dependencies, leaving unrelated services untouched.
 func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 	if !o.rt.Available() {
-		return fmt.Errorf("the `container` CLI was not found on PATH; install Apple's container runtime first")
+		return ErrRuntimeAbsent()
 	}
 
 	order, err := o.Project.StartupOrder()
@@ -1044,6 +1044,12 @@ func (o *Orchestrator) serviceImage(name string, svc *compose.Service) (ref stri
 // Images lists each service's image, whether opossum builds it, and whether it's
 // present locally — the image-side counterpart to Ps.
 func (o *Orchestrator) Images() error {
+	// Same reasoning as Ps: a stopped daemon makes every `image inspect` fail, which
+	// would print a confident `PRESENT=no` for images that may well be present. Probe
+	// first so `PRESENT` reflects reality rather than "couldn't ask the runtime".
+	if !o.rt.SystemRunning() {
+		return ErrRuntimeStopped()
+	}
 	order, err := o.Project.StartupOrder()
 	if err != nil {
 		return err
@@ -1243,6 +1249,14 @@ func (o *Orchestrator) namedVolumes() []string {
 
 // Ps prints each service, its container name, status, and resolved IP.
 func (o *Orchestrator) Ps() error {
+	// A dead daemon makes every per-service inspect look like "container absent",
+	// which would render as an empty table — a lie ("nothing is running") when the
+	// truth is the runtime is unreachable. Probe the system once up front so an
+	// empty `ps` means genuinely empty, not "couldn't ask". (The CLI-absent case is
+	// caught earlier by the root preflight; here the CLI is present but stopped.)
+	if !o.rt.SystemRunning() {
+		return ErrRuntimeStopped()
+	}
 	order, err := o.Project.StartupOrder()
 	if err != nil {
 		return err
@@ -1481,7 +1495,7 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 		return fmt.Errorf("unknown service %q", service)
 	}
 	if !o.rt.Available() {
-		return fmt.Errorf("the `container` CLI was not found on PATH; install Apple's container runtime first")
+		return ErrRuntimeAbsent()
 	}
 
 	// Keep the one-off's own stdout clean (e.g. an MCP server's JSON-RPC over

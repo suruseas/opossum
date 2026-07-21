@@ -175,6 +175,28 @@ func (r *Runtime) Available() bool {
 	return err == nil
 }
 
+// SystemRunning reports whether the container system (daemon) is actually up —
+// not merely installed. Available only checks the CLI is on PATH; the system can
+// be present but stopped, in which case every real call fails. A read-only
+// command that silently returns "nothing" when the system is down (an empty `ps`
+// table, `PRESENT=no`) would be lying, so those commands probe with this first.
+// `container system status` is the canonical liveness signal — doctor uses the
+// same one — printing a `status running` line when the daemon is up.
+func (r *Runtime) SystemRunning() bool {
+	out, err := r.capture("system", "status")
+	if err != nil {
+		return false
+	}
+	// Mirror doctor's parse: a `status running` field means the daemon is up.
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 2 && f[0] == "status" && strings.EqualFold(f[1], "running") {
+			return true
+		}
+	}
+	return false
+}
+
 // stream runs a command with stdio attached to the parent process.
 func (r *Runtime) stream(args ...string) error {
 	if r.recordIfDryRun(args) {

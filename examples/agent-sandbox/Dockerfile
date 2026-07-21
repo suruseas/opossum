@@ -4,9 +4,11 @@
 # git for the agent's clone / commit / push workflows.
 FROM node:22-bookworm-slim
 
-# git for the agent's version-control work; ca-certificates for HTTPS to the API.
+# git for the agent's version-control work; ca-certificates for HTTPS to the API;
+# curl both for the agent's own fetches and to sanity-check egress in the caged
+# variant (it honours HTTPS_PROXY, so it proves the allowlist end to end).
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git ca-certificates \
+ && apt-get install -y --no-install-recommends git ca-certificates curl \
  && rm -rf /var/lib/apt/lists/*
 
 # Claude Code, installed globally so it's on PATH for every user.

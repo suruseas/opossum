@@ -103,6 +103,15 @@ list; codes are add-only and never change meaning.
 - **`[OPSM-401]` … `container is not running (state "stopped"); its last log
   lines:`** → the dependency crashed at startup; the embedded logs show why (e.g.
   the Postgres `initdb` message above). Fix the dependency, not the dependent.
+- **`[OPSM-404]` … `the container CLI was not found on PATH`** → Apple's `container`
+  isn't installed. Every runtime command (`up`, `ps`, `images`, `logs`, `stats`, …)
+  fails this way with a non-zero exit — an empty `ps` table would be a lie. Install
+  it (`brew install container`, or the `.pkg` from the releases page), then
+  `container system start`. `config` still works without it (it only parses compose).
+- **`[OPSM-405]` … `the container system isn't running`** → the CLI is installed but
+  the daemon is stopped. `ps`/`images` fail with a non-zero exit instead of printing
+  an empty table / `PRESENT=no` (which would look like "nothing is here"). Run
+  `container system start` (or `opossum doctor` to check the whole environment).
 - **`[OPSM-102]` … `services <a,b> share named volume "<v>"`** → Apple `container`
   attaches a named volume to only one running container; use a bind mount for
   shared data, or don't run both at once.
@@ -139,6 +148,8 @@ Every `[OPSM-NNN]` opossum can emit (add-only; grouped 1xx storage / 2xx network
 - `OPSM-401` — a dependency's container exited before becoming healthy (logs embedded).
 - `OPSM-402` — orphan containers left by services no longer in the compose.
 - `OPSM-403` — a `service_healthy` dependency defines no healthcheck (not waited on).
+- `OPSM-404` — the `container` CLI isn't installed / not on PATH (every runtime command fails).
+- `OPSM-405` — the `container` system (daemon) is installed but not running (`ps`/`images` fail loudly).
 - `OPSM-501` — unsupported top-level compose field(s), ignored.
 - `OPSM-502` — unsupported service compose field(s), ignored (e.g. `network_mode: host`).
 - `OPSM-601` — a `watch` rebuild action failed.
@@ -164,5 +175,7 @@ Every `[OPSM-NNN]` opossum can emit (add-only; grouped 1xx storage / 2xx network
 
 - `0` — success.
 - non-zero — any failure: a runtime error, a load/validation error (bad compose), an
-  unknown service, a health-gate failure, or `doctor` finding an unhealthy check.
+  unknown service, a health-gate failure, the `container` CLI being absent
+  (`[OPSM-404]`) or its system stopped (`[OPSM-405]`, `ps`/`images`), or `doctor`
+  finding an unhealthy check.
   There are no granular per-cause codes today; read stderr for the message.

@@ -38,7 +38,22 @@ func run(args []string) int {
 		return ""
 	}
 
+	// SYSTEM_STOPPED simulates an installed-but-stopped runtime: with the daemon
+	// down, EVERY invocation fails (this is what makes `inspect` fail and, absent
+	// the liveness probe, drove the empty-`ps`/`PRESENT=no` bug). Modelling the
+	// whole-runtime failure — not just `system status` — keeps the fake faithful.
+	if os.Getenv("SYSTEM_STOPPED") != "" {
+		fmt.Fprintln(os.Stderr, "Error: the container system is not running")
+		return 1
+	}
+
 	switch args[0] {
+	case "system":
+		// `system status` is the daemon-liveness probe (Ps/Images call it before
+		// rendering); report running (the stopped case is handled above).
+		if arg(1) == "status" {
+			fmt.Println("status running")
+		}
 	case "inspect":
 		// Build the labels object from INSPECT_PROJECT and any recorded config-hash.
 		var labels []string

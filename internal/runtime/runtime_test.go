@@ -207,6 +207,22 @@ func TestFidelityDNSDomainExists(t *testing.T) {
 	}
 }
 
+func TestFidelitySystemRunning(t *testing.T) {
+	// The real `container system status` output when the daemon is up: a table with
+	// a `status running` field. SystemRunning must read that as running.
+	const realStatus = "FIELD              VALUE\nstatus             running\nappRoot            /Users/x\n"
+	if !replayShim(t, realStatus, 0).SystemRunning() {
+		t.Error("SystemRunning should be true for a `status running` report")
+	}
+	// A stopped system (some builds print `status stopped`, others error) is not running.
+	if replayShim(t, "status             stopped\n", 0).SystemRunning() {
+		t.Error("SystemRunning should be false for a `status stopped` report")
+	}
+	if replayShim(t, "Error: ...", 1).SystemRunning() {
+		t.Error("SystemRunning should be false when `system status` errors")
+	}
+}
+
 func TestFidelityEnsureNetwork(t *testing.T) {
 	// Real "already exists" failure must be treated as success, and reported as
 	// NOT created (so callers don't roll it back).

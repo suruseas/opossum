@@ -11,8 +11,8 @@ the agent is allowed to touch**:
 |----------|-------------|------|
 | Files it sees | `volumes:` (bind mount) | `./work:/work` — nothing else on your disk |
 | Secrets it holds | `environment:` from `.env` | the auth token, and only that |
-| How far it reaches | `networks:` | direct internet (default), or host-only + a proxy (caged) |
-| Reaching the host | `${OPOSSUM_HOST_GATEWAY}` | the host proxy, for the caged variant |
+| How far it reaches | `networks:` | direct internet (default), or host-only + an allowlist proxy (caged) |
+| Reaching the host | `${OPOSSUM_HOST_GATEWAY}` | the caged agent's route to the proxy service |
 
 Everything an agent needs to be boxed in is already ordinary compose vocabulary.
 
@@ -64,26 +64,59 @@ already-isolating VM, rather than reaching for a root escape hatch.
 ## Constraining egress (the caged variant)
 
 By default the agent reaches the Claude API — and the rest of the internet —
-directly. When you don't want that, the `agent-caged` service puts the workroom on
-a **host-only** network (`internal: true`): it has no direct internet at all, so
-its only way out is a proxy you run on the host, reached via
-`${OPOSSUM_HOST_GATEWAY}`. Because the internet route is physically gone, the
-allowlist the proxy enforces can't be bypassed — see the main README's
-[Constraining egress (agent sandboxes)](../../README.md#constraining-egress-agent-sandboxes)
-section for the full pattern.
+directly. When you don't want that, the `agent-caged` variant fences its egress to
+an allowlist, and **the whole cage is declared in this one compose file** — no
+proxy to set up on the host:
+
+- **`agent-caged`** sits on a **host-only** network (`caged: internal: true`): it
+  has no direct internet at all.
+- **`proxy`** is a small [tinyproxy](https://tinyproxy.github.io/) forward proxy on
+  the normal network (so *it* can reach the internet), republished to the host. The
+  agent reaches it at `${OPOSSUM_HOST_GATEWAY}:8080` via `HTTPS_PROXY`.
+- **`proxy/allowlist`** is the declaration of where the agent may go — one host
+  regex per line, **default-deny**. As shipped it permits only `anthropic.com` /
+  `claude.ai`. Add a line to widen it.
+
+Because the agent has no internet route of its own, the proxy is its *only* way out,
+so the allowlist is enforced, not merely advised.
 
 ```sh
-# 1. run an allowlist forward proxy on the host, bound to 0.0.0.0:8080, that
-#    permits only api.anthropic.com (and whatever else the task legitimately needs)
-# 2. then:
-opossum run --rm agent-caged \
+opossum build                       # builds the agent and proxy images
+opossum --profile caged run --rm agent-caged \
   claude --dangerously-skip-permissions -p "…task…"
 ```
 
-`agent-caged` is behind a `caged` profile, so a plain `opossum up` (or
-`run agent`) never starts it and its internal network isn't created — you opt in
-by naming it. Pair it with `cap_drop: [ALL]` if you want to stop the agent from
-reconfiguring its own networking.
+The `--profile caged` opts into the cage: without it, neither the internal network
+nor the proxy is created, and a plain `opossum up` (or `run agent`) never starts
+them. `run` brings the `proxy` dependency up first, then runs the agent.
+
+Sanity-check the fence yourself (the image includes `curl`, which honours
+`HTTPS_PROXY`):
+
+```sh
+# allowed → reaches the API (an HTTP status, e.g. 404 for a bare GET)
+opossum --profile caged run --rm agent-caged \
+  curl -s -o /dev/null -w '%{http_code}\n' https://api.anthropic.com/
+# not on the allowlist → refused by the proxy
+opossum --profile caged run --rm agent-caged \
+  curl -sS -o /dev/null https://example.org/ ; echo "exit $?"
+```
+
+Notes:
+
+- It's a **CONNECT** proxy: it gates HTTPS by destination host without decrypting
+  it (no MITM, no CA to install) — enough to fence *where* the agent goes.
+- The proxy port is published on the host (`0.0.0.0:8080`), so on an untrusted LAN
+  other machines can use it as a relay to the allowed hosts. For a shared network,
+  add a tinyproxy `Allow` line (or bind the port to a specific address).
+- "No internet of its own" fences the *internet*: the agent can still reach
+  services your Mac exposes on `0.0.0.0` via `${OPOSSUM_HOST_GATEWAY}` (that's how
+  it reaches the proxy). Don't run other host services you don't want it touching.
+- Pair it with `cap_drop: [ALL]` if you want to stop the agent from reconfiguring
+  its own networking.
+- See the main README's
+  [Constraining egress (agent sandboxes)](../../README.md#constraining-egress-agent-sandboxes)
+  for the underlying network model.
 
 ## Limits — what the VM does and doesn't protect
 
@@ -99,8 +132,8 @@ reconfiguring its own networking.
    The guest has cgroup v2, overlayfs, and `--cap-add ALL` available — the pieces
    a rootful dockerd needs — but running one is left as future work.
 5. **Egress is declarative.** `network_mode: none` (full block) or an `internal:`
-   network + a host proxy (allowlist) let you decide how far the agent reaches —
-   see the caged variant above.
+   network + the bundled allowlist proxy let you decide how far the agent reaches,
+   all in the compose file — see the caged variant above.
 
 ## Resources
 

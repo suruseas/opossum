@@ -30,6 +30,11 @@ func main() {
 		if arg(1) == "dns" && arg(2) == "list" {
 			fmt.Print("DOMAIN\nopossum\n")
 		}
+		// `system status` is the daemon-liveness probe Ps/Images run first; report
+		// running so those CLI-level tests reach their normal output.
+		if arg(1) == "status" {
+			fmt.Print("FIELD  VALUE\nstatus  running\n")
+		}
 	case "network":
 		if arg(1) == "create" {
 			fmt.Println(arg(2))

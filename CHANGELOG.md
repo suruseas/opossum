@@ -6,6 +6,31 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-07-21
+
+### Added
+
+- The `examples/agent-sandbox` "caged" variant now ships a **self-contained egress
+  allowlist**: a small forward-proxy service and a `proxy/allowlist` file declare,
+  in the compose file itself, exactly which hosts a sandboxed agent may reach
+  (default-deny). The agent runs on a host-only network with no internet of its
+  own, so the proxy is its only way out and the allowlist is enforced rather than
+  advised — no host-side proxy to set up. See the example's README.
+
+### Changed
+
+- `opossum ps` and `opossum images` now fail with a clear error (`[OPSM-405]`) and a
+  non-zero exit when Apple's `container` system is installed but **not running**,
+  instead of printing an empty table / `PRESENT=no` that looks like "nothing is
+  here". Start the system with `container system start` (or run `opossum doctor`).
+- When Apple's `container` CLI isn't installed, **every** runtime command now
+  fails the same way — a clear, actionable error (`[OPSM-404]` with the
+  `brew install container` / `container system start` steps) and a non-zero exit —
+  instead of some commands quietly succeeding with misleading output. Previously
+  `ps` printed an empty table (looking like "nothing is running") and `images`
+  reported `PRESENT=no`, both exiting 0. `config` still works without the CLI
+  since it only parses your compose files.
+
 ## [0.10.0] - 2026-07-17
 
 ### Added
@@ -421,7 +446,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/suruseas/opossum/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/suruseas/opossum/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/suruseas/opossum/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/suruseas/opossum/compare/v0.7.0...v0.8.0

@@ -56,7 +56,50 @@ func newRootCmd() *cobra.Command {
 		buildCmd(), pullCmd(), killCmd(), runCmd(),
 		importCmd(), configCmd(), doctorCmd(), cpCmd(), watchCmd(),
 	)
+
+	// Preflight: every runtime-touching command needs Apple's `container` CLI on
+	// PATH. Check once here so all of them fail the same way — a coded, actionable
+	// error (OPSM-404) and a non-zero exit — instead of each command inventing its
+	// own signal (an empty `ps` table, a raw exec error, a bespoke message).
+	// Commands that don't touch the runtime are exempt (see runtimePreflightExempt).
+	root.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
+		if cmdSkipsRuntimePreflight(cmd) {
+			return nil
+		}
+		if !runtime.New().Available() {
+			return orchestrator.ErrRuntimeAbsent()
+		}
+		return nil
+	}
 	return root
+}
+
+// runtimePreflightExempt names commands that must run without the `container` CLI
+// installed: `config` only parses/renders compose, `doctor` self-diagnoses the
+// runtime (and reports its absence itself), and cobra's own help/completion
+// machinery must never be gated. A command is exempt if its own name or any
+// ancestor's name is listed. The root command is handled separately (bare
+// `opossum` prints help and touches no runtime), so "opossum" is deliberately
+// absent here — listing it would exempt every command via the ancestor walk.
+var runtimePreflightExempt = map[string]bool{
+	"config":           true,
+	"doctor":           true,
+	"help":             true,
+	"completion":       true,
+	"__complete":       true, // cobra's hidden shell-completion driver
+	"__completeNoDesc": true,
+}
+
+func cmdSkipsRuntimePreflight(cmd *cobra.Command) bool {
+	if cmd.Parent() == nil {
+		return true // the root command itself: prints help, touches no runtime
+	}
+	for c := cmd; c != nil; c = c.Parent() {
+		if runtimePreflightExempt[c.Name()] {
+			return true
+		}
+	}
+	return false
 }
 
 func watchCmd() *cobra.Command {

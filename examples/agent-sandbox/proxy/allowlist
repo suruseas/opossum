@@ -1,0 +1,5 @@
+# The destinations the caged agent may reach — one POSIX-extended regex per line.
+# Default-deny: anything not listed here is refused. This is the box's egress
+# permission, declared in the repo. These entries let Claude Code reach the API.
+(^|\.)anthropic\.com$
+(^|\.)claude\.ai$
