@@ -6,6 +6,78 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-07-23
+
+### Added
+
+- `up`/`run` now print a one-line `note:` when the compose file has fields opossum
+  ignores (e.g. `dns_search`, `container_name`), pointing to `opossum config` for
+  the full list — so a dropped field never silently looks like it took effect. It's
+  a low-key note, not a warning; `--verbose` still lists each ignored field. AGENTS.md
+  now also documents that `dns`/`dns_search` are ignored and that service discovery
+  is automatic (bare service names under `<project>.opossum`), so there's no reason
+  to set them.
+- When a service fails to start because a named volume is **already attached to
+  another running container** (Apple `container` attaches a named volume to only
+  one running container at a time), opossum now decodes the cryptic virtualization
+  error (`VZErrorDomain Code=2 "The storage device attachment is invalid"`) into a
+  clear `[OPSM-103]` message that **names the volume and the container holding
+  it** — including a holder from a *different* project — and tells you how to free
+  it. The same conflict is also flagged as a pre-flight warning at `up` time when
+  the holder is already running, so you see it before the failed start.
+- `opossum run --audit` reports what a one-off did after it finishes — the
+  "verify" half of declaring what an agent may do: the workspace file diff
+  (added/changed/deleted + content hashes, from an APFS snapshot taken just before
+  the run), the egress destinations (read from the allowlist proxy's log when the
+  run routes through one; otherwise marked *unobserved* rather than a misleading
+  blank), and the exit code. `--audit-format json` gives a machine-readable report
+  (like `doctor --format json`); the container's own stdout goes to stderr so the
+  report owns stdout.
+- A service can declare the MCP servers an agent inside it should use with the
+  `x-opossum-mcp-tools` compose extension, and opossum generates a `.mcp.json` and
+  mounts it read-only at `/run/opossum/mcp.json` — so "which tools this agent has"
+  is declared in the compose file, not hand-wired. Each entry is another service
+  (`svc`, `svc:port`, `svc:port/path` — reached by name on the shared network) or an
+  explicit `name=url`. Pass it to Claude Code with `--mcp-config /run/opossum/mcp.json`.
+  MVP is HTTP-transport MCP servers. See `examples/agent-sandbox`.
+- `opossum ws snapshot [name]` / `ws ls` / `ws rollback <name>` snapshot and roll
+  back a workspace directory (`--path`, default `./work`) using APFS copy-on-write
+  clones — a snapshot is near-instant and uses almost no extra disk, so an agent
+  can try something risky and reset in an instant. `rollback` saves the current
+  state first (reversible); snapshots live in `.opossum-snapshots/` beside the
+  workspace; on a non-APFS filesystem it falls back to a full copy and says so.
+  `ws rm <name>…` deletes named snapshots and `ws prune` clears out the auto-saves
+  `rollback` accumulates (`--keep N` to keep the newest few, `--all` for every
+  snapshot), so they don't pile up.
+- `OPOSSUM_DOCKER_BIN` overrides the `docker` CLI that `opossum import` shells out
+  to (mirroring `OPOSSUM_CONTAINER_BIN`) — useful when docker lives on a
+  nonstandard path or you want `import` to use a specific docker-compatible CLI.
+
+### Changed
+
+- When the `container` runtime isn't running, a **mutating** command (`up`, `run`,
+  `build`, `pull`, `down`, …) now **starts it automatically** (`container system
+  start` — a light, idempotent launchd start) and proceeds, printing a one-line
+  notice (`[OPSM-406]`) that also explains *why* it was needed. Previously `up`
+  began work and then failed mid-way with the runtime's raw error. Read-only
+  commands (`ps`/`images`) still report `[OPSM-405]` without starting anything (a
+  read shouldn't have a side effect), and both messages now say why the runtime
+  needs starting. Opt out of auto-start with `OPOSSUM_NO_AUTO_START`.
+- Clearer, more actionable error messages across common failures (first pass of a
+  broader audit): a malformed compose file now says it's invalid YAML and where to
+  look (instead of a raw parser dump); `depends_on`/`secrets`/duration/memory/cpus
+  mistakes now show the fix or a valid example; an unknown service name lists the
+  services the project actually defines; `snapshot not found` points at `opossum ws
+  ls`; and failing to create a bind mount's host directory now warns (`[OPSM-104]`)
+  with the fix instead of failing silently later. The guiding rule — every error
+  says what happened, why, and what to do next.
+- The `examples/agent-sandbox` **caged** variant now shows a working MCP tool: an
+  agent whose internet is fenced to an allowlist can still use one host tool. The
+  tool is declared as an explicit URL through the host gateway (an internal network
+  has no name resolution) and `NO_PROXY` keeps that traffic off the egress proxy —
+  so the caged agent reaches only the allowlisted internet plus the one declared
+  tool, and nothing else.
+
 ## [0.11.0] - 2026-07-21
 
 ### Added
@@ -446,7 +518,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/suruseas/opossum/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/suruseas/opossum/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/suruseas/opossum/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/suruseas/opossum/compare/v0.8.0...v0.9.0

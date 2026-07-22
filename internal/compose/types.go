@@ -65,6 +65,13 @@ type Service struct {
 	Deploy  *Deploy  `yaml:"deploy"`  // only deploy.resources.limits.{memory,cpus} is acted on
 	Develop *Develop `yaml:"develop"` // develop.watch drives `opossum watch` (file-change sync)
 
+	// MCPTools declares the MCP (Model Context Protocol) servers to wire up for an
+	// agent in this service: opossum generates a `.mcp.json` and mounts it in. It's
+	// a compose `x-` extension (other tools ignore it). Each entry is either another
+	// service reachable by name (`svc`, `svc:port`, `svc:port/path`) or an explicit
+	// `name=url`. See internal/orchestrator/mcp.go. (#258)
+	MCPTools []string `yaml:"x-opossum-mcp-tools"`
+
 	// Unsupported holds any compose keys opossum doesn't act on (e.g.
 	// container_name, restart), collected during parsing so it can warn rather
 	// than silently ignore them.
@@ -192,7 +199,7 @@ func parseMemoryBytes(s string) (float64, error) {
 	}
 	num, err := strconv.ParseFloat(s[:end], 64)
 	if err != nil {
-		return 0, fmt.Errorf("invalid memory value %q", s)
+		return 0, fmt.Errorf("invalid memory value %q — use a number with an optional unit, e.g. \"512m\" or \"2g\"", s)
 	}
 	unit := strings.ToLower(strings.TrimSpace(s[end:]))
 	unit = strings.TrimSuffix(unit, "ib") // mib -> m
@@ -200,7 +207,7 @@ func parseMemoryBytes(s string) (float64, error) {
 	mult := map[string]float64{"": 1, "k": 1 << 10, "m": 1 << 20, "g": 1 << 30, "t": 1 << 40, "p": 1 << 50}
 	f, ok := mult[unit]
 	if !ok {
-		return 0, fmt.Errorf("invalid memory unit in %q", s)
+		return 0, fmt.Errorf("invalid memory unit in %q — use k, m, g, or t (e.g. \"512m\")", s)
 	}
 	return num * f, nil
 }
@@ -213,7 +220,7 @@ func parseCPUs(s string) (float64, error) {
 	}
 	f, err := strconv.ParseFloat(s, 64)
 	if err != nil {
-		return 0, fmt.Errorf("invalid cpus value %q", s)
+		return 0, fmt.Errorf("invalid cpus value %q — use a number, e.g. \"1.5\" or \"2\"", s)
 	}
 	if f < 0 {
 		return 0, fmt.Errorf("cpus must not be negative, got %q", s)
@@ -814,5 +821,9 @@ func parseDuration(s string, def time.Duration) (time.Duration, error) {
 	if s == "" {
 		return def, nil
 	}
-	return time.ParseDuration(s)
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("%q is not a duration — use a unit, e.g. 30s, 1m, or 500ms", s)
+	}
+	return d, nil
 }

@@ -32,6 +32,43 @@ services:
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
 
+  # An HTTP MCP server, offered to the agent below as a tool. It's an ordinary
+  # service on the shared network — nothing special — reachable by name. MVP wiring
+  # is HTTP-transport MCP servers (stdio has no cross-container stdin path).
+  terraform:
+    image: hashicorp/terraform-mcp-server
+    command: ["streamable-http", "--transport-host", "0.0.0.0"] # bind all interfaces
+    ports:
+      # host 8091 (not 8080 — the caged proxy uses that); the normal agent reaches
+      # it by network name (container port 8080), the caged agent via host 8091.
+      - "8091:8080"
+    profiles: ["tools", "caged"] # available to both the normal and caged tool variants
+
+  # The workroom, wired with a tool. Same box as `agent`, plus a declared MCP
+  # server: `x-opossum-mcp-tools` names services this agent should use as tools, and
+  # opossum generates a `.mcp.json` and mounts it at /run/opossum/mcp.json — no
+  # hand-writing URLs. Pass it to Claude Code with `--mcp-config`:
+  #   opossum --profile tools run --rm agent-tools \
+  #     claude --dangerously-skip-permissions --mcp-config /run/opossum/mcp.json \
+  #     -p "use the terraform tools to …"
+  # Reuses the image `agent` builds (run `opossum build` first).
+  agent-tools:
+    image: agent-sandbox-agent:latest
+    user: node
+    working_dir: /work
+    volumes:
+      - ./work:/work
+    mem_limit: 4g
+    cpus: 4
+    depends_on: [terraform] # bring the tool server up first (`run` starts dependencies)
+    # The tools face of the capability manifest: opossum turns each entry into an
+    # HTTP MCP entry (here http://terraform:8080/mcp, reached by name on the network).
+    x-opossum-mcp-tools: [terraform]
+    environment:
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    profiles: ["tools"]
+
   # The allowlist forward proxy: the caged agent's single, enforced exit. It sits
   # on the DEFAULT (internet-facing) network so it can reach the outside, and
   # republishes its port to the host — the caged agent, which has no internet of
@@ -62,12 +99,20 @@ services:
     mem_limit: 4g
     cpus: 4
     networks: [caged]
-    depends_on: [proxy] # bring the exit up first (`run` starts dependencies)
+    depends_on: [proxy, terraform] # bring the exit AND the tool server up first
+    # A tool on a caged agent: it has no name resolution and its only internet is
+    # the proxy, so the tool is declared as an explicit URL through the host gateway
+    # (not a bare service name). NO_PROXY below keeps that tool traffic off the
+    # allowlist proxy — the tool is a granted capability, not open internet.
+    x-opossum-mcp-tools: ["terraform=http://${OPOSSUM_HOST_GATEWAY}:8091/mcp"]
     environment:
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      # The proxy is the only way out. With no internet route, the agent can't
-      # bypass it — HTTPS (CONNECT) is gated by destination against proxy/allowlist.
+      # The proxy is the only way out for the INTERNET. With no internet route, the
+      # agent can't bypass it — HTTPS (CONNECT) is gated against proxy/allowlist.
       HTTPS_PROXY: http://${OPOSSUM_HOST_GATEWAY}:8080
       HTTP_PROXY: http://${OPOSSUM_HOST_GATEWAY}:8080
+      # …but the declared tool at the host gateway is a granted capability, not
+      # internet egress, so it bypasses the allowlist proxy.
+      NO_PROXY: ${OPOSSUM_HOST_GATEWAY}
     profiles: ["caged"]

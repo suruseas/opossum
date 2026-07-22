@@ -221,7 +221,7 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 			}
 			var m map[string]any
 			if err := yaml.Unmarshal(raw, &m); err != nil {
-				return nil, fmt.Errorf("parsing %s: %w", path, err)
+				return nil, fmt.Errorf("compose file %s is not valid YAML: %w\n  check the indentation and quoting near the line the parser names above", path, err)
 			}
 			if merged == nil {
 				merged = m
@@ -236,10 +236,17 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 
 	var f composeFile
 	if err := yaml.Unmarshal(data, &f); err != nil {
-		return nil, fmt.Errorf("parsing %s: %w", paths[0], err)
+		// This decode runs the services' custom unmarshalers, so the error may be a
+		// real YAML syntax problem OR a semantic one (a bad duration/memory/cpus
+		// value, which already carries its own fix). Only frame the former as invalid
+		// YAML — the library prefixes those with "yaml:".
+		if strings.HasPrefix(err.Error(), "yaml:") {
+			return nil, fmt.Errorf("compose file %s is not valid YAML: %w\n  check the indentation and quoting near the line the parser names above", paths[0], err)
+		}
+		return nil, fmt.Errorf("compose file %s: %w", paths[0], err)
 	}
 	if len(f.Services) == 0 {
-		return nil, fmt.Errorf("%s defines no services", paths[0])
+		return nil, fmt.Errorf("%s defines no services — add a top-level `services:` block with at least one service", paths[0])
 	}
 
 	p := &Project{
@@ -318,7 +325,7 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 		for _, ref := range svc.Secrets {
 			sec, ok := f.Secrets[ref.Source]
 			if !ok {
-				return nil, fmt.Errorf("service %q references undefined secret %q", name, ref.Source)
+				return nil, fmt.Errorf("service %q references undefined secret %q — declare it under top-level secrets: with a file:, or remove the reference", name, ref.Source)
 			}
 			if sec.External {
 				return nil, fmt.Errorf("service %q: external secret %q is not supported (only file-based secrets)", name, ref.Source)
@@ -358,7 +365,7 @@ func (p *Project) validateDeps() error {
 		for _, dep := range svc.DependsOn {
 			target, ok := p.Services[dep.Name]
 			if !ok {
-				return fmt.Errorf("service %q depends on unknown service %q", name, dep.Name)
+				return fmt.Errorf("service %q depends on unknown service %q — define %q under services: or remove it from depends_on", name, dep.Name, dep.Name)
 			}
 			switch dep.Condition {
 			case ConditionStarted, ConditionCompleted:
@@ -370,7 +377,7 @@ func (p *Project) validateDeps() error {
 					return fmt.Errorf("service %q requires %q to be healthy, but %q is depended on to complete (run-to-completion services stop, so they can't stay healthy)", name, dep.Name, dep.Name)
 				}
 			default:
-				return fmt.Errorf("service %q: unsupported depends_on condition %q for %q", name, dep.Condition, dep.Name)
+				return fmt.Errorf("service %q: unsupported depends_on condition %q for %q — use service_started, service_healthy, or service_completed_successfully", name, dep.Condition, dep.Name)
 			}
 		}
 	}

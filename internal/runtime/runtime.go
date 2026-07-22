@@ -159,14 +159,15 @@ func needsQuote(a string) bool {
 	return false
 }
 
-// New returns a Runtime. The binary can be overridden with OPOSSUM_CONTAINER_BIN
-// (useful for tests or a fake shim).
+// New returns a Runtime. The binary can be overridden with OPOSSUM_CONTAINER_BIN,
+// and the docker CLI used by `import` with OPOSSUM_DOCKER_BIN (both useful for
+// tests or a fake shim, or to point `import` at docker on a nonstandard path).
 func New() *Runtime {
 	bin := os.Getenv("OPOSSUM_CONTAINER_BIN")
 	if bin == "" {
 		bin = "container"
 	}
-	return &Runtime{Bin: bin}
+	return &Runtime{Bin: bin, DockerBin: os.Getenv("OPOSSUM_DOCKER_BIN")}
 }
 
 // Available reports whether the container binary can be found.
@@ -195,6 +196,20 @@ func (r *Runtime) SystemRunning() bool {
 		}
 	}
 	return false
+}
+
+// StartSystem starts the container system (its apiserver launchd service). It's
+// idempotent — starting an already-running system succeeds — and light: it starts
+// the service, it doesn't boot a VM. opossum calls it to auto-start a stopped
+// runtime before a mutating command.
+func (r *Runtime) StartSystem() error {
+	if out, err := r.capture("system", "start"); err != nil {
+		if s := strings.TrimSpace(out); s != "" {
+			return fmt.Errorf("%w\n%s", err, s)
+		}
+		return err
+	}
+	return nil
 }
 
 // stream runs a command with stdio attached to the parent process.
@@ -559,7 +574,46 @@ func (r *Runtime) Run(o RunOptions) error {
 		args = append(args, o.Entrypoint[1:]...)
 	}
 	args = append(args, o.Command...)
+	if o.Detach {
+		// A detached `run` returns quickly (it just starts the container), so
+		// capturing its stderr is cheap — and lets a caller decode a cryptic
+		// bootstrap failure (e.g. a VZError) into a coded diagnostic. Foreground
+		// runs stream directly (their stderr is the container's own output, which
+		// can be unbounded).
+		var stderr bytes.Buffer
+		if err := r.streamCaptureStderr(&stderr, args...); err != nil {
+			return &RunError{Err: err, Stderr: stderr.String()}
+		}
+		return nil
+	}
 	return r.stream(args...)
+}
+
+// RunError wraps a failed detached `container run` with its captured stderr, so a
+// caller can decode a cryptic runtime failure (e.g. a VZError attach conflict)
+// into a coded diagnostic. It unwraps to the underlying exec error.
+type RunError struct {
+	Err    error
+	Stderr string
+}
+
+func (e *RunError) Error() string { return e.Err.Error() }
+func (e *RunError) Unwrap() error { return e.Err }
+
+// streamCaptureStderr is stream but also copies the child's stderr into capture
+// (live to the user's stderr AND the buffer), so a caller can inspect the failure
+// output without changing what the user sees.
+func (r *Runtime) streamCaptureStderr(capture io.Writer, args ...string) error {
+	if r.recordIfDryRun(args) {
+		return nil
+	}
+	r.trace(args)
+	cmd := r.newCmd(r.baseCtx(), args...)
+	cmd.WaitDelay = 2 * time.Second
+	cmd.Stdout = r.stdoutW()
+	cmd.Stderr = io.MultiWriter(os.Stderr, capture)
+	cmd.Stdin = os.Stdin
+	return cmd.Run()
 }
 
 // Exec runs a command inside a running container and returns an error if it
@@ -811,14 +865,36 @@ type inspectResult struct {
 			HostPort      int    `json:"hostPort"`
 			Proto         string `json:"proto"`
 		} `json:"publishedPorts"`
+		Mounts []struct {
+			Type struct {
+				Volume struct {
+					Name string `json:"name"`
+				} `json:"volume"`
+			} `json:"type"`
+		} `json:"mounts"`
 	} `json:"configuration"`
+}
+
+// volumeNames returns the named volumes this container mounts (empty for bind
+// mounts). Apple `container` attaches each named volume as an exclusive block
+// device, so this is how opossum finds which running container is holding a
+// volume another service is trying to attach.
+func (res inspectResult) volumeNames() []string {
+	var out []string
+	for _, m := range res.Configuration.Mounts {
+		if n := m.Type.Volume.Name; n != "" {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // ContainerSummary is one entry from `container ls -a`.
 type ContainerSummary struct {
-	Name   string
-	State  string
-	Labels map[string]string
+	Name    string
+	State   string
+	Labels  map[string]string
+	Volumes []string // named volumes this container mounts (for attach-conflict decode)
 }
 
 // List returns every container (running or not) with its name, state, and labels,
@@ -835,9 +911,10 @@ func (r *Runtime) List() []ContainerSummary {
 	summaries := make([]ContainerSummary, 0, len(results))
 	for _, res := range results {
 		summaries = append(summaries, ContainerSummary{
-			Name:   res.Configuration.ID,
-			State:  res.Status.State,
-			Labels: res.Configuration.Labels,
+			Name:    res.Configuration.ID,
+			State:   res.Status.State,
+			Labels:  res.Configuration.Labels,
+			Volumes: res.volumeNames(),
 		})
 	}
 	return summaries

@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,6 +44,27 @@ func TestNoUncodedWarnings(t *testing.T) {
 		}
 		if strings.Contains(string(b), `"warning:`) {
 			t.Errorf("%s emits a bare uncoded warning (a %q string literal) — route it through o.warnf(code, …) so it carries an [OPSM-NNN] code", name, "warning:")
+		}
+	}
+}
+
+// The runtime-stopped error, the auto-start notice, and the auto-start-failed
+// error must all TEACH why the runtime needs starting (not just name the command),
+// so an agent that reads "doesn't start on demand" won't loop. Guards the #271
+// requirement that the reason text ships in every runtime-not-running message.
+func TestRuntimeMessagesExplainWhy(t *testing.T) {
+	const why = "doesn't start on demand"
+	cases := map[string]string{
+		"ErrRuntimeStopped":         ErrRuntimeStopped().Error(),
+		"NoticeRuntimeAutoStart":    NoticeRuntimeAutoStart(),
+		"ErrRuntimeAutoStartFailed": ErrRuntimeAutoStartFailed(fmt.Errorf("boom")).Error(),
+	}
+	for name, msg := range cases {
+		if !strings.Contains(msg, why) {
+			t.Errorf("%s must explain why (%q), got: %s", name, why, msg)
+		}
+		if !strings.Contains(msg, "OPSM-40") {
+			t.Errorf("%s must carry an OPSM code, got: %s", name, msg)
 		}
 	}
 }

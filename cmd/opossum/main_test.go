@@ -346,6 +346,105 @@ func TestImagesCLI(t *testing.T) {
 	}
 }
 
+// The `import` CLI path: importCmd → Import → ImportFromDocker, wired through
+// runtime.New()'s OPOSSUM_CONTAINER_BIN / OPOSSUM_DOCKER_BIN seams. A build
+// service is exported from Docker (save|load); the fakes prove the full chain ran
+// (the runtime test covers the byte flow — this covers the CLI wiring).
+func TestImportCLI(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "calls.log")
+	// docker: emits fake tar bytes on `image save`, logging every call.
+	docker := filepath.Join(dir, "docker")
+	writeExec(t, docker, fmt.Sprintf("#!/bin/sh\necho \"docker $*\" >> %s\n[ \"$1 $2\" = \"image save\" ] && echo TARDATA\nexit 0\n", logPath))
+	// container: drains stdin on `image load` (mirroring the real load, which
+	// consumes save's stream), logging. The runtime test covers the EPIPE/byte flow.
+	container := filepath.Join(dir, "container")
+	writeExec(t, container, fmt.Sprintf("#!/bin/sh\necho \"container $*\" >> %s\n[ \"$1 $2\" = \"image load\" ] && cat >/dev/null\nexit 0\n", logPath))
+	t.Setenv("OPOSSUM_CONTAINER_BIN", container)
+	t.Setenv("OPOSSUM_DOCKER_BIN", docker)
+
+	compose := writeCompose(t, "name: demo\nservices:\n  web:\n    build: .\n")
+	out, err := run(t, "-f", compose, "import")
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if !strings.Contains(out, "Importing web from Docker (demo-web:latest)") {
+		t.Errorf("import should report the build service and its docker ref, got:\n%s", out)
+	}
+	log, _ := os.ReadFile(logPath)
+	if s := string(log); !strings.Contains(s, "docker image save demo-web:latest") || !strings.Contains(s, "container image load") {
+		t.Errorf("import CLI did not drive save|load through the runtime, log:\n%s", s)
+	}
+}
+
+// writeExec writes an executable shim script.
+func writeExec(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The `ws` CLI path: snapshot → ls → rollback wired through newRootCmd().Execute().
+// ws touches only the directory (never the runtime), so no fake container shim.
+func TestWsCLI(t *testing.T) {
+	work := filepath.Join(t.TempDir(), "work")
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExec(t, filepath.Join(work, "f.txt"), "v1") // just writes the file (mode is harmless)
+
+	if out, err := run(t, "ws", "snapshot", "s1", "--path", work); err != nil || !strings.Contains(out, `Saved workspace snapshot "s1"`) {
+		t.Fatalf("ws snapshot: out=%q err=%v", out, err)
+	}
+	if out, err := run(t, "ws", "ls", "--path", work); err != nil || !strings.Contains(out, "s1") {
+		t.Fatalf("ws ls should list s1: out=%q err=%v", out, err)
+	}
+	// Break the workspace, then roll back.
+	if err := os.WriteFile(filepath.Join(work, "f.txt"), []byte("BROKEN"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := run(t, "ws", "rollback", "s1", "--path", work); err != nil || !strings.Contains(out, "before-rollback-") {
+		t.Fatalf("ws rollback should restore and report the autosave: out=%q err=%v", out, err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(work, "f.txt")); string(b) != "v1" {
+		t.Errorf("rollback did not restore the file through the CLI, got %q", string(b))
+	}
+}
+
+// The `ws rm` / `ws prune` CLI paths: create snapshots, prune the auto-saves,
+// rm a named one. Directory-only, so no fake container shim.
+func TestWsRmPruneCLI(t *testing.T) {
+	work := filepath.Join(t.TempDir(), "work")
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExec(t, filepath.Join(work, "f.txt"), "v1")
+	if _, err := run(t, "ws", "snapshot", "keep-me", "--path", work); err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	// Two rollbacks each leave a before-rollback-* auto-save — the clutter prune clears.
+	for i := 0; i < 2; i++ {
+		if _, err := run(t, "ws", "rollback", "keep-me", "--path", work); err != nil {
+			t.Fatalf("rollback: %v", err)
+		}
+	}
+	// prune removes the auto-saves, leaves the named one.
+	if out, err := run(t, "ws", "prune", "--path", work); err != nil || !strings.Contains(out, "before-rollback-") {
+		t.Fatalf("ws prune: out=%q err=%v", out, err)
+	}
+	if out, _ := run(t, "ws", "ls", "--path", work); !strings.Contains(out, "keep-me") || strings.Contains(out, "before-rollback") {
+		t.Errorf("prune should keep the named snapshot and drop auto-saves, ls:\n%s", out)
+	}
+	// rm removes the named one.
+	if _, err := run(t, "ws", "rm", "keep-me", "--path", work); err != nil {
+		t.Fatalf("ws rm: %v", err)
+	}
+	if out, _ := run(t, "ws", "ls", "--path", work); !strings.Contains(out, "No snapshots") {
+		t.Errorf("after rm, expected no snapshots, ls:\n%s", out)
+	}
+}
+
 func TestDownRmiCLI(t *testing.T) {
 	readLog := fakeShim(t)
 	compose := writeCompose(t, "name: demo\nservices:\n  db:\n    image: pg\n")

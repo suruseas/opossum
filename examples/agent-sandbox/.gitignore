@@ -5,3 +5,9 @@
 # ignore its contents.
 work/*
 !work/.gitkeep
+
+# Workspace snapshots (opossum ws) — copy-on-write clones of ./work, kept beside it.
+.opossum-snapshots/
+
+# Generated artifacts (e.g. the .mcp.json opossum writes for x-opossum-mcp-tools).
+.opossum/

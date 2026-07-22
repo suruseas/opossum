@@ -6,6 +6,63 @@ import (
 	"testing"
 )
 
+// A stopped runtime must not stall a mutating command: opossum starts it (once)
+// and proceeds. The fake shim reports the system stopped until `system start` runs,
+// then running — so this exercises the whole auto-start→proceed flow.
+func TestUpAutoStartsStoppedRuntime(t *testing.T) {
+	readLog := fakeShim(t)
+	t.Setenv("SYSTEM_STOPPED", "1")
+	t.Setenv("SYSTEM_START_FLAG", filepath.Join(t.TempDir(), "started"))
+	compose := writeCompose(t, "name: demo\nservices:\n  web:\n    image: nginx\n")
+
+	if _, err := run(t, "-f", compose, "up", "web"); err != nil {
+		t.Fatalf("up should auto-start the runtime and proceed, got %v", err)
+	}
+	if joined := strings.Join(readLog(), "\n"); !strings.Contains(joined, "system start") {
+		t.Errorf("up on a stopped runtime must invoke `system start`, got:\n%s", joined)
+	}
+}
+
+// OPOSSUM_NO_AUTO_START opts out: a mutating command on a stopped runtime errors
+// (OPSM-405, with the why) instead of starting anything.
+func TestNoAutoStartOptOut(t *testing.T) {
+	readLog := fakeShim(t)
+	t.Setenv("SYSTEM_STOPPED", "1")
+	t.Setenv("SYSTEM_START_FLAG", filepath.Join(t.TempDir(), "started"))
+	t.Setenv("OPOSSUM_NO_AUTO_START", "1")
+	compose := writeCompose(t, "name: demo\nservices:\n  web:\n    image: nginx\n")
+
+	_, err := run(t, "-f", compose, "up", "web")
+	if err == nil {
+		t.Fatal("with OPOSSUM_NO_AUTO_START, up on a stopped runtime must error, got nil")
+	}
+	for _, want := range []string{"OPSM-405", "container system start", "OPOSSUM_NO_AUTO_START"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("opt-out error %q missing %q", err.Error(), want)
+		}
+	}
+	if strings.Contains(strings.Join(readLog(), "\n"), "system start") {
+		t.Error("with OPOSSUM_NO_AUTO_START set, opossum must NOT invoke `system start`")
+	}
+}
+
+// Read-only commands (ps/images) never auto-start — a read must not have a side
+// effect. On a stopped runtime `ps` reports OPSM-405 and starts nothing.
+func TestReadOnlyDoesNotAutoStart(t *testing.T) {
+	readLog := fakeShim(t)
+	t.Setenv("SYSTEM_STOPPED", "1")
+	t.Setenv("SYSTEM_START_FLAG", filepath.Join(t.TempDir(), "started"))
+	compose := writeCompose(t, "name: demo\nservices:\n  web:\n    image: nginx\n")
+
+	_, err := run(t, "-f", compose, "ps")
+	if err == nil || !strings.Contains(err.Error(), "OPSM-405") {
+		t.Fatalf("ps on a stopped runtime should report OPSM-405, got %v", err)
+	}
+	if strings.Contains(strings.Join(readLog(), "\n"), "system start") {
+		t.Error("a read-only command must not auto-start the runtime")
+	}
+}
+
 // A container-CLI-absent environment must fail every runtime-touching command the
 // same way: the coded, actionable OPSM-404 error and a non-zero exit — never a
 // misleading empty `ps` table, a confident `PRESENT=no`, or a bare exec error

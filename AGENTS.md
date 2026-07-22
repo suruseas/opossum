@@ -46,7 +46,7 @@ is **0 on success, non-zero on any error** (see Exit codes).
 | `logs [service…]` | print logs; `--follow`/`-f` streams (multiplexed, name-prefixed), `-n/--tail N` |
 | `stats [service…]` | live CPU/mem/net/IO (streams); `--no-stream` for one snapshot; `--host` shows each service's host-memory footprint (its VM's resident size — a shared-VM tool can't do this per service) |
 | `exec [-it] <service> <cmd…>` | run a command in a running container |
-| `run [--rm] [--no-deps] [-T] <service> [cmd]` | one-off foreground container; starts deps unless `--no-deps`; `-T` disables the TTY (keeps piped stdout clean, e.g. an MCP stdio server); no published ports |
+| `run [--rm] [--no-deps] [-T] [--audit] <service> [cmd]` | one-off foreground container; starts deps unless `--no-deps`; `-T` disables the TTY (keeps piped stdout clean, e.g. an MCP stdio server); no published ports. `--audit` reports what the run did afterward — workspace file diff (added/changed/deleted + hashes), egress destinations (when routed through a proxy; else marked unobserved), exit code — as a human summary or `--audit-format json`; the container's stdout goes to stderr so the report owns stdout |
 | `build [service…]` | build images for services with a `build:` |
 | `pull [service…]` | pull images for services with an `image:` |
 | `import [service…]` | copy a service's Docker-built image into `container`'s store (skip Apple's builder) |
@@ -57,6 +57,7 @@ is **0 on success, non-zero on any error** (see Exit codes).
 | `images` | each service's image, whether opossum builds it, whether it's present |
 | `config [--services]` | validate and print the resolved compose (interpolation + env_file applied), listing ignored fields |
 | `doctor` | diagnose the environment (runtime, DNS domain, outbound network, builder memory, stack-memory estimate); non-zero exit if any check fails |
+| `ws snapshot [name]` / `ws ls` / `ws rollback <name>` / `ws rm <name>…` / `ws prune` | snapshot and roll back a workspace directory (`--path`, default `./work`) via APFS copy-on-write clones: near-instant, ~no extra disk. `rollback` saves the current state first (reversible). `rm` deletes named snapshots; `prune` removes auto-saves (`--keep N`, `--all`). Non-APFS → full-copy fallback (reported). Snapshots live in `.opossum-snapshots/` beside the workspace. Touches no runtime — works without `container` |
 
 ## Compose dialect: supported / ignored / rejected
 
@@ -70,14 +71,30 @@ string, `interval`/`timeout`/`retries`/`start_period`), `command`, `entrypoint`,
 `profiles`, `mem_limit`/`cpus` (and `deploy.resources.limits.{memory,cpus}`), `ssh`
 (forwards the host SSH agent), `develop.watch`, `user`, `working_dir`, `init`,
 `read_only`, `cap_add`/`cap_drop`, `networks` (top-level + per-service, incl.
-`internal: true` and `external: true`), `${VAR}` interpolation (`${VAR:-default}`,
-`${VAR:?required}`, `$$`). YAML anchors + merge keys (`<<: *anchor`) resolve.
+`internal: true` and `external: true`), `x-opossum-mcp-tools` (a list of MCP servers
+to wire for an agent — each `svc`/`svc:port`/`svc:port/path` (reached by name) or
+`name=url`; opossum generates a `.mcp.json` and mounts it at `/run/opossum/mcp.json`,
+pass it with `claude --mcp-config`; HTTP transport only), `${VAR}` interpolation
+(`${VAR:-default}`, `${VAR:?required}`, `$$`). YAML anchors + merge keys (`<<:
+*anchor`) resolve.
 
-**Ignored with a warning (file still loads):** `restart`, `container_name`,
+**Ignored (file still loads):** `restart`, `container_name`, `dns`, `dns_search`,
 `network_mode` values other than `none` (e.g. `host` → the service joins the
 project network), per-network `aliases`, `ipam`/static IPs under `networks`,
-`deploy` beyond `resources.limits`, and other unrecognized fields. `opossum config`
-lists them.
+`deploy` beyond `resources.limits`, and other unrecognized fields. `up`/`run` print
+a one-line `note:` when any field is ignored (so a dropped field never looks like it
+took effect); `opossum config` lists each, and `--verbose` warns per field
+(`[OPSM-501]`/`[OPSM-502]`).
+
+**Don't set `dns`/`dns_search` for service discovery — it's automatic and these are
+ignored.** opossum registers every service under the search domain
+`<project>.<dns-domain>` (default dns-domain `opossum`), so services on the same
+default/attachable network reach each other by bare name (`web`, `db`) with no DNS
+config. Writing `dns_search: [web.myproj.opossum]` (or any `dns`/`dns_search`) does
+nothing. Caveats: bare-name discovery needs the domain registered once (`sudo
+container system dns create opossum`, see `[OPSM-202]`); an `internal:` network has
+**no name resolution at all** — peers there must be addressed by IP (see
+`[OPSM-203]`).
 
 **Rejected (hard load error):** `external: true` secrets; a `secrets` entry with no
 `file:`; a service with neither `image` nor `build`; `network_mode: none` combined
@@ -109,12 +126,31 @@ list; codes are add-only and never change meaning.
   it (`brew install container`, or the `.pkg` from the releases page), then
   `container system start`. `config` still works without it (it only parses compose).
 - **`[OPSM-405]` … `the container system isn't running`** → the CLI is installed but
-  the daemon is stopped. `ps`/`images` fail with a non-zero exit instead of printing
-  an empty table / `PRESENT=no` (which would look like "nothing is here"). Run
-  `container system start` (or `opossum doctor` to check the whole environment).
+  the daemon is stopped. Why: the `container` CLI manages the VM through a background
+  service (apiserver) that **doesn't start on demand**, so it needs starting after a
+  reboot or a `container system stop`. **Mutating commands auto-start it** (see
+  OPSM-406) unless `OPOSSUM_NO_AUTO_START` is set — this error is what you see with
+  the opt-out, or on `ps`/`images` (read-only commands don't auto-start). Run
+  `container system start` (or `opossum doctor`).
+- **`[OPSM-406]` … `the container runtime isn't running — starting it now`** → not an
+  error: a mutating command found the runtime stopped and started it (`container
+  system start`, a light idempotent launchd start) before proceeding. Set
+  `OPOSSUM_NO_AUTO_START` to opt out (then a stopped runtime is `[OPSM-405]` instead).
 - **`[OPSM-102]` … `services <a,b> share named volume "<v>"`** → Apple `container`
   attaches a named volume to only one running container; use a bind mount for
   shared data, or don't run both at once.
+- **`[OPSM-103]` … `<v> is already attached elsewhere — the second attach fails
+  with a storage-device (VZError) error`** → a named volume is held by another
+  running container (often from a *different* project), so this service can't
+  attach it. The message names the holder; `container stop <name>` frees it, or give
+  this service its own volume / a bind mount. Emitted both as a pre-flight warning
+  (holder already running at `up`) and as the decoded failure if the run hits the
+  raw `VZErrorDomain Code=2 "The storage device attachment is invalid"`.
+- **`[OPSM-104]` … `couldn't create host directory <path> for a bind mount`** → the
+  bind mount's host source doesn't exist and opossum couldn't create it (e.g. a
+  parent directory is read-only). Create it yourself (`mkdir -p <path>`) or fix the
+  parent's permissions, then `up` again — otherwise the container fails to start on
+  a missing bind source.
 - **`[OPSM-202]` … `DNS domain "opossum" not found`** → run `sudo container system
   dns create opossum` once, then `up` again (needed for bare-name discovery).
 - **`[OPSM-203]` … `network <n> is internal (host-only): … no internet egress`** →
@@ -139,6 +175,8 @@ Every `[OPSM-NNN]` opossum can emit (add-only; grouped 1xx storage / 2xx network
 
 - `OPSM-101` — named volume mounted directly at Postgres's data dir (initdb fails).
 - `OPSM-102` — a named volume shared by two running services (exclusive attach).
+- `OPSM-103` — a named volume is already attached to another running container (cross-project VZError).
+- `OPSM-104` — couldn't create a bind mount's host source directory (permissions).
 - `OPSM-201` — a published host port is already taken (pre-flight).
 - `OPSM-202` — the DNS domain isn't registered (no bare-name discovery).
 - `OPSM-203` — an internal network: no internet egress and no name resolution.
@@ -149,7 +187,8 @@ Every `[OPSM-NNN]` opossum can emit (add-only; grouped 1xx storage / 2xx network
 - `OPSM-402` — orphan containers left by services no longer in the compose.
 - `OPSM-403` — a `service_healthy` dependency defines no healthcheck (not waited on).
 - `OPSM-404` — the `container` CLI isn't installed / not on PATH (every runtime command fails).
-- `OPSM-405` — the `container` system (daemon) is installed but not running (`ps`/`images` fail loudly).
+- `OPSM-405` — the `container` system (daemon) is installed but not running (`ps`/`images` fail loudly; the opt-out error for mutating commands).
+- `OPSM-406` — the runtime was stopped; a mutating command auto-started it (notice, not an error; `OPOSSUM_NO_AUTO_START` opts out).
 - `OPSM-501` — unsupported top-level compose field(s), ignored.
 - `OPSM-502` — unsupported service compose field(s), ignored (e.g. `network_mode: host`).
 - `OPSM-601` — a `watch` rebuild action failed.

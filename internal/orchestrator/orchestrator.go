@@ -5,6 +5,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -416,25 +417,13 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 		return err
 	}
 
-	// Compose fields we don't act on don't affect startup, and a warning for each
-	// one is more alarming than useful — surface them only under --verbose. Fields
-	// that DO change behavior (e.g. a Postgres datadir on a named volume) still
-	// warn unconditionally below.
-	if o.rt.Verbose {
-		if u := o.Project.Unsupported; len(u) > 0 {
-			o.warnf(codeIgnoredTopField, "ignoring unsupported top-level field(s): %s\n", strings.Join(u, ", "))
-		}
-		for _, name := range order {
-			if u := o.Project.Services[name].Unsupported; len(u) > 0 {
-				o.warnf(codeIgnoredField, "service %q: ignoring unsupported field(s): %s\n", name, strings.Join(u, ", "))
-			}
-		}
-	}
+	o.reportIgnoredFields(order, true)
 	for _, name := range order {
 		o.warnPostgresDatadir(name, o.Project.Services[name])
 		o.warnDockerSocket(name, o.Project.Services[name])
 	}
 	o.warnSharedNamedVolumes(order)
+	o.warnBusyNamedVolumes(order)
 
 	// Containers for services no longer in the compose are removed with
 	// --remove-orphans, otherwise just flagged (docker compose parity).
@@ -502,7 +491,8 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 		o.logf("Creating network %s\n", rn.name)
 		created, nerr := o.rt.EnsureNetwork(rn.name, rn.internal)
 		if nerr != nil {
-			return nerr
+			return fmt.Errorf("couldn't create network %q for the project: %w\n"+
+				"  check the runtime is healthy (`opossum doctor`); if a stale network with that name exists, remove it with `container network delete %s`", rn.name, nerr, rn.name)
 		}
 		if created {
 			createdNets = append(createdNets, rn.name)
@@ -591,6 +581,16 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 
 		mem, cpu, _ := svc.Resources() // validated at load
 		svcNets, dnsDomain, dnsSearch := o.serviceNetworks(svc)
+		env := svc.Environment
+		vols := append(o.resolveVolumes(name, svc.Volumes), o.secretMounts(svc)...)
+		mcpMount, err := o.mcpConfigMount(name, svc, !o.up.dryRun)
+		if err != nil {
+			return err
+		}
+		if mcpMount != "" {
+			vols = append(vols, mcpMount)
+			env = append(append([]string(nil), env...), "OPOSSUM_MCP_CONFIG="+mcpMountTarget)
+		}
 		runOpts := runtime.RunOptions{
 			Name:       cname,
 			Image:      image,
@@ -598,9 +598,9 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 			Networks:   svcNets,
 			DNSDomain:  dnsDomain,
 			DNSSearch:  dnsSearch,
-			Env:        svc.Environment,
+			Env:        env,
 			Ports:      svc.Ports,
-			Volumes:    append(o.resolveVolumes(name, svc.Volumes), o.secretMounts(svc)...),
+			Volumes:    vols,
 			Tmpfs:      svc.Tmpfs,
 			Command:    svc.Command,
 			Entrypoint: svc.Entrypoint,
@@ -657,13 +657,14 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 			runOpts.Detach = false
 			o.logf("Running %s to completion (%s)\n", name, image)
 			if err := o.rt.Run(runOpts); err != nil {
-				return fmt.Errorf("service %q did not complete successfully: %w", name, err)
+				return fmt.Errorf("service %q did not complete successfully: %w\n"+
+					"  it's a run-to-completion dependency (a service_completed_successfully target) that exited non-zero — check its output above, or run it directly with `opossum run %s`", name, err, name)
 			}
 			continue
 		}
 		o.logf("Starting %s (%s)\n", name, image)
 		if err := o.rt.Run(runOpts); err != nil {
-			return fmt.Errorf("starting service %q: %w", name, err)
+			return o.decodeStartError(name, err)
 		}
 		// The runtime echoes the container's DNS name (e.g. web.demo.opossum),
 		// which is for container-to-container resolution — not a URL the host can
@@ -832,7 +833,7 @@ func (o *Orchestrator) selectServices(order, requested []string) ([]string, erro
 	}
 	for _, r := range requested {
 		if _, ok := o.Project.Services[r]; !ok {
-			return nil, fmt.Errorf("unknown service %q", r)
+			return nil, o.unknownServiceErr(r)
 		}
 	}
 	want := map[string]bool{}
@@ -1145,6 +1146,249 @@ func (o *Orchestrator) warnSharedNamedVolumes(order []string) {
 	}
 }
 
+// reportIgnoredFields surfaces compose fields opossum doesn't act on, so an agent
+// (or a human) who wrote an invalid field learns it was dropped instead of
+// assuming it took effect — silent ignoring breeds cargo-cult config. Under
+// --verbose it prints the full per-scope list (coded OPSM-501/502); otherwise it
+// prints a single low-key `note:` line with the count, a representative field, and
+// a pointer to `opossum config` for the details. These fields don't affect
+// startup, so a per-field warning on every up would be more alarming than useful —
+// the note is the middle ground. (Fields that DO change behavior, e.g. a Postgres
+// datadir on a named volume, still warn unconditionally elsewhere.)
+func (o *Orchestrator) reportIgnoredFields(services []string, includeTopLevel bool) {
+	if o.rt.Verbose {
+		if includeTopLevel {
+			if u := o.Project.Unsupported; len(u) > 0 {
+				o.warnf(codeIgnoredTopField, "ignoring unsupported top-level field(s): %s\n", strings.Join(u, ", "))
+			}
+		}
+		for _, name := range services {
+			if u := o.Project.Services[name].Unsupported; len(u) > 0 {
+				o.warnf(codeIgnoredField, "service %q: ignoring unsupported field(s): %s\n", name, strings.Join(u, ", "))
+			}
+		}
+		return
+	}
+	if note := o.ignoredFieldsNote(services, includeTopLevel); note != "" {
+		o.logf("%s", note)
+	}
+}
+
+// ignoredFieldsNote builds the one-line summary of ignored compose fields across
+// the given services (plus top-level when includeTopLevel), or "" when nothing is
+// ignored. The representative favors a service-level field (the common agent
+// mistake), falling back to a top-level one; the whole list is deterministic so the
+// note is stable. includeTopLevel is false when the caller (a one-off with
+// dependencies) delegates top-level reporting to the deps' Up, so the project-wide
+// fields aren't counted twice in a single command.
+func (o *Orchestrator) ignoredFieldsNote(services []string, includeTopLevel bool) string {
+	type pair struct{ scope, field string }
+	var pairs []pair
+	names := append([]string(nil), services...)
+	sort.Strings(names)
+	for _, name := range names {
+		for _, f := range o.Project.Services[name].Unsupported {
+			pairs = append(pairs, pair{name, f})
+		}
+	}
+	if includeTopLevel {
+		top := append([]string(nil), o.Project.Unsupported...)
+		sort.Strings(top)
+		for _, f := range top {
+			pairs = append(pairs, pair{"top-level", f})
+		}
+	}
+	if len(pairs) == 0 {
+		return ""
+	}
+	rep := fmt.Sprintf("%s: %s", pairs[0].scope, pairs[0].field)
+	if len(pairs) == 1 {
+		return fmt.Sprintf("note: 1 compose field is ignored (%s) — run `opossum config` for details\n", rep)
+	}
+	return fmt.Sprintf("note: %d compose fields are ignored (e.g. %s) — run `opossum config` for details\n", len(pairs), rep)
+}
+
+// unknownServiceErr reports a service name that isn't in the project, listing the
+// names that ARE defined so the user (or an agent) can fix the typo without running
+// a second command to discover them.
+func (o *Orchestrator) unknownServiceErr(name string) error {
+	names := make([]string, 0, len(o.Project.Services))
+	for n := range o.Project.Services {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		// Practically unreachable (a project with no services fails to load), but keep
+		// the message coherent for a hand-built project.
+		return fmt.Errorf("unknown service %q — this project defines no services", name)
+	}
+	return fmt.Errorf("unknown service %q — this project defines: %s (run `opossum config --services` to list them)",
+		name, strings.Join(names, ", "))
+}
+
+// serviceRuntimeVolumes returns the runtime-level named volumes a service mounts
+// — the exact names a running container would show — covering project-namespaced,
+// anonymous, and external volumes. Bind mounts (host paths) are excluded: they're
+// shareable and never cause an attach conflict.
+func (o *Orchestrator) serviceRuntimeVolumes(name string) []string {
+	svc := o.Project.Services[name]
+	seen := map[string]bool{}
+	var out []string
+	add := func(v string) {
+		if v != "" && !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	for _, m := range o.serviceMounts(name, svc.Volumes) {
+		add(m.Volume) // named + anonymous (namespaced)
+	}
+	// External volumes mount under their real name and aren't tracked in m.Volume,
+	// but they're still exclusive block devices, so a cross-project holder conflicts.
+	for _, v := range svc.Volumes {
+		src := strings.SplitN(v, ":", 2)[0]
+		if isNamedVolume(src) && o.isExternalVolume(src) {
+			add(o.externalRealName(src))
+		}
+	}
+	return out
+}
+
+// volumeHolders maps each of the given runtime volumes to the running containers
+// currently attached to it, skipping `exclude` (the container opossum is about to
+// (re)create for this service). Used to name the culprit in an attach-conflict.
+func (o *Orchestrator) volumeHolders(volnames []string, exclude string) map[string][]string {
+	if len(volnames) == 0 {
+		return nil
+	}
+	want := map[string]bool{}
+	for _, v := range volnames {
+		want[v] = true
+	}
+	holders := map[string][]string{}
+	for _, c := range o.rt.List() {
+		if c.Name == exclude || c.State != "running" {
+			continue
+		}
+		for _, v := range c.Volumes {
+			if want[v] {
+				holders[v] = append(holders[v], c.Name)
+			}
+		}
+	}
+	return holders
+}
+
+// isStorageAttachmentError reports whether a failed run's stderr is the VZError
+// Apple `container` emits when a service tries to attach a named volume that's
+// already held by another running container. The device is exclusive, so the
+// second attach is rejected with an opaque virtualization error — this is the
+// signature opossum decodes into OPSM-103.
+func isStorageAttachmentError(stderr string) bool {
+	return strings.Contains(stderr, "VZErrorDomain") &&
+		strings.Contains(stderr, "Code=2") &&
+		strings.Contains(stderr, "storage device attachment is invalid")
+}
+
+// decodeStartError turns a service's raw run failure into an actionable
+// diagnostic. When the failure is the exclusive-attach VZError (OPSM-103), it
+// names the volume and the running container holding it — the cryptic
+// virtualization error becomes a fix. Any other failure passes through unchanged.
+func (o *Orchestrator) decodeStartError(name string, err error) error {
+	var re *runtime.RunError
+	if !errors.As(err, &re) || !isStorageAttachmentError(re.Stderr) {
+		return fmt.Errorf("starting service %q: %w", name, err)
+	}
+	vols := o.serviceRuntimeVolumes(name)
+	if len(vols) == 0 {
+		// The signature matched but the service mounts no named volume opossum owns
+		// (only bind mounts, say) — this isn't an attach conflict we can explain, so
+		// don't dress it up as OPSM-103. Pass the raw failure through.
+		return fmt.Errorf("starting service %q: %w", name, err)
+	}
+	holders := o.volumeHolders(vols, o.containerName(name))
+	// Report the specific volume(s) and their holders when we can identify them;
+	// fall back to naming just the service's volumes (the holder may have exited
+	// between the failed run and this lookup).
+	var busy []string
+	for _, v := range vols {
+		if hs := holders[v]; len(hs) > 0 {
+			sort.Strings(hs)
+			busy = append(busy, fmt.Sprintf("%q (held by running container %s)", v, strings.Join(quoteAll(hs), ", ")))
+		}
+	}
+	if len(busy) == 0 {
+		for _, v := range vols {
+			busy = append(busy, fmt.Sprintf("%q", v))
+		}
+	}
+	sort.Strings(busy)
+	return fmt.Errorf("[%s] service %q can't start: Apple `container` attaches a named volume to only "+
+		"one running container at a time, and %s is already attached elsewhere — the second attach fails "+
+		"with a storage-device (VZError) error. Stop the container holding it (`container stop <name>`), "+
+		"or give this service its own volume; for shared data use a bind mount (a host path) instead",
+		codeVolumeAttachBusy, name, strings.Join(busy, ", "))
+}
+
+// warnBusyNamedVolumes warns, before starting anything, when a service's named
+// volume is already attached to a running container from *another* project (or a
+// hand-run container). warnSharedNamedVolumes covers same-compose collisions from
+// the compose file alone; this catches cross-project holders that only the live
+// runtime knows about, so the user sees the conflict up front rather than as a
+// mid-`up` bootstrap failure.
+func (o *Orchestrator) warnBusyNamedVolumes(order []string) {
+	// One container per volume is enough to flag it; collect holders once.
+	all := map[string][]string{} // volume -> running holders
+	for _, c := range o.rt.List() {
+		if c.State != "running" {
+			continue
+		}
+		for _, v := range c.Volumes {
+			all[v] = append(all[v], c.Name)
+		}
+	}
+	if len(all) == 0 {
+		return
+	}
+	ours := map[string]bool{}
+	for _, name := range order {
+		ours[o.containerName(name)] = true
+	}
+	warned := map[string]bool{}
+	for _, name := range order {
+		for _, v := range o.serviceRuntimeVolumes(name) {
+			if warned[v] {
+				continue
+			}
+			var foreign []string
+			for _, h := range all[v] {
+				if !ours[h] { // our own stale container is deleted before its run
+					foreign = append(foreign, h)
+				}
+			}
+			if len(foreign) == 0 {
+				continue
+			}
+			warned[v] = true
+			sort.Strings(foreign)
+			o.warnf(codeVolumeAttachBusy, "service %q mounts named volume %q, which is already attached to "+
+				"running container %s — Apple container attaches a named volume to only one running "+
+				"container at a time, so this service will fail to start until that container stops. "+
+				"Stop it (`container stop %s`), or use a separate volume / a bind mount for shared data.\n",
+				name, v, strings.Join(quoteAll(foreign), ", "), foreign[0])
+		}
+	}
+}
+
+// quoteAll wraps each string in %q for embedding a list in a message.
+func quoteAll(ss []string) []string {
+	out := make([]string, len(ss))
+	for i, s := range ss {
+		out[i] = fmt.Sprintf("%q", s)
+	}
+	return out
+}
+
 // postgresDataDir is Postgres's default data directory. A named volume mounted
 // there fails `initdb` because the mount point isn't empty (contains lost+found),
 // unless PGDATA points at a subdirectory. This is the single most common snag in
@@ -1422,7 +1666,7 @@ func (o *Orchestrator) resolveServices(services []string) ([]string, error) {
 	}
 	for _, s := range services {
 		if _, ok := o.Project.Services[s]; !ok {
-			return nil, fmt.Errorf("unknown service %q", s)
+			return nil, o.unknownServiceErr(s)
 		}
 	}
 	return services, nil
@@ -1483,6 +1727,10 @@ type RunOneOffOptions struct {
 	NoDeps bool // don't start the service's dependencies first
 	TTY    bool // allocate a TTY (the CLI sets this when its own stdin is a terminal)
 	SSH    bool // forward the host SSH agent (--ssh), on top of the service's own `ssh:`
+	// Audit keeps the one-off's stdout on stderr (instead of the real stdout) so the
+	// audit report — the deliverable of `run --audit` — owns stdout cleanly. Set by
+	// RunAudited, not the CLI directly.
+	Audit bool
 }
 
 // RunOneOff starts a single throwaway container for a service in the foreground,
@@ -1492,7 +1740,7 @@ type RunOneOffOptions struct {
 func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOffOptions) (err error) {
 	svc, ok := o.Project.Services[service]
 	if !ok {
-		return fmt.Errorf("unknown service %q", service)
+		return o.unknownServiceErr(service)
 	}
 	if !o.rt.Available() {
 		return ErrRuntimeAbsent()
@@ -1503,6 +1751,13 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 	// stderr; only the one-off body (below) writes to the real stdout.
 	o.rt.Out = os.Stderr
 	defer func() { o.rt.Out = nil }()
+
+	// Tell the caller if the run target carries compose fields opossum ignores, so
+	// an invalid field doesn't look like it took effect. When dependencies will
+	// start, their Up reports the project-wide top-level fields, so skip them here
+	// to avoid counting them twice in one `run`.
+	willStartDeps := !opts.NoDeps && len(svc.DependsOn.Names()) > 0
+	o.reportIgnoredFields([]string{service}, !willStartDeps)
 
 	if !opts.NoDeps {
 		if deps := svc.DependsOn.Names(); len(deps) > 0 {
@@ -1530,7 +1785,8 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 				continue
 			}
 			if _, err := o.rt.EnsureNetwork(rn.name, rn.internal); err != nil {
-				return err
+				return fmt.Errorf("couldn't create network %q for the run: %w\n"+
+					"  check the runtime is healthy (`opossum doctor`); if a stale network with that name exists, remove it with `container network delete %s`", rn.name, err, rn.name)
 			}
 			if rn.internal {
 				o.warnInternalNetwork(rn.name)
@@ -1559,9 +1815,25 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 	o.ensureBindDirs(svc.Volumes)
 	o.seedVolumes(service, image, svc.Volumes)
 	o.logf("Running one-off %s\n", service)
-	o.rt.Out = os.Stdout           // the one-off body's stdout is the real stdout (e.g. MCP JSON-RPC)
+	// The one-off body's stdout is the real stdout (e.g. MCP JSON-RPC) — except under
+	// --audit, where the audit report owns stdout, so the container output stays on
+	// stderr with the rest of the progress.
+	o.rt.Out = os.Stdout
+	if opts.Audit {
+		o.rt.Out = os.Stderr
+	}
 	mem, cpu, _ := svc.Resources() // validated at load
 	svcNets, dnsDomain, dnsSearch := o.serviceNetworks(svc)
+	env := svc.Environment
+	vols := append(o.resolveVolumes(service, svc.Volumes), o.secretMounts(svc)...)
+	mcpMount, err := o.mcpConfigMount(service, svc, true)
+	if err != nil {
+		return err
+	}
+	if mcpMount != "" {
+		vols = append(vols, mcpMount)
+		env = append(append([]string(nil), env...), "OPOSSUM_MCP_CONFIG="+mcpMountTarget)
+	}
 	runErr := o.rt.Run(runtime.RunOptions{
 		Name:       cname,
 		Image:      image,
@@ -1569,8 +1841,8 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 		Networks:   svcNets,
 		DNSDomain:  dnsDomain,
 		DNSSearch:  dnsSearch,
-		Env:        svc.Environment,
-		Volumes:    append(o.resolveVolumes(service, svc.Volumes), o.secretMounts(svc)...),
+		Env:        env,
+		Volumes:    vols,
 		Tmpfs:      svc.Tmpfs,
 		Command:    cmd,
 		Entrypoint: svc.Entrypoint,
@@ -1602,7 +1874,7 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 // Exec runs a command in a service's running container, streaming stdio.
 func (o *Orchestrator) Exec(service string, command []string, opts runtime.ExecOptions) error {
 	if _, ok := o.Project.Services[service]; !ok {
-		return fmt.Errorf("unknown service %q", service)
+		return o.unknownServiceErr(service)
 	}
 	if len(command) == 0 {
 		return fmt.Errorf("exec requires a command to run")
@@ -1869,6 +2141,13 @@ func (o *Orchestrator) ensureBindDirs(vols []string) {
 		if _, err := os.Stat(src); os.IsNotExist(err) {
 			if mkErr := os.MkdirAll(src, 0o755); mkErr == nil {
 				o.logf("Created host directory %s for a bind mount\n", src)
+			} else {
+				// Don't fail silently: a missing bind source makes the container fail
+				// to start later with an opaque runtime error, so say what couldn't be
+				// created and how to unblock it.
+				o.warnf(codeBindDirCreate, "couldn't create host directory %s for a bind mount: %v — "+
+					"create it yourself (`mkdir -p %s`) or fix the parent directory's permissions, then run `opossum up` again\n",
+					src, mkErr, src)
 			}
 		}
 	}

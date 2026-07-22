@@ -306,6 +306,100 @@ func TestUpFailsWhenHostPortInUse(t *testing.T) {
 	}
 }
 
+// A service that declares MCP tools gets a generated .mcp.json bind-mounted at the
+// documented in-container path (and the file holds the resolved URL). Guards the
+// whole wiring: parse → generate → mount (#258).
+func TestUpMountsGeneratedMCPConfig(t *testing.T) {
+	rt, log := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"agent": {Image: "agent:latest", MCPTools: []string{"tf"}},
+		"tf":    {Image: "tf:latest", Ports: compose.Ports{"8080:8080"}},
+	})
+	if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true, "agent"); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	if joined := strings.Join(log(), "\n"); !strings.Contains(joined, ":"+"/run/opossum/mcp.json:ro") {
+		t.Errorf("agent run must mount the generated MCP config read-only, got:\n%s", joined)
+	}
+	data, err := os.ReadFile(filepath.Join(p.BaseDir, ".opossum", "mcp", "agent.json"))
+	if err != nil {
+		t.Fatalf("generated MCP config not written: %v", err)
+	}
+	if !strings.Contains(string(data), `"http://tf:8080/mcp"`) {
+		t.Errorf("generated MCP config has the wrong URL:\n%s", data)
+	}
+}
+
+// `up --dry-run` shows the MCP mount in the plan but writes no host file — a dry
+// run must touch nothing on disk.
+func TestUpDryRunDoesNotWriteMCPConfig(t *testing.T) {
+	rt, _ := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"agent": {Image: "agent:latest", MCPTools: []string{"tf"}},
+		"tf":    {Image: "tf:latest", Ports: compose.Ports{"8080:8080"}},
+	})
+	p.BaseDir = t.TempDir() // isolated, so we can assert nothing was written
+	var out bytes.Buffer
+	o := orchestrator.New(p, rt, "opossum", &out)
+	o.SetDryRun(true)
+	if err := o.Up(true, "agent"); err != nil {
+		t.Fatalf("Up (dry-run): %v", err)
+	}
+	if !strings.Contains(out.String(), "/run/opossum/mcp.json:ro") {
+		t.Errorf("the plan should still show the MCP mount, got:\n%s", out.String())
+	}
+	if _, err := os.Stat(filepath.Join(p.BaseDir, ".opossum", "mcp", "agent.json")); !os.IsNotExist(err) {
+		t.Errorf("dry-run must not write the MCP config file (stat err = %v)", err)
+	}
+}
+
+// RunAudited assembles a report even when a dimension can't be observed: a service
+// with no working_dir bind mount and no proxy must report files AND egress as
+// unobserved WITH a reason (never a blank that reads as "nothing happened"), and
+// still carry the exit code. Guards the audit orchestration skeleton (#261).
+func TestRunAuditedMarksUnobservedDimensions(t *testing.T) {
+	rt, _ := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"web": {Image: "web:latest"}, // no working_dir bind, no proxy env
+	})
+	report, err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).
+		RunAudited("web", []string{"echo", "hi"}, orchestrator.RunOneOffOptions{Rm: true})
+	if err != nil {
+		t.Fatalf("RunAudited: %v", err)
+	}
+	if report.ExitCode != 0 {
+		t.Errorf("a passing fake run should report exit 0, got %d", report.ExitCode)
+	}
+	if report.Files.Observed || report.Files.Reason == "" {
+		t.Errorf("no working_dir bind → files must be unobserved with a reason, got %+v", report.Files)
+	}
+	if report.Egress.Observed || report.Egress.Reason == "" {
+		t.Errorf("no proxy → egress must be unobserved with a reason, got %+v", report.Egress)
+	}
+}
+
+func TestUpSkipsOwnRunningContainerPort(t *testing.T) {
+	// A re-up must not flag its OWN already-running container's published port as a
+	// conflict: up will delete and recreate that container, freeing the port. The
+	// port stays bound here, but because inspect reports the container as running
+	// and owned by this project, checkHostPorts skips it and up proceeds — the
+	// distinction that keeps a plain re-up from failing on ports it already holds.
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	port := l.Addr().(*net.TCPAddr).Port
+	rt, _ := fakeShim(t)
+	setShimEnv(rt, "INSPECT_PROJECT=demo") // web's container is running (shim default) and ours
+	p := project("demo", map[string]*compose.Service{
+		"web": {Image: "web:latest", Ports: []string{fmt.Sprintf("127.0.0.1:%d:80", port)}},
+	})
+	if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true); err != nil {
+		t.Errorf("re-up must skip its own running container's published port, got %v", err)
+	}
+}
+
 func TestUpAllowsFreeHostPort(t *testing.T) {
 	// Grab a port then release it, so it's (almost certainly) free for the up.
 	l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -373,9 +467,10 @@ func TestUpPassesEntrypoint(t *testing.T) {
 	}
 }
 
-// Ignored service fields don't affect startup, so they're silent by default and
-// only surface under --verbose (rt.Verbose) — a warning per field alarmed users.
-func TestUpUnsupportedFieldsSilentUnlessVerbose(t *testing.T) {
+// Ignored service fields don't affect startup, so `up` never warns per field by
+// default — but silence let agents cargo-cult invalid config, so a one-line note
+// points at `opossum config`. --verbose still gives the full per-field warning.
+func TestUpIgnoredServiceFieldsNoteAndVerbose(t *testing.T) {
 	upOutput := func(verbose bool) string {
 		rt, _ := fakeShim(t)
 		rt.Verbose = verbose
@@ -388,16 +483,27 @@ func TestUpUnsupportedFieldsSilentUnlessVerbose(t *testing.T) {
 		}
 		return out.String()
 	}
-	if got := upOutput(false); strings.Contains(got, "unsupported field") {
-		t.Errorf("ignored-field warning should be hidden by default, got:\n%s", got)
+	// Default: one low-key note naming a representative field + pointing to config —
+	// not a per-field warning.
+	def := upOutput(false)
+	if !strings.Contains(def, "note:") || !strings.Contains(def, "2 compose fields are ignored") ||
+		!strings.Contains(def, "web: container_name") || !strings.Contains(def, "opossum config") {
+		t.Errorf("default up should print a one-line ignored-fields note, got:\n%s", def)
 	}
-	got := upOutput(true)
-	if !strings.Contains(got, "unsupported field") || !strings.Contains(got, "container_name") || !strings.Contains(got, "restart") {
-		t.Errorf("--verbose should name the ignored fields, got:\n%s", got)
+	if strings.Contains(def, "unsupported field") {
+		t.Errorf("default up should note, not warn per field, got:\n%s", def)
+	}
+	// Verbose: the full per-field warning, and no summary note (no double-report).
+	v := upOutput(true)
+	if !strings.Contains(v, "unsupported field") || !strings.Contains(v, "container_name") || !strings.Contains(v, "restart") {
+		t.Errorf("--verbose should name every ignored field, got:\n%s", v)
+	}
+	if strings.Contains(v, "note:") {
+		t.Errorf("--verbose should not also print the summary note, got:\n%s", v)
 	}
 }
 
-func TestUpTopLevelIgnoredFieldsSilentUnlessVerbose(t *testing.T) {
+func TestUpTopLevelIgnoredFieldsNoteAndVerbose(t *testing.T) {
 	upOutput := func(verbose bool) string {
 		rt, _ := fakeShim(t)
 		rt.Verbose = verbose
@@ -409,11 +515,25 @@ func TestUpTopLevelIgnoredFieldsSilentUnlessVerbose(t *testing.T) {
 		}
 		return out.String()
 	}
-	if got := upOutput(false); strings.Contains(got, "unsupported top-level") {
-		t.Errorf("top-level ignored-fields warning should be hidden by default, got:\n%s", got)
+	if got := upOutput(false); !strings.Contains(got, "note:") || !strings.Contains(got, "top-level: networks") {
+		t.Errorf("default up should note the ignored top-level fields, got:\n%s", got)
 	}
 	if got := upOutput(true); !strings.Contains(got, "unsupported top-level field(s): networks, volumes") {
 		t.Errorf("--verbose should show the top-level ignored fields, got:\n%s", got)
+	}
+}
+
+// A clean compose (nothing ignored) prints no note at all — the note only appears
+// when there's actually a dropped field to surface.
+func TestUpNoNoteWhenNothingIgnored(t *testing.T) {
+	rt, _ := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{"web": {Image: "web:latest"}})
+	var out bytes.Buffer
+	if err := orchestrator.New(p, rt, "opossum", &out).Up(true); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	if got := out.String(); strings.Contains(got, "note:") || strings.Contains(got, "compose field") {
+		t.Errorf("no ignored-fields note when nothing is ignored, got:\n%s", got)
 	}
 }
 

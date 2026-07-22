@@ -122,6 +122,36 @@ func TestAgentSandboxCagedEgressIsFenced(t *testing.T) {
 	if !regexp.MustCompile(`(?mi)^\s*Filter\s+\S`).MatchString(c) {
 		t.Error("tinyproxy.conf must reference a Filter (allowlist) file — without it there is no allowlist to enforce")
 	}
+
+	// 7. If the caged agent declares an MCP tool, it must be reachable AND not leak
+	//    through the allowlist proxy. On a host-only network there's no name
+	//    resolution, so the tool must be an explicit URL (through the host gateway),
+	//    not a bare service name; and NO_PROXY must be declared, or the tool's traffic
+	//    would be routed through the allowlist proxy and denied. A careless edit that
+	//    drops NO_PROXY or uses a bare name would quietly break the caged tool.
+	//    (Values are interpolated at load, so these check the form/key, not the host.)
+	for _, tool := range agent.MCPTools {
+		if !strings.Contains(tool, "=http") {
+			t.Errorf("caged agent's MCP tool %q must be an explicit name=url through the host gateway — a bare service name won't resolve on an internal network", tool)
+		}
+	}
+	if len(agent.MCPTools) > 0 && !hasEnvKey(agent.Environment, "NO_PROXY") {
+		t.Error("caged agent declaring an MCP tool must set NO_PROXY (the host gateway) so tool traffic bypasses the allowlist proxy")
+	}
+}
+
+// hasEnvKey reports whether a normalized environment declares key, regardless of
+// its interpolated value — including the bare-key form (`NO_PROXY` with no `=`)
+// that an empty interpolation (e.g. an unresolved ${OPOSSUM_HOST_GATEWAY} in a
+// no-network CI) normalizes to. We're asserting the compose *declares* the key,
+// not what it resolved to.
+func hasEnvKey(env Environment, key string) bool {
+	for _, e := range env {
+		if e == key || strings.HasPrefix(e, key+"=") {
+			return true
+		}
+	}
+	return false
 }
 
 func contains(ss []string, want string) bool {

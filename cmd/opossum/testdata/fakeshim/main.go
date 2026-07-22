@@ -25,15 +25,41 @@ func main() {
 		}
 		return ""
 	}
+	// SYSTEM_STOPPED simulates a stopped runtime for `system status`, but a
+	// SYSTEM_START_FLAG file (created by `system start`) flips it to running — so a
+	// test can drive the whole auto-start flow: status=stopped → `system start` →
+	// status=running → the command proceeds.
+	systemRunning := func() bool {
+		if os.Getenv("SYSTEM_STOPPED") == "" {
+			return true
+		}
+		flag := os.Getenv("SYSTEM_START_FLAG")
+		if flag == "" {
+			return false
+		}
+		_, err := os.Stat(flag)
+		return err == nil
+	}
 	switch arg(0) {
 	case "system":
 		if arg(1) == "dns" && arg(2) == "list" {
 			fmt.Print("DOMAIN\nopossum\n")
 		}
-		// `system status` is the daemon-liveness probe Ps/Images run first; report
-		// running so those CLI-level tests reach their normal output.
+		// `system status` is the daemon-liveness probe; report running (or stopped
+		// under SYSTEM_STOPPED until `system start` runs).
 		if arg(1) == "status" {
-			fmt.Print("FIELD  VALUE\nstatus  running\n")
+			if systemRunning() {
+				fmt.Print("FIELD  VALUE\nstatus  running\n")
+			} else {
+				fmt.Print("FIELD  VALUE\nstatus  stopped\n")
+			}
+		}
+		// `system start` starts the runtime: mark it running for subsequent status.
+		if arg(1) == "start" {
+			if flag := os.Getenv("SYSTEM_START_FLAG"); flag != "" {
+				os.WriteFile(flag, []byte("started"), 0o644)
+			}
+			fmt.Println("started")
 		}
 	case "network":
 		if arg(1) == "create" {

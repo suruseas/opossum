@@ -14,12 +14,14 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 	"github.com/suruseas/opossum/internal/compose"
 	"github.com/suruseas/opossum/internal/doctor"
 	"github.com/suruseas/opossum/internal/orchestrator"
 	"github.com/suruseas/opossum/internal/runtime"
+	"github.com/suruseas/opossum/internal/workspace"
 	"golang.org/x/term"
 )
 
@@ -54,7 +56,7 @@ func newRootCmd() *cobra.Command {
 		upCmd(), downCmd(), psCmd(), imagesCmd(), logsCmd(), statsCmd(),
 		stopCmd(), restartCmd(), startCmd(), execCmd(),
 		buildCmd(), pullCmd(), killCmd(), runCmd(),
-		importCmd(), configCmd(), doctorCmd(), cpCmd(), watchCmd(),
+		importCmd(), configCmd(), doctorCmd(), cpCmd(), watchCmd(), wsCmd(),
 	)
 
 	// Preflight: every runtime-touching command needs Apple's `container` CLI on
@@ -66,13 +68,40 @@ func newRootCmd() *cobra.Command {
 		if cmdSkipsRuntimePreflight(cmd) {
 			return nil
 		}
-		if !runtime.New().Available() {
+		rt := runtime.New()
+		if !rt.Available() {
 			return orchestrator.ErrRuntimeAbsent()
+		}
+		// A command that acts on the runtime needs it *running*, not just installed.
+		// Since the runtime's service doesn't start on demand, opossum starts it here
+		// (a light, idempotent launchd start) so an agent's edit→run loop doesn't
+		// stall on "system start". Opt out with OPOSSUM_NO_AUTO_START. The `ps`/
+		// `images` "is anything here?" queries never auto-start (an empty answer is
+		// meaningful, and a read shouldn't have a side effect) — they report OPSM-405
+		// themselves. Every other command (up/run/logs/stats/…) needs the runtime up
+		// to do anything, so auto-starting it is the useful move.
+		if !cmdReadOnlyRuntime(cmd) && !rt.SystemRunning() {
+			if os.Getenv("OPOSSUM_NO_AUTO_START") != "" {
+				return orchestrator.ErrRuntimeStopped()
+			}
+			fmt.Fprintln(os.Stderr, "opossum: "+orchestrator.NoticeRuntimeAutoStart())
+			if err := rt.StartSystem(); err != nil {
+				return orchestrator.ErrRuntimeAutoStartFailed(err)
+			}
 		}
 		return nil
 	}
 	return root
 }
+
+// runtimeReadOnly names the "is anything here?" query commands that must never
+// auto-start the runtime — a read shouldn't have a side effect, and an empty
+// answer is itself meaningful. They report a stopped runtime (OPSM-405) themselves
+// (see Ps/Images). Every other command needs the runtime up to do useful work, so
+// it auto-starts; logs/stats included, since they'd otherwise just fail.
+var runtimeReadOnly = map[string]bool{"ps": true, "images": true}
+
+func cmdReadOnlyRuntime(cmd *cobra.Command) bool { return runtimeReadOnly[cmd.Name()] }
 
 // runtimePreflightExempt names commands that must run without the `container` CLI
 // installed: `config` only parses/renders compose, `doctor` self-diagnoses the
@@ -84,6 +113,7 @@ func newRootCmd() *cobra.Command {
 var runtimePreflightExempt = map[string]bool{
 	"config":           true,
 	"doctor":           true,
+	"ws":               true, // operates on a directory, never the container runtime
 	"help":             true,
 	"completion":       true,
 	"__complete":       true, // cobra's hidden shell-completion driver
@@ -122,6 +152,123 @@ func watchCmd() *cobra.Command {
 			return o.Watch(ctx)
 		},
 	}
+}
+
+// wsCmd groups the workspace snapshot/rollback commands. A workspace is just a
+// directory (the agent's `./work` by default) — these never touch the container
+// runtime, so `ws` is exempt from the runtime preflight.
+func wsCmd() *cobra.Command {
+	var path string
+	cmd := &cobra.Command{
+		Use:   "ws",
+		Short: "Snapshot and roll back a workspace directory (fast, copy-on-write on APFS)",
+		Long: "Snapshot and roll back a workspace directory using APFS file clones, so an " +
+			"agent can try something risky and reset in an instant.\n\nA snapshot is copy-on-write: " +
+			"near-instant and almost no extra disk until the workspace and the snapshot diverge. " +
+			"Snapshots live in a `.opossum-snapshots/` directory beside the workspace (add it to " +
+			"`.gitignore`; it isn't part of the workspace). On a non-APFS filesystem, snapshotting " +
+			"falls back to a full copy and says so.",
+	}
+	cmd.PersistentFlags().StringVar(&path, "path", "./work", "the workspace directory to snapshot")
+
+	snapshot := &cobra.Command{
+		Use:   "snapshot [name]",
+		Short: "Save the current workspace (name defaults to a timestamp)",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := workspace.DefaultName()
+			if len(args) == 1 {
+				name = args[0]
+			}
+			fastClone, err := workspace.New(path).Snapshot(name)
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "Saved workspace snapshot %q\n", name)
+			if !fastClone {
+				fmt.Fprintln(out, "note: this filesystem doesn't support cloning — made a full copy (slower, uses disk)")
+			}
+			return nil
+		},
+	}
+	list := &cobra.Command{
+		Use:     "ls",
+		Short:   "List saved workspace snapshots (oldest first)",
+		Aliases: []string{"list"},
+		Args:    cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			snaps, err := workspace.New(path).List()
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			if len(snaps) == 0 {
+				fmt.Fprintln(out, "No snapshots yet.")
+				return nil
+			}
+			tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+			fmt.Fprintln(tw, "NAME\tSAVED")
+			for _, s := range snaps {
+				fmt.Fprintf(tw, "%s\t%s\n", s.Name, s.ModTime.Format("2006-01-02 15:04:05"))
+			}
+			return tw.Flush()
+		},
+	}
+	rollback := &cobra.Command{
+		Use:   "rollback <name>",
+		Short: "Restore the workspace from a snapshot (saves the current state first)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			autosave, err := workspace.New(path).Rollback(args[0])
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Rolled workspace back to %q (the previous state was saved as %q)\n", args[0], autosave)
+			return nil
+		},
+	}
+	rm := &cobra.Command{
+		Use:     "rm <name>...",
+		Short:   "Delete named snapshots",
+		Aliases: []string{"remove"},
+		Args:    cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := workspace.New(path).Remove(args...); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Removed %d snapshot(s): %s\n", len(args), strings.Join(args, ", "))
+			return nil
+		},
+	}
+	var keep int
+	var all bool
+	prune := &cobra.Command{
+		Use:   "prune",
+		Short: "Remove snapshots to reclaim space (auto-save snapshots by default)",
+		Long: "Remove snapshots to reclaim space.\n\nBy default it removes only the auto-save " +
+			"snapshots (the `before-rollback-…` ones Rollback makes automatically); pass --all to " +
+			"include ones you named. --keep N keeps the N newest of whichever set is targeted.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			removed, err := workspace.New(path).Prune(keep, all)
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			if len(removed) == 0 {
+				fmt.Fprintln(out, "Nothing to prune.")
+				return nil
+			}
+			fmt.Fprintf(out, "Removed %d snapshot(s): %s\n", len(removed), strings.Join(removed, ", "))
+			return nil
+		},
+	}
+	prune.Flags().IntVar(&keep, "keep", 0, "keep the N newest of the targeted snapshots")
+	prune.Flags().BoolVar(&all, "all", false, "target every snapshot, not just auto-saves")
+
+	cmd.AddCommand(snapshot, list, rollback, rm, prune)
+	return cmd
 }
 
 func servicesCmd(use, short string, fn func(*orchestrator.Orchestrator, []string) error) *cobra.Command {
@@ -419,10 +566,11 @@ var stdinIsTerminal = func() bool {
 }
 
 func runCmd() *cobra.Command {
-	var rm, noDeps, noTTY, ssh bool
+	var rm, noDeps, noTTY, ssh, audit bool
+	var auditFormat string
 	var profiles []string
 	cmd := &cobra.Command{
-		Use:   "run [--rm] [--no-deps] <service> [command...]",
+		Use:   "run [--rm] [--no-deps] [--audit] <service> [command...]",
 		Short: "Run a one-off command in a new container for a service",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -435,7 +583,29 @@ func runCmd() *cobra.Command {
 			}
 			o.EnableProfiles(profiles)
 			o.EnableProfiles(strings.Split(os.Getenv("COMPOSE_PROFILES"), ","))
-			return o.RunOneOff(args[0], args[1:], orchestrator.RunOneOffOptions{Rm: rm, NoDeps: noDeps, TTY: stdinIsTerminal() && !noTTY, SSH: ssh})
+			opts := orchestrator.RunOneOffOptions{Rm: rm, NoDeps: noDeps, TTY: stdinIsTerminal() && !noTTY, SSH: ssh}
+			if audit {
+				if auditFormat != "json" && auditFormat != "text" {
+					return fmt.Errorf("invalid --audit-format %q (want text or json)", auditFormat)
+				}
+				report, err := o.RunAudited(args[0], args[1:], opts)
+				if err != nil {
+					return err
+				}
+				out := cmd.OutOrStdout()
+				if auditFormat == "json" {
+					if err := report.WriteJSON(out); err != nil {
+						return err
+					}
+				} else {
+					report.WriteSummary(out)
+				}
+				if report.ExitCode != 0 {
+					return errRunFailed // non-zero container exit -> non-zero opossum exit
+				}
+				return nil
+			}
+			return o.RunOneOff(args[0], args[1:], opts)
 		},
 	}
 	cmd.Flags().BoolVar(&rm, "rm", false, "remove the container after it exits")
@@ -443,10 +613,16 @@ func runCmd() *cobra.Command {
 	cmd.Flags().BoolVarP(&noTTY, "no-tty", "T", false, "don't allocate a pseudo-terminal, so piped output (e.g. opossum run web cmd | jq) stays clean")
 	cmd.Flags().StringArrayVar(&profiles, "profile", nil, "enable services gated behind this compose profile (repeatable; also honors COMPOSE_PROFILES)")
 	cmd.Flags().BoolVar(&ssh, "ssh", false, "forward the host SSH agent into the container, so private git over SSH works with your host keys")
+	cmd.Flags().BoolVar(&audit, "audit", false, "after the run, report what it did (workspace file diff, egress, exit) — the container's stdout goes to stderr so the report owns stdout")
+	cmd.Flags().StringVar(&auditFormat, "audit-format", "text", "audit report format: text (human summary) or json")
 	// Flags after the service name belong to the executed command, not opossum.
 	cmd.Flags().SetInterspersed(false)
 	return cmd
 }
+
+// errRunFailed makes `opossum run --audit` exit non-zero when the audited container
+// exited non-zero, without discarding the audit report (already printed).
+var errRunFailed = errors.New("the audited run exited non-zero (see the report above)")
 
 func execCmd() *cobra.Command {
 	var interactive, tty bool
