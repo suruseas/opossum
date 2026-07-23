@@ -293,6 +293,18 @@ func (r *Runtime) captureStdout(args ...string) (string, error) {
 // roll back only a network they themselves created. An internal network is
 // created host-only (`--network create --internal`): no internet egress, though
 // the host stays reachable — the enforcement point for allowlist egress.
+// NetworkExists reports whether a network is present. Used to pre-flight an
+// `external: true` network, which opossum uses by name but never creates — so a
+// missing one should fail up front rather than as a raw per-service run error.
+// A non-zero `network inspect` is read as "absent"; it can't tell absent from
+// "couldn't reach the daemon", but the CLI runs `up` only after ensuring the
+// runtime is up (main's preflight), so a false "absent" here isn't reachable in
+// practice.
+func (r *Runtime) NetworkExists(name string) bool {
+	_, err := r.capture("network", "inspect", name)
+	return err == nil
+}
+
 func (r *Runtime) EnsureNetwork(name string, internal bool) (created bool, err error) {
 	args := []string{"network", "create"}
 	if internal {
@@ -318,7 +330,7 @@ func (r *Runtime) EnsureNetwork(name string, internal bool) (created bool, err e
 func (r *Runtime) DeleteNetwork(name string) {
 	out, err := r.capture("network", "delete", name)
 	if err != nil && !networkAlreadyGone(out) {
-		fmt.Fprintf(os.Stderr, "warning: could not delete network %q: %s\n", name, strings.TrimSpace(out))
+		fmt.Fprintf(os.Stderr, "warning: could not delete network %q: %s — a container may still be attached; check `container network ls` and `container ls`\n", name, strings.TrimSpace(out))
 	}
 }
 
@@ -336,7 +348,23 @@ func networkAlreadyGone(out string) bool {
 
 // DeleteVolume removes a named volume, best-effort (used by `down --volumes`).
 func (r *Runtime) DeleteVolume(name string) {
-	r.capture("volume", "delete", name)
+	// Best-effort, but surface the one actionable failure: a volume that won't delete
+	// because it's still attached to a container. Apple `container` reports an absent
+	// volume with the same generic "failed to delete one or more volumes" shape as
+	// other hiccups (no "not found" wording), so keying off that would warn on every
+	// clean re-run of `down -v`; only the explicit in-use signal is worth a warning.
+	if out, err := r.capture("volume", "delete", name); err != nil && resourceInUse(out) {
+		fmt.Fprintf(os.Stderr, "warning: could not remove volume %q: it's still in use by a container — stop the container, then remove it with `container volume delete %s`\n",
+			name, name)
+	}
+}
+
+// resourceInUse reports whether a best-effort delete failed because the target is
+// still in use (the one case worth a warning — an already-absent target and other
+// benign teardown hiccups stay quiet, since Apple `container` reports them with the
+// same generic "failed to delete one or more …" text).
+func resourceInUse(out string) bool {
+	return strings.Contains(strings.ToLower(out), "in use")
 }
 
 // ImageExists reports whether an image reference is present locally.
@@ -348,7 +376,12 @@ func (r *Runtime) ImageExists(ref string) bool {
 // DeleteImage removes an image, best-effort (--force ignores a missing image),
 // for `down --rmi`.
 func (r *Runtime) DeleteImage(ref string) {
-	r.capture("image", "delete", "--force", ref)
+	// Best-effort (used by `down --rmi`); like DeleteVolume, warn only on the
+	// actionable in-use signal so a clean re-run stays quiet.
+	if out, err := r.capture("image", "delete", "--force", ref); err != nil && resourceInUse(out) {
+		fmt.Fprintf(os.Stderr, "warning: could not remove image %q: it's still in use by a running container — stop the container, then remove it with `container image delete %s`\n",
+			ref, ref)
+	}
 }
 
 // Copy copies files between a container and the host via `container cp`. src and
@@ -577,17 +610,48 @@ func (r *Runtime) Run(o RunOptions) error {
 	if o.Detach {
 		// A detached `run` returns quickly (it just starts the container), so
 		// capturing its stderr is cheap — and lets a caller decode a cryptic
-		// bootstrap failure (e.g. a VZError) into a coded diagnostic. Foreground
-		// runs stream directly (their stderr is the container's own output, which
-		// can be unbounded).
+		// bootstrap failure (e.g. a VZError) into a coded diagnostic.
 		var stderr bytes.Buffer
 		if err := r.streamCaptureStderr(&stderr, args...); err != nil {
 			return &RunError{Err: err, Stderr: stderr.String()}
 		}
 		return nil
 	}
-	return r.stream(args...)
+	// A foreground run (a one-off) streams live. When it's not on a TTY we can also
+	// tee stderr into a small capped buffer so the same bootstrap failure (VZError)
+	// is decodable here too — that text appears at the very start of the run, so the
+	// head is enough and memory stays bounded even for a long-running one-off. A TTY
+	// run keeps its real terminal fds (tee'ing would drop it out of TTY mode), so it
+	// isn't captured.
+	if o.TTY {
+		return r.stream(args...)
+	}
+	stderr := &cappedBuffer{cap: 8 << 10}
+	if err := r.streamCaptureStderr(stderr, args...); err != nil {
+		return &RunError{Err: err, Stderr: stderr.String()}
+	}
+	return nil
 }
+
+// cappedBuffer accumulates up to cap bytes and silently drops the rest — enough to
+// detect a bootstrap failure (emitted at the start of a run) without buffering an
+// unbounded foreground stream.
+type cappedBuffer struct {
+	buf []byte
+	cap int
+}
+
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	if room := c.cap - len(c.buf); room > 0 {
+		if room > len(p) {
+			room = len(p)
+		}
+		c.buf = append(c.buf, p[:room]...)
+	}
+	return len(p), nil // always report full write; the drop is intentional
+}
+
+func (c *cappedBuffer) String() string { return string(c.buf) }
 
 // RunError wraps a failed detached `container run` with its captured stderr, so a
 // caller can decode a cryptic runtime failure (e.g. a VZError attach conflict)

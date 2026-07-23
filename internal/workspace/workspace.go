@@ -101,7 +101,7 @@ func (m *Manager) snapshot(name string) (fastClone bool, err error) {
 		return false, err
 	}
 	if err := os.MkdirAll(snapDir, 0o755); err != nil {
-		return false, err
+		return false, fmt.Errorf("couldn't create the snapshot directory %s: %w — check the parent directory's permissions and free space", snapDir, err)
 	}
 	dst := filepath.Join(snapDir, name)
 	if _, err := os.Stat(dst); err == nil {
@@ -122,7 +122,7 @@ func (m *Manager) List() ([]Snapshot, error) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("couldn't read the snapshot directory %s: %w — check its permissions", snapDir, err)
 	}
 	var snaps []Snapshot
 	for _, e := range entries {
@@ -174,7 +174,7 @@ func (m *Manager) Rollback(name string) (autosave string, err error) {
 	os.RemoveAll(old)
 	if err := os.Rename(m.Root, old); err != nil {
 		os.RemoveAll(tmp)
-		return "", err
+		return "", fmt.Errorf("couldn't move the current workspace aside to roll back: %w — check permissions on %s (nothing was changed)", err, m.Root)
 	}
 	if err := os.Rename(tmp, m.Root); err != nil {
 		// Put the original back. If even that fails, the workspace's contents are

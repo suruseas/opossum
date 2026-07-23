@@ -1,0 +1,17 @@
+# Nested variable defaults and YAML double-quoted line continuations INSIDE a
+# reference — the shape rocketchat writes its mongo replica-set URL with (#290,
+# found dogfooding Haxxnet/Compose-Examples). opossum interpolates the raw file
+# text before YAML parsing, so it must both resolve a reference nested in another
+# reference's default and fold the backslash+newline continuation that carries a
+# long default across lines. Regressing either makes this file fail to load.
+# (No interpolation syntax in this comment on purpose: opossum's text-level
+# interpolation would otherwise try to expand it.)
+name: nested-interp
+services:
+  app:
+    image: app:latest
+    environment:
+      NESTED: "${OUTER:-mongodb://${HOST:-localhost}:${PORT:-27017}/db}"
+      MULTILINE: "${MONGO_URL:\
+        -mongodb://${HOST:-localhost}:${PORT:-27017}/\
+        local?replicaSet=${RS:-rs0}}"

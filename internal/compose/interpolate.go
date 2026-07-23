@@ -211,7 +211,10 @@ func interpolate(raw []byte, lookup varLookup) ([]byte, error) {
 			out.WriteByte('$')
 			i += 2
 		case next == '{':
-			end := strings.IndexByte(s[i+2:], '}')
+			// Find the `}` that closes THIS reference, skipping any nested `${…}` so a
+			// reference with a nested default (`${A:-${B}}`) is captured whole rather
+			// than truncated at the first inner `}`.
+			end := matchBrace(s[i+2:])
 			if end < 0 {
 				return nil, fmt.Errorf("unterminated variable reference: %q", s[i:])
 			}
@@ -238,21 +241,72 @@ func interpolate(raw []byte, lookup varLookup) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-// expandBraced resolves the inside of a `${...}` reference.
+// matchBrace returns the index in s of the `}` that closes a `${` reference whose
+// content starts at s[0], skipping nested `${…}` so the outer reference is captured
+// whole. Returns -1 if no matching `}` is found.
+func matchBrace(s string) int {
+	depth := 1
+	for i := 0; i < len(s); i++ {
+		switch {
+		case s[i] == '$' && i+1 < len(s) && s[i+1] == '{':
+			depth++
+			i++ // consume the '{' so it isn't recounted
+		case s[i] == '}':
+			if depth--; depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// foldLineContinuations removes YAML double-quoted line continuations from inside a
+// `${…}` expression. Interpolation runs on the raw file text (before YAML parsing),
+// so a reference a compose author wrote across several lines — `"${VAR:\<newline>
+// -default}"` — still carries the `\`+newline+indent that YAML would fold away.
+// Collapsing them here lets such a reference parse as one line (only `\` immediately
+// before a newline is folded, so a literal backslash elsewhere is untouched).
+func foldLineContinuations(expr string) string {
+	if !strings.Contains(expr, "\\") {
+		return expr
+	}
+	var b strings.Builder
+	for i := 0; i < len(expr); i++ {
+		if expr[i] == '\\' && i+1 < len(expr) && (expr[i+1] == '\n' || expr[i+1] == '\r') {
+			i++ // skip the backslash; land on CR or LF
+			if expr[i] == '\r' && i+1 < len(expr) && expr[i+1] == '\n' {
+				i++ // skip the LF of a CRLF
+			}
+			for i+1 < len(expr) && (expr[i+1] == ' ' || expr[i+1] == '\t') {
+				i++ // skip the continuation line's leading whitespace
+			}
+			continue
+		}
+		b.WriteByte(expr[i])
+	}
+	return b.String()
+}
+
+// expandBraced resolves the inside of a `${...}` reference. A default value (the
+// argument of `:-`/`-`/`:?`/`?`) is itself interpolated, so a nested reference in
+// the default (`${A:-${B:-x}}`) resolves too.
 func expandBraced(expr string, lookup varLookup) (string, error) {
-	// Find the operator (:-, -, :?, ?) separating name from the argument.
+	expr = foldLineContinuations(expr)
+	// Find the operator (:-, -, :?, ?) separating name from the argument. Scan only
+	// up to the first nested `${…}` so an operator inside a nested default isn't
+	// mistaken for this reference's operator.
 	for idx := 0; idx < len(expr); idx++ {
+		if expr[idx] == '$' && idx+1 < len(expr) && expr[idx+1] == '{' {
+			break // the rest is a nested reference; this one has no operator before it
+		}
 		ch := expr[idx]
 		if ch == '-' || ch == '?' {
 			name := expr[:idx]
 			colon := false
-			opStart := idx
 			if idx > 0 && expr[idx-1] == ':' {
 				colon = true
 				name = expr[:idx-1]
-				opStart = idx - 1
 			}
-			_ = opStart
 			arg := expr[idx+1:]
 			if err := validName(name); err != nil {
 				return "", err
@@ -261,13 +315,16 @@ func expandBraced(expr string, lookup varLookup) (string, error) {
 			missing := !set || (colon && val == "")
 			if ch == '-' {
 				if missing {
-					return arg, nil
+					return interpolateStr(arg, lookup) // resolve nested refs in the default
 				}
 				return val, nil
 			}
 			// ch == '?': required
 			if missing {
-				msg := arg
+				msg, err := interpolateStr(arg, lookup)
+				if err != nil {
+					return "", err
+				}
 				if msg == "" {
 					msg = "required variable is not set"
 				}
@@ -282,6 +339,12 @@ func expandBraced(expr string, lookup varLookup) (string, error) {
 	}
 	val, _ := lookup(expr)
 	return val, nil
+}
+
+// interpolateStr is the string form of interpolate, for resolving a default value.
+func interpolateStr(s string, lookup varLookup) (string, error) {
+	b, err := interpolate([]byte(s), lookup)
+	return string(b), err
 }
 
 func validName(name string) error {

@@ -142,7 +142,7 @@ func (o *Orchestrator) applyChanges(paths []string) {
 	for svc := range rebuilds {
 		fmt.Fprintf(o.out, "rebuilding %s…\n", svc)
 		if err := o.rebuildService(svc); err != nil {
-			o.warnf(codeWatchRebuild, "rebuild %s failed: %v\n", svc, err)
+			o.warnf(codeWatchRebuild, "rebuild %s failed: %v — fix the error above and save again, or re-run `opossum up --build %s`\n", svc, err, svc)
 		}
 	}
 	for svc := range restarts {
@@ -150,7 +150,7 @@ func (o *Orchestrator) applyChanges(paths []string) {
 			continue // a rebuild already recreated it
 		}
 		if err := o.Restart([]string{svc}); err != nil {
-			o.warnf(codeWatchRestart, "restart %s failed: %v\n", svc, err)
+			o.warnf(codeWatchRestart, "restart %s failed: %v — the container may be gone; run `opossum up %s` to recreate it\n", svc, err, svc)
 		}
 	}
 }
@@ -160,7 +160,7 @@ func (o *Orchestrator) syncFile(t watchTarget, changed, rel string) {
 	dst := t.service + ":" + t.containerTarget(rel)
 	fmt.Fprintf(o.out, "sync %s → %s\n", changed, dst)
 	if err := o.Copy(changed, dst); err != nil {
-		o.warnf(codeWatchSync, "sync failed: %v\n", err)
+		o.warnf(codeWatchSync, "sync of %s to %s failed: %v — check the container %q is running (`opossum ps`)\n", changed, dst, err, t.service)
 	}
 }
 
@@ -195,7 +195,7 @@ func (o *Orchestrator) Watch(ctx context.Context) error {
 	// so a large dependency dir doesn't flood the watcher with events.
 	for _, t := range targets {
 		if err := addTree(w, t); err != nil {
-			o.warnf(codeWatchSetup, "watching %s: %v\n", t.hostDir, err)
+			o.warnf(codeWatchSetup, "couldn't watch %s: %v — check the path exists and is readable; watch continues for the other paths\n", t.hostDir, err)
 		}
 		fmt.Fprintf(o.out, "watching %s (%s → %s:%s)\n", t.hostDir, t.action, t.service, t.target)
 	}
@@ -240,7 +240,7 @@ func (o *Orchestrator) Watch(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
-			o.warnf(codeWatchError, "watch error: %v\n", err)
+			o.warnf(codeWatchError, "the file watcher reported an error: %v — if watching has stopped, re-run `opossum watch`\n", err)
 		}
 	}
 }

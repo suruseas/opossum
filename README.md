@@ -175,7 +175,7 @@ opossum down          # stop + remove (add -v to also drop named volumes)
 `opossum up` — opossum builds any `build:` service itself (a heavy build can be
 slow; see [Troubleshooting builds](#troubleshooting-builds)). Either way, run
 `opossum config` first to preview the resolved configuration and any fields
-opossum ignores (`networks`, `restart`, …).
+opossum ignores (`restart`, `dns_search`, …).
 
 **If a service doesn't come up**, each of these is also warned about at `up` time
 (see [Differences from docker compose](#differences-from-docker-compose)):
@@ -379,7 +379,7 @@ features aren't supported. The detailed rationale for each is in
 | Container names | `<project>-<service>-N` | `<service>.<project>.<domain>` (DNS-registered for bare-name discovery) |
 | Named volumes | shared globally by name | namespaced `<project>_<volume>`; `down -v` only removes this project's |
 | Volume seeding | a fresh named/anonymous volume is pre-filled from the image's contents at that path | **not seeded** — a fresh volume always mounts empty (named *and* anonymous) |
-| Networks | user-defined networks/aliases | one network per project (`<project>-net`); `networks:` is ignored |
+| Networks | user-defined networks + aliases | `networks:` **is** supported — a per-project default network (`<project>-net`), plus top-level `internal:`/`external:` and multiple networks per service; per-network **aliases** and static IPs aren't applied (see [Networking model](#networking-model)) |
 | Published ports | a bare `ports: - "3000"` picks a random host port | mirrors it to `3000:3000` — Apple `container` requires a host port and has no random option |
 | Healthcheck | engine-native | no native support — opossum runs `healthcheck.test` via `container exec` and polls |
 | `service_completed_successfully` | engine tracks exit | opossum runs the one-shot in the **foreground** (an exit code is only observable there) |
@@ -387,9 +387,10 @@ features aren't supported. The detailed rationale for each is in
 **Not supported / hard constraints:**
 
 - **Platform**: macOS 26+ on Apple silicon, single host only (no Swarm/remote). Relies on `container`'s macOS-26 networking + DNS.
-- **Ignored fields** (parsed and listed by `opossum config` / `--verbose`, not acted on): `networks`, `restart`, `deploy` (except `resources.limits`), `container_name`, `cap_add`/`cap_drop`, `sysctls`, `devices`, `privileged`, and top-level volume `driver`/`labels`.
+- **Ignored fields** (parsed and listed by `opossum config` / `--verbose`, not acted on): `restart`, `container_name`, `dns`/`dns_search` (service discovery is automatic — see [Networking model](#networking-model)), `network_mode` other than `none`, per-network **aliases** and static IPs (`ipam`), `deploy` (except `resources.limits`), `sysctls`, `devices`, `privileged`, and top-level volume `driver`/`labels`. (`networks`, `cap_add`/`cap_drop` *are* acted on.)
 - **`secrets`**: file-based only; `external` secrets and `uid`/`gid`/`mode` are not applied.
 - **DB data dirs**: Postgres `initdb` fails on a named-volume mount point — use a **subdirectory** (`PGDATA=/var/lib/postgresql/data/pgdata`). Very common in real app composes (gitea, nextcloud, …), so `up` **warns** when it sees a named volume at `/var/lib/postgresql/data` without a PGDATA subdirectory. (MySQL/MariaDB tolerate the mount point.)
+- **DB data dirs can't be bind-mounted** (use a **named volume**): Apple `container`'s bind mounts are host-owned (virtiofs) and can't be `chown`ed from inside the container, so a DB image (MySQL/Postgres/…) that chowns its data directory fails to start with `chown: … Operation not permitted`. A named volume *is* chownable, so mount the data directory from one. Self-host composes that put data under a bind-mounted `/mnt/docker-volumes/<svc>/…` (a Linux-host convention) hit this on macOS — when a DB crashes this way, `up` points at the fix.
 - **Volumes aren't seeded from the image**: Docker copies an image's directory contents into a *fresh* named or anonymous volume the first time it's used; Apple `container` mounts it **empty**. This breaks the common dev pattern of a bind-mounted source plus a `- /app/node_modules` volume to preserve the image's installed dependencies — on opossum that `node_modules` is empty and the app fails to start (`ng serve`/`vite`/etc. can't find their packages). Work around it by installing deps at container start (`command: sh -c "npm ci && npm start"`), or by not shadowing the dependency dir with a volume. Applies to **named volumes too**, not just anonymous ones.
 - **Build context**: Apple's builder can't read a context under `/private/tmp` or a symlinked directory — build from a real path under your home dir (`up` warns).
 - **Won't run at all**: composes that need Linux-host kernel access (WireGuard's `NET_ADMIN` + `/lib/modules`) — Apple `container` doesn't provide it (also true of Docker Desktop for the host-path cases). Tools that drive Docker through `/var/run/docker.sock` (e.g. Portainer) also can't manage opossum's containers: bind-mounting a host Unix socket into a container *does* work now (since `container` 1.1.0), but Apple `container` exposes no Docker-compatible daemon socket — it talks to the host over XPC — so the mount has nothing on the other end.
@@ -398,6 +399,31 @@ features aren't supported. The detailed rationale for each is in
 
 Everything else in the [Compose support](#compose-support) and
 [Command support](#command-support) tables works as in docker compose.
+
+## Networking model
+
+The place opossum diverges most from docker compose is the network — because Apple
+`container`'s network model is genuinely different from the Docker engine's. opossum
+maps your compose onto it rather than reimplementing Docker's; this is the map.
+
+| Concern | docker compose (Docker engine) | opossum (Apple `container`) — what you write |
+|---------|--------------------------------|----------------------------------------------|
+| Default connectivity | bridge network, outbound via NAT | per-project network, outbound via NAT — nothing to write |
+| Reaching the **host** | `host.docker.internal` / `--add-host` | **no `host.docker.internal`** — use the built-in **`${OPOSSUM_HOST_GATEWAY}`** (the host's LAN IP; the host service must bind `0.0.0.0`) — see [Reaching a service on the host](#reaching-a-service-on-the-host) |
+| Service **discovery** | automatic embedded DNS on the network | built-in DNS, but it needs a **registered domain** — one-time `sudo container system dns create opossum`; peers then resolve each other by bare service name (`db`, `web`) |
+| Container names / **project isolation** | `<project>-<service>-N`, name-scoped | `<service>.<project>.<domain>` on a per-project network (`<project>-net`); projects stay isolated automatically — see [Running multiple projects](#running-multiple-projects-at-once) |
+| Restricting **internet egress** | no native control (needs an external firewall) | `internal: true` on a network **removes the route to the internet** (host still reachable); `network_mode: none` = loopback only — see [Constraining egress](#constraining-egress-agent-sandboxes) |
+| Multiple networks / **external** | supported, with aliases | multiple networks per service (one `--network` each) and `external: true` (reuse a pre-existing network by name) both work |
+| Name resolution **on an `internal:` network** | works | **doesn't** — the DNS resolver sits on the gateway an internal network can't route to, so address peers by **IP** (or reach a host proxy via `${OPOSSUM_HOST_GATEWAY}`) |
+| Per-network **aliases** / static IPs (`ipam`) | applied | **not applied** (the `<project>` subdomain is what keeps names unique) |
+
+The three surprises for a docker-compose user, and why:
+
+- **There's no `host.docker.internal`.** Apple `container`'s default network is NAT-only and exposes no host alias, so opossum computes the host's LAN address and hands it to you as `${OPOSSUM_HOST_GATEWAY}`, interpolated into your compose at load time. The host service must listen on `0.0.0.0` (not just loopback) to be reachable from the container.
+- **Bare-name discovery needs a one-time DNS domain.** The runtime's built-in DNS only serves a *registered* domain, so `sudo container system dns create opossum` (once) is what makes `db`/`web` resolve. Skip it and services can't find each other by name (`opossum doctor` flags this, and startup warns with `[OPSM-202]`).
+- **An `internal:` network has no name resolution at all.** Removing the internet route (the point of `internal:`, for agent sandboxes) also removes the route to the DNS resolver — so on an internal network, peers must talk by IP, and the one sanctioned way out is a host proxy at `${OPOSSUM_HOST_GATEWAY}`.
+
+`opossum doctor` checks the two things that most often go wrong here — whether the DNS domain is registered and whether outbound networking works — and prints a one-line fix for each.
 
 ## Running multiple projects at once
 
@@ -499,14 +525,10 @@ opossum -f mcp-stack/compose.yaml up          # starts the HTTP servers
   case is an app + nginx sharing a `public`/assets volume.) `up` **warns** when it
   sees this — use a **bind mount** (a host path, which *is* shareable) for the
   shared data, or bake it into the image.
-- **`networks:` — network aliases aren't applied.** A service with no `networks:`
-  joins the single per-project network (`<project>-net`); one that names declared
-  networks joins each of them (`internal:` for host-only egress control, or
-  `external:` to reuse a pre-existing network — see [Constraining
-  egress](#constraining-egress-agent-sandboxes)). Multiple networks per service are
-  supported (one `--network` each), but per-network **aliases** are not. On an
-  `internal:` network, peers can't resolve each other by name (the DNS resolver is
-  unreachable) — use IPs.
+- **`networks:` — aliases and static IPs (`ipam`) aren't applied**, and an
+  `internal:` network has no name resolution (peers must use IPs). Multiple networks
+  per service and `external:` reuse both work. See [Networking
+  model](#networking-model) for the full picture.
 - **`restart:` policies are ignored** — opossum does not restart a container that
   exits (`up` warns). Also, `restart` (the command) reassigns a container's IP;
   its name and config are preserved, so name-based discovery is unaffected.

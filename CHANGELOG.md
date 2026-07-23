@@ -6,6 +6,56 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-07-24
+
+### Added
+
+- When a database container crashes because it can't `chown` a **bind-mounted**
+  data directory (Apple `container`'s bind mounts are host-owned and not chownable —
+  common with self-host composes that put data under `/mnt/docker-volumes/…`), the
+  crash report (`[OPSM-401]`/`[OPSM-407]`) now points at the fix: use a **named
+  volume** for that directory. Previously the raw `chown: … Operation not permitted`
+  was shown without the remedy.
+- `up` now fails up front (`[OPSM-205]`) when a service joins a network declared
+  `external: true` that doesn't exist — opossum uses external networks by name and
+  never creates them, so a missing one used to surface only as a raw "network not
+  found" when the service tried to start. The error names the network and gives two
+  fixes (create it, or drop `external:`). Common with reverse-proxy composes that
+  expect a shared `proxy` network.
+- `up` now catches a service that **exits right after starting** even when nothing
+  gates on it (no healthcheck or `depends_on`). Previously such a service — a bad
+  config, a failed Postgres `initdb`, a missing mount — left `up` reporting success
+  (exit 0) over a dead container. Now `up` prints the crashed service's last log
+  lines (`[OPSM-407]`) and exits non-zero, so "started" never masks "already dead".
+  The containers are left up for inspection (not rolled back). A dependency crash
+  caught by a health gate is still `[OPSM-401]`.
+
+### Changed
+
+- `opossum run` (a one-off) now gets the same named-volume conflict handling as
+  `up`: it warns up front (`[OPSM-103]`) when a running container — including the
+  service's own `up` container — already holds a volume the one-off needs, and if
+  the run still hits the cryptic exclusive-attach VZError it's decoded to the same
+  clear message naming the volume and holder. A one-off's ordinary non-zero exit is
+  untouched, so `run` keeps propagating exit codes.
+- More actionable error messages across the remaining lifecycle and teardown paths
+  (second pass of the error audit): a failed `start`/`restart` says the container
+  must exist first (`opossum up`); a failed `pull` names the image and points at
+  registry auth/network; a generic service-start failure points at `opossum logs`;
+  `logs` points at `opossum ps`; the `watch` rebuild/restart/sync/setup/error
+  warnings each carry a fix (and sync now names the file and service); Docker-import
+  failures explain what to check. Best-effort teardown (`down --volumes`/`--rmi`)
+  no longer swallows a real failure silently — a volume or image that won't delete
+  now warns with a next step, while a clean re-run (already gone) stays quiet.
+
+### Fixed
+
+- Variable interpolation now resolves a reference **nested inside another's
+  default** (`${A:-${B:-x}}`) and handles a reference written across lines with YAML
+  double-quoted `\`-continuations. Previously a nested `${…}` was truncated at the
+  first `}` and a multi-line reference failed to parse — both are used by real
+  self-host composes (e.g. rocketchat's MongoDB replica-set URL).
+
 ## [0.12.0] - 2026-07-23
 
 ### Added
@@ -518,7 +568,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/suruseas/opossum/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/suruseas/opossum/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/suruseas/opossum/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/suruseas/opossum/compare/v0.9.0...v0.10.0

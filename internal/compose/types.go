@@ -60,7 +60,7 @@ type Service struct {
 	CapAdd      StringOrSlice   `yaml:"cap_add"`      // --cap-add Linux capabilities
 	CapDrop     StringOrSlice   `yaml:"cap_drop"`     // --cap-drop Linux capabilities
 	NetworkMode string          `yaml:"network_mode"` // only "none" acted on: full network isolation (--network none)
-	Networks    ServiceNetworks `yaml:"networks"`     // declared networks this service joins (opossum: at most one)
+	Networks    ServiceNetworks `yaml:"networks"`     // declared networks this service joins (one --network each; aliases/static IPs not applied)
 
 	Deploy  *Deploy  `yaml:"deploy"`  // only deploy.resources.limits.{memory,cpus} is acted on
 	Develop *Develop `yaml:"develop"` // develop.watch drives `opossum watch` (file-change sync)

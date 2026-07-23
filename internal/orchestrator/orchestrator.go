@@ -331,6 +331,37 @@ func (o *Orchestrator) warnInternalNetwork(name string) {
 		"         and can't resolve peers by name — use IPs, or reach a host proxy via ${OPOSSUM_HOST_GATEWAY}.\n", name)
 }
 
+// checkExternalNetworks fails if a network any starting service declares
+// `external: true` doesn't exist. opossum uses external networks by their real name
+// and never creates them, so without this a missing one surfaces only when the
+// service tries to start (a raw "network not found") — misleading, since the real
+// fix is to create the network or drop `external:`.
+func (o *Orchestrator) checkExternalNetworks(services []string) error {
+	checked := map[string]bool{}
+	for _, name := range services {
+		svc := o.Project.Services[name]
+		if svc.NetworkMode == compose.NetworkModeNone {
+			continue
+		}
+		for _, key := range svc.Networks {
+			if !o.Project.Networks[key].External {
+				continue
+			}
+			rn := o.resolveNetwork(key)
+			if checked[rn.name] {
+				continue
+			}
+			checked[rn.name] = true
+			if !o.rt.NetworkExists(rn.name) {
+				return fmt.Errorf("[%s] network %q is declared `external: true` but doesn't exist — "+
+					"create it first (`container network create %s`), or remove `external: true` so opossum creates it for the project",
+					codeExternalNetAbsent, rn.name, rn.name)
+			}
+		}
+	}
+	return nil
+}
+
 // managedNetworks returns the networks opossum must create for the given
 // services, keyed by runtime name, with the internal flag. Isolated
 // (`network_mode: none`) and external networks are skipped — opossum creates
@@ -466,6 +497,14 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 		return err
 	}
 
+	// Pre-flight: fail before starting anything if a network a service declares
+	// `external: true` doesn't exist — opossum uses external networks by name and
+	// never creates them, so a missing one would otherwise surface only as a raw
+	// "network not found" mid-start (docker compose likewise errors up front).
+	if err := o.checkExternalNetworks(order); err != nil {
+		return err
+	}
+
 	// Pre-flight: bail out before creating the network (or anything else) if a
 	// target container name is already owned by a different project.
 	for _, name := range order {
@@ -506,8 +545,11 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 	// containers we started (reverse order) and remove any networks we created,
 	// so a failed up leaves no residue behind.
 	var started []string
+	broughtUp := false // set once every service has started; suppresses rollback for a
+	// post-start crash (that's a health report, not a failed bring-up — leave the
+	// containers for inspection like docker compose does).
 	defer func() {
-		if err == nil {
+		if err == nil || broughtUp {
 			return
 		}
 		// When up was interrupted, the shared context is already cancelled — reset
@@ -675,8 +717,54 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 	}
 	if o.up.dryRun {
 		o.printPlan()
+		return nil
+	}
+	// Every service started successfully. A crash from here on is a post-start
+	// health report, not a failed bring-up, so don't roll the stack back.
+	broughtUp = true
+	// For a detached up, verify each long-running service is still running — a
+	// container that exited right after starting (with no healthcheck/depends_on to
+	// catch it) would otherwise leave `up` reporting success over a dead service. A
+	// foreground up blocks on the container, so its exit is already surfaced.
+	if detach {
+		return o.verifyStarted(order, oneShot)
 	}
 	return nil
+}
+
+// verifyStarted checks that each long-running service just brought up is still
+// running, reporting any that exited immediately (with its last log lines) and
+// failing the up. One-shots (completed-targets) are expected to exit, so they're
+// skipped. It's a snapshot right after start, so it catches an immediate crash
+// (bad config, failed initdb, missing mount) — not one that dies minutes later.
+func (o *Orchestrator) verifyStarted(order []string, oneShot map[string]bool) error {
+	var crashed []string
+	for _, name := range order {
+		if oneShot[name] {
+			continue
+		}
+		info := o.rt.Inspect(o.containerName(name))
+		// `container run -d` returns after the container is running, so a healthy
+		// service inspects as "running" here (the OPSM-401 fail-fast keys off the
+		// same predicate). Treat a missing/empty state as "don't flag" — only a
+		// concrete non-running state (stopped/exited) is a crash. If Apple `container`
+		// ever surfaces a transient "created"/"starting" state post-run, revisit.
+		if !info.Exists || info.State == "" || info.State == "running" {
+			continue
+		}
+		if logs := o.rt.CaptureLogs(o.containerName(name), 15); logs != "" {
+			o.warnf(codeServiceExited, "service %q exited right after starting (state %q); its last log lines:\n%s%s\n", name, info.State, indentLines(logs), crashHint(logs, o.Project.Services[name]))
+		} else {
+			o.warnf(codeServiceExited, "service %q exited right after starting (state %q) — check its command, image, and mounts\n", name, info.State)
+		}
+		crashed = append(crashed, name)
+	}
+	if len(crashed) == 0 {
+		return nil
+	}
+	sort.Strings(crashed)
+	return fmt.Errorf("[%s] %d service(s) exited right after starting: %s — see the logs above, fix the cause, and run `opossum up` again",
+		codeServiceExited, len(crashed), strings.Join(quoteAll(crashed), ", "))
 }
 
 // printPlan lists the exact `container` invocations a dry-run recorded but did
@@ -964,7 +1052,8 @@ func (o *Orchestrator) waitHealthy(name string, hc *compose.Healthcheck) error {
 			// container — otherwise the usual "check `opossum logs`" hint points at a
 			// container that's already gone.
 			if logs := o.rt.CaptureLogs(cname, 15); logs != "" {
-				return fmt.Errorf("[OPSM-401] container is not running (state %q); its last log lines:\n%s", info.State, indentLines(logs))
+				return fmt.Errorf("[OPSM-401] container is not running (state %q); its last log lines:\n%s%s",
+					info.State, indentLines(logs), crashHint(logs, o.Project.Services[name]))
 			}
 			return fmt.Errorf("[%s] container is not running (state %q)", codeDepNotRunning, info.State)
 		}
@@ -1293,20 +1382,33 @@ func isStorageAttachmentError(stderr string) bool {
 // decodeStartError turns a service's raw run failure into an actionable
 // diagnostic. When the failure is the exclusive-attach VZError (OPSM-103), it
 // names the volume and the running container holding it — the cryptic
-// virtualization error becomes a fix. Any other failure passes through unchanged.
+// virtualization error becomes a fix. Any other failure gets the generic
+// start-failed pointer to the logs.
 func (o *Orchestrator) decodeStartError(name string, err error) error {
+	if decoded, ok := o.decodeVolumeAttachError(name, o.containerName(name), err); ok {
+		return decoded
+	}
+	return startFailed(name, err)
+}
+
+// decodeVolumeAttachError decodes the exclusive-attach VZError (OPSM-103) when
+// that's what failed, naming the volume and the running container holding it.
+// excludeContainer is skipped while scanning for holders (the caller's own
+// container). It returns (nil, false) for any other failure, so callers that must
+// preserve their own error semantics — e.g. a one-off propagating its command's
+// exit code — can leave those untouched.
+func (o *Orchestrator) decodeVolumeAttachError(name, excludeContainer string, err error) (error, bool) {
 	var re *runtime.RunError
 	if !errors.As(err, &re) || !isStorageAttachmentError(re.Stderr) {
-		return fmt.Errorf("starting service %q: %w", name, err)
+		return nil, false
 	}
 	vols := o.serviceRuntimeVolumes(name)
 	if len(vols) == 0 {
 		// The signature matched but the service mounts no named volume opossum owns
-		// (only bind mounts, say) — this isn't an attach conflict we can explain, so
-		// don't dress it up as OPSM-103. Pass the raw failure through.
-		return fmt.Errorf("starting service %q: %w", name, err)
+		// (only bind mounts, say) — not an attach conflict we can explain.
+		return nil, false
 	}
-	holders := o.volumeHolders(vols, o.containerName(name))
+	holders := o.volumeHolders(vols, excludeContainer)
 	// Report the specific volume(s) and their holders when we can identify them;
 	// fall back to naming just the service's volumes (the holder may have exited
 	// between the failed run and this lookup).
@@ -1327,7 +1429,7 @@ func (o *Orchestrator) decodeStartError(name string, err error) error {
 		"one running container at a time, and %s is already attached elsewhere — the second attach fails "+
 		"with a storage-device (VZError) error. Stop the container holding it (`container stop <name>`), "+
 		"or give this service its own volume; for shared data use a bind mount (a host path) instead",
-		codeVolumeAttachBusy, name, strings.Join(busy, ", "))
+		codeVolumeAttachBusy, name, strings.Join(busy, ", ")), true
 }
 
 // warnBusyNamedVolumes warns, before starting anything, when a service's named
@@ -1337,6 +1439,19 @@ func (o *Orchestrator) decodeStartError(name string, err error) error {
 // runtime knows about, so the user sees the conflict up front rather than as a
 // mid-`up` bootstrap failure.
 func (o *Orchestrator) warnBusyNamedVolumes(order []string) {
+	ours := map[string]bool{}
+	for _, name := range order {
+		ours[o.containerName(name)] = true
+	}
+	o.warnBusyVolumesFor(order, ours)
+}
+
+// warnBusyVolumesFor warns when any of the given services' named volumes is already
+// attached to a running container that isn't in `ours`. Split out so a one-off can
+// pass the right exclusion: its own container is the `<service>-run` container, so
+// the service's regular `up` container (if running and holding the volume) is a
+// genuine foreign holder to warn about — unlike during `up`, where it's ours.
+func (o *Orchestrator) warnBusyVolumesFor(services []string, ours map[string]bool) {
 	// One container per volume is enough to flag it; collect holders once.
 	all := map[string][]string{} // volume -> running holders
 	for _, c := range o.rt.List() {
@@ -1350,12 +1465,8 @@ func (o *Orchestrator) warnBusyNamedVolumes(order []string) {
 	if len(all) == 0 {
 		return
 	}
-	ours := map[string]bool{}
-	for _, name := range order {
-		ours[o.containerName(name)] = true
-	}
 	warned := map[string]bool{}
-	for _, name := range order {
+	for _, name := range services {
 		for _, v := range o.serviceRuntimeVolumes(name) {
 			if warned[v] {
 				continue
@@ -1439,6 +1550,27 @@ func (o *Orchestrator) warnDockerSocket(name string, svc *compose.Service) {
 // block (e.g. container logs) inside an error message.
 func indentLines(s string) string {
 	return "  " + strings.ReplaceAll(s, "\n", "\n  ")
+}
+
+// crashHint decodes a crashed container's last log lines into an actionable hint
+// for a known Apple-`container` gotcha, appended to the crash report. Currently it
+// recognizes a chown-permission failure on a bind mount: Apple `container` bind
+// mounts are host-owned (virtiofs) and can't be chowned from inside the container,
+// so a DB image (mysql/postgres/…) that chowns its data directory fails with
+// "chown: … Operation not permitted". A named volume IS chownable, so it's the fix.
+// Returns "" when nothing matches (so callers can append unconditionally).
+func crashHint(logs string, svc *compose.Service) string {
+	if svc == nil || !strings.Contains(logs, "chown") || !strings.Contains(logs, "Operation not permitted") {
+		return ""
+	}
+	for _, v := range svc.Volumes {
+		if isHostPath(strings.SplitN(v, ":", 2)[0]) {
+			return "\n  → Apple `container` bind mounts are host-owned and can't be chowned from inside the " +
+				"container, so a DB image that chowns its data directory fails here. Use a named volume for that " +
+				"directory instead of a bind mount (host path)."
+		}
+	}
+	return ""
 }
 
 // hasPGDATASubdir reports whether the service sets PGDATA to a path below the
@@ -1568,7 +1700,7 @@ func (o *Orchestrator) Logs(services []string, opts runtime.LogsOptions) error {
 			o.logf("==> %s <==\n", name)
 		}
 		if err := o.rt.Logs(o.containerName(name), opts); err != nil {
-			return fmt.Errorf("logs for service %q: %w", name, err)
+			return fmt.Errorf("logs for service %q: %w\n  confirm the service is up with `opossum ps`", name, err)
 		}
 	}
 	return nil
@@ -1721,6 +1853,14 @@ func buildFailed(service string, err error) error {
 		"  (if Apple's builder can't handle this Dockerfile, build it with Docker and import it: opossum import %s)", service, err, service)
 }
 
+// startFailed wraps a generic (non-decoded) container-start failure with a pointer
+// to the logs — the raw runtime error rarely says why the container died, but its
+// own logs usually do.
+func startFailed(service string, err error) error {
+	return fmt.Errorf("starting service %q: %w\n"+
+		"  check why with `opossum logs %s`, or verify the image, command, and mounts in the compose file", service, err, service)
+}
+
 // RunOneOffOptions configures a one-off `run`.
 type RunOneOffOptions struct {
 	Rm     bool // remove the container after it exits
@@ -1814,6 +1954,11 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 
 	o.ensureBindDirs(svc.Volumes)
 	o.seedVolumes(service, image, svc.Volumes)
+	// Pre-flight the exclusive-attach conflict for the one-off too (as `up` does):
+	// if a running container — including this service's own `up` container — already
+	// holds a volume the one-off needs, it will fail to attach. Exclude only our
+	// just-deleted run container.
+	o.warnBusyVolumesFor([]string{service}, map[string]bool{cname: true})
 	o.logf("Running one-off %s\n", service)
 	// The one-off body's stdout is the real stdout (e.g. MCP JSON-RPC) — except under
 	// --audit, where the audit report owns stdout, so the container output stays on
@@ -1868,6 +2013,14 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 	if opts.Rm {
 		o.rt.Delete(cname)
 	}
+	// Decode ONLY the exclusive-attach VZError (OPSM-103); every other failure — most
+	// commonly the command's own non-zero exit — passes through untouched so `run`
+	// keeps propagating exit codes.
+	if runErr != nil {
+		if decoded, ok := o.decodeVolumeAttachError(service, cname, runErr); ok {
+			return decoded
+		}
+	}
 	return runErr
 }
 
@@ -1917,7 +2070,7 @@ func (o *Orchestrator) Pull(services []string) error {
 		}
 		o.logf("Pulling %s (%s)\n", name, svc.Image)
 		if err := o.rt.Pull(svc.Image); err != nil {
-			return fmt.Errorf("pulling service %q: %w", name, err)
+			return fmt.Errorf("pulling service %q: %w\n  check the image name %q and that it's reachable (registry auth / network)", name, err, svc.Image)
 		}
 	}
 	return nil
@@ -1933,7 +2086,7 @@ func (o *Orchestrator) Start(services []string) error {
 	for _, name := range targets {
 		o.logf("Starting %s\n", name)
 		if err := o.rt.Start(o.containerName(name)); err != nil {
-			return fmt.Errorf("starting service %q: %w", name, err)
+			return fmt.Errorf("starting service %q: %w\n  `start` only (re)starts an already-created container — if it doesn't exist yet, run `opossum up %s` first", name, err, name)
 		}
 	}
 	return nil
@@ -1981,7 +2134,7 @@ func (o *Orchestrator) Restart(services []string) error {
 	for _, name := range targets {
 		o.logf("Restarting %s\n", name)
 		if err := o.rt.Start(o.containerName(name)); err != nil {
-			return fmt.Errorf("restarting service %q: %w", name, err)
+			return fmt.Errorf("restarting service %q: %w\n  `restart` needs an already-created container — if it doesn't exist yet, run `opossum up %s` first", name, err, name)
 		}
 	}
 	return nil

@@ -12,6 +12,14 @@ import "fmt"
 // the embedded-logs dependency failure (OPSM-401), and every `doctor` check. When
 // adding an error, prefer naming the fix inline over leaving the user to guess.
 //
+// How this is enforced: coded diagnostics ([OPSM-NNN]) are ratcheted — every code
+// is documented in AGENTS.md and vice-versa (TestDiagCodesDocumentedInAgentsMd +
+// TestNoPhantomDiagCodesInAgentsMd, a 1:1 loop), and no warning may ship uncoded
+// (TestNoUncodedWarnings). Plain (uncoded) errors are deliberately NOT ratcheted —
+// enumerating every fmt.Errorf and asserting it's "documented" would be noise, and
+// most aren't recovery signatures worth a code. They're held to the three elements
+// above by this guideline plus independent review of behaviour-changing PRs.
+//
 // Diagnostic codes. opossum stamps each warning and recovery-relevant error with
 // a stable `[OPSM-NNN]` code so an agent (or a human) can map it straight to a fix
 // via AGENTS.md's "Diagnostic codes" / "Failure signatures" tables — no need to
@@ -22,39 +30,41 @@ import "fmt"
 type diagCode string
 
 const (
-	codePGDATADatadir    diagCode = "OPSM-101" // named volume mounted directly at Postgres's data dir
-	codeSharedVolume     diagCode = "OPSM-102" // a named volume shared by two running services
-	codeVolumeAttachBusy diagCode = "OPSM-103" // a named volume is already attached to another running container
-	codeBindDirCreate    diagCode = "OPSM-104" // couldn't create a bind mount's host source directory
-	codeHostPortInUse    diagCode = "OPSM-201" // a published host port is already taken (pre-flight)
-	codeDNSDomainAbsent  diagCode = "OPSM-202" // the DNS domain isn't registered (no bare-name discovery)
-	codeInternalEgress   diagCode = "OPSM-203" // an internal network: no internet egress / no name resolution
-	codeDockerSocket     diagCode = "OPSM-204" // a service mounts docker.sock (Apple container has none)
-	codeBuildTmpContext  diagCode = "OPSM-301" // build context under /private/tmp (builder can't read it)
-	codeBuildSymlink     diagCode = "OPSM-302" // build context is a symlink (builder may reject it)
-	codeDepNotRunning    diagCode = "OPSM-401" // a dependency's container exited before becoming healthy
-	codeOrphans          diagCode = "OPSM-402" // containers left by services no longer in the compose
-	codeDepNoHealth      diagCode = "OPSM-403" // a service_healthy dependency defines no healthcheck
-	codeRuntimeAbsent    diagCode = "OPSM-404" // the `container` CLI isn't installed / not on PATH
-	codeRuntimeStopped   diagCode = "OPSM-405" // the `container` system (daemon) is installed but not running
-	codeRuntimeAutoStart diagCode = "OPSM-406" // the runtime wasn't running; opossum is starting it
-	codeIgnoredTopField  diagCode = "OPSM-501" // unsupported top-level compose field(s), ignored
-	codeIgnoredField     diagCode = "OPSM-502" // unsupported service compose field(s), ignored
-	codeWatchRebuild     diagCode = "OPSM-601" // a `watch` rebuild action failed
-	codeWatchRestart     diagCode = "OPSM-602" // a `watch` restart action failed
-	codeWatchSync        diagCode = "OPSM-603" // a `watch` file sync failed
-	codeWatchSetup       diagCode = "OPSM-604" // `watch` couldn't start watching a path
-	codeWatchError       diagCode = "OPSM-605" // the `watch` file watcher reported an error
+	codePGDATADatadir     diagCode = "OPSM-101" // named volume mounted directly at Postgres's data dir
+	codeSharedVolume      diagCode = "OPSM-102" // a named volume shared by two running services
+	codeVolumeAttachBusy  diagCode = "OPSM-103" // a named volume is already attached to another running container
+	codeBindDirCreate     diagCode = "OPSM-104" // couldn't create a bind mount's host source directory
+	codeHostPortInUse     diagCode = "OPSM-201" // a published host port is already taken (pre-flight)
+	codeDNSDomainAbsent   diagCode = "OPSM-202" // the DNS domain isn't registered (no bare-name discovery)
+	codeInternalEgress    diagCode = "OPSM-203" // an internal network: no internet egress / no name resolution
+	codeDockerSocket      diagCode = "OPSM-204" // a service mounts docker.sock (Apple container has none)
+	codeExternalNetAbsent diagCode = "OPSM-205" // a network declared external: true doesn't exist
+	codeBuildTmpContext   diagCode = "OPSM-301" // build context under /private/tmp (builder can't read it)
+	codeBuildSymlink      diagCode = "OPSM-302" // build context is a symlink (builder may reject it)
+	codeDepNotRunning     diagCode = "OPSM-401" // a dependency's container exited before becoming healthy
+	codeOrphans           diagCode = "OPSM-402" // containers left by services no longer in the compose
+	codeDepNoHealth       diagCode = "OPSM-403" // a service_healthy dependency defines no healthcheck
+	codeRuntimeAbsent     diagCode = "OPSM-404" // the `container` CLI isn't installed / not on PATH
+	codeRuntimeStopped    diagCode = "OPSM-405" // the `container` system (daemon) is installed but not running
+	codeRuntimeAutoStart  diagCode = "OPSM-406" // the runtime wasn't running; opossum is starting it
+	codeServiceExited     diagCode = "OPSM-407" // a service's container exited right after starting (no health gate)
+	codeIgnoredTopField   diagCode = "OPSM-501" // unsupported top-level compose field(s), ignored
+	codeIgnoredField      diagCode = "OPSM-502" // unsupported service compose field(s), ignored
+	codeWatchRebuild      diagCode = "OPSM-601" // a `watch` rebuild action failed
+	codeWatchRestart      diagCode = "OPSM-602" // a `watch` restart action failed
+	codeWatchSync         diagCode = "OPSM-603" // a `watch` file sync failed
+	codeWatchSetup        diagCode = "OPSM-604" // `watch` couldn't start watching a path
+	codeWatchError        diagCode = "OPSM-605" // the `watch` file watcher reported an error
 )
 
 // allDiagCodes lists every code opossum can emit. A test asserts each appears in
 // AGENTS.md, so adding a code forces documenting it.
 var allDiagCodes = []diagCode{
 	codePGDATADatadir, codeSharedVolume, codeVolumeAttachBusy, codeBindDirCreate,
-	codeHostPortInUse, codeDNSDomainAbsent, codeInternalEgress, codeDockerSocket,
+	codeHostPortInUse, codeDNSDomainAbsent, codeInternalEgress, codeDockerSocket, codeExternalNetAbsent,
 	codeBuildTmpContext, codeBuildSymlink,
 	codeDepNotRunning, codeOrphans, codeDepNoHealth,
-	codeIgnoredTopField, codeIgnoredField, codeRuntimeAbsent, codeRuntimeStopped, codeRuntimeAutoStart,
+	codeIgnoredTopField, codeIgnoredField, codeRuntimeAbsent, codeRuntimeStopped, codeRuntimeAutoStart, codeServiceExited,
 	codeWatchRebuild, codeWatchRestart, codeWatchSync, codeWatchSetup, codeWatchError,
 }
 

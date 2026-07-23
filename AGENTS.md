@@ -120,6 +120,13 @@ list; codes are add-only and never change meaning.
 - **`[OPSM-401]` … `container is not running (state "stopped"); its last log
   lines:`** → the dependency crashed at startup; the embedded logs show why (e.g.
   the Postgres `initdb` message above). Fix the dependency, not the dependent.
+- **`[OPSM-407]` … `service <x> exited right after starting (state "stopped")` /
+  `N service(s) exited right after starting`** → a service with no
+  healthcheck/`depends_on` gate started but its container exited immediately (bad
+  config, failed `initdb`, a missing mount). `up` prints the crashed service's last
+  log lines and exits non-zero (so success never masks a dead service), but leaves
+  the containers up for inspection. Read the embedded logs, fix the cause, and
+  `up` again. (A dependency crash caught by a health gate is `[OPSM-401]` instead.)
 - **`[OPSM-404]` … `the container CLI was not found on PATH`** → Apple's `container`
   isn't installed. Every runtime command (`up`, `ps`, `images`, `logs`, `stats`, …)
   fails this way with a non-zero exit — an empty `ps` table would be a lie. Install
@@ -156,6 +163,11 @@ list; codes are add-only and never change meaning.
 - **`[OPSM-203]` … `network <n> is internal (host-only): … no internet egress`** →
   expected for an `internal:` network; reach out only through a host proxy at
   `${OPOSSUM_HOST_GATEWAY}`, and address peers by IP (no name resolution).
+- **`[OPSM-205]` … `network <n> is declared external: true but doesn't exist`** →
+  opossum uses an `external:` network by name and never creates it, so it must
+  already exist. Create it (`container network create <n>`), or drop `external:
+  true` so opossum creates a project network instead. (Common with reverse-proxy
+  composes that expect a shared `proxy` network.) `up` fails this up front.
 - **`[OPSM-301]` … `context … under /private/tmp … builder can't read`** → build
   from a path under your home directory (the builder VM doesn't mount `/private/tmp`).
 - **`unsupported network_mode "host"`** does NOT occur — such values are ignored, not
@@ -181,6 +193,7 @@ Every `[OPSM-NNN]` opossum can emit (add-only; grouped 1xx storage / 2xx network
 - `OPSM-202` — the DNS domain isn't registered (no bare-name discovery).
 - `OPSM-203` — an internal network: no internet egress and no name resolution.
 - `OPSM-204` — a service mounts `docker.sock` (Apple container has no Docker socket).
+- `OPSM-205` — a network declared `external: true` doesn't exist (pre-flight; create it or drop `external`).
 - `OPSM-301` — build context under `/private/tmp` (the builder VM can't read it).
 - `OPSM-302` — build context is a symlink (the builder may reject it).
 - `OPSM-401` — a dependency's container exited before becoming healthy (logs embedded).
@@ -189,6 +202,7 @@ Every `[OPSM-NNN]` opossum can emit (add-only; grouped 1xx storage / 2xx network
 - `OPSM-404` — the `container` CLI isn't installed / not on PATH (every runtime command fails).
 - `OPSM-405` — the `container` system (daemon) is installed but not running (`ps`/`images` fail loudly; the opt-out error for mutating commands).
 - `OPSM-406` — the runtime was stopped; a mutating command auto-started it (notice, not an error; `OPOSSUM_NO_AUTO_START` opts out).
+- `OPSM-407` — a service's container exited right after starting, with no health gate to catch it (`up` reports its logs and fails).
 - `OPSM-501` — unsupported top-level compose field(s), ignored.
 - `OPSM-502` — unsupported service compose field(s), ignored (e.g. `network_mode: host`).
 - `OPSM-601` — a `watch` rebuild action failed.

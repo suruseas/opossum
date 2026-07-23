@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -12,16 +13,42 @@ import (
 // agent that sees a `[OPSM-NNN]` can always look up its fix. Adding a code forces
 // documenting it (1:1 with the failure-signature / diagnostic-codes tables).
 func TestDiagCodesDocumentedInAgentsMd(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "..", "AGENTS.md"))
-	if err != nil {
-		t.Fatalf("reading AGENTS.md: %v", err)
-	}
-	md := string(data)
+	md := readAgentsMd(t)
 	for _, c := range allDiagCodes {
 		if !strings.Contains(md, string(c)) {
 			t.Errorf("diagnostic code %q is not documented in AGENTS.md — add it to the Diagnostic codes list", c)
 		}
 	}
+}
+
+// The reverse of the above, closing the 1:1 loop: every `OPSM-NNN` that AGENTS.md
+// mentions must be a real code in the ledger. This catches a stale reference (a
+// code removed from the ledger but left in the docs) or a typo like `OPSM-4004`,
+// either of which would send an agent looking up a fix that doesn't exist.
+func TestNoPhantomDiagCodesInAgentsMd(t *testing.T) {
+	real := map[string]bool{}
+	for _, c := range allDiagCodes {
+		real[string(c)] = true
+	}
+	seen := map[string]bool{}
+	for _, m := range regexp.MustCompile(`OPSM-\d+`).FindAllString(readAgentsMd(t), -1) {
+		if seen[m] {
+			continue
+		}
+		seen[m] = true
+		if !real[m] {
+			t.Errorf("AGENTS.md references %q, which is not a defined diagnostic code — fix the typo or remove the stale reference (the ledger is the source of truth)", m)
+		}
+	}
+}
+
+func readAgentsMd(t *testing.T) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("..", "..", "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("reading AGENTS.md: %v", err)
+	}
+	return string(data)
 }
 
 // Every warning the orchestrator emits must carry a code, i.e. go through warnf.

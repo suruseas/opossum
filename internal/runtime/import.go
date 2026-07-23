@@ -51,13 +51,13 @@ func (r *Runtime) ImportFromDocker(dockerRef, targetTag string) error {
 	if err := load.Start(); err != nil {
 		pr.Close()
 		pw.Close()
-		return fmt.Errorf("container image load: %w", err)
+		return fmt.Errorf("couldn't start `container image load`: %w — check the container CLI is installed and on PATH (`opossum doctor`)", err)
 	}
 	if err := save.Start(); err != nil {
 		pr.Close()
 		pw.Close()
 		load.Wait()
-		return fmt.Errorf("docker image save: %w", err)
+		return fmt.Errorf("couldn't start `docker image save`: %w — check the docker CLI is installed and its daemon is running", err)
 	}
 	// The children hold their own dups; the parent must drop its ends so EOF/EPIPE
 	// propagate when either side exits.
@@ -69,7 +69,7 @@ func (r *Runtime) ImportFromDocker(dockerRef, targetTag string) error {
 	// Prefer the load error: a broken-pipe save error is usually a symptom of load
 	// having failed first.
 	if loadErr != nil {
-		return fmt.Errorf("loading %q into container failed: %w", dockerRef, loadErr)
+		return fmt.Errorf("loading %q into Apple container failed: %w\n  check the runtime is healthy (`opossum doctor`) and that the image exported cleanly from Docker", dockerRef, loadErr)
 	}
 	if saveErr != nil {
 		return fmt.Errorf("exporting %q from Docker failed — is it built and is Docker running? "+
@@ -78,7 +78,7 @@ func (r *Runtime) ImportFromDocker(dockerRef, targetTag string) error {
 
 	if targetTag != "" && targetTag != dockerRef {
 		if _, err := r.capture("image", "tag", dockerRef, targetTag); err != nil {
-			return fmt.Errorf("tagging %q as %q: %w", dockerRef, targetTag, err)
+			return fmt.Errorf("the image loaded but tagging %q as %q failed: %w\n  retag it yourself with `container image tag %s %s`", dockerRef, targetTag, err, dockerRef, targetTag)
 		}
 	}
 	return nil

@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/suruseas/opossum/internal/compose"
+	"github.com/suruseas/opossum/internal/runtime"
 	"github.com/suruseas/opossum/internal/workspace"
 )
 
@@ -84,6 +85,12 @@ func TestExitCode(t *testing.T) {
 	}
 	if exitCode(errors.New("setup failed")) != -1 {
 		t.Error("a non-ExitError should be -1 (a setup failure, not a process exit)")
+	}
+	// A non-TTY foreground run now returns a *runtime.RunError wrapping the exec
+	// error; exitCode must still extract the child's code through Unwrap so
+	// `run --audit` reports it (a dropped Unwrap would silently regress to -1).
+	if got := exitCode(&runtime.RunError{Err: err, Stderr: "boom"}); got != 7 {
+		t.Errorf("exitCode through a RunError wrapper = %d, want 7", got)
 	}
 }
 
