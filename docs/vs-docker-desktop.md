@@ -99,7 +99,7 @@ The decisive dev-stack difference is speed, not memory.
 | **10× `run --rm`, in parallel** | 0.75 s | 7.6 s | gap widens to ~10× — a shared daemon parallelizes, per-container VMs don't |
 | **First build in a session** | BuildKit always warm | +~6 s builder-VM cold start | the on-demand builder VM boots on first use |
 | **Cached rebuild (no changes)** | 0.21 s | 0.17 s | parity — layer caching works |
-| **Disk usage view / cleanup** | `system df` + `system prune` | per-image sizes (`image list --verbose`) + `image prune`; **no `system df`** | Docker gives an aggregate view; `container` doesn't |
+| **Disk usage view / cleanup** | `system df` + `system prune` | `system df` (aggregate + reclaimable) + `image prune` / `volume prune`; no single `system prune` | parity on the view; cleanup is split per-resource. `opossum doctor` flags large reclaimable storage |
 
 ```sh
 # throwaway throughput
@@ -125,7 +125,7 @@ gaps:
 | `watch` (live sync/rebuild on change) | ❌ | dev-loop convenience; planned as a `develop.watch` MVP |
 | Restart policies (`restart: always`) | ❌ ignored | auto-restarting a crashed container needs a supervisor; a real limitation, not just a missing flag |
 | GUI / dashboard | ❌ | opossum is CLI-only — a different tool class than Docker Desktop |
-| Aggregate disk usage (`system df`) | ❌ | a runtime gap; you can list per-image sizes but not a total |
+| One-shot `system prune` | ❌ | `container system df` shows the aggregate (and `opossum doctor` flags large reclaimable storage), but cleanup is per-resource — `image prune` / `volume prune`, not one command |
 
 ## Article angles, by decision impact
 

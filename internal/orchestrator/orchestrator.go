@@ -1388,7 +1388,83 @@ func (o *Orchestrator) decodeStartError(name string, err error) error {
 	if decoded, ok := o.decodeVolumeAttachError(name, o.containerName(name), err); ok {
 		return decoded
 	}
+	if hint := runErrorHint(o.Project.Services[name], err); hint != "" {
+		return fmt.Errorf("starting service %q: %w%s", name, err, hint)
+	}
 	return startFailed(name, err)
+}
+
+// runErrorHint decodes a failed `container run` (its captured stderr) into an
+// actionable hint for a known Apple-`container` gotcha the pre-flight can't catch:
+// a host-port conflict the host probe can't see (a privileged port held by the
+// runtime's own DNS), an image with no arm64 build, or a bind mount of a config
+// FILE whose host source is missing. Returns "" when no signature matches (so
+// callers fall back to the generic start-failed message). The raw stderr was
+// already streamed live; this only adds the fix.
+func runErrorHint(svc *compose.Service, err error) string {
+	var re *runtime.RunError
+	if !errors.As(err, &re) {
+		return ""
+	}
+	s := re.Stderr
+	switch {
+	case strings.Contains(s, "does not support required platforms"):
+		return "\n  → this image has no build for Apple silicon (arm64). Add `platform: linux/amd64` to the service — " +
+			"opossum runs an amd64 image through Rosetta."
+	case strings.Contains(s, "Address already in use"):
+		hint := "\n  → a published host port is already in use, which opossum's pre-flight can't always see (a port held " +
+			"by the runtime itself, like its built-in DNS on 53). Remap the port in the compose file"
+		if svc != nil {
+			if addrs := hostPublishAddrs(svc.Ports); len(addrs) > 0 {
+				hint += " (this service publishes " + strings.Join(addrs, ", ") + ")"
+				// Only flag the common macOS culprits this service actually uses.
+				var dns, airplay bool
+				for _, a := range addrs {
+					switch a[strings.LastIndexByte(a, ':')+1:] {
+					case "53":
+						dns = true
+					case "5000", "7000":
+						airplay = true
+					}
+				}
+				var culprits []string
+				if dns {
+					culprits = append(culprits, "53 is the runtime's built-in DNS")
+				}
+				if airplay {
+					culprits = append(culprits, "5000/7000 are AirPlay")
+				}
+				if len(culprits) > 0 {
+					hint += " — on macOS, " + strings.Join(culprits, " and ")
+				}
+			}
+		}
+		return hint + "."
+	case strings.Contains(s, "failed to resolve") && strings.Contains(s, "in rootfs"):
+		path := betweenQuotes(s, "failed to resolve '", "'")
+		where := "a bind mount"
+		if path != "" {
+			where = "the bind mount for " + path
+		}
+		return "\n  → " + where + " couldn't be resolved. If it's a config FILE, create it on the host first — opossum " +
+			"creates a missing bind source as a directory, which can't mount onto a file path."
+	}
+	return ""
+}
+
+// betweenQuotes returns the substring of s between the first occurrence of open and
+// the next occurrence of close after it, or "" if not found.
+func betweenQuotes(s, open, close string) string {
+	i := strings.Index(s, open)
+	if i < 0 {
+		return ""
+	}
+	rest := s[i+len(open):]
+	j := strings.Index(rest, close)
+	if j < 0 {
+		return ""
+	}
+	return rest[:j]
 }
 
 // decodeVolumeAttachError decodes the exclusive-attach VZError (OPSM-103) when

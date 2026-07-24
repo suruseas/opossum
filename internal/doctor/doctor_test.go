@@ -13,9 +13,9 @@ import (
 
 // mock is a fake Runner returning canned output per top-level `container` command.
 type mock struct {
-	status, builder, probe string
-	statusErr              bool
-	dns                    bool
+	status, builder, probe, df string
+	statusErr                  bool
+	dns                        bool
 }
 
 func (m mock) Output(args ...string) (string, error) {
@@ -26,6 +26,9 @@ func (m mock) Output(args ...string) (string, error) {
 	case "system":
 		if m.statusErr {
 			return "", errors.New("container not available")
+		}
+		if len(args) > 1 && args[1] == "df" {
+			return m.df, nil
 		}
 		return m.status, nil
 	case "builder":
@@ -170,7 +173,7 @@ func TestRunJSONShape(t *testing.T) {
 	if !rep.Healthy {
 		t.Errorf("healthy field should be true; got %+v", rep)
 	}
-	wantIDs := []string{"runtime", "dns", "network", "builder", "memory"}
+	wantIDs := []string{"runtime", "dns", "network", "builder", "storage", "memory"}
 	if len(rep.Checks) != len(wantIDs) {
 		t.Fatalf("got %d checks, want %d: %+v", len(rep.Checks), len(wantIDs), rep.Checks)
 	}
@@ -243,6 +246,62 @@ func TestRunJSONStatusMapping(t *testing.T) {
 	}
 	if c := byID["builder"]; c.Status != "warn" || c.Fix == "" {
 		t.Errorf("builder should be warn with a fix; got %+v", c)
+	}
+}
+
+// A large reclaimable total (untagged build layers piling up) warns with the
+// prune fix — the disk-fill case `container images ls` hides.
+func TestCheckStorageWarnsOnLargeReclaimable(t *testing.T) {
+	df := "TYPE           TOTAL  ACTIVE  SIZE    RECLAIMABLE\n" +
+		"Images         286    0       188 GB  188 GB (100%)\n" +
+		"Containers     0      0       0 B     0 B (0%)\n" +
+		"Local Volumes  5      0       347 MB  347 MB (100%)\n"
+	c := checkStorage(mock{df: df})
+	if c.status != warn {
+		t.Fatalf("188 GB reclaimable should warn; got status %d, detail %q", c.status, c.detail)
+	}
+	if !strings.Contains(c.detail, "188.3 GB") {
+		t.Errorf("detail should report the reclaimable total; got %q", c.detail)
+	}
+	if !strings.Contains(c.fix, "image prune -a") {
+		t.Errorf("fix should point at the prune command; got %q", c.fix)
+	}
+}
+
+// A working-cache-sized reclaimable total stays ok (no nagging), but the amount is
+// still reported so the otherwise-hidden storage is visible.
+func TestCheckStorageOKBelowThreshold(t *testing.T) {
+	df := "TYPE      TOTAL  ACTIVE  SIZE    RECLAIMABLE\n" +
+		"Images    3      1       1.2 GB  800 MB (66%)\n"
+	c := checkStorage(mock{df: df})
+	if c.status != ok {
+		t.Fatalf("800 MB reclaimable is a normal cache, should be ok; got status %d", c.status)
+	}
+	if !strings.Contains(c.detail, "800 MB") {
+		t.Errorf("detail should still report the amount; got %q", c.detail)
+	}
+	if c.fix != "" {
+		t.Errorf("an ok storage check should carry no fix; got %q", c.fix)
+	}
+}
+
+func TestParseReclaimable(t *testing.T) {
+	df := "TYPE           TOTAL  ACTIVE  SIZE    RECLAIMABLE\n" +
+		"Images         286    0       188 GB  188 GB (100%)\n" +
+		"Containers     0      0       0 B     0 B (0%)\n" +
+		"Local Volumes  5      0       347 MB  347 MB (100%)\n"
+	b, ok := parseReclaimable(df)
+	if !ok {
+		t.Fatal("expected the reclaimable column to parse")
+	}
+	// 188 GB + 0 B + 347 MB, base-1000.
+	if want := int64(188e9 + 347e6); b != want {
+		t.Errorf("reclaimable = %d, want %d", b, want)
+	}
+	// The SIZE column (no percentage) must not be double-counted: only the three
+	// RECLAIMABLE cells contribute.
+	if _, ok := parseReclaimable("no table here\n"); ok {
+		t.Error("unexpected output should report ok=false")
 	}
 }
 

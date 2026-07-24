@@ -56,7 +56,7 @@ is **0 on success, non-zero on any error** (see Exit codes).
 | `watch` | sync host file changes into containers per `develop.watch`; runs until Ctrl-C (start with `up` first) |
 | `images` | each service's image, whether opossum builds it, whether it's present |
 | `config [--services]` | validate and print the resolved compose (interpolation + env_file applied), listing ignored fields |
-| `doctor` | diagnose the environment (runtime, DNS domain, outbound network, builder memory, stack-memory estimate); non-zero exit if any check fails |
+| `doctor` | diagnose the environment (runtime, DNS domain, outbound network, builder memory, reclaimable storage, stack-memory estimate); non-zero exit if any check fails |
 | `ws snapshot [name]` / `ws ls` / `ws rollback <name>` / `ws rm <name>…` / `ws prune` | snapshot and roll back a workspace directory (`--path`, default `./work`) via APFS copy-on-write clones: near-instant, ~no extra disk. `rollback` saves the current state first (reversible). `rm` deletes named snapshots; `prune` removes auto-saves (`--keep N`, `--all`). Non-APFS → full-copy fallback (reported). Snapshots live in `.opossum-snapshots/` beside the workspace. Touches no runtime — works without `container` |
 
 ## Compose dialect: supported / ignored / rejected
@@ -75,8 +75,13 @@ string, `interval`/`timeout`/`retries`/`start_period`), `command`, `entrypoint`,
 to wire for an agent — each `svc`/`svc:port`/`svc:port/path` (reached by name) or
 `name=url`; opossum generates a `.mcp.json` and mounts it at `/run/opossum/mcp.json`,
 pass it with `claude --mcp-config`; HTTP transport only), `${VAR}` interpolation
-(`${VAR:-default}`, `${VAR:?required}`, `$$`). YAML anchors + merge keys (`<<:
-*anchor`) resolve.
+(`${VAR:-default}`, `${VAR:?required}`, `$$`, nested `${A:-${B}}`, multi-line via a
+YAML `\`-continuation). YAML anchors + merge keys (`<<: *anchor`) resolve.
+Interpolation runs on the **raw text before YAML parsing** (so it reaches every
+field, including `x-` and block scalars) — a side effect is that a `${…}` in a
+**comment** is expanded too (docker interpolates after parsing and skips comments).
+Harmless for `${VAR}`, but a `${VAR:?required}` in a comment fails the load — keep
+interpolation syntax out of comments, or write `$$`.
 
 **Ignored (file still loads):** `restart`, `container_name`, `dns`, `dns_search`,
 `network_mode` values other than `none` (e.g. `host` → the service joins the
@@ -179,6 +184,10 @@ list; codes are add-only and never change meaning.
 - **build hangs / `Unavailable`/`EOF` on a heavy image** → the shared builder VM (no
   code — a runtime resource issue) is starved (default 2 CPU / 2 GB). `container
   builder start --cpus 4 --memory 8g`, and shrink the context with `.dockerignore`.
+- **build fails with `no space left on device`** → the host volume is out of disk (no
+  code — a runtime resource issue); a real build pulls multi-GB base images and layers.
+  Free space with `container image prune -f` and `container builder delete --force`, not
+  by growing the builder (which makes it worse). opossum decodes this into that hint.
 
 ### Diagnostic codes
 

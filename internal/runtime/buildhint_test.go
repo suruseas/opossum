@@ -10,6 +10,9 @@ func TestBuildErrorDetector(t *testing.T) {
 		return strings.Contains(h, "delete --force") && !strings.Contains(h, "start --cpus")
 	}
 	resourceHint := func(h string) bool { return strings.Contains(h, "start --cpus 4 --memory 8g") }
+	diskHint := func(h string) bool {
+		return strings.Contains(h, "ran out of disk space") && strings.Contains(h, "image prune -f")
+	}
 
 	t.Run("cache corruption", func(t *testing.T) {
 		d := &buildErrorDetector{}
@@ -23,6 +26,22 @@ func TestBuildErrorDetector(t *testing.T) {
 		d.Write([]byte("Error: unavailable: rpc error: code = Unavailable desc = error reading from server: EOF\n"))
 		if !resourceHint(d.hint()) {
 			t.Errorf("resource hint expected, got: %q", d.hint())
+		}
+	})
+	t.Run("disk full", func(t *testing.T) {
+		d := &buildErrorDetector{}
+		d.Write([]byte("#12 exporting layers: write /var/lib/.../blob: no space left on device\n"))
+		if !diskHint(d.hint()) {
+			t.Errorf("disk-full hint expected, got: %q", d.hint())
+		}
+	})
+	t.Run("disk full outranks resource exhaustion", func(t *testing.T) {
+		// A full volume makes the builder fail downstream (rpc/EOF), so the disk
+		// remedy must win — growing the builder would make ENOSPC worse.
+		d := &buildErrorDetector{}
+		d.Write([]byte("no space left on device\nrpc error: code = Unavailable desc = error reading from server: EOF\n"))
+		if !diskHint(d.hint()) {
+			t.Errorf("disk-full hint should win over the resource hint, got: %q", d.hint())
 		}
 	})
 	t.Run("plain build error gets no hint", func(t *testing.T) {
@@ -70,6 +89,17 @@ func TestBuildResourceHintOnConnectionDrop(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "start --cpus 4 --memory 8g") {
 		t.Errorf("build error should carry the resource hint, got: %v", err)
+	}
+}
+
+func TestBuildDiskFullHint(t *testing.T) {
+	r := replayShim(t, "#12 exporting to image\nfailed to solve: write blob: no space left on device\n", 1)
+	err := r.Build(BuildOptions{Tag: "x:1", Context: t.TempDir()})
+	if err == nil {
+		t.Fatal("expected a build error")
+	}
+	if !strings.Contains(err.Error(), "ran out of disk space") || !strings.Contains(err.Error(), "image prune -f") {
+		t.Errorf("build error should carry the disk-full recovery hint, got: %v", err)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -99,7 +100,7 @@ type Report struct {
 func runChecks(rt Runner, dnsDomain string, project *compose.Project, hostMemMB int) []check {
 	checks := []check{checkRuntime(rt)}
 	if checks[0].status != fail { // pointless to probe further if the runtime is down
-		checks = append(checks, checkDNS(rt, dnsDomain), checkNetwork(rt), checkBuilder(rt))
+		checks = append(checks, checkDNS(rt, dnsDomain), checkNetwork(rt), checkBuilder(rt), checkStorage(rt))
 	}
 	if project != nil {
 		checks = append(checks, checkMemory(project, hostMemMB))
@@ -233,6 +234,91 @@ func parseBuilder(out string) (memMB int, state string) {
 		}
 	}
 	return memMB, state
+}
+
+// reclaimableWarnBytes is the point past which "reclaimable" storage reads as
+// accumulated cruft rather than a working image cache. It's deliberately high:
+// when nothing is running, every cached image counts as reclaimable (no container
+// references it), so a low threshold would nag users who keep base images around
+// on purpose. 20 GB is well beyond a normal cache but far below the disk-filling
+// accumulation (100+ GB of untagged build layers) this check exists to catch.
+const reclaimableWarnBytes = 20_000_000_000
+
+// checkStorage surfaces how much image/volume storage the runtime holds that no
+// running container references. Apple's `container images ls` hides untagged
+// (dangling) images, so a large cache from repeated builds/pulls can fill the
+// disk unseen — `container system df` is the only place it shows. This warns only
+// past reclaimableWarnBytes; below it, the amount is reported as informational.
+func checkStorage(rt Runner) check {
+	out, err := rt.Output("system", "df")
+	if err != nil {
+		return check{"storage", ok, "disk usage unavailable (`container system df` didn't run)", ""}
+	}
+	b, parsed := parseReclaimable(out)
+	if !parsed {
+		return check{"storage", ok, "disk usage looks fine", ""}
+	}
+	if b >= reclaimableWarnBytes {
+		return check{"storage", warn,
+			fmt.Sprintf("%s of images/volumes are reclaimable — not referenced by any running container, and untagged ones don't show in `container images ls`, so this can fill the disk unseen", humanBytes(b)),
+			"if you're low on disk, reclaim it: container image prune -a && container volume prune"}
+	}
+	return check{"storage", ok, fmt.Sprintf("%s of images/volumes reclaimable", humanBytes(b)), ""}
+}
+
+// reclaimableRe matches the RECLAIMABLE column of `container system df` — a size
+// followed by a "(NN%)" share, e.g. "188 GB (100%)". The trailing "(" is what
+// distinguishes it from the SIZE column, which carries no percentage.
+var reclaimableRe = regexp.MustCompile(`([0-9.]+)\s+(B|KB|MB|GB|TB|PB)\s+\(`)
+
+// parseReclaimable sums the reclaimable bytes across every row of `container
+// system df`. ok is false when no reclaimable column was found (unexpected output).
+func parseReclaimable(out string) (bytes int64, ok bool) {
+	ms := reclaimableRe.FindAllStringSubmatch(out, -1)
+	if len(ms) == 0 {
+		return 0, false
+	}
+	var total float64
+	for _, m := range ms {
+		n, err := strconv.ParseFloat(m[1], 64)
+		if err != nil {
+			continue
+		}
+		total += n * unitBytes(m[2])
+	}
+	return int64(total), true
+}
+
+// unitBytes maps a `container system df` size unit to bytes, base-1000 to match
+// how the CLI prints (GB, not GiB).
+func unitBytes(u string) float64 {
+	switch u {
+	case "KB":
+		return 1e3
+	case "MB":
+		return 1e6
+	case "GB":
+		return 1e9
+	case "TB":
+		return 1e12
+	case "PB":
+		return 1e15
+	}
+	return 1 // "B"
+}
+
+func humanBytes(b int64) string {
+	f := float64(b)
+	switch {
+	case f >= 1e12:
+		return fmt.Sprintf("%.1f TB", f/1e12)
+	case f >= 1e9:
+		return fmt.Sprintf("%.1f GB", f/1e9)
+	case f >= 1e6:
+		return fmt.Sprintf("%.0f MB", f/1e6)
+	default:
+		return fmt.Sprintf("%d B", b)
+	}
 }
 
 // checkMemory estimates the stack's host memory use: each container is its own VM

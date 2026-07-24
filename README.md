@@ -328,7 +328,7 @@ opossum mirrors the common `docker compose` subcommands, delegating each to the
 | `build [service…]` | ✅ | build images for services with `build:` |
 | `pull [service…]` | ✅ | pull images for services with `image:` |
 | `import [service…]` | ✅ (extra) | copy a service's Docker-built image into `container`'s store, so `up` skips the rebuild |
-| `doctor` | ✅ (extra) | diagnose the environment (runtime, DNS domain, outbound network, build VM memory, stack memory estimate); prints ✅/⚠️/❌ + a one-line fix each. `--format json` emits machine-readable `{healthy, checks[]}` for scripts/agents; a failed check exits non-zero in either format |
+| `doctor` | ✅ (extra) | diagnose the environment (runtime, DNS domain, outbound network, build VM memory, reclaimable storage, stack memory estimate); prints ✅/⚠️/❌ + a one-line fix each. `--format json` emits machine-readable `{healthy, checks[]}` for scripts/agents; a failed check exits non-zero in either format |
 | `cp <src> <dst>` | ✅ | copy files between a service's container and the host (each path is a host path or `service:path`), like `docker compose cp` |
 | `watch` | ✅ | watch each service's `develop.watch` paths and act on changes (like `docker compose watch`): `sync` copies files in, `rebuild` rebuilds + recreates, `sync+restart` copies + restarts; runs until Ctrl-C. Start the stack with `up` first |
 | `start [service…]` | ✅ | start existing (stopped) containers |
@@ -568,7 +568,17 @@ optional surrounding quotes), and the process environment overrides them — so
 `${VAR}`, `${VAR:-default}` (default when unset **or empty**), `${VAR-default}`
 (default only when unset), `${VAR:?message}` / `${VAR?message}` (fail if
 unset/empty), and `$$` for a literal `$`. An undefined variable with no default
-expands to an empty string.
+expands to an empty string. A reference may span lines via a YAML double-quoted
+`\`-continuation, and a reference nested in another's default (`${A:-${B:-x}}`) is
+resolved too.
+
+Because expansion runs on the raw file **before** YAML parsing — which is what lets
+it reach every field uniformly, including `x-` extensions and block scalars — a
+`${…}` written inside a **comment** is expanded as well, unlike docker compose
+(which interpolates after parsing and so ignores comments). For a `${VAR}` this is
+harmless (the comment is dropped anyway), but a `${VAR:?required}` in a comment will
+**fail the load**. Keep interpolation syntax out of comments, or write the `$` as
+`$$` to keep it literal.
 
 opossum also provides one built-in: **`${OPOSSUM_HOST_GATEWAY}`** — the address a
 container can use to reach a service running on the host (see below). A shell env
@@ -687,6 +697,15 @@ build can starve.
   ```sh
   container builder delete --force
   opossum up
+  ```
+- **A build fails with `no space left on device`**: the host volume is out of
+  disk. A real build pulls multi-GB base images and writes build layers onto the
+  host, so this is common when disk is tight. Free space and retry — don't grow
+  the builder, which only uses more disk:
+  ```sh
+  container image prune -f          # remove unused images
+  container builder delete --force  # clear the builder's cache (recreated automatically)
+  df -h /                           # confirm there's room, then: opossum up
   ```
 - **`transferring context` is slow**: your build context is large. Add a
   `.dockerignore` next to the Dockerfile that excludes things the image doesn't

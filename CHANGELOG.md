@@ -6,6 +6,36 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-07-24
+
+### Added
+
+- `opossum doctor` now checks **reclaimable storage**: it reads `container system
+  df` and warns when a large amount of image/volume storage is unused by any
+  running container, with the reclaim command (`container image prune -a`). Apple's
+  `container images ls` doesn't list untagged images, so build/pull leftovers can
+  fill the disk unseen — this surfaces them before that happens. The amount is
+  shown even when it's within a normal cache.
+- When a build fails because the host ran out of disk (`no space left on device`),
+  `build`/`up --build` now decodes it into the fix — free space with
+  `container image prune -f` and `container builder delete --force`, then retry —
+  instead of forwarding the raw builder error. A real build pulls multi-GB base
+  images and layers onto the host volume, so this is a common failure; the remedy
+  is the opposite of the resource-starvation one (growing the builder would only
+  use more disk). Found dogfooding real builds.
+
+### Changed
+
+- When a service fails to start for a reason the pre-flight can't catch, `up` now
+  decodes the cryptic runtime error into the fix instead of just forwarding it:
+  a host-port conflict the host probe can't see (Apple `container`'s built-in DNS
+  holds port 53, so a DNS server like AdGuard/Pi-hole clashes) → remap the port;
+  an image with no arm64 build (`does not support required platforms`) → add
+  `platform: linux/amd64` (opossum runs it via Rosetta); a bind mount of a config
+  file whose host source is missing → create the file first (opossum makes a missing
+  bind source a directory, which can't mount onto a file path). Found dogfooding
+  real self-host composes.
+
 ## [0.13.0] - 2026-07-24
 
 ### Added
@@ -568,7 +598,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/suruseas/opossum/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/suruseas/opossum/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/suruseas/opossum/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/suruseas/opossum/compare/v0.10.0...v0.11.0
