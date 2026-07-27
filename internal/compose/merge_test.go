@@ -2,6 +2,7 @@ package compose
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -127,6 +128,140 @@ func TestLoadFilesDedupsVolumes(t *testing.T) {
 	}
 }
 
+// docker compose merges volumes by MOUNT POINT: a later file mounting a path an
+// earlier file already mounts replaces it, rather than adding a second mount at
+// the same path. Verified against docker compose (v5.1.4), which renders exactly one
+// mount for this input. Without it, an override can't swap a bind mount for a
+// named volume — the container would get both sources at one path.
+func TestLoadFilesVolumesMergeByTarget(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "base.yml")
+	over := filepath.Join(dir, "over.yml")
+	mustWriteFile(t, base, "services:\n  db:\n    image: postgres\n    volumes: [\"./data:/var/lib/postgresql/data\", \"./cfg:/etc/cfg\"]\n")
+	mustWriteFile(t, over, "services:\n  db:\n    image: postgres\n    volumes: [\"dbdata:/var/lib/postgresql/data\"]\n")
+
+	p, err := LoadFiles([]string{base, over}, nil)
+	if err != nil {
+		t.Fatalf("LoadFiles: %v", err)
+	}
+	vols := p.Services["db"].Volumes
+	// The data dir is mounted exactly once, by the override's named volume; the
+	// unrelated mount survives, and the swap keeps the base's position.
+	want := []string{"dbdata:/var/lib/postgresql/data", "./cfg:/etc/cfg"}
+	if strings.Join(vols, ",") != strings.Join(want, ",") {
+		t.Errorf("volumes merge by target = %v, want %v", vols, want)
+	}
+}
+
+// The same rule applies to the long mapping form and to a `:ro` mode suffix —
+// the target is what identifies the mount, not the entry's spelling.
+func TestLoadFilesVolumesMergeByTargetForms(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "base.yml")
+	over := filepath.Join(dir, "over.yml")
+	// Long form in the base, short form (with a mode) in the override.
+	mustWriteFile(t, base, "services:\n  web:\n    image: w\n    volumes:\n      - type: bind\n        source: ./a\n        target: /data\n")
+	mustWriteFile(t, over, "services:\n  web:\n    image: w\n    volumes: [\"vol:/data:ro\"]\n")
+
+	p, err := LoadFiles([]string{base, over}, nil)
+	if err != nil {
+		t.Fatalf("LoadFiles: %v", err)
+	}
+	if vols := p.Services["web"].Volumes; len(vols) != 1 || vols[0] != "vol:/data:ro" {
+		t.Errorf("a short-form override should replace a long-form mount at the same target, got %v", vols)
+	}
+}
+
+// A mount at a path nobody else mounts is kept — merging by target must not
+// collapse unrelated mounts.
+func TestLoadFilesVolumesDistinctTargetsKept(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "base.yml")
+	over := filepath.Join(dir, "over.yml")
+	mustWriteFile(t, base, "services:\n  web:\n    image: w\n    volumes: [\"a:/one\"]\n")
+	mustWriteFile(t, over, "services:\n  web:\n    image: w\n    volumes: [\"b:/two\", \"/anon\"]\n")
+
+	p, err := LoadFiles([]string{base, over}, nil)
+	if err != nil {
+		t.Fatalf("LoadFiles: %v", err)
+	}
+	// Assert the contents, not just the count: a count survives a bug that stops
+	// keying an entry (it's appended unmerged, so the total is unchanged).
+	want := []string{"a:/one", "b:/two", "/anon"}
+	if vols := p.Services["web"].Volumes; strings.Join(vols, ",") != strings.Join(want, ",") {
+		t.Errorf("distinct targets should all survive in order = %v, want %v", vols, want)
+	}
+}
+
+// An anonymous volume ("/data", no source) names its target directly, so a later
+// file mounting something at that path replaces it. docker compose does the same.
+func TestLoadFilesVolumesAnonymousReplacedByTarget(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "base.yml")
+	over := filepath.Join(dir, "over.yml")
+	mustWriteFile(t, base, "services:\n  web:\n    image: w\n    volumes: [\"/data\"]\n")
+	mustWriteFile(t, over, "services:\n  web:\n    image: w\n    volumes: [\"./a:/data\"]\n")
+
+	p, err := LoadFiles([]string{base, over}, nil)
+	if err != nil {
+		t.Fatalf("LoadFiles: %v", err)
+	}
+	if vols := p.Services["web"].Volumes; len(vols) != 1 || vols[0] != "./a:/data" {
+		t.Errorf("a named mount should replace an anonymous volume at the same target, got %v", vols)
+	}
+}
+
+// A trailing slash doesn't make it a different mount point ("/data/" is "/data").
+// Confirmed against docker compose, which collapses these too.
+func TestLoadFilesVolumesTrailingSlashTarget(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "base.yml")
+	over := filepath.Join(dir, "over.yml")
+	mustWriteFile(t, base, "services:\n  web:\n    image: w\n    volumes: [\"./a:/data/\"]\n")
+	mustWriteFile(t, over, "services:\n  web:\n    image: w\n    volumes: [\"./b:/data\"]\n")
+
+	p, err := LoadFiles([]string{base, over}, nil)
+	if err != nil {
+		t.Fatalf("LoadFiles: %v", err)
+	}
+	if vols := p.Services["web"].Volumes; len(vols) != 1 || vols[0] != "./b:/data" {
+		t.Errorf("a trailing slash should not make a distinct mount point, got %v", vols)
+	}
+}
+
+// The collapse must also apply within a SINGLE file: the merge only runs when
+// files are combined, but docker compose collapses duplicate targets regardless
+// of how many files were given. Same for a merge where the override never
+// restates `volumes` (that key is then copied through, never merged).
+func TestLoadVolumesCollapseWithoutMerge(t *testing.T) {
+	dir := t.TempDir()
+
+	// One file, two mounts at the same target: the last wins.
+	single := filepath.Join(dir, "single.yml")
+	mustWriteFile(t, single, "services:\n  db:\n    image: p\n    volumes: [\"./a:/data\", \"./b:/data\"]\n")
+	p, err := Load(single)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if vols := p.Services["db"].Volumes; len(vols) != 1 || vols[0] != "./b:/data" {
+		t.Errorf("a single file should collapse duplicate targets, got %v", vols)
+	}
+
+	// Two files, but the override doesn't touch `volumes` — the base's list is
+	// copied through without ever reaching the merge.
+	base := filepath.Join(dir, "base.yml")
+	over := filepath.Join(dir, "over.yml")
+	mustWriteFile(t, base, "services:\n  db:\n    image: p\n    volumes: [\"./a:/data\", \"./b:/data\"]\n")
+	mustWriteFile(t, over, "services:\n  db:\n    image: p\n    environment:\n      X: \"1\"\n")
+	p2, err := LoadFiles([]string{base, over}, nil)
+	if err != nil {
+		t.Fatalf("LoadFiles: %v", err)
+	}
+	if vols := p2.Services["db"].Volumes; len(vols) != 1 || vols[0] != "./b:/data" {
+		t.Errorf("an untouched volumes list should still collapse, got %v", vols)
+	}
+}
+
 // entrypoint replaces (not appends) across files — it's a single value, not a
 // list to accumulate. Previously only `command` replacement was tested.
 func TestLoadFilesReplacesEntrypoint(t *testing.T) {
@@ -180,5 +315,45 @@ func TestDiscoverOverride(t *testing.T) {
 		if got := DiscoverOverride(dir); got != path {
 			t.Errorf("should discover %s, got %q", name, got)
 		}
+	}
+}
+
+// A volume declaration's `external:`/`name:` are acted on, so `volumes` itself is
+// not an ignored key — but `driver`/`driver_opts`/`labels` ARE dropped, and a
+// project asking for (say) an NFS driver must be told it won't get one.
+func TestIgnoredVolumeDeclarationFields(t *testing.T) {
+	p := writeTemp(t, `
+name: demo
+volumes:
+  nfsdata:
+    driver: local
+    driver_opts:
+      type: nfs
+      device: ":/exports"
+  plain:
+    external: true
+    name: real-name
+services:
+  web:
+    image: web
+`)
+	proj, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	got := strings.Join(proj.Unsupported, ",")
+	for _, want := range []string{"volumes.nfsdata.driver", "volumes.nfsdata.driver_opts"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected %q to be reported as ignored, got %v", want, proj.Unsupported)
+		}
+	}
+	// The acted-on keys are not flagged, and neither is `volumes` wholesale.
+	for _, unwanted := range []string{"volumes.plain.external", "volumes.plain.name"} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("%q is acted on and must not be reported as ignored, got %v", unwanted, proj.Unsupported)
+		}
+	}
+	if slices.Contains(proj.Unsupported, "volumes") {
+		t.Errorf("`volumes` itself is acted on and must not be flagged, got %v", proj.Unsupported)
 	}
 }

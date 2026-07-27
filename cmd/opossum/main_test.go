@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -377,6 +378,202 @@ func TestImportCLI(t *testing.T) {
 	}
 }
 
+// --from-docker is the old name for --from-docker-compose. It must keep working
+// identically (published examples and agents that learned the old name still use
+// it), and it must steer the caller to the new name. This drives a real `up` with
+// each spelling through the same fakes and compares the commands the runtime
+// actually issued — equivalence at the argv level, not just "both exit 0".
+func TestFromDockerComposeLegacyAlias(t *testing.T) {
+	upWith := func(flag string) (calls, stderr string) {
+		t.Helper()
+		dir := t.TempDir()
+		logPath := filepath.Join(dir, "calls.log")
+		docker := filepath.Join(dir, "docker")
+		writeExec(t, docker, fmt.Sprintf("#!/bin/sh\necho \"docker $*\" >> %s\n[ \"$1 $2\" = \"image save\" ] && echo TARDATA\nexit 0\n", logPath))
+		// `image inspect` fails so the built image looks missing — the real migration
+		// case, and what makes `up` reach for the image at all.
+		container := filepath.Join(dir, "container")
+		writeExec(t, container, fmt.Sprintf("#!/bin/sh\necho \"container $*\" >> %s\n"+
+			"[ \"$1 $2\" = \"image inspect\" ] && exit 1\n"+
+			"[ \"$1 $2\" = \"image load\" ] && cat >/dev/null\nexit 0\n", logPath))
+		t.Setenv("OPOSSUM_CONTAINER_BIN", container)
+		t.Setenv("OPOSSUM_DOCKER_BIN", docker)
+
+		compose := writeCompose(t, "name: demo\nservices:\n  web:\n    build: .\n")
+		root := newRootCmd()
+		var so, se strings.Builder
+		root.SetOut(&so)
+		root.SetErr(&se)
+		root.SetArgs([]string{"-f", compose, "up", flag})
+		if err := root.Execute(); err != nil {
+			t.Fatalf("up %s: %v", flag, err)
+		}
+		log, _ := os.ReadFile(logPath)
+		// The notice must go to stderr, never stdout (callers parse stdout).
+		if strings.Contains(so.String(), "deprecated") {
+			t.Errorf("the deprecation notice must not go to stdout, got:\n%s", so.String())
+		}
+		// Sorted: the import is a pipe (`docker image save | container image load`),
+		// so those two processes append to the shared log concurrently and their
+		// relative order isn't deterministic. Compare the commands as a multiset —
+		// that still catches a missing, extra, or differently-argued command, which
+		// is what "the two spellings do the same thing" means here.
+		lines := strings.Split(strings.TrimRight(string(log), "\n"), "\n")
+		sort.Strings(lines)
+		return strings.Join(lines, "\n"), se.String()
+	}
+
+	newCalls, newErr := upWith("--from-docker-compose")
+	oldCalls, oldErr := upWith("--from-docker")
+
+	// The import actually ran (otherwise the comparison below is vacuous).
+	if !strings.Contains(newCalls, "docker image save demo-web:latest") {
+		t.Fatalf("--from-docker-compose should import from Docker, calls:\n%s", newCalls)
+	}
+	// The same commands, with the same arguments, for both spellings.
+	if newCalls != oldCalls {
+		t.Errorf("--from-docker must drive the identical commands as --from-docker-compose\nnew:\n%s\nold:\n%s", newCalls, oldCalls)
+	}
+	// Only the old spelling is called out, and it names the new flag.
+	if !strings.Contains(oldErr, "--from-docker is deprecated") || !strings.Contains(oldErr, "--from-docker-compose") {
+		t.Errorf("--from-docker should warn and name the new flag, stderr:\n%s", oldErr)
+	}
+	if strings.Contains(newErr, "deprecated") {
+		t.Errorf("--from-docker-compose must not warn, stderr:\n%s", newErr)
+	}
+}
+
+// The old name is hidden from `up --help` (the new name is the one to advertise),
+// but still accepted — a hidden flag must not become an unknown flag.
+func TestFromDockerComposeHelpAdvertisesNewNameOnly(t *testing.T) {
+	out, err := run(t, "up", "--help")
+	if err != nil {
+		t.Fatalf("up --help: %v", err)
+	}
+	if !strings.Contains(out, "--from-docker-compose") {
+		t.Errorf("up --help should advertise --from-docker-compose, got:\n%s", out)
+	}
+	// The old name appears nowhere on its own (only as the new name's prefix).
+	if strings.Contains(strings.ReplaceAll(out, "--from-docker-compose", ""), "--from-docker") {
+		t.Errorf("up --help should not advertise the deprecated --from-docker, got:\n%s", out)
+	}
+}
+
+// The migration story end to end: a compose file that can't start as written on
+// Apple `container` (Postgres data dir on a bind mount) reaches startup in ONE
+// command, because --from-docker-compose writes the fixes into an overlay and
+// re-resolves the project with it merged.
+func TestFromDockerComposeGeneratesOverlayAndStarts(t *testing.T) {
+	readLog := fakeShim(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte(
+		"name: demo\nservices:\n  db:\n    image: postgres:16\n    volumes:\n      - ./pgdata:/var/lib/postgresql/data\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	out, err := run(t, "up", "--from-docker-compose", "--no-build")
+	if err != nil {
+		t.Fatalf("up --from-docker-compose: %v\n%s", err, out)
+	}
+	// The overlay was written, and the notice says what and where.
+	body, rerr := os.ReadFile(filepath.Join(dir, "compose.opossum.yaml"))
+	if rerr != nil {
+		t.Fatalf("--from-docker-compose should write an overlay: %v", rerr)
+	}
+	if !strings.Contains(out, "wrote compose.opossum.yaml") {
+		t.Errorf("generating an overlay should be announced, got:\n%s", out)
+	}
+	if !strings.Contains(out, "OPSM-101") || !strings.Contains(out, "OPSM-105") {
+		t.Errorf("the notice should name the diagnostics it fixed, got:\n%s", out)
+	}
+
+	// The SAME run started the service with the adapted config: the bind mount is
+	// gone, replaced by the named volume the overlay introduced.
+	calls := strings.Join(readLog(), "\n")
+	if !strings.Contains(calls, "db-data:/var/lib/postgresql/data") {
+		t.Errorf("the run should mount the overlay's named volume, calls:\n%s", calls)
+	}
+	// The host bind mount must be GONE, not merely accompanied by the volume —
+	// mounting both sources at one path is the bug #309 fixed.
+	if strings.Contains(calls, filepath.Join(dir, "pgdata")+":/var/lib/postgresql/data") {
+		t.Errorf("the run should not still use the host bind mount, calls:\n%s", calls)
+	}
+	if !strings.Contains(calls, "PGDATA=/var/lib/postgresql/data/pgdata") {
+		t.Errorf("the run should carry the redirected PGDATA, calls:\n%s", calls)
+	}
+	if !strings.Contains(string(body), "[opossum --from-docker-compose]") {
+		t.Errorf("the overlay should carry the stable marker, got:\n%s", body)
+	}
+}
+
+// An existing compose.opossum.yaml is never overwritten — the user may have
+// edited it, and clobbering that would destroy work.
+func TestFromDockerComposeNeverOverwritesOverlay(t *testing.T) {
+	fakeShim(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte(
+		"name: demo\nservices:\n  db:\n    image: postgres:16\n    volumes:\n      - ./pgdata:/var/lib/postgresql/data\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mine := "# hand written\nservices:\n  db:\n    environment:\n      PGDATA: /var/lib/postgresql/data/mine\n"
+	if err := os.WriteFile(filepath.Join(dir, "compose.opossum.yaml"), []byte(mine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	if _, err := run(t, "up", "--from-docker-compose", "--no-build"); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	got, _ := os.ReadFile(filepath.Join(dir, "compose.opossum.yaml"))
+	if string(got) != mine {
+		t.Errorf("an existing overlay must be left alone, got:\n%s", got)
+	}
+}
+
+// With an explicit -f, the overlay isn't auto-merged (same rule as the standard
+// override), so writing one would leave a file that silently does nothing.
+func TestFromDockerComposeNoGenerationWithExplicitFile(t *testing.T) {
+	fakeShim(t)
+	dir := t.TempDir()
+	cf := filepath.Join(dir, "compose.yaml")
+	if err := os.WriteFile(cf, []byte(
+		"name: demo\nservices:\n  db:\n    image: postgres:16\n    volumes:\n      - ./pgdata:/var/lib/postgresql/data\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	if _, err := run(t, "-f", cf, "up", "--from-docker-compose", "--no-build"); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "compose.opossum.yaml")); err == nil {
+		t.Error("an explicit -f should not generate an overlay (it wouldn't be merged)")
+	}
+}
+
+// A project with nothing to adapt gets no file — the overlay is never written
+// speculatively.
+func TestFromDockerComposeNoOverlayWhenNothingToAdapt(t *testing.T) {
+	fakeShim(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte(
+		"name: demo\nservices:\n  web:\n    image: nginx\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	out, err := run(t, "up", "--from-docker-compose", "--no-build")
+	if err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "compose.opossum.yaml")); err == nil {
+		t.Error("nothing to adapt should mean no overlay file")
+	}
+	if strings.Contains(out, "wrote compose.opossum.yaml") {
+		t.Errorf("no overlay should be announced when none was written, got:\n%s", out)
+	}
+}
+
 // writeExec writes an executable shim script.
 func writeExec(t *testing.T, path, body string) {
 	t.Helper()
@@ -697,6 +894,74 @@ func TestDiscoversDockerComposeFileWithoutFlag(t *testing.T) {
 	}
 }
 
+// An opossum overlay (compose.opossum.yaml) is auto-merged when no -f is given,
+// at the HIGHEST precedence: its values win over both the base compose file and a
+// standard compose.override.yaml. This is what lets opossum carry adjustments that
+// make a project run on Apple `container` without editing the user's own files.
+func TestOpossumOverlayAutoMerged(t *testing.T) {
+	fakeShim(t)
+	dir := t.TempDir()
+	writeF := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Base sets FOO=base; a standard override sets FOO=override; the opossum
+	// overlay sets FOO=overlay. Merge order is base -> override -> overlay, so the
+	// overlay must win.
+	writeF("compose.yaml", "name: demo\nservices:\n  web:\n    image: web\n    environment:\n      FOO: base\n")
+	writeF("compose.override.yaml", "services:\n  web:\n    environment:\n      FOO: override\n")
+	writeF("compose.opossum.yaml", "services:\n  web:\n    environment:\n      FOO: overlay\n")
+	t.Chdir(dir)
+
+	out, err := run(t, "config") // no -f
+	if err != nil {
+		t.Fatalf("config with an opossum overlay: %v", err)
+	}
+	if !strings.Contains(out, "FOO=overlay") {
+		t.Errorf("the opossum overlay should win at the highest precedence, got:\n%s", out)
+	}
+	if strings.Contains(out, "FOO=base") || strings.Contains(out, "FOO=override") {
+		t.Errorf("the overlay value should replace base/override, got:\n%s", out)
+	}
+}
+
+// Merging an opossum overlay is announced by the commands that surface or start
+// the resolved config (config, up) — the running config differs from the user's
+// base compose file, and that must never be silent. It is NOT announced by
+// read-only commands like `ps`, which would just be noise on a file meant to live
+// in the repo. (run() captures cobra's stderr, where the notice is written.)
+func TestOpossumOverlayNotice(t *testing.T) {
+	fakeShim(t)
+	dir := t.TempDir()
+	writeF := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeF("compose.yaml", "name: demo\nservices:\n  web:\n    image: web\n")
+	writeF("compose.opossum.yaml", "services:\n  web:\n    image: web2\n")
+	t.Chdir(dir)
+
+	// config announces the overlay.
+	out, err := run(t, "config")
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	if !strings.Contains(out, "compose.opossum.yaml") {
+		t.Errorf("config should announce a merged opossum overlay, got:\n%s", out)
+	}
+
+	// ps does not — it's scoped to config/up to avoid noise on every command.
+	out, err = run(t, "ps")
+	if err != nil {
+		t.Fatalf("ps: %v", err)
+	}
+	if strings.Contains(out, "opossum overlay") {
+		t.Errorf("ps should not announce the overlay (scoped to config/up), got:\n%s", out)
+	}
+}
+
 func TestNoComposeFileWithoutFlagErrors(t *testing.T) {
 	fakeShim(t)
 	t.Chdir(t.TempDir()) // empty dir, no compose file
@@ -886,6 +1151,140 @@ services:
 	for _, verb := range []string{"run -d", "network create", "delete --force"} {
 		if strings.Contains(joined, verb) {
 			t.Errorf("--dry-run must not issue %q to the runtime, got log:\n%s", verb, joined)
+		}
+	}
+}
+
+// The overlay is discovered under either spelling, so generation must respect a
+// hand-written compose.opossum.YML too. Writing the .yaml next to it would take
+// precedence and silently make the user's file inert — worse than overwriting,
+// because nothing is lost visibly.
+func TestFromDockerComposeRespectsYmlSpelling(t *testing.T) {
+	fakeShim(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte(
+		"name: demo\nservices:\n  db:\n    image: postgres:16\n    volumes:\n      - ./pgdata:/var/lib/postgresql/data\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mine := "services:\n  db:\n    environment:\n      MY_SETTING: keepme\n"
+	if err := os.WriteFile(filepath.Join(dir, "compose.opossum.yml"), []byte(mine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	out, err := run(t, "up", "--from-docker-compose", "--no-build")
+	if err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "compose.opossum.yaml")); err == nil {
+		t.Error("a hand-written compose.opossum.yml must not be shadowed by a generated .yaml")
+	}
+	// And the user is told fixes were available rather than left guessing.
+	if !strings.Contains(out, "already exists") {
+		t.Errorf("skipping because an overlay exists should be reported, got:\n%s", out)
+	}
+	// The user's setting still reaches the project.
+	cfg, err := run(t, "config")
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	if !strings.Contains(cfg, "MY_SETTING=keepme") {
+		t.Errorf("the hand-written overlay must still apply, got:\n%s", cfg)
+	}
+}
+
+// --dry-run must show what a real run would do. It writes nothing, but it plans
+// against the adapted project — otherwise the one command a cautious user runs to
+// ask "what will this do?" is the one that answers wrongly.
+func TestFromDockerComposeDryRunPlansAdapted(t *testing.T) {
+	fakeShim(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte(
+		"name: demo\nservices:\n  db:\n    image: postgres:16\n    volumes:\n      - ./pgdata:/var/lib/postgresql/data\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	out, err := run(t, "up", "--from-docker-compose", "--dry-run")
+	if err != nil {
+		t.Fatalf("up --dry-run: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "compose.opossum.yaml")); err == nil {
+		t.Error("--dry-run must not write the overlay")
+	}
+	if !strings.Contains(out, "would write compose.opossum.yaml") {
+		t.Errorf("--dry-run should say it would write the overlay, got:\n%s", out)
+	}
+	// The planned commands must match what a real run issues, not the unadapted file.
+	if !strings.Contains(out, "db-data:/var/lib/postgresql/data") {
+		t.Errorf("--dry-run should plan against the adapted project, got:\n%s", out)
+	}
+	if strings.Contains(out, filepath.Join(dir, "pgdata")+":/var/lib/postgresql/data") {
+		t.Errorf("--dry-run should not plan the unadapted bind mount, got:\n%s", out)
+	}
+}
+
+// A directory opossum can't write to must not turn an `up` that used to work into
+// a failure: the overlay is a convenience, so it degrades to the existing warnings.
+func TestFromDockerComposeUnwritableDirStillStarts(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can write to a read-only directory")
+	}
+	fakeShim(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte(
+		"name: demo\nservices:\n  db:\n    image: postgres:16\n    volumes:\n      - ./pgdata:/var/lib/postgresql/data\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	out, err := run(t, "up", "--from-docker-compose", "--no-build")
+	if err != nil {
+		t.Fatalf("an unwritable directory must not fail up: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "couldn't write compose.opossum.yaml") {
+		t.Errorf("the failure to write should be reported, got:\n%s", out)
+	}
+}
+
+// The overlay is self-checked before it lands: it's merged from a temp file in the
+// same directory and only linked into place if it resolves. Since opossum never
+// overwrites the result, an unloadable file would otherwise break every later
+// command until a human deleted a file they never wrote. This asserts the file that
+// does land always loads.
+func TestFromDockerComposeWrittenOverlayAlwaysResolves(t *testing.T) {
+	fakeShim(t)
+	dir := t.TempDir()
+	// Names and paths that stress the renderer: a reserved-word service, a `$` in
+	// a host path, and a colliding sanitized name.
+	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte(
+		"name: demo\nservices:\n"+
+			"  \"true\":\n    image: postgres:16\n    volumes:\n      - ./pg$$x:/var/lib/postgresql/data\n"+
+			"  a_b:\n    image: mysql:8\n    volumes:\n      - ./one:/var/lib/mysql\n"+
+			"  a-b:\n    image: mariadb:11\n    volumes:\n      - ./two:/var/lib/mysql\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	if _, err := run(t, "up", "--from-docker-compose", "--no-build"); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "compose.opossum.yaml")); err != nil {
+		t.Fatalf("expected an overlay to be written: %v", err)
+	}
+	// Every later command must still work against the written file.
+	if _, err := run(t, "config"); err != nil {
+		t.Errorf("the written overlay must leave the project loadable: %v", err)
+	}
+	// No temp files left behind in the user's directory.
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			t.Errorf("a temp file was left in the project directory: %s", e.Name())
 		}
 	}
 }

@@ -6,6 +6,22 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-07-28
+
+### Added
+
+- A `compose.opossum.yaml` (or `.yml`) next to a discovered compose file is now auto-merged **last, at the highest precedence** — after the base file and any `compose.override.yaml`. docker compose ignores this name, so the same directory works with both tools and your original files stay untouched: keep Apple-`container`-specific tweaks here. Merging one prints a one-line notice naming the file (delete it to opt out).
+- `up --from-docker-compose` now **writes the fixes a docker compose project needs to run on Apple `container`** into a `compose.opossum.yaml`, then starts — so bringing a project over is one command instead of read-warning-edit-retry. It handles the two patterns that fail for runtime reasons rather than mistakes in your file: a named volume mounted at Postgres's data directory (`PGDATA` is pointed at a subdirectory of it) and a database data directory on a bind mount (swapped for a named volume — note this changes where the data lives; the host directory is left untouched). Every entry says what changed, why (with its diagnostic code), how to verify it, what to do if it still fails, and how to undo it. An existing `compose.opossum.yaml` is never overwritten, your own compose file is never modified, and nothing is written when there's nothing to fix.
+- A Japanese README ([`README.ja.md`](README.ja.md)), and a diagram in the **Networking model** section (mermaid) contrasting the docker-compose and Apple-`container` network models side by side.
+
+### Changed
+
+- `up --from-docker` is now **`up --from-docker-compose`**. The flag is the switch for bringing an existing docker compose project up here, and the new name says so. The old `--from-docker` still works exactly as before and prints a one-line notice pointing at the new name, so existing scripts and examples keep running.
+
+### Fixed
+
+- `volumes` entries that mount the same container path now collapse to one, matching docker compose: the last entry wins, whether the duplicates come from one file or from a file and its override. Previously every entry was passed to the runtime, so two sources could end up mounted at a single path — and an override couldn't swap a bind mount for a named volume.
+
 ## [0.14.0] - 2026-07-24
 
 ### Added
@@ -598,7 +614,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/suruseas/opossum/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/suruseas/opossum/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/suruseas/opossum/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/suruseas/opossum/compare/v0.11.0...v0.12.0

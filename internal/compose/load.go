@@ -48,6 +48,28 @@ func DiscoverOverride(dir string) string {
 	return ""
 }
 
+// opossumOverlayFileNames are opossum-specific overlays, auto-merged at the
+// highest precedence — on top of the base compose file AND any standard override.
+// docker compose doesn't know these names, so it ignores them: the same directory
+// works with both tools and the original compose file stays untouched, while
+// opossum can carry adjustments that make a project run on Apple `container`.
+var opossumOverlayFileNames = []string{
+	"compose.opossum.yaml",
+	"compose.opossum.yml",
+}
+
+// DiscoverOpossumOverlay returns the path of an opossum overlay file in dir
+// (merged last, at the highest precedence), or "" if none exists.
+func DiscoverOpossumOverlay(dir string) string {
+	for _, name := range opossumOverlayFileNames {
+		p := filepath.Join(dir, name)
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+			return p
+		}
+	}
+	return ""
+}
+
 // ignoredTopLevel lists top-level compose keys opossum doesn't act on. `version`
 // (legacy no-op) and `x-` extension keys are intentionally not flagged.
 func ignoredTopLevel(data []byte) []string {
@@ -58,13 +80,45 @@ func ignoredTopLevel(data []byte) []string {
 	var out []string
 	for k := range top {
 		switch {
-		case k == "name" || k == "services" || k == "version" || k == "secrets" || k == "networks":
+		// `volumes` is acted on (declarations drive external: true and a volume's
+		// real `name:`), so reporting the whole key as ignored was wrong — and noisy,
+		// since almost every real project declares named volumes. The fields inside a
+		// declaration that opossum *doesn't* act on are reported individually below,
+		// so nothing is silently dropped.
+		case k == "name" || k == "services" || k == "version" || k == "secrets" || k == "networks" || k == "volumes":
 		case strings.HasPrefix(k, "x-"):
 		default:
 			out = append(out, k)
 		}
 	}
+	out = append(out, ignoredVolumeFields(top["volumes"])...)
 	sort.Strings(out)
+	return out
+}
+
+// volumeDeclFields are the per-volume keys opossum acts on. Anything else in a
+// declaration (driver, driver_opts, labels) is parsed and dropped — a project that
+// asks for an NFS driver would otherwise silently get a plain local volume, with
+// nothing said about it.
+var volumeDeclFields = map[string]bool{"external": true, "name": true}
+
+// ignoredVolumeFields reports unacted-on keys inside top-level volume declarations
+// as `volumes.<vol>.<key>`, so the signal lost by not flagging `volumes` wholesale
+// comes back sharper than before.
+func ignoredVolumeFields(node yaml.Node) []string {
+	var decls map[string]map[string]yaml.Node
+	if node.IsZero() || node.Decode(&decls) != nil {
+		return nil
+	}
+	var out []string
+	for vol, fields := range decls {
+		for k := range fields {
+			if volumeDeclFields[k] || strings.HasPrefix(k, "x-") {
+				continue
+			}
+			out = append(out, fmt.Sprintf("volumes.%s.%s", vol, k))
+		}
+	}
 	return out
 }
 
@@ -111,8 +165,18 @@ var replaceSeqKeys = map[string]bool{"command": true, "entrypoint": true, "test"
 var envLikeKeys = map[string]bool{"environment": true, "labels": true}
 
 // dedupSeqKeys are list fields where a repeated entry (e.g. an override restating a
-// port) should collapse to one, matching docker compose.
-var dedupSeqKeys = map[string]bool{"ports": true, "volumes": true, "expose": true}
+// port) should collapse to one, matching docker compose. `volumes` is deliberately
+// absent: mergeByTargetKeys handles it with a stricter rule (same mount point, not
+// just same text) that subsumes plain dedup.
+var dedupSeqKeys = map[string]bool{"ports": true, "expose": true}
+
+// mergeByTargetKeys are list fields docker compose merges by *mount point* rather
+// than by whole entry: a later file's mount at a path an earlier file already
+// mounts replaces it. Appending both instead (what a plain dedup does, since the
+// two entries differ as strings) would mount two sources at one path — the
+// container gets whichever the runtime picks, which is not what either file asked
+// for. This is what lets an override swap a bind mount for a named volume.
+var mergeByTargetKeys = map[string]bool{"volumes": true}
 
 // mergeValue merges one value: env-like fields merge by key (list or map form),
 // nested mappings merge by key, most sequences append (deduping known list
@@ -129,6 +193,9 @@ func mergeValue(base, over any, key string) any {
 	case []any:
 		if b, ok := base.([]any); ok && !replaceSeqKeys[key] {
 			merged := append(append([]any{}, b...), o...)
+			if mergeByTargetKeys[key] {
+				return mergeSeqByTarget(merged)
+			}
 			if dedupSeqKeys[key] {
 				merged = dedupSeq(merged)
 			}
@@ -136,6 +203,74 @@ func mergeValue(base, over any, key string) any {
 		}
 	}
 	return over
+}
+
+// mergeSeqByTarget collapses mount entries that share a target path, keeping the
+// LAST one (the higher-precedence file wins) at the FIRST one's position, so an
+// override swaps a mount in place instead of adding a second mount at the same
+// path. Entries whose target can't be read are left alone.
+func mergeSeqByTarget(xs []any) []any {
+	pos := map[string]int{} // target -> index in out
+	out := make([]any, 0, len(xs))
+	for _, x := range xs {
+		t := mountTarget(x)
+		if t == "" {
+			out = append(out, x)
+			continue
+		}
+		if i, seen := pos[t]; seen {
+			out[i] = x // later file wins, in the earlier file's slot
+			continue
+		}
+		pos[t] = len(out)
+		out = append(out, x)
+	}
+	return out
+}
+
+// collapseMountsByTarget is mergeSeqByTarget for an already-parsed (string) mount
+// list, applied after load so a single file gets the same treatment as merged ones.
+func collapseMountsByTarget(vs []string) []string {
+	pos := map[string]int{}
+	out := make([]string, 0, len(vs))
+	for _, v := range vs {
+		t := mountTarget(v)
+		if t == "" {
+			out = append(out, v)
+			continue
+		}
+		if i, seen := pos[t]; seen {
+			out[i] = v
+			continue
+		}
+		pos[t] = len(out)
+		out = append(out, v)
+	}
+	return out
+}
+
+// mountTarget returns the container path a volumes entry mounts at, for both the
+// short string form ("src:target", "src:target:ro", or a bare "target" for an
+// anonymous volume) and the long mapping form ({type, source, target, …}).
+// Returns "" when the entry has no readable target — such an entry is left alone
+// rather than guessed at, which is the pre-merge-by-target behaviour (append both)
+// and never a wrong merge.
+func mountTarget(v any) string {
+	switch x := v.(type) {
+	case string:
+		// Split never yields an empty slice: Split("", ":") is [""], which falls to
+		// the anonymous-volume case and correctly reports "" (unkeyable).
+		parts := strings.Split(x, ":")
+		if len(parts) == 1 {
+			return strings.TrimRight(parts[0], "/") // anonymous volume: the target itself
+		}
+		return strings.TrimRight(parts[1], "/")
+	case map[string]any:
+		if t, ok := x["target"].(string); ok {
+			return strings.TrimRight(t, "/")
+		}
+	}
+	return ""
 }
 
 // toEnvMap normalizes an env-like value (a `KEY: value` map or a `- KEY=value`
@@ -313,6 +448,13 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 				ports = append(ports, n)
 			}
 			svc.Ports = ports
+		}
+		// Collapse mounts sharing a target, for the same reason ports are re-deduped
+		// above: the merge only sees files being combined, so a single file — or one
+		// whose override doesn't restate `volumes` — never reaches it. docker compose
+		// collapses unconditionally, keeping the last entry.
+		if len(svc.Volumes) > 1 {
+			svc.Volumes = collapseMountsByTarget(svc.Volumes)
 		}
 		// Fold env_file values into the environment (explicit `environment` wins).
 		env, err := resolveEnvFiles(baseDir, svc.EnvFile, svc.Environment)

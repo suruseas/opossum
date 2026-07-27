@@ -2,6 +2,8 @@
   <img src="docs/assets/readme-banner.png" alt="opossum — Compose-style orchestration for Apple's container runtime" width="920">
 </p>
 
+<p align="right"><a href="README.ja.md">日本語</a></p>
+
 A Docker Compose–like orchestrator for [Apple's `container`](https://github.com/apple/container)
 runtime on macOS. Define a multi-service stack in a familiar `compose.yaml`, and
 `opossum` starts each service in dependency order on a shared network so they can
@@ -152,7 +154,7 @@ sudo container system dns create opossum
 
 cd path/to/your-project
 docker compose build       # if you haven't already (or the images are already there)
-opossum up --from-docker   # import each built image from Docker, then start
+opossum up --from-docker-compose   # import each built image from Docker, then start
 ```
 
 opossum names a built image `<project>-<service>` just like `docker compose`,
@@ -171,7 +173,7 @@ opossum exec -it web sh
 opossum down          # stop + remove (add -v to also drop named volumes)
 ```
 
-**Prefer to build with Apple's builder?** Drop `--from-docker` and run
+**Prefer to build with Apple's builder?** Drop `--from-docker-compose` and run
 `opossum up` — opossum builds any `build:` service itself (a heavy build can be
 slow; see [Troubleshooting builds](#troubleshooting-builds)). Either way, run
 `opossum config` first to preview the resolved configuration and any fields
@@ -183,7 +185,7 @@ opossum ignores (`restart`, `dns_search`, …).
 1. **DNS domain not registered** → services can't resolve each other by name. Run the setup line above.
 2. **Postgres data on a named volume** → `initdb` fails. Set `PGDATA` to a subdirectory (`environment: PGDATA=/var/lib/postgresql/data/pgdata`). MySQL/MariaDB are fine.
 3. **Host port already in use** → `up` names the port and service; on macOS a taken 5000/7000 is often the **AirPlay Receiver** (turn it off in System Settings › General › AirDrop & Handoff, or remap the host port).
-4. **Building from a temp/scratch dir** → Apple's builder can't read a context under `/private/tmp` or a symlink. Build from a real path under your home directory (or use `--from-docker`).
+4. **Building from a temp/scratch dir** → Apple's builder can't read a context under `/private/tmp` or a symlink. Build from a real path under your home directory (or use `--from-docker-compose`).
 
 ### Reuse images you already built with Docker
 
@@ -198,7 +200,7 @@ opossum import                # docker save → container image load, per build 
 opossum up                    # starts immediately; no rebuild
 
 # …or in one step — import each build service instead of building it, then start:
-opossum up --from-docker
+opossum up --from-docker-compose
 ```
 
 `docker compose` and opossum name a built image the same way
@@ -309,7 +311,33 @@ the ignored fields, so a `docker-compose.yml` runs without surprises.
 (later files override earlier ones — mappings merge by key, most sequences append,
 `command`/`entrypoint` replace), and a `compose.override.yaml` (or
 `docker-compose.override.yml`) next to a discovered compose file is merged
-automatically.
+automatically. `volumes` are keyed by **mount point**: if more than one entry
+mounts the same container path, the last one wins — so an override can swap a bind
+mount for a named volume, rather than leaving two sources on one path.
+
+**opossum overlay.** A `compose.opossum.yaml` (or `.yml`) next to a discovered
+compose file is merged **last, at the highest precedence** — after the base file
+and any `compose.override.yaml`. docker compose doesn't read this name, so the same
+directory works with both tools and your original files stay untouched: put the
+tweaks that make a project run on Apple `container` here and keep them out of the
+shared compose file. When one is merged, opossum prints a one-line notice naming it
+(delete the file to opt out).
+
+`opossum up --from-docker-compose` **writes that overlay for you**. Two things
+about a `docker-compose.yml` can stop it starting here for reasons that are
+properties of the runtime rather than mistakes in your file:
+
+| What | Why it fails on Apple `container` | What the overlay does |
+|---|---|---|
+| A named volume mounted at Postgres's data directory | The volume is a mount point, so the directory isn't empty and `initdb` refuses it (`OPSM-101`) | Points `PGDATA` at a subdirectory — the data stays in the same volume |
+| A database's data directory on a bind mount | Bind mounts are host-owned and can't be chowned from inside the container, which every official DB image does at startup (`OPSM-105`) | Mounts a named volume there instead — **this changes where the data lives**; the host directory is left untouched, not copied |
+
+Each entry it writes says what changed, why (with the diagnostic code), how to
+check it worked, what to do if it didn't, and how to undo it. opossum **never
+overwrites an existing `compose.opossum.yaml`**, never modifies your own compose
+file, and only writes one when it found something to fix. Anything that would
+change what the project *means* — sharing semantics, published ports,
+app-specific seeding — stays a warning for you to decide on.
 
 ## Command support
 
@@ -318,7 +346,7 @@ opossum mirrors the common `docker compose` subcommands, delegating each to the
 
 | Command | Supported | Notes |
 |---------|-----------|-------|
-| `up [service…]` | ✅ | build + start the project, or named services plus their deps. Leaves a running service untouched when its config is unchanged (build images only if missing), and flags orphan containers from removed services; `--force-recreate`, `--build`, `--no-build`, `--from-docker` (import build images from Docker instead of building), `--remove-orphans`, `--foreground`, `--profile` |
+| `up [service…]` | ✅ | build + start the project, or named services plus their deps. Leaves a running service untouched when its config is unchanged (build images only if missing), and flags orphan containers from removed services; `--force-recreate`, `--build`, `--no-build`, `--from-docker-compose` (import build images from Docker instead of building; formerly `--from-docker`, which still works and warns), `--remove-orphans`, `--foreground`, `--profile` |
 | `down [-v] [--rmi local\|all]` | ✅ | stop, remove, and delete the project network; `-v` also removes named volumes; `--rmi local` removes opossum-built images (`all` also removes pulled ones); `--remove-orphans` also removes containers for services no longer in the compose |
 | `ps` | ✅ | service / container / IP / ports / status |
 | `images` | ✅ | each service's image, whether opossum builds it, and whether it's present locally |
@@ -405,6 +433,33 @@ Everything else in the [Compose support](#compose-support) and
 The place opossum diverges most from docker compose is the network — because Apple
 `container`'s network model is genuinely different from the Docker engine's. opossum
 maps your compose onto it rather than reimplementing Docker's; this is the map.
+
+At a glance, here is where the two models line up and where opossum has to bridge a gap:
+
+```mermaid
+flowchart LR
+    subgraph DC["docker compose (Docker engine)"]
+        direction TB
+        dc_svc["services"] --> dc_net["bridge network<br/>+ embedded DNS"]
+        dc_net --> dc_disc["bare-name discovery<br/>(automatic)"]
+        dc_net --> dc_host["host.docker.internal"]
+        dc_net --> dc_nat["internet via NAT"]
+    end
+
+    subgraph OP["opossum (Apple container)"]
+        direction TB
+        op_svc["services"] --> op_net["per-project network<br/>&lt;project&gt;-net"]
+        op_net --> op_disc["bare-name discovery<br/>needs 1x: dns create"]
+        op_net --> op_host["$OPOSSUM_HOST_GATEWAY<br/>(host LAN IP)"]
+        op_net --> op_nat["internet via NAT<br/>internal:true removes it"]
+    end
+
+    dc_disc -.same idea, one-time setup.-> op_disc
+    dc_host -.no host alias; opossum computes it.-> op_host
+    dc_nat -.plus declarative egress control.-> op_nat
+```
+
+The table below is the same map in detail — each row is one thing you might reach for in docker compose, and what you write instead:
 
 | Concern | docker compose (Docker engine) | opossum (Apple `container`) — what you write |
 |---------|--------------------------------|----------------------------------------------|

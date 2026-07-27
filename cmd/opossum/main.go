@@ -394,7 +394,7 @@ func main() {
 func upCmd() *cobra.Command {
 	var foreground bool
 	var profiles []string
-	var forceRecreate, build, noBuild, removeOrphans, fromDocker, dryRun bool
+	var forceRecreate, build, noBuild, removeOrphans, fromDockerCompose, fromDockerLegacy, dryRun bool
 	cmd := &cobra.Command{
 		Use:   "up [service...]",
 		Short: "Build and start services in dependency order (all, or the named services plus their dependencies)",
@@ -402,9 +402,29 @@ func upCmd() *cobra.Command {
 			if build && noBuild {
 				return fmt.Errorf("--build and --no-build are mutually exclusive")
 			}
+			// --from-docker is the old name for --from-docker-compose. Accept it
+			// (same behaviour) and point at the new name rather than failing: the old
+			// name is in published docs an agent may have learned.
+			if fromDockerLegacy {
+				fmt.Fprintln(cmd.ErrOrStderr(), "opossum: --from-docker is deprecated — use --from-docker-compose (same behaviour)")
+			}
+			fromDocker := fromDockerCompose || fromDockerLegacy
+			announceOverlay(cmd.ErrOrStderr())
 			o, err := loadOrchestrator(cmd.OutOrStdout())
 			if err != nil {
 				return err
+			}
+			// Bringing a docker compose project over: write the known fixes into an
+			// overlay and reload, so `up` reaches startup in one command instead of
+			// making the user read a warning and edit their file.
+			if fromDocker {
+				reloaded, err := adaptProject(cmd.ErrOrStderr(), o, dryRun)
+				if err != nil {
+					return err
+				}
+				if reloaded != nil {
+					o = reloaded
+				}
 			}
 			o.SetUpOptions(forceRecreate, build, noBuild, removeOrphans, fromDocker)
 			// --dry-run resolves everything but executes nothing: it prints the plan
@@ -438,7 +458,17 @@ func upCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&build, "build", false, "build images before starting, even if already present")
 	cmd.Flags().BoolVar(&noBuild, "no-build", false, "don't build images (error if one is missing)")
 	cmd.Flags().BoolVar(&removeOrphans, "remove-orphans", false, "remove containers for services no longer in the compose file")
-	cmd.Flags().BoolVar(&fromDocker, "from-docker", false, "for services with a build, import the image from Docker instead of building it (needs the docker CLI)")
+	cmd.Flags().BoolVar(&fromDockerCompose, "from-docker-compose", false, "bring an existing docker compose project up here: for services with a build, import the image from Docker instead of building it (needs the docker CLI)")
+	// The old name, kept working so published examples and agents that learned it
+	// don't break. Hidden from --help (the new name is the one to advertise), with
+	// the run-time notice above steering to it. MarkHidden rather than
+	// MarkDeprecated because the notice is hand-rolled: MarkDeprecated would print
+	// its own on top of ours, and ours is worded for this migration ("same
+	// behaviour") and pinned to cmd.ErrOrStderr() — so it stays on stderr even if a
+	// caller redirects the command's out-writer. Both mark it hidden and keep it
+	// accepted, so nothing is lost.
+	cmd.Flags().BoolVar(&fromDockerLegacy, "from-docker", false, "deprecated alias for --from-docker-compose")
+	_ = cmd.Flags().MarkHidden("from-docker")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "resolve and print the plan (startup order and the container commands that would run) without executing anything")
 	return cmd
 }
@@ -504,6 +534,9 @@ func configCmd() *cobra.Command {
 		Use:   "config",
 		Short: "Validate and print the resolved compose configuration",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Surface an auto-merged overlay before the resolved YAML, on stderr so
+			// it never pollutes the config stdout consumers parse.
+			announceOverlay(cmd.ErrOrStderr())
 			o, err := loadOrchestrator(cmd.OutOrStdout())
 			if err != nil {
 				return err
@@ -563,6 +596,24 @@ func configCmd() *cobra.Command {
 // (a test's stdin is never a real TTY).
 var stdinIsTerminal = func() bool {
 	return term.IsTerminal(int(os.Stdin.Fd()))
+}
+
+// announceOverlay prints a one-line notice on stderr naming an auto-merged opossum
+// overlay, so the commands that surface or start the resolved config (`config`,
+// `up`) never present something that silently differs from the user's base compose
+// file. It's scoped to those two commands on purpose: a `compose.opossum.yaml` is
+// meant to live in the repo, so echoing it on every `ps`/`logs`/`stats` (or in a
+// watch loop) would be noise. The notice goes to the command's stderr — never the
+// config stdout it must not pollute — and is emitted unconditionally (not gated on
+// a TTY), so an AI agent capturing stderr sees it too. Only the no-`-f` path
+// auto-merges the overlay, so nothing is announced when `-f` was given.
+func announceOverlay(stderr io.Writer) {
+	if len(composeFiles) != 0 {
+		return
+	}
+	if ol := compose.DiscoverOpossumOverlay("."); ol != "" {
+		fmt.Fprintf(stderr, "opossum: merging %s (opossum overlay, highest precedence) — delete it to opt out\n", filepath.Base(ol))
+	}
 }
 
 func runCmd() *cobra.Command {
@@ -717,6 +768,168 @@ func statsCmd() *cobra.Command {
 	return cmd
 }
 
+// adaptProject writes a compose.opossum.yaml adapting the project to Apple
+// `container` and returns a reloaded orchestrator that has it merged, or nil when
+// nothing was written. Returning a fresh orchestrator (rather than mutating) keeps
+// the overlay on the same code path as a hand-written one: it's discovered and
+// merged by the normal loader, so what `up` runs is exactly what `config` prints.
+//
+// It declines to act in three cases, all of which would take a decision away from
+// the user:
+//   - an explicit -f was given: the overlay is only auto-merged on the discovery
+//     path, so writing one would produce a file that silently does nothing;
+//   - an overlay already exists (either spelling): it may be hand-edited, and
+//     shadowing or clobbering it would destroy work;
+//   - nothing matches the known patterns.
+//
+// dryRun plans and reports without touching the filesystem, so `--dry-run` shows
+// the project as it would actually start rather than as it stands unadapted.
+func adaptProject(stderr io.Writer, o *orchestrator.Orchestrator, dryRun bool) (*orchestrator.Orchestrator, error) {
+	if len(composeFiles) != 0 {
+		// Explain the no-op: the user asked for the migration and would otherwise
+		// see nothing at all happen.
+		if _, changes := o.PlanOverlay(); len(changes) > 0 {
+			fmt.Fprintf(stderr, "opossum: found %d change(s) this project needs, but -f was given — "+
+				"an overlay is only merged when opossum discovers the compose file itself. "+
+				"Re-run without -f to have them written, or apply them by hand (see the warnings below).\n", len(changes))
+		}
+		return nil, nil
+	}
+	body, changes := o.PlanOverlay()
+
+	// Check both spellings via the same discovery the loader uses. Checking only
+	// the name we write would let us drop a compose.opossum.yaml next to a
+	// hand-written compose.opossum.yml — which takes precedence, silently making
+	// the user's file inert.
+	if existing := compose.DiscoverOpossumOverlay(o.Project.BaseDir); existing != "" {
+		if len(changes) > 0 {
+			// Say so rather than skipping in silence: the user asked for the fixes
+			// and would otherwise hit the failure with no idea one was available.
+			fmt.Fprintf(stderr, "opossum: %s already exists, so it was left alone — but %d further change(s) would help:\n",
+				filepath.Base(existing), len(changes))
+			for _, c := range changes {
+				fmt.Fprintf(stderr, "opossum:   [%s] %s\n", c.Code, c.Summary)
+			}
+			fmt.Fprintf(stderr, "opossum: add them by hand, or delete %s and re-run to regenerate.\n", filepath.Base(existing))
+		}
+		return nil, nil
+	}
+	if body == "" {
+		return nil, nil
+	}
+	if dryRun {
+		fmt.Fprintf(stderr, "opossum: would write %s — %d change(s) so this project runs on Apple container:\n",
+			orchestrator.OverlayFileName, len(changes))
+		for _, c := range changes {
+			fmt.Fprintf(stderr, "opossum:   [%s] %s\n", c.Code, c.Summary)
+		}
+		// Plan against the adapted project so the printed commands match a real run.
+		return reloadWith(stderr, o, body)
+	}
+	if err := writeOverlay(o.Project.BaseDir, body); err != nil {
+		// The overlay is a convenience. A directory we can't write to, or a file
+		// that doesn't survive its own self-check, must not turn an `up` that used
+		// to work into a failure — fall back to the warnings `up` already prints.
+		fmt.Fprintf(stderr, "opossum: couldn't write %s (%v) — starting without it; "+
+			"the warnings below say what to change by hand\n", orchestrator.OverlayFileName, err)
+		return nil, nil
+	}
+	fmt.Fprintf(stderr, "opossum: wrote %s — %d change(s) so this project runs on Apple container:\n",
+		orchestrator.OverlayFileName, len(changes))
+	for _, c := range changes {
+		fmt.Fprintf(stderr, "opossum:   [%s] %s\n", c.Code, c.Summary)
+	}
+	fmt.Fprintf(stderr, "opossum: each entry says why and how to undo it. Your compose file was not modified;\n"+
+		"opossum: delete %s to opt out.\n", orchestrator.OverlayFileName)
+
+	return loadOrchestrator(o.Out())
+}
+
+// writeOverlay lands the overlay in dir, atomically and without clobbering.
+//
+// It writes to a temp file in the same directory, MERGES THAT FILE to prove it
+// parses and resolves, and only then links it into place. The self-check matters
+// because opossum will never overwrite the result: a rendering bug that produced
+// unparseable YAML would otherwise be committed to the user's project and break
+// every later command until a human found and deleted a file they never wrote.
+// Linking (rather than renaming) keeps the no-clobber guarantee — it fails if the
+// name already exists — and a short write can never leave a truncated overlay
+// under the real name.
+func writeOverlay(dir, body string) error {
+	tmp, err := os.CreateTemp(dir, ".compose.opossum.*.tmp")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name()) // also removes the temp name after a successful link
+	if _, err := tmp.WriteString(body); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := checkOverlayResolves(dir, tmp.Name()); err != nil {
+		return fmt.Errorf("the generated overlay did not resolve (%w) — this is an opossum bug; "+
+			"nothing was written", err)
+	}
+	return os.Link(tmp.Name(), filepath.Join(dir, orchestrator.OverlayFileName))
+}
+
+// checkOverlayResolves merges an overlay candidate the way a later run would, so a
+// file that can't load never reaches the project.
+func checkOverlayResolves(dir, candidate string) error {
+	base, err := compose.Discover(dir)
+	if err != nil {
+		return err
+	}
+	files := []string{base}
+	if ov := compose.DiscoverOverride(dir); ov != "" {
+		files = append(files, ov)
+	}
+	_, err = compose.LoadFiles(append(files, candidate), envFiles)
+	return err
+}
+
+// reloadWith re-resolves the project with an unwritten overlay merged in, so
+// --dry-run can plan against what a real run would start. The overlay goes to a
+// temp directory and is passed explicitly; nothing is written to the project.
+// Falling back to the unadapted project is better than failing the dry run, but
+// never silently: it would print a plan that contradicts the "would write" summary
+// above it, which is exactly the confusion --dry-run exists to prevent.
+func reloadWith(stderr io.Writer, o *orchestrator.Orchestrator, body string) (*orchestrator.Orchestrator, error) {
+	fallback := func(err error) (*orchestrator.Orchestrator, error) {
+		fmt.Fprintf(stderr, "opossum: couldn't plan against the adapted project (%v) — "+
+			"the plan below is for the project as it stands, WITHOUT the changes listed above\n", err)
+		return nil, nil
+	}
+	dir, err := os.MkdirTemp("", "opossum-dryrun")
+	if err != nil {
+		return fallback(err)
+	}
+	defer os.RemoveAll(dir)
+	tmp := filepath.Join(dir, orchestrator.OverlayFileName)
+	if err := os.WriteFile(tmp, []byte(body), 0o644); err != nil {
+		return fallback(err)
+	}
+	base, err := compose.Discover(o.Project.BaseDir)
+	if err != nil {
+		return fallback(err)
+	}
+	files := []string{base}
+	if ov := compose.DiscoverOverride(o.Project.BaseDir); ov != "" {
+		files = append(files, ov)
+	}
+	files = append(files, tmp)
+	proj, err := compose.LoadFiles(files, envFiles)
+	if err != nil {
+		return fallback(err)
+	}
+	proj.Name = o.Project.Name
+	rt := runtime.New()
+	rt.Verbose = verbose
+	return orchestrator.New(proj, rt, dnsDomain, o.Out()), nil
+}
+
 func loadOrchestrator(out io.Writer) (*orchestrator.Orchestrator, error) {
 	files := composeFiles
 	if len(files) == 0 {
@@ -729,6 +942,12 @@ func loadOrchestrator(out io.Writer) (*orchestrator.Orchestrator, error) {
 		files = []string{found}
 		if ov := compose.DiscoverOverride("."); ov != "" {
 			files = append(files, ov)
+		}
+		// An opossum overlay merges last, at the highest precedence. It's
+		// opossum-specific (docker compose doesn't read it); the commands that
+		// surface or start the resolved config announce it (see announceOverlay).
+		if ol := compose.DiscoverOpossumOverlay("."); ol != "" {
+			files = append(files, ol)
 		}
 	}
 	proj, err := compose.LoadFiles(files, envFiles)

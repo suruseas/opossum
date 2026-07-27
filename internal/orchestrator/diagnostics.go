@@ -34,6 +34,7 @@ const (
 	codeSharedVolume      diagCode = "OPSM-102" // a named volume shared by two running services
 	codeVolumeAttachBusy  diagCode = "OPSM-103" // a named volume is already attached to another running container
 	codeBindDirCreate     diagCode = "OPSM-104" // couldn't create a bind mount's host source directory
+	codeBindDataDirChown  diagCode = "OPSM-105" // a database data directory is a bind mount (can't be chowned)
 	codeHostPortInUse     diagCode = "OPSM-201" // a published host port is already taken (pre-flight)
 	codeDNSDomainAbsent   diagCode = "OPSM-202" // the DNS domain isn't registered (no bare-name discovery)
 	codeInternalEgress    diagCode = "OPSM-203" // an internal network: no internet egress / no name resolution
@@ -60,7 +61,7 @@ const (
 // allDiagCodes lists every code opossum can emit. A test asserts each appears in
 // AGENTS.md, so adding a code forces documenting it.
 var allDiagCodes = []diagCode{
-	codePGDATADatadir, codeSharedVolume, codeVolumeAttachBusy, codeBindDirCreate,
+	codePGDATADatadir, codeSharedVolume, codeVolumeAttachBusy, codeBindDirCreate, codeBindDataDirChown,
 	codeHostPortInUse, codeDNSDomainAbsent, codeInternalEgress, codeDockerSocket, codeExternalNetAbsent,
 	codeBuildTmpContext, codeBuildSymlink,
 	codeDepNotRunning, codeOrphans, codeDepNoHealth,

@@ -2852,7 +2852,7 @@ func TestUpDryRunPlanMatchesRealUp(t *testing.T) {
 	}
 }
 
-// The --from-docker import path issues `container image load`/`image tag` (and a
+// The --from-docker-compose import path issues `container image load`/`image tag` (and a
 // `docker image save`) OUTSIDE the recording seam, so a dry-run must guard it
 // explicitly: nothing may execute, and the plan records the import.
 func TestUpDryRunFromDockerExecutesNothing(t *testing.T) {
@@ -2863,18 +2863,18 @@ func TestUpDryRunFromDockerExecutesNothing(t *testing.T) {
 	})
 	var out bytes.Buffer
 	o := orchestrator.New(p, rt, "opossum", &out)
-	o.SetUpOptions(false, false, false, false, true) // --from-docker (must precede SetDryRun)
+	o.SetUpOptions(false, false, false, false, true) // --from-docker-compose (must precede SetDryRun)
 	o.SetDryRun(true)
 	if err := o.Up(true); err != nil {
-		t.Fatalf("Up (dry-run --from-docker): %v", err)
+		t.Fatalf("Up (dry-run --from-docker-compose): %v", err)
 	}
 	lines := log()
 	for _, v := range []string{"image load", "image tag", "run -d"} {
 		if n := countLines(lines, v); n > 0 {
-			t.Errorf("dry-run --from-docker must not execute %q, ran it %d time(s): %v", v, n, lines)
+			t.Errorf("dry-run --from-docker-compose must not execute %q, ran it %d time(s): %v", v, n, lines)
 		}
 	}
 	if !strings.Contains(out.String(), "image load") {
-		t.Errorf("dry-run --from-docker should record the import in the plan, got:\n%s", out.String())
+		t.Errorf("dry-run --from-docker-compose should record the import in the plan, got:\n%s", out.String())
 	}
 }

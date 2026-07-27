@@ -23,7 +23,7 @@ container system start                       # start the runtime (once per boot)
 sudo container system dns create opossum     # ONLY needed for cross-service bare-name
                                              # resolution (svc→svc by name); skippable
                                              # otherwise (needs sudo — may prompt)
-opossum up                                   # reads ./compose.yaml (+ override), starts in dep order
+opossum up                                   # reads ./compose.yaml (+ override + compose.opossum.yaml), starts in dep order
 opossum ps                                   # SERVICE / CONTAINER / IP / PORTS / STATUS
 opossum logs -f web                          # stream a service's logs
 opossum down                                 # stop + remove + drop the network (-v also drops volumes)
@@ -33,6 +33,30 @@ opossum down                                 # stop + remove + drop the network 
 project name; `--verbose` echoes each `container` command; `--dns-domain` overrides
 the discovery domain (default `opossum`).
 
+A `compose.opossum.yaml` (or `.yml`) next to a discovered compose file is merged
+**last, at the highest precedence** — after the base file and any
+`compose.override.yaml`. docker compose ignores this name, so it's the place for
+opossum-only tweaks that make a project run on Apple `container` without touching
+shared files. Merging one prints a one-line stderr notice; delete the file to opt
+out. (Only auto-merged when no `-f` is given, same as the standard override.)
+
+`up --from-docker-compose` **generates** that overlay when it finds a known
+incompatibility (`OPSM-101` Postgres PGDATA, `OPSM-105` bind-mounted DB data dir),
+then re-resolves and starts — so migrating a docker compose project is one command.
+Facts to rely on:
+
+- Generated entries are marked `# [opossum --from-docker-compose]` — a **stable
+  string**; grep it to tell generated entries from hand-written ones.
+- Each entry carries a fixed five-part comment: **what** changed, **Why** (with the
+  diagnostic code, cross-referable to the tables above), **Verify** (the command to
+  confirm it), **If this still fails** (what to run next), **To undo** (delete the
+  entry or the file).
+- The file is **never overwritten** once it exists, and your compose file is never
+  modified. Editing or deleting the overlay is safe and is the intended way to
+  disagree with a fix.
+- Nothing is written when `-f` was given (the overlay wouldn't be merged) or when
+  no known pattern matched.
+
 ## Commands
 
 One line each. `[service…]` means optional service names (default: all). Exit code
@@ -40,7 +64,7 @@ is **0 on success, non-zero on any error** (see Exit codes).
 
 | Command | Does |
 |---------|------|
-| `up [service…]` | build (if missing) + start in dependency order. Leaves an unchanged running service alone, but **recreates a stopped or config-changed one** — so after a failed `up` you can just fix the compose and re-run `up` (no `down` first; re-running over a partial/failed bring-up is safe). Flags: `--build`, `--no-build`, `--force-recreate`, `--from-docker`, `--remove-orphans`, `--foreground`, `--profile <p>` |
+| `up [service…]` | build (if missing) + start in dependency order. Leaves an unchanged running service alone, but **recreates a stopped or config-changed one** — so after a failed `up` you can just fix the compose and re-run `up` (no `down` first; re-running over a partial/failed bring-up is safe). Flags: `--build`, `--no-build`, `--force-recreate`, `--from-docker-compose` (was `--from-docker`; the old name still works and warns), `--remove-orphans`, `--foreground`, `--profile <p>` |
 | `down` | stop + remove containers + delete the project network. `-v` also removes named volumes; `--rmi local\|all` removes images; `--remove-orphans` |
 | `ps` | table of service / container / IP / ports / status. STATUS is `running`/`stopped`/`absent` — it does **not** show healthcheck state; to confirm a service is *healthy*, check its `logs` (a `service_healthy` dependency gates on health automatically during `up`) |
 | `logs [service…]` | print logs; `--follow`/`-f` streams (multiplexed, name-prefixed), `-n/--tail N` |
@@ -163,6 +187,13 @@ list; codes are add-only and never change meaning.
   parent directory is read-only). Create it yourself (`mkdir -p <path>`) or fix the
   parent's permissions, then `up` again — otherwise the container fails to start on
   a missing bind source.
+- **`[OPSM-105]` … a database data directory is a bind mount** → Apple `container`
+  bind mounts are host-owned (virtiofs) and can't be chowned from inside the
+  container, but every official DB image chowns its data directory at startup, so
+  it fails there. Use a named volume for that path (it *is* chownable).
+  `up --from-docker-compose` writes this swap into `compose.opossum.yaml` for you;
+  note it changes where the data lives (into the volume — the host directory is
+  left untouched, not copied).
 - **`[OPSM-202]` … `DNS domain "opossum" not found`** → run `sudo container system
   dns create opossum` once, then `up` again (needed for bare-name discovery).
 - **`[OPSM-203]` … `network <n> is internal (host-only): … no internet egress`** →
@@ -198,6 +229,7 @@ Every `[OPSM-NNN]` opossum can emit (add-only; grouped 1xx storage / 2xx network
 - `OPSM-102` — a named volume shared by two running services (exclusive attach).
 - `OPSM-103` — a named volume is already attached to another running container (cross-project VZError).
 - `OPSM-104` — couldn't create a bind mount's host source directory (permissions).
+- `OPSM-105` — a database data directory is a bind mount (host-owned, can't be chowned).
 - `OPSM-201` — a published host port is already taken (pre-flight).
 - `OPSM-202` — the DNS domain isn't registered (no bare-name discovery).
 - `OPSM-203` — an internal network: no internet egress and no name resolution.

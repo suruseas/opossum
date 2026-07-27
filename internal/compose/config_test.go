@@ -122,6 +122,8 @@ networks:
   backend: {}
 volumes:
   data: {}
+configs:
+  appcfg: {}
 x-custom: ignore-me
 services:
   web:
@@ -131,16 +133,19 @@ services:
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	// version and x-* are not flagged; volumes is still ignored, but networks is
-	// now acted on (namespaced/created), so it's no longer listed as ignored.
-	if got := proj.Unsupported; len(got) != 1 || got[0] != "volumes" {
-		t.Fatalf("top-level Unsupported = %v, want [volumes]", got)
+	// version and x-* are not flagged, and neither are networks (namespaced and
+	// created) nor volumes — a volume declaration drives `external: true` and a
+	// volume's real `name:`, so calling it "not acted on" was wrong, and noisy
+	// besides, since almost every real project declares named volumes. `configs`
+	// genuinely is ignored, so it's the one that should be listed.
+	if got := proj.Unsupported; len(got) != 1 || got[0] != "configs" {
+		t.Fatalf("top-level Unsupported = %v, want [configs]", got)
 	}
 	out, err := RenderConfig(proj)
 	if err != nil {
 		t.Fatalf("RenderConfig: %v", err)
 	}
-	if !strings.Contains(out, "(top-level): volumes") {
+	if !strings.Contains(out, "(top-level): configs") {
 		t.Errorf("config should list top-level ignored keys, got:\n%s", out)
 	}
 }

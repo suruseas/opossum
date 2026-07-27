@@ -53,7 +53,7 @@ func TestImportBuildServicesOnly(t *testing.T) {
 	}
 }
 
-// `up --from-docker` imports a build service's image instead of building it.
+// `up --from-docker-compose` imports a build service's image instead of building it.
 func TestUpFromDockerImportsInsteadOfBuilding(t *testing.T) {
 	rt, calls := fakeShim(t)
 	setShimEnv(rt, "IMAGE_ABSENT=pj-web:latest") // not present, so up would otherwise build
@@ -66,23 +66,23 @@ func TestUpFromDockerImportsInsteadOfBuilding(t *testing.T) {
 	p := project("pj", map[string]*compose.Service{"web": {Build: &compose.Build{Context: "."}}})
 	var out bytes.Buffer
 	o := orchestrator.New(p, rt, "opossum", &out)
-	o.SetUpOptions(false, false, false, false, true) // --from-docker
+	o.SetUpOptions(false, false, false, false, true) // --from-docker-compose
 	if err := o.Up(true); err != nil {
 		t.Fatalf("Up: %v", err)
 	}
 	s := out.String()
 	if !strings.Contains(s, "Importing web from Docker") {
-		t.Errorf("--from-docker should import; got: %s", s)
+		t.Errorf("--from-docker-compose should import; got: %s", s)
 	}
 	if strings.Contains(s, "Building web") {
-		t.Errorf("--from-docker should not build; got: %s", s)
+		t.Errorf("--from-docker-compose should not build; got: %s", s)
 	}
 	if got := strings.Join(calls(), "\n"); strings.Contains(got, "build --progress") {
-		t.Errorf("--from-docker should not invoke `container build`; calls: %s", got)
+		t.Errorf("--from-docker-compose should not invoke `container build`; calls: %s", got)
 	}
 }
 
-// For a build+`image:` service, `up --from-docker` imports the Docker `image:`
+// For a build+`image:` service, `up --from-docker-compose` imports the Docker `image:`
 // ref (how Docker tags it), not the built tag. The Import() path covers this;
 // this guards the identical branch in the up path.
 func TestUpFromDockerUsesImageRefForBuildImageService(t *testing.T) {
@@ -99,7 +99,7 @@ func TestUpFromDockerUsesImageRefForBuildImageService(t *testing.T) {
 	})
 	var out bytes.Buffer
 	o := orchestrator.New(p, rt, "opossum", &out)
-	o.SetUpOptions(false, false, false, false, true) // --from-docker
+	o.SetUpOptions(false, false, false, false, true) // --from-docker-compose
 	if err := o.Up(true); err != nil {
 		t.Fatalf("Up: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestUpFromDockerUsesImageRefForBuildImageService(t *testing.T) {
 	}
 }
 
-// --from-docker doesn't import (or build) a service whose image is already
+// --from-docker-compose doesn't import (or build) a service whose image is already
 // present — nothing to bring over.
 func TestUpFromDockerSkipsWhenImagePresent(t *testing.T) {
 	rt, calls := fakeShim(t) // no IMAGE_ABSENT: the built image is present
@@ -121,7 +121,7 @@ func TestUpFromDockerSkipsWhenImagePresent(t *testing.T) {
 	p := project("pj2", map[string]*compose.Service{"web": {Build: &compose.Build{Context: "."}}})
 	var out bytes.Buffer
 	o := orchestrator.New(p, rt, "opossum", &out)
-	o.SetUpOptions(false, false, false, false, true) // --from-docker
+	o.SetUpOptions(false, false, false, false, true) // --from-docker-compose
 	if err := o.Up(true); err != nil {
 		t.Fatalf("Up: %v", err)
 	}

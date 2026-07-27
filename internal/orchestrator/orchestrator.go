@@ -49,7 +49,7 @@ type upOptions struct {
 	build         bool // --build: (re)build images even if present
 	noBuild       bool // --no-build: never build (error if an image is missing)
 	removeOrphans bool // --remove-orphans: remove containers for services no longer in the compose
-	fromDocker    bool // --from-docker: import a build service's image from Docker instead of building it
+	fromDocker    bool // --from-docker-compose: import a build service's image from Docker instead of building it
 	noDeps        bool // don't pull in depends_on services (used by rebuild-on-watch to touch only the named service)
 	dryRun        bool // --dry-run: resolve and print the plan, but execute nothing against the runtime
 }
@@ -98,6 +98,10 @@ func (o *Orchestrator) OnSignal(ctx context.Context) {
 		o.rt.Ctx = ctx
 	}
 }
+
+// Out returns the writer this orchestrator reports to, so a caller that rebuilds
+// one (after writing an overlay) can keep the same destination.
+func (o *Orchestrator) Out() io.Writer { return o.out }
 
 // SetUpOptions configures `up`'s recreate/build behavior from the command flags.
 func (o *Orchestrator) SetUpOptions(forceRecreate, build, noBuild, removeOrphans, fromDocker bool) {
@@ -1641,9 +1645,12 @@ func crashHint(logs string, svc *compose.Service) string {
 	}
 	for _, v := range svc.Volumes {
 		if isHostPath(strings.SplitN(v, ":", 2)[0]) {
-			return "\n  → Apple `container` bind mounts are host-owned and can't be chowned from inside the " +
-				"container, so a DB image that chowns its data directory fails here. Use a named volume for that " +
-				"directory instead of a bind mount (host path)."
+			// Carries the code so this reads the same whether it's hit on a plain
+			// `up` or fixed automatically by `up --from-docker-compose`.
+			return fmt.Sprintf("\n  → [%s] Apple `container` bind mounts are host-owned and can't be chowned from inside the "+
+				"container, so a DB image that chowns its data directory fails here. Use a named volume for that "+
+				"directory instead of a bind mount (host path); `opossum up --from-docker-compose` writes that change for you.",
+				codeBindDataDirChown)
 		}
 	}
 	return ""
