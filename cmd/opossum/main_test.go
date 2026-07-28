@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1286,5 +1287,97 @@ func TestFromDockerComposeWrittenOverlayAlwaysResolves(t *testing.T) {
 		if strings.HasSuffix(e.Name(), ".tmp") {
 			t.Errorf("a temp file was left in the project directory: %s", e.Name())
 		}
+	}
+}
+
+// End to end: a compose file with a container-only port (`ports: ["<p>"]`) whose
+// mirrored host port is occupied still reaches startup, publishing on a free port
+// — the whole point being that docker compose would have started here too.
+func TestBarePortFallbackCLI(t *testing.T) {
+	readLog := fakeShim(t)
+	l, err := net.Listen("tcp", ":0") // occupy the port; the probe binds IPv4 wildcard, which this conflicts with
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	port := l.Addr().(*net.TCPAddr).Port
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte(fmt.Sprintf(
+		"name: demo\nservices:\n  web:\n    image: web\n    ports:\n      - \"%d\"\n", port)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	out, err := run(t, "up")
+	if err != nil {
+		t.Fatalf("a container-only port on a taken host port should still start: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "[OPSM-206]") {
+		t.Errorf("the fallback should be announced, got:\n%s", out)
+	}
+	calls := strings.Join(readLog(), "\n")
+	if strings.Contains(calls, fmt.Sprintf("-p %d:%d", port, port)) {
+		t.Errorf("the occupied host port must not be published, calls:\n%s", calls)
+	}
+	if !strings.Contains(calls, fmt.Sprintf(":%d ", port)) && !strings.Contains(calls, fmt.Sprintf(":%d\n", port)) {
+		t.Errorf("the container port %d should still be published, calls:\n%s", port, calls)
+	}
+}
+
+// A project whose only finding is a note gets NO overlay: the file is never
+// overwritten once written, so a comment-only one would burn that single chance
+// and block a real fix later. The finding is still reported.
+func TestFromDockerComposeNotesOnlyWritesNoOverlay(t *testing.T) {
+	fakeShim(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte(
+		"name: demo\nservices:\n  ci:\n    image: someci\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	out, err := run(t, "up", "--from-docker-compose", "--no-build")
+	if err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	if _, serr := os.Stat(filepath.Join(dir, "compose.opossum.yaml")); serr == nil {
+		t.Error("a notes-only finding must not write an overlay")
+	}
+	if !strings.Contains(out, "can't be fixed by a compose change") {
+		t.Errorf("the note should still be reported, got:\n%s", out)
+	}
+}
+
+// The report must not call a note or a suggestion a change opossum made.
+func TestFromDockerComposeReportsClassesSeparately(t *testing.T) {
+	fakeShim(t)
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "pg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte(
+		"name: demo\nservices:\n"+
+			"  db:\n    image: postgres:16\n    volumes:\n      - ./pg:/var/lib/postgresql/data\n"+
+			"  web:\n    image: nginx\n    volumes:\n      - shared:/srv\n"+
+			"  worker:\n    image: busybox\n    volumes:\n      - shared:/srv\n"+
+			"volumes:\n  shared: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	out, err := run(t, "up", "--from-docker-compose", "--no-build")
+	if err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	if !strings.Contains(out, "change(s) so this project runs") {
+		t.Errorf("applied changes should be reported as changes, got:\n%s", out)
+	}
+	if !strings.Contains(out, "suggestion(s) written but NOT applied") {
+		t.Errorf("suggestions must be reported as not applied, got:\n%s", out)
+	}
+	// The applied count must not include the suggestions.
+	if strings.Contains(out, "4 change(s)") {
+		t.Errorf("suggestions must not be counted as changes, got:\n%s", out)
 	}
 }

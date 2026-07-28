@@ -40,6 +40,8 @@ const (
 	codeInternalEgress    diagCode = "OPSM-203" // an internal network: no internet egress / no name resolution
 	codeDockerSocket      diagCode = "OPSM-204" // a service mounts docker.sock (Apple container has none)
 	codeExternalNetAbsent diagCode = "OPSM-205" // a network declared external: true doesn't exist
+	codeHostDeviceMount   diagCode = "OPSM-106" // a host device or session socket is mounted (a per-container VM can't reach it)
+	codeHostPortRemapped  diagCode = "OPSM-206" // a container-only port's mirrored host port was taken, so opossum picked a free one
 	codeBuildTmpContext   diagCode = "OPSM-301" // build context under /private/tmp (builder can't read it)
 	codeBuildSymlink      diagCode = "OPSM-302" // build context is a symlink (builder may reject it)
 	codeDepNotRunning     diagCode = "OPSM-401" // a dependency's container exited before becoming healthy
@@ -61,8 +63,8 @@ const (
 // allDiagCodes lists every code opossum can emit. A test asserts each appears in
 // AGENTS.md, so adding a code forces documenting it.
 var allDiagCodes = []diagCode{
-	codePGDATADatadir, codeSharedVolume, codeVolumeAttachBusy, codeBindDirCreate, codeBindDataDirChown,
-	codeHostPortInUse, codeDNSDomainAbsent, codeInternalEgress, codeDockerSocket, codeExternalNetAbsent,
+	codePGDATADatadir, codeSharedVolume, codeVolumeAttachBusy, codeBindDirCreate, codeBindDataDirChown, codeHostDeviceMount,
+	codeHostPortInUse, codeDNSDomainAbsent, codeInternalEgress, codeDockerSocket, codeExternalNetAbsent, codeHostPortRemapped,
 	codeBuildTmpContext, codeBuildSymlink,
 	codeDepNotRunning, codeOrphans, codeDepNoHealth,
 	codeIgnoredTopField, codeIgnoredField, codeRuntimeAbsent, codeRuntimeStopped, codeRuntimeAutoStart, codeServiceExited,

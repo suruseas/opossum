@@ -14,6 +14,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -2876,5 +2878,257 @@ func TestUpDryRunFromDockerExecutesNothing(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "image load") {
 		t.Errorf("dry-run --from-docker-compose should record the import in the plan, got:\n%s", out.String())
+	}
+}
+
+// The host-port pre-flight has to see an IPv4-only listener. Asking the OS for a
+// plain "tcp" wildcard bind gets a dual-stack IPv6 socket, which on macOS binds
+// alongside an existing IPv4 listener and reports the port free — and the daemons
+// that actually squat ports (AirPlay's receiver on 5000/7000) are IPv4-only, so
+// that blind spot covers the case the check exists for.
+func TestUpDetectsIPv4OnlyHostPortConflict(t *testing.T) {
+	l, err := net.Listen("tcp4", "0.0.0.0:0") // IPv4 only, all interfaces
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	port := l.Addr().(*net.TCPAddr).Port
+
+	rt, _ := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"web": {Image: "web:latest", Ports: []string{fmt.Sprintf("%d:80", port)}},
+	})
+	err = orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true)
+	if err == nil || !strings.Contains(err.Error(), "[OPSM-201]") {
+		t.Errorf("an IPv4-only listener must be detected as a host-port conflict, got %v", err)
+	}
+}
+
+// …and a port nobody holds still reads as free, so the wider probe doesn't start
+// inventing conflicts.
+func TestUpAllowsPortAfterListenerClosed(t *testing.T) {
+	l, err := net.Listen("tcp4", "0.0.0.0:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	l.Close()
+
+	rt, _ := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"web": {Image: "web:latest", Ports: []string{fmt.Sprintf("%d:80", port)}},
+	})
+	if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true); err != nil {
+		t.Errorf("a free port must not be reported as in use, got %v", err)
+	}
+}
+
+// A container-only port entry (`ports: ["3000"]`) leaves the host port to the
+// engine, so when the port opossum mirrored is taken it publishes on a free one
+// instead of failing — docker compose does the same. The run command must carry
+// the new port, and the notice must say where it went.
+func TestUpRemapsBareHostPortWhenTaken(t *testing.T) {
+	// Occupy the port. The probe binds an IPv4 wildcard, which conflicts with this
+	// listener — the same way a real squatter (AirPlay's receiver) would.
+	l, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	port := l.Addr().(*net.TCPAddr).Port
+	spec := fmt.Sprintf("%d:%d", port, port)
+
+	rt, log := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"web": {
+			Image:        "web:latest",
+			Ports:        []string{spec},
+			AutoHostPort: map[string]bool{spec: true}, // as Load marks a bare "3000"
+		},
+	})
+	var out bytes.Buffer
+	if err := orchestrator.New(p, rt, "opossum", &out).Up(true); err != nil {
+		t.Fatalf("a container-only port should fall back to a free host port, got %v", err)
+	}
+	calls := strings.Join(log(), "\n")
+	if strings.Contains(calls, fmt.Sprintf("-p %s", spec)) {
+		t.Errorf("the taken host port should not have been published, calls:\n%s", calls)
+	}
+	if !strings.Contains(calls, fmt.Sprintf(":%d", port)) {
+		t.Errorf("the container port should still be published somewhere, calls:\n%s", calls)
+	}
+	if !strings.Contains(out.String(), "[OPSM-206]") || !strings.Contains(out.String(), "opossum ps") {
+		t.Errorf("the remap should be announced and point at `opossum ps`, got:\n%s", out.String())
+	}
+}
+
+// An explicit mapping is a contract the user wrote down: it must still fail
+// loudly rather than quietly listening on some other port.
+func TestUpDoesNotRemapExplicitHostPort(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	port := l.Addr().(*net.TCPAddr).Port
+
+	rt, _ := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"web": {Image: "web:latest", Ports: []string{fmt.Sprintf("127.0.0.1:%d:80", port)}},
+	})
+	err = orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true)
+	if err == nil || !strings.Contains(err.Error(), "[OPSM-201]") {
+		t.Errorf("an explicit host port must still fail when taken, got %v", err)
+	}
+}
+
+// A free mirrored port is left exactly as it is — the fallback must not fire, and
+// must not perturb the predictable same-number mapping when nothing is wrong.
+func TestUpKeepsBareHostPortWhenFree(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	l.Close() // free it again
+
+	spec := fmt.Sprintf("%d:%d", port, port)
+	rt, log := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"web": {Image: "web:latest", Ports: []string{spec}, AutoHostPort: map[string]bool{spec: true}},
+	})
+	var out bytes.Buffer
+	if err := orchestrator.New(p, rt, "opossum", &out).Up(true); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	if !strings.Contains(strings.Join(log(), "\n"), spec) {
+		t.Errorf("a free mirrored port should be published unchanged, calls:\n%s", strings.Join(log(), "\n"))
+	}
+	if strings.Contains(out.String(), "[OPSM-206]") {
+		t.Errorf("no remap notice should appear when the port was free, got:\n%s", out.String())
+	}
+}
+
+// A service with BOTH kinds of entry is where the distinction actually bites: the
+// container-only one moves, the explicit one still fails. Without a per-spec
+// check, having any movable port on the service would make every port movable.
+func TestUpRemapsOnlyBarePortOnMixedService(t *testing.T) {
+	bare, err := net.Listen("tcp", ":0") // occupied on every interface, like AirPlay
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bare.Close()
+	barePort := bare.Addr().(*net.TCPAddr).Port
+
+	explicit, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer explicit.Close()
+	explicitPort := explicit.Addr().(*net.TCPAddr).Port
+
+	bareSpec := fmt.Sprintf("%d:%d", barePort, barePort)
+	explicitSpec := fmt.Sprintf("127.0.0.1:%d:80", explicitPort)
+
+	rt, _ := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"web": {
+			Image:        "web:latest",
+			Ports:        []string{bareSpec, explicitSpec},
+			AutoHostPort: map[string]bool{bareSpec: true}, // only the bare one
+		},
+	})
+	err = orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true)
+	if err == nil || !strings.Contains(err.Error(), "[OPSM-201]") {
+		t.Fatalf("the explicit mapping must still fail even alongside a movable port, got %v", err)
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("%d/tcp", explicitPort)) {
+		t.Errorf("the conflict should name the explicit port %d, got %v", explicitPort, err)
+	}
+	// The bare one was moved out of the way rather than reported as a conflict.
+	if strings.Contains(err.Error(), fmt.Sprintf("%d/tcp", barePort)) {
+		t.Errorf("the container-only port should have been remapped, not reported, got %v", err)
+	}
+}
+
+// A remapped port must survive the next `up`: reusing what this service's own
+// running container publishes is what keeps the config hash — and so the
+// "unchanged, leave it alone" decision — stable. Without it a remapped service
+// would look different every run and be recreated forever.
+func TestUpReusesOwnPublishedPortOnRerun(t *testing.T) {
+	l, err := net.Listen("tcp4", "0.0.0.0:0") // hold the mirror for both runs
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	port := l.Addr().(*net.TCPAddr).Port
+	spec := fmt.Sprintf("%d:%d", port, port)
+
+	rt, log := fakeShim(t)
+	setShimEnv(rt, "INSPECT_PROJECT=demo")
+	newProj := func() *compose.Project {
+		return project("demo", map[string]*compose.Service{
+			"web": {Image: "web:latest", Ports: []string{spec}, AutoHostPort: map[string]bool{spec: true}},
+		})
+	}
+	if err := orchestrator.New(newProj(), rt, "opossum", &bytes.Buffer{}).Up(true); err != nil {
+		t.Fatalf("first up: %v", err)
+	}
+	first := publishedHostPort(t, strings.Join(log(), "\n"), port)
+
+	if err := orchestrator.New(newProj(), rt, "opossum", &bytes.Buffer{}).Up(true); err != nil {
+		t.Fatalf("second up: %v", err)
+	}
+	second := publishedHostPort(t, strings.Join(log(), "\n"), port)
+	if first != second {
+		t.Errorf("a remapped port should be reused on the next up: first=%d second=%d", first, second)
+	}
+}
+
+// publishedHostPort returns the host port of the LAST `-p <host>:<container>`
+// published for container port want.
+func publishedHostPort(t *testing.T, calls string, want int) int {
+	t.Helper()
+	re := regexp.MustCompile(fmt.Sprintf(`-p (\d+):%d\b`, want))
+	m := re.FindAllStringSubmatch(calls, -1)
+	if len(m) == 0 {
+		t.Fatalf("no published mapping for container port %d in:\n%s", want, calls)
+	}
+	n, err := strconv.Atoi(m[len(m)-1][1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// Two services that both leave the host port to the engine must not be handed the
+// same one — probing the OS alone can't see a port this very run already gave out.
+func TestUpGivesDistinctPortsToTwoBareServices(t *testing.T) {
+	l, err := net.Listen("tcp4", "0.0.0.0:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.Close() // a FREE port both services would mirror
+	port := l.Addr().(*net.TCPAddr).Port
+	spec := fmt.Sprintf("%d:%d", port, port)
+
+	rt, log := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"web": {Image: "web:latest", Ports: []string{spec}, AutoHostPort: map[string]bool{spec: true}},
+		"api": {Image: "api:latest", Ports: []string{spec}, AutoHostPort: map[string]bool{spec: true}},
+	})
+	if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	re := regexp.MustCompile(fmt.Sprintf(`-p (\d+):%d\b`, port))
+	seen := map[string]bool{}
+	for _, m := range re.FindAllStringSubmatch(strings.Join(log(), "\n"), -1) {
+		if seen[m[1]] {
+			t.Errorf("both services were published on host port %s", m[1])
+		}
+		seen[m[1]] = true
+	}
+	if len(seen) != 2 {
+		t.Errorf("expected two distinct host ports, got %v", seen)
 	}
 }

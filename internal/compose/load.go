@@ -439,15 +439,29 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 		if len(svc.Ports) > 0 {
 			seen := make(map[string]bool, len(svc.Ports))
 			ports := make([]string, 0, len(svc.Ports))
+			auto := map[string]bool{}
 			for _, p := range svc.Ports {
-				n := normalizePort(p)
+				n, mirrored := normalizePort(p)
 				if seen[n] {
+					// A spec is only opossum's to move if EVERY declaration of it was
+					// bare: `["3000", "3000:3000"]` names the host port explicitly in
+					// one of them, so the user did choose it.
+					auto[n] = auto[n] && mirrored
 					continue
 				}
 				seen[n] = true
+				auto[n] = mirrored
 				ports = append(ports, n)
 			}
 			svc.Ports = ports
+			for spec, isAuto := range auto {
+				if !isAuto {
+					delete(auto, spec)
+				}
+			}
+			if len(auto) > 0 {
+				svc.AutoHostPort = auto
+			}
 		}
 		// Collapse mounts sharing a target, for the same reason ports are re-deduped
 		// above: the merge only sees files being combined, so a single file — or one
@@ -545,10 +559,13 @@ func SanitizeName(s string) string {
 // ("3000:3000", …) — it has no random-host-port option, so the host port
 // mirrors the container port. Specs that already name a host port
 // ("8080:80", "127.0.0.1:8080:80", "8080:80/udp") pass through unchanged.
-func normalizePort(spec string) string {
+// mirrored is true when opossum supplied the host port itself (the compose file
+// named only a container port), which is what lets `up` move it if the mirrored
+// port turns out to be taken.
+func normalizePort(spec string) (norm string, mirrored bool) {
 	s := strings.TrimSpace(spec)
 	if s == "" {
-		return spec
+		return spec, false
 	}
 	proto := ""
 	if i := strings.LastIndexByte(s, '/'); i >= 0 {
@@ -558,8 +575,19 @@ func normalizePort(spec string) string {
 	switch {
 	case !strings.Contains(s, ":"):
 		s = s + ":" + s // bare container port -> host port mirrors it
+		mirrored = true
 	case strings.HasPrefix(s, ":") && !strings.Contains(s[1:], ":"):
 		s = s[1:] + s // ":80" (empty host = random in docker) -> "80:80"
+		mirrored = true
+	default:
+		// "ip::80" — a host IP with the host port left to the engine. Same deal as
+		// ":80", just bound to one interface; without this it reached the runtime
+		// with an empty host port.
+		if i := strings.LastIndexByte(s, ':'); i > 0 && s[i-1] == ':' {
+			target := s[i+1:]
+			s = s[:i] + target + ":" + target
+			mirrored = true
+		}
 	}
-	return s + proto
+	return s + proto, mirrored
 }

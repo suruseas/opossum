@@ -805,11 +805,9 @@ func adaptProject(stderr io.Writer, o *orchestrator.Orchestrator, dryRun bool) (
 		if len(changes) > 0 {
 			// Say so rather than skipping in silence: the user asked for the fixes
 			// and would otherwise hit the failure with no idea one was available.
-			fmt.Fprintf(stderr, "opossum: %s already exists, so it was left alone — but %d further change(s) would help:\n",
-				filepath.Base(existing), len(changes))
-			for _, c := range changes {
-				fmt.Fprintf(stderr, "opossum:   [%s] %s\n", c.Code, c.Summary)
-			}
+			fmt.Fprintf(stderr, "opossum: %s already exists, so it was left alone — but opossum found more:\n",
+				filepath.Base(existing))
+			reportEntries(stderr, changes)
 			fmt.Fprintf(stderr, "opossum: add them by hand, or delete %s and re-run to regenerate.\n", filepath.Base(existing))
 		}
 		return nil, nil
@@ -817,12 +815,16 @@ func adaptProject(stderr io.Writer, o *orchestrator.Orchestrator, dryRun bool) (
 	if body == "" {
 		return nil, nil
 	}
+	// Notes alone don't justify the file. It is never overwritten once written, so
+	// a comment-only overlay would burn that one chance and block a real fix later
+	// — and it would make every command print the "merging an overlay" notice for
+	// a file that changes nothing. The notes are still reported on stderr.
+	if !hasActionable(changes) {
+		reportNotesOnly(stderr, changes)
+		return nil, nil
+	}
 	if dryRun {
-		fmt.Fprintf(stderr, "opossum: would write %s — %d change(s) so this project runs on Apple container:\n",
-			orchestrator.OverlayFileName, len(changes))
-		for _, c := range changes {
-			fmt.Fprintf(stderr, "opossum:   [%s] %s\n", c.Code, c.Summary)
-		}
+		reportOverlay(stderr, "would write", changes)
 		// Plan against the adapted project so the printed commands match a real run.
 		return reloadWith(stderr, o, body)
 	}
@@ -834,13 +836,7 @@ func adaptProject(stderr io.Writer, o *orchestrator.Orchestrator, dryRun bool) (
 			"the warnings below say what to change by hand\n", orchestrator.OverlayFileName, err)
 		return nil, nil
 	}
-	fmt.Fprintf(stderr, "opossum: wrote %s — %d change(s) so this project runs on Apple container:\n",
-		orchestrator.OverlayFileName, len(changes))
-	for _, c := range changes {
-		fmt.Fprintf(stderr, "opossum:   [%s] %s\n", c.Code, c.Summary)
-	}
-	fmt.Fprintf(stderr, "opossum: each entry says why and how to undo it. Your compose file was not modified;\n"+
-		"opossum: delete %s to opt out.\n", orchestrator.OverlayFileName)
+	reportOverlay(stderr, "wrote", changes)
 
 	return loadOrchestrator(o.Out())
 }
@@ -965,4 +961,89 @@ func loadOrchestrator(out io.Writer) (*orchestrator.Orchestrator, error) {
 	rt := runtime.New()
 	rt.Verbose = verbose
 	return orchestrator.New(proj, rt, dnsDomain, out), nil
+}
+
+// reportOverlay prints what the overlay contains, grouped by what opossum is
+// actually claiming. Applied entries are changes; suggestions and notes are not,
+// and lumping them together would overstate what happened.
+func reportOverlay(stderr io.Writer, verb string, changes []orchestrator.Adaptation) {
+	var applied, suggested, noted []orchestrator.Adaptation
+	for _, c := range changes {
+		switch c.Kind {
+		case "suggestion":
+			suggested = append(suggested, c)
+		case "note":
+			noted = append(noted, c)
+		default:
+			applied = append(applied, c)
+		}
+	}
+	if len(applied) > 0 {
+		fmt.Fprintf(stderr, "opossum: %s %s — %d change(s) so this project runs on Apple container:\n",
+			verb, orchestrator.OverlayFileName, len(applied))
+		for _, c := range applied {
+			fmt.Fprintf(stderr, "opossum:   [%s] %s\n", c.Code, c.Summary)
+		}
+	} else {
+		fmt.Fprintf(stderr, "opossum: %s %s — no automatic fix was needed or possible:\n",
+			verb, orchestrator.OverlayFileName)
+	}
+	if len(suggested) > 0 {
+		fmt.Fprintf(stderr, "opossum: %d suggestion(s) written but NOT applied — they change what the project means, so they're yours to decide:\n", len(suggested))
+		for _, c := range suggested {
+			fmt.Fprintf(stderr, "opossum:   [%s] %s\n", c.Code, c.Summary)
+		}
+	}
+	if len(noted) > 0 {
+		fmt.Fprintf(stderr, "opossum: %d note(s) about things a compose change can't fix:\n", len(noted))
+		for _, c := range noted {
+			fmt.Fprintf(stderr, "opossum:   [%s] %s\n", c.Code, c.Summary)
+		}
+	}
+	fmt.Fprintf(stderr, "opossum: each entry says why and how to undo it. Your compose file was not modified;\n"+
+		"opossum: delete %s to opt out.\n", orchestrator.OverlayFileName)
+}
+
+// hasActionable reports whether anything in the overlay would actually do
+// something — an applied change, or a suggestion the user can uncomment.
+func hasActionable(changes []orchestrator.Adaptation) bool {
+	for _, c := range changes {
+		if c.Kind != "note" {
+			return true
+		}
+	}
+	return false
+}
+
+// reportNotesOnly says what opossum found when there is nothing to write.
+func reportNotesOnly(stderr io.Writer, changes []orchestrator.Adaptation) {
+	fmt.Fprintf(stderr, "opossum: nothing to fix or suggest, but %d thing(s) here can't be fixed by a compose change:\n", len(changes))
+	for _, c := range changes {
+		fmt.Fprintf(stderr, "opossum:   [%s] %s\n", c.Code, c.Summary)
+	}
+	fmt.Fprintln(stderr, "opossum: no overlay was written (it would only hold comments).")
+}
+
+// reportEntries prints entries grouped by what opossum is claiming.
+func reportEntries(stderr io.Writer, changes []orchestrator.Adaptation) {
+	label := map[string]string{
+		"applied":    "change(s) opossum would apply",
+		"suggestion": "suggestion(s) — NOT applied; they change what the project means",
+		"note":       "note(s) about things a compose change can't fix",
+	}
+	for _, kind := range []string{"applied", "suggestion", "note"} {
+		var got []orchestrator.Adaptation
+		for _, c := range changes {
+			if c.Kind == kind {
+				got = append(got, c)
+			}
+		}
+		if len(got) == 0 {
+			continue
+		}
+		fmt.Fprintf(stderr, "opossum: %d %s:\n", len(got), label[kind])
+		for _, c := range got {
+			fmt.Fprintf(stderr, "opossum:   [%s] %s\n", c.Code, c.Summary)
+		}
+	}
 }

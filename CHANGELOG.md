@@ -6,6 +6,21 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-07-29
+
+### Added
+
+- `compose.opossum.yaml` is now the whole compatibility picture for a project, not just the fixes: alongside the changes opossum **applied**, it records **suggestions** (a concrete change written out but commented — it alters what the project means, so it's yours to decide; uncomment the block to apply it) and **notes** (things no compose change can fix, like a Docker socket mount or a host device). Each entry says which of the three it is, with a stable marker. `up` reports the three separately, so a note is never counted as a change opossum made. Suggestions cover a named volume shared by several services (which Apple `container` can't attach twice) and an application's own data directory on a bind mount; notes cover Docker socket mounts and host devices. An overlay is written only when there is something to apply or suggest — findings that are notes alone are reported but don't create a file.
+
+### Changed
+
+- The automatic fix for a database data directory on a bind mount now also covers **ClickHouse**, **MongoDB** and **Redis/Valkey** (previously Postgres and MySQL/MariaDB only), each confirmed on the real runtime to fail the same way. Every chowned directory on a service is fixed in one pass — MongoDB has two (`/data/db` and `/data/configdb`), and fixing only one left the container still crashing. A service built on a database image but running a client or dump command (`redis-cli`, `mongodump`, a shell) is left alone: those read a bind mount fine, so rewriting one would have swapped real data for an empty volume.
+- A `ports:` entry that names only a container port (`ports: ["3000"]`) no longer fails when the matching host port is taken. Compose leaves the host port to the engine for those, so opossum now falls back to a free one and says which (`opossum ps` shows the ports actually published) instead of refusing to start. The same-number mapping is still preferred whenever it's available, and an explicit `"3000:3000"` is never moved — that one still fails loudly, since it's a contract you wrote down.
+
+### Fixed
+
+- The host-port pre-flight (`OPSM-201`) now detects a port held by a listener bound to all interfaces over IPv4. It probed with a single dual-stack bind, which on macOS succeeds alongside such a listener — so the port read as free and the run failed later with the runtime's raw bind error instead. This was the case the check most needed to catch: the daemons that squat ports, AirPlay's receiver on 5000/7000 included, listen on IPv4. (A daemon bound only to `127.0.0.1` is still not detected; the runtime does bind such a port, but traffic reaches the other listener rather than the container.)
+
 ## [0.15.0] - 2026-07-28
 
 ### Added
@@ -614,7 +629,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/suruseas/opossum/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/suruseas/opossum/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/suruseas/opossum/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/suruseas/opossum/compare/v0.12.0...v0.13.0

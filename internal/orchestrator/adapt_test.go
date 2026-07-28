@@ -656,3 +656,556 @@ services:
 		t.Errorf("a shared bind mount should get neither fix, got %+v", changes)
 	}
 }
+
+// The data directories below were each confirmed on the real runtime to fail the
+// same way as Postgres/MySQL — the image chowns its data directory and exits.
+// Redis's `/data` is generic, so the image name is doing all the work: the exact
+// match is what keeps an unrelated service mounting `/data` from being rewritten.
+func TestPlanOverlayCoversMoreDatabases(t *testing.T) {
+	cases := []struct{ image, dir string }{
+		{"clickhouse/clickhouse-server:25.3-alpine", "/var/lib/clickhouse"},
+		{"mongo:7", "/data/db"},
+		{"redis:7-alpine", "/data"},
+		{"valkey/valkey:8", "/data"},
+	}
+	for _, c := range cases {
+		_, changes := planFor(t, "name: demo\nservices:\n  db:\n    image: "+c.image+
+			"\n    volumes:\n      - ./d:"+c.dir+"\n")
+		if len(changes) == 0 {
+			t.Errorf("%s mounting %s should be adapted", c.image, c.dir)
+			continue
+		}
+		if changes[0].Code != "OPSM-105" {
+			t.Errorf("%s: expected OPSM-105, got %+v", c.image, changes)
+		}
+	}
+}
+
+// …and a service that merely mounts one of those paths without being that
+// database is still left alone. `/data` in particular is mounted by all sorts of
+// images, so a wrong match here would swap real data for an empty volume.
+func TestPlanOverlayGenericDataDirNeedsMatchingImage(t *testing.T) {
+	for _, img := range []string{"busybox", "alpine:3", "myapp/data-loader:1", "redis-exporter:1"} {
+		body, changes := planFor(t, "name: demo\nservices:\n  svc:\n    image: "+img+
+			"\n    volumes:\n      - ./d:/data\n")
+		if body != "" || len(changes) != 0 {
+			t.Errorf("%s mounting /data is not a database; got %d change(s):\n%s", img, len(changes), body)
+		}
+	}
+}
+
+// mongo's entrypoint chowns BOTH /data/db and /data/configdb. Fixing only the
+// first is the worst possible outcome: the change is announced as the fix, the
+// user's directory is detached from the container, and it still dies on the
+// second. Every chowned directory on a service has to be adapted in one pass.
+func TestPlanOverlayAdaptsEveryDataDirOnAService(t *testing.T) {
+	const src = `
+name: demo
+services:
+  db:
+    image: mongo:7
+    volumes:
+      - ./db:/data/db
+      - ./cfg:/data/configdb
+`
+	body, changes := planFor(t, src)
+	if len(changes) != 2 {
+		t.Fatalf("both chowned directories must be adapted, got %+v:\n%s", changes, body)
+	}
+	for _, want := range []string{":/data/db", ":/data/configdb"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("overlay should mount a named volume at %s, got:\n%s", want, body)
+		}
+	}
+	// Two adaptations on one service both write under `volumes:`. Emitting that
+	// key twice is invalid YAML and the overlay would not load at all, so check
+	// the merged result through the real loader rather than by substring.
+	p := mergeOverlay(t, src, body)
+	vols := p.Services["db"].Volumes
+	if len(vols) != 2 {
+		t.Fatalf("expected two named-volume mounts after merging, got %v", vols)
+	}
+	seen := map[string]bool{}
+	for _, v := range vols {
+		src, _, _, ok := splitMount(v)
+		if !ok || isHostPath(src) {
+			t.Errorf("mount %q should be a named volume", v)
+		}
+		if seen[src] {
+			t.Errorf("both data dirs got the same volume %q: %v", src, vols)
+		}
+		seen[src] = true
+	}
+}
+
+// mergeOverlay loads the source compose with the generated overlay on top, the
+// way a real run does, and fails if the result doesn't resolve.
+func mergeOverlay(t *testing.T, srcBody, overlayBody string) *compose.Project {
+	t.Helper()
+	dir := t.TempDir()
+	base := writeFile(t, dir, "compose.yaml", srcBody)
+	ov := writeFile(t, dir, OverlayFileName, overlayBody)
+	p, err := compose.LoadFiles([]string{base, ov}, nil)
+	if err != nil {
+		t.Fatalf("the generated overlay must load: %v\n%s", err, overlayBody)
+	}
+	return p
+}
+
+// A service built on a database image but running a client/dump command is not
+// the server: the official entrypoints only chown when started as the server, so
+// a bind mount works fine there and rewriting it would swap real data for an
+// empty volume.
+func TestPlanOverlaySkipsNonServerCommand(t *testing.T) {
+	cases := []string{
+		"name: demo\nservices:\n  dump:\n    image: redis:7-alpine\n    command: [\"redis-cli\",\"--pipe\"]\n    volumes:\n      - ./dumps:/data\n",
+		"name: demo\nservices:\n  restore:\n    image: mongo:7\n    entrypoint: [\"mongorestore\"]\n    volumes:\n      - ./dump:/data/db\n",
+		"name: demo\nservices:\n  shell:\n    image: mongo:7\n    command: [\"sh\",\"-c\",\"mongodump\"]\n    volumes:\n      - ./dump:/data/db\n",
+	}
+	for _, src := range cases {
+		body, changes := planFor(t, src)
+		if body != "" || len(changes) != 0 {
+			t.Errorf("a non-server command must not be adapted, got %d change(s):\n%s\nfor:\n%s", len(changes), body, src)
+		}
+	}
+}
+
+// …but the server itself, with flags, still adapts.
+func TestPlanOverlayAdaptsServerWithFlags(t *testing.T) {
+	_, changes := planFor(t, `
+name: demo
+services:
+  cache:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - ./data:/data
+`)
+	if len(changes) != 1 {
+		t.Errorf("a server invoked with flags should still be adapted, got %+v", changes)
+	}
+}
+
+// A named volume shared by several services can't work on Apple container (one
+// attachment at a time), and the way out — a host directory — changes what the
+// project means. So it's written out and left commented: proposed, not done.
+func TestPlanOverlaySuggestsSharedVolumeFix(t *testing.T) {
+	const src = `
+name: demo
+services:
+  web:
+    image: nginx
+    volumes:
+      - shared:/srv
+  worker:
+    image: busybox
+    volumes:
+      - shared:/srv
+volumes:
+  shared: {}
+`
+	body, changes := planFor(t, src)
+	if len(changes) != 2 {
+		t.Fatalf("both sharers should get a suggestion, got %+v", changes)
+	}
+	for _, c := range changes {
+		if c.Code != "OPSM-102" {
+			t.Errorf("expected OPSM-102, got %+v", c)
+		}
+	}
+	if !strings.Contains(body, suggestionMarker) {
+		t.Errorf("a suggestion must carry its marker, got:\n%s", body)
+	}
+	// The proposal must be INERT: merging the overlay must not change the mounts.
+	p := mergeOverlay(t, src, body)
+	for _, svc := range []string{"web", "worker"} {
+		vols := p.Services[svc].Volumes
+		if len(vols) != 1 || vols[0] != "shared:/srv" {
+			t.Errorf("a suggestion must not take effect; %s has %v", svc, vols)
+		}
+	}
+}
+
+// Uncommenting a suggestion has to actually work — that's the whole promise. Strip
+// the comment prefix from the suggestion block and the result must merge cleanly
+// and produce the proposed mounts.
+func TestPlanOverlaySuggestionAppliesWhenUncommented(t *testing.T) {
+	const src = `
+name: demo
+services:
+  web:
+    image: nginx
+    volumes:
+      - shared:/srv
+  worker:
+    image: busybox
+    volumes:
+      - shared:/srv
+volumes:
+  shared: {}
+`
+	body, _ := planFor(t, src)
+	uncommented := uncommentSuggestions(body)
+	p := mergeOverlay(t, src, uncommented)
+	for _, svc := range []string{"web", "worker"} {
+		vols := p.Services[svc].Volumes
+		if len(vols) != 1 || !strings.HasPrefix(vols[0], "./shared:") {
+			t.Errorf("uncommenting should swap %s to a host directory, got %v", svc, vols)
+		}
+	}
+}
+
+// uncommentSuggestions strips the leading "# " from the suggestion section, the
+// way a user would when accepting the proposal.
+func uncommentSuggestions(body string) string {
+	var out []string
+	inSuggestions := false
+	for _, line := range strings.Split(body, "\n") {
+		switch {
+		case strings.HasPrefix(line, "# ── Suggestions"):
+			inSuggestions = true
+			continue
+		case strings.HasPrefix(line, "# ── Notes"):
+			inSuggestions = false
+			continue
+		}
+		if inSuggestions {
+			if strings.HasPrefix(line, "# opossum did NOT") || strings.HasPrefix(line, "# the call is") ||
+				strings.HasPrefix(line, "# line included") {
+				continue // the section preamble, not part of the YAML
+			}
+			out = append(out, strings.TrimPrefix(strings.TrimPrefix(line, "# "), "#"))
+			continue
+		}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n")
+}
+
+// Problems opossum can't fix are recorded rather than left for the user to
+// rediscover — and they carry no YAML, so nothing can be uncommented into effect.
+func TestPlanOverlayNotesUnfixable(t *testing.T) {
+	body, changes := planFor(t, `
+name: demo
+services:
+  ci:
+    image: someci
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+  media:
+    image: player
+    volumes:
+      - /dev/dri:/dev/dri
+`)
+	codes := map[string]bool{}
+	for _, c := range changes {
+		codes[c.Code] = true
+	}
+	if !codes["OPSM-204"] {
+		t.Errorf("a docker.sock mount should be noted, got %+v", changes)
+	}
+	if !strings.Contains(body, noteMarker) {
+		t.Errorf("a note must carry its marker, got:\n%s", body)
+	}
+	if !strings.Contains(body, "/dev/dri") {
+		t.Errorf("a host device mount should be noted, got:\n%s", body)
+	}
+	// Notes are prose only: there is no services: block to accidentally apply.
+	if strings.Contains(body, "\nservices:") {
+		t.Errorf("a notes-only overlay should carry no YAML, got:\n%s", body)
+	}
+}
+
+// The three classes are a contract an agent relies on: each entry says which it
+// is, and the markers are stable. This ratchets that so it can't erode.
+func TestPlanOverlayEntryClassContract(t *testing.T) {
+	body, _ := planFor(t, `
+name: demo
+services:
+  db:
+    image: postgres:16
+    volumes:
+      - ./pg:/var/lib/postgresql/data
+  web:
+    image: nginx
+    volumes:
+      - shared:/srv
+  worker:
+    image: busybox
+    volumes:
+      - shared:/srv
+  ci:
+    image: someci
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+volumes:
+  shared: {}
+`)
+	for _, marker := range []string{overlayMarker, suggestionMarker, noteMarker} {
+		if !strings.Contains(body, marker) {
+			t.Errorf("every class must be present and marked; missing %q in:\n%s", marker, body)
+		}
+	}
+	// The header must teach the reader what the three markers mean.
+	for _, want := range []string{"applied. This is live", "uncomment to apply", "nothing to change"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the header should explain the classes; missing %q", want)
+		}
+	}
+}
+
+// planForIn is planFor with a compose file written into a directory the test
+// controls, so bind-mount sources can be created and populated.
+func planForIn(t *testing.T, dir, body string) (string, []Adaptation) {
+	t.Helper()
+	path := writeFile(t, dir, "compose.yaml", body)
+	p, err := compose.Load(path)
+	if err != nil {
+		t.Fatalf("loading test compose: %v", err)
+	}
+	return New(p, nil, "opossum", io.Discard).PlanOverlay()
+}
+
+// An application that writes into a bind-mounted directory hits the same
+// host-owned wall a database does, but opossum can't be sure it needs to own that
+// directory — so a named volume is proposed, not applied. It's only proposed when
+// the host directory exists and is EMPTY, which is the one shape where switching
+// loses nothing.
+func TestPlanOverlaySuggestsNamedVolumeForEmptyAppDataDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "content"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body, changes := planForIn(t, dir, `
+name: demo
+services:
+  blog:
+    image: ghost:6-alpine
+    volumes:
+      - ./content:/var/lib/ghost/content
+`)
+	if len(changes) != 1 || changes[0].Kind != "suggestion" {
+		t.Fatalf("an empty app data dir should get one suggestion, got %+v", changes)
+	}
+	if !strings.Contains(body, suggestionMarker) {
+		t.Errorf("expected a suggestion marker in:\n%s", body)
+	}
+	// It must not take effect on its own.
+	p := mergeOverlay(t, "name: demo\nservices:\n  blog:\n    image: ghost:6-alpine\n    volumes:\n      - ./content:/var/lib/ghost/content\n", body)
+	if v := p.Services["blog"].Volumes; len(v) != 1 || !strings.HasPrefix(v[0], "./content:") {
+		t.Errorf("a suggestion must stay inert, got %v", v)
+	}
+}
+
+// A host directory with files in it is SUPPLYING content — a config directory, a
+// site, data from a previous Docker run. Suggesting a named volume there is advice
+// to hide it, which is worse than the failure being diagnosed.
+func TestPlanOverlayNoSuggestionWhenHostSuppliesContent(t *testing.T) {
+	dir := t.TempDir()
+	conf := filepath.Join(dir, "conf")
+	if err := os.MkdirAll(conf, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, conf, "default.conf", "server {}\n")
+
+	body, changes := planForIn(t, dir, `
+name: demo
+services:
+  web:
+    image: nginx
+    volumes:
+      - ./conf:/etc/nginx/conf.d
+`)
+	if body != "" || len(changes) != 0 {
+		t.Errorf("a host directory with content must not be suggested away, got %d:\n%s", len(changes), body)
+	}
+}
+
+// An absent host directory is not evidence either way: `./conf:/etc/nginx/conf.d`
+// on a machine that hasn't created ./conf looks exactly like an empty data dir
+// from the compose file alone.
+func TestPlanOverlayNoSuggestionForAbsentHostDir(t *testing.T) {
+	dir := t.TempDir()
+	body, changes := planForIn(t, dir, `
+name: demo
+services:
+  web:
+    image: nginx
+    volumes:
+      - ./conf:/etc/nginx/conf.d
+`)
+	if body != "" || len(changes) != 0 {
+		t.Errorf("an absent host directory must not be suggested away, got %d:\n%s", len(changes), body)
+	}
+}
+
+// A directory two services share is class C, not this: swapping it for a named
+// volume would break the sharing outright (OPSM-102), so it must not be suggested
+// as an app data dir.
+func TestPlanOverlaySharedEmptyDirIsNotAnAppDataDirSuggestion(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "media"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, changes := planForIn(t, dir, `
+name: demo
+services:
+  app:
+    image: papermerge/papermerge
+    volumes:
+      - ./media:/opt/media
+  worker:
+    image: papermerge/papermerge
+    volumes:
+      - ./media:/opt/media
+`)
+	for _, c := range changes {
+		if c.Code == string(codeBindDataDirChown) {
+			t.Errorf("a shared directory must not be suggested as an app data dir, got %+v", changes)
+		}
+	}
+}
+
+// The self-containment promise has to survive MORE THAN ONE suggestion. Emitting
+// a `volumes:` key between services would either duplicate a top-level key
+// (invalid YAML) or swallow the services after it as volume declarations — in
+// which case uncommenting silently applies only the first suggestion while the
+// user believes they applied them all.
+func TestPlanOverlayMultipleSuggestionsUncommentTogether(t *testing.T) {
+	dir := t.TempDir()
+	for _, d := range []string{"content", "wiki"} {
+		if err := os.MkdirAll(filepath.Join(dir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const src = `
+name: demo
+services:
+  blog:
+    image: ghost:6-alpine
+    volumes:
+      - ./content:/var/lib/ghost/content
+  wiki:
+    image: wikijs
+    volumes:
+      - ./wiki:/var/wiki/data
+  web:
+    image: nginx
+    volumes:
+      - shared:/srv
+  worker:
+    image: busybox
+    volumes:
+      - shared:/srv
+volumes:
+  shared: {}
+`
+	writeFile(t, dir, "compose.yaml", src)
+	p0, err := compose.Load(filepath.Join(dir, "compose.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, changes := New(p0, nil, "opossum", io.Discard).PlanOverlay()
+	if len(changes) < 4 {
+		t.Fatalf("expected suggestions for all four services, got %+v", changes)
+	}
+
+	// Uncommented, EVERY suggestion must take effect — not just the first.
+	merged := mergeOverlay(t, src, uncommentSuggestions(body))
+	for _, c := range []struct{ svc, wantPrefix string }{
+		{"blog", "blog-content:"},
+		{"wiki", "wiki-data:"},
+		{"web", "./shared:"},
+		{"worker", "./shared:"},
+	} {
+		vols := merged.Services[c.svc].Volumes
+		if len(vols) != 1 || !strings.HasPrefix(vols[0], c.wantPrefix) {
+			t.Errorf("uncommenting should give %s a %s mount, got %v", c.svc, c.wantPrefix, vols)
+		}
+	}
+	// And the volumes the suggestions introduce must be declared exactly once.
+	if n := strings.Count(uncommentSuggestions(body), "\nvolumes:\n"); n != 1 {
+		t.Errorf("the uncommented block should carry exactly one volumes: section, got %d", n)
+	}
+}
+
+// Two empty bind dirs on ONE service must not be handed the same volume name —
+// that would mount one volume at two paths.
+func TestPlanOverlayTwoDirsOnOneServiceGetDistinctVolumes(t *testing.T) {
+	dir := t.TempDir()
+	for _, d := range []string{"d1", "d2"} {
+		if err := os.MkdirAll(filepath.Join(dir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	body, _ := planForIn(t, dir, `
+name: demo
+services:
+  app:
+    image: someapp
+    volumes:
+      - ./d1:/var/data
+      - ./d2:/opt/data
+`)
+	names := map[string]bool{}
+	for _, line := range strings.Split(body, "\n") {
+		if i := strings.Index(line, "      - "); i >= 0 && strings.Contains(line, ":/") {
+			spec := strings.TrimSpace(line[i+8:])
+			if src, _, _, ok := splitMount(spec); ok {
+				if names[src] {
+					t.Errorf("volume %q suggested for two mount points:\n%s", src, body)
+				}
+				names[src] = true
+			}
+		}
+	}
+}
+
+// A suggested volume name must not land on one the project already declares —
+// re-declaring an external volume would hand a service someone else's data.
+func TestPlanOverlaySuggestedVolumeAvoidsDeclaredNames(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "content"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := planForIn(t, dir, `
+name: demo
+services:
+  blog:
+    image: ghost:6-alpine
+    volumes:
+      - ./content:/var/lib/ghost/content
+  other:
+    image: busybox
+    volumes:
+      - blog-content:/mnt
+volumes:
+  blog-content:
+    external: true
+    name: real-content
+`)
+	if strings.Contains(body, "- blog-content:/var/lib/ghost/content") {
+		t.Errorf("a suggestion must not reuse a declared volume name, got:\n%s", body)
+	}
+}
+
+// A read-only mount is not a data directory the service takes ownership of — the
+// host is supplying it, and nothing chowns it. Suggesting a named volume there
+// would be advice to replace supplied content with an empty volume.
+func TestPlanOverlayNoAppDataSuggestionForReadOnlyMount(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "content"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body, changes := planForIn(t, dir, `
+name: demo
+services:
+  blog:
+    image: ghost:6-alpine
+    volumes:
+      - ./content:/var/lib/ghost/content:ro
+`)
+	if body != "" || len(changes) != 0 {
+		t.Errorf("a read-only mount must not be suggested away, got %d:\n%s", len(changes), body)
+	}
+}

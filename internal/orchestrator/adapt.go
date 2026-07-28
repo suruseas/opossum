@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"fmt"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -33,10 +34,35 @@ import (
 // the diagnostic code, to cross-reference AGENTS.md), how to verify it, what to do
 // if it still fails, and how to undo it.
 
-// overlayMarker prefixes every generated entry. It is a stable string on purpose:
-// an agent can grep for it to tell opossum-generated entries from hand-written
-// ones. Never change it without a migration.
-const overlayMarker = "[opossum --from-docker-compose]"
+// Entry classes. The overlay is not only the fixes opossum made — it is the whole
+// compatibility picture for this project, so a reader (often an agent) finds the
+// problems opossum could NOT fix in the same place, instead of having to know they
+// exist. Each class says how much opossum is claiming:
+//
+//	applied     — changed, and in effect. This is what made the project run.
+//	suggestion  — a concrete change opossum will NOT make for you, written out but
+//	              commented. It alters what the project means (where data lives,
+//	              how services share it), so the call is yours; uncomment to apply.
+//	note        — nothing to change here. The compose file can't express a fix;
+//	              this records the fact so the failure isn't a mystery.
+//
+// The markers are stable strings on purpose: an agent greps them to tell
+// opossum-generated entries from hand-written ones, and to tell what is live from
+// what is merely proposed. Never change them without a migration.
+const (
+	overlayMarker    = "[opossum --from-docker-compose]"
+	suggestionMarker = "[opossum suggestion — NOT APPLIED]"
+	noteMarker       = "[opossum note]"
+)
+
+// entryClass is which of the three an overlay entry is.
+type entryClass int
+
+const (
+	classApplied entryClass = iota
+	classSuggestion
+	classNote
+)
 
 // OverlayFileName is the overlay `up --from-docker-compose` generates.
 const OverlayFileName = "compose.opossum.yaml"
@@ -44,6 +70,26 @@ const OverlayFileName = "compose.opossum.yaml"
 // mysqlDataDir is MySQL/MariaDB's default data directory. Like Postgres's, a
 // bind mount here fails because the image chowns it at startup.
 const mysqlDataDir = "/var/lib/mysql"
+
+// Other databases' data directories, each verified on the real runtime to fail
+// the same way (the container starts, chowns its data directory, and exits):
+//
+//	clickhouse  chown: /var/lib/clickhouse/: Operation not permitted
+//	redis       chown: .: Operation not permitted
+//	mongo       chown: changing ownership of '/data/db': Operation not permitted
+//
+// The trap is that `up` reports success and exits 0: the container is created and
+// started, and only then does the entrypoint fail its chown and exit. `opossum ps`
+// immediately afterwards already shows it stopped.
+const (
+	clickhouseDataDir = "/var/lib/clickhouse"
+	mongoDataDir      = "/data/db"
+	// mongo's entrypoint chowns BOTH /data/db and /data/configdb, so fixing only
+	// the first leaves the container dying on the second — with the change already
+	// announced as the fix and the user's directory already detached.
+	mongoConfigDir = "/data/configdb"
+	redisDataDir   = "/data"
+)
 
 // dbDataDir pairs a database's data directory with the images that own it. Both
 // halves are required to adapt a mount: the path alone is not evidence, because
@@ -67,6 +113,12 @@ type dbDataDir struct {
 var dbDataDirs = []dbDataDir{
 	{postgresDataDir, []string{"postgres", "postgresql", "postgis", "timescaledb", "timescaledb-ha"}},
 	{mysqlDataDir, []string{"mysql", "mysql-server", "mariadb", "percona", "percona-server", "percona-xtradb-cluster"}},
+	{clickhouseDataDir, []string{"clickhouse", "clickhouse-server"}},
+	{mongoDataDir, []string{"mongo", "mongodb", "mongodb-community-server"}},
+	{mongoConfigDir, []string{"mongo", "mongodb", "mongodb-community-server"}},
+	// `/data` is a generic path, so the image name carries all the weight here —
+	// which is exactly why the match is exact rather than a substring.
+	{redisDataDir, []string{"redis", "redis-stack", "redis-stack-server", "valkey"}},
 }
 
 // imageName reduces an image reference to its bare name: the last path segment,
@@ -84,6 +136,31 @@ func imageName(ref string) string {
 		s = s[i+1:]
 	}
 	return s
+}
+
+// serverCommands are the entrypoint arguments that make a database image behave
+// as the server. The official images only chown their data directory on that
+// path: redis chowns when argv[0] is `redis-server`, mongo when it's `mongod`.
+// A sidecar built on the same image to dump, restore or poke at the data
+// (`redis-cli`, `mongodump`, a shell) reads a bind mount perfectly well — and
+// rewriting it would swap that service's real data for an empty volume.
+var serverCommands = map[string]bool{
+	"redis-server": true, "mongod": true, "clickhouse-server": true, "clickhouse": true,
+	"postgres": true, "docker-entrypoint.sh": true,
+	"mysqld": true, "mysqld_safe": true, "mariadbd": true,
+}
+
+// runsAsServer reports whether the service still runs its image's own server.
+// An overridden entrypoint means we can't tell what it runs, so assume not; an
+// overridden command is judged by its first word.
+func runsAsServer(svc *compose.Service) bool {
+	if len(svc.Entrypoint) > 0 {
+		return false
+	}
+	if len(svc.Command) == 0 {
+		return true // the image's default: the server
+	}
+	return serverCommands[pathLeaf(svc.Command[0])]
 }
 
 // ownsDataDir reports whether svc looks like the database that owns target — i.e.
@@ -110,17 +187,28 @@ func ownsDataDir(svc *compose.Service, target string) bool {
 // Adaptation is one change the overlay makes, for reporting to the user.
 type Adaptation struct {
 	Service string
-	Code    string // the diagnostic code this fixes, e.g. "OPSM-101"
-	Summary string // one line: what changed, in the user's terms
+	Code    string // the diagnostic code this relates to, e.g. "OPSM-101"
+	Summary string // one line, in the user's terms
+	// Kind is "applied", "suggestion" or "note" — what opossum is claiming. The
+	// caller reports each group separately, because calling a note a "change"
+	// would overstate what the overlay did.
+	Kind string
 }
 
 // serviceAdaptation is the internal, renderable form: the YAML fragment for one
 // service plus the comment block that explains it.
 type serviceAdaptation struct {
 	Adaptation
-	comment string   // the full comment block (already prefixed with "# ")
-	keys    []string // the service's YAML body lines, already indented
-	volume  string   // a top-level named volume to declare, if any
+	class   entryClass
+	comment string // the full comment block (already prefixed with "# ")
+	// block is the service-level YAML key this adaptation writes under (e.g.
+	// "volumes"), and entries are its indented items. Kept apart rather than as
+	// ready-made lines so a service with two adaptations under the same key emits
+	// that key once — YAML rejects a mapping with the same key twice, and the
+	// overlay would not load at all.
+	block   string
+	entries []string
+	volume  string // a top-level named volume to declare, if any
 }
 
 // PlanOverlay inspects the resolved project (base + any override already merged)
@@ -143,6 +231,7 @@ func (o *Orchestrator) PlanOverlay() (string, []Adaptation) {
 	for _, name := range names {
 		plans = append(plans, o.adaptService(name, o.Project.Services[name], claimed)...)
 	}
+	plans = append(plans, o.suggestSharedVolumeFix(names)...)
 	if len(plans) == 0 {
 		return "", nil
 	}
@@ -152,7 +241,16 @@ func (o *Orchestrator) PlanOverlay() (string, []Adaptation) {
 func summarize(plans []serviceAdaptation) []Adaptation {
 	out := make([]Adaptation, 0, len(plans))
 	for _, p := range plans {
-		out = append(out, p.Adaptation)
+		a := p.Adaptation
+		switch p.class {
+		case classSuggestion:
+			a.Kind = "suggestion"
+		case classNote:
+			a.Kind = "note"
+		default:
+			a.Kind = "applied"
+		}
+		out = append(out, a)
 	}
 	return out
 }
@@ -167,21 +265,179 @@ func (o *Orchestrator) adaptService(name string, svc *compose.Service, claimed m
 		return nil
 	}
 	var out []serviceAdaptation
-	a, swapped := o.adaptBindMountedDataDir(name, svc, claimed)
-	if swapped {
-		out = append(out, a)
-	}
-	if p, ok := o.adaptPGDATA(name, svc, swapped); ok {
+	swaps, swappedPostgres := o.adaptBindMountedDataDir(name, svc, claimed)
+	out = append(out, swaps...)
+	if p, ok := o.adaptPGDATA(name, svc, swappedPostgres); ok {
 		out = append(out, p)
 	}
+	out = append(out, o.suggestAppDataDir(name, svc, claimed)...)
+	out = append(out, o.noteUnfixable(name, svc)...)
 	return out
+}
+
+// suggestAppDataDir proposes a named volume for a directory the service will
+// populate itself. Applications that write into a bind-mounted directory hit the
+// same wall databases do — Apple `container` bind mounts are host-owned and can't
+// be chowned — but opossum can't be sure an application needs to own its directory
+// the way an official database image demonstrably does, so this is proposed rather
+// than applied.
+//
+// The decisive question is whether the host directory is SUPPLYING something.
+// A mount whose host side already has files is feeding content in (a config
+// directory, a site, data from a previous Docker run); turning that into a named
+// volume would hide it, which would be worse than the failure. So the suggestion
+// is limited to a host directory that EXISTS and is EMPTY — the shape of "the app
+// will create its data here", and the only shape where swapping loses nothing.
+//
+// An absent directory is deliberately not enough. `./conf:/etc/nginx/conf.d` on a
+// machine that hasn't got `./conf` yet looks identical to an empty data dir from
+// the compose file alone, and suggesting a volume for a config mount would be
+// advice to empty it.
+func (o *Orchestrator) suggestAppDataDir(name string, svc *compose.Service, claimed map[string]bool) []serviceAdaptation {
+	var out []serviceAdaptation
+	for _, v := range svc.Volumes {
+		src, target, mode, ok := splitMount(v)
+		switch {
+		case !ok || !isHostPath(src):
+			continue
+		case readOnlyMount(mode):
+			continue // read-only: the host is supplying, and nothing chowns it
+		case isHostDevicePath(src):
+			continue // a note, not a suggestion
+		case ownsDataDir(svc, target):
+			continue // already handled as an applied fix
+		case o.sharesHostDataDir(name, src):
+			continue // shared: a named volume would break the sharing outright
+		}
+		host := o.resolvePath(src)
+		fi, err := os.Stat(host)
+		if err != nil || !fi.IsDir() {
+			continue // absent (can't tell what it's for) or a single file
+		}
+		if entries, rerr := os.ReadDir(host); rerr != nil || len(entries) > 0 {
+			continue // the host is supplying content (or holds existing data)
+		}
+		// Same collision avoidance as an applied swap: a suggested name must not
+		// land on a volume the project already declares (an external one above all)
+		// or on one another entry has taken — uncommenting it would then re-declare
+		// someone else's volume and manufacture the very sharing failure the sibling
+		// suggestion exists to escape.
+		vol := o.freeVolumeName(compose.SanitizeName(name)+"-"+compose.SanitizeName(pathLeaf(target)), claimed)
+		out = append(out, serviceAdaptation{
+			Adaptation: Adaptation{
+				Service: name,
+				Code:    string(codeBindDataDirChown),
+				Summary: fmt.Sprintf("service %q writes into the bind mount %s; if it fails to chown that directory, a named volume fixes it", name, target),
+			},
+			class: classSuggestion,
+			comment: suggestionBlock(
+				fmt.Sprintf("%s service %q: use a named volume for %s instead of the host path %q.",
+					suggestionMarker, esc(name), esc(target), esc(src)),
+				[]string{
+					"Apple container bind mounts are host-owned and cannot be chowned from",
+					"inside the container. A service that takes ownership of its data",
+					"directory at startup fails on one — the same wall databases hit.",
+					"Diagnostic: " + string(codeBindDataDirChown) + ".",
+					"NOT APPLIED, because opossum can't tell whether this service needs to own",
+					fmt.Sprintf("%s the way an official database image demonstrably", esc(target)),
+					fmt.Sprintf("does. It is suggested only because %q exists and is empty,", esc(src)),
+					"so nothing is lost by switching — but the data would then live in the",
+					"volume, not on the Mac.",
+				},
+				[]string{
+					fmt.Sprintf("uncomment this block if `opossum logs %s` shows a chown or", name),
+					"permission failure on that directory, then `opossum up` again.",
+				},
+			),
+			block:   "volumes",
+			entries: []string{fmt.Sprintf("      - %s:%s", esc(vol), esc(target))},
+			volume:  vol,
+		})
+	}
+	return out
+}
+
+// noteUnfixable records the problems opossum finds but will not change: things the
+// compose file simply can't express a fix for. Writing them down is the point —
+// otherwise the user meets the failure with no idea opossum already knew about it.
+func (o *Orchestrator) noteUnfixable(name string, svc *compose.Service) []serviceAdaptation {
+	var out []serviceAdaptation
+	note := func(code diagCode, what string, why, next []string) {
+		out = append(out, serviceAdaptation{
+			Adaptation: Adaptation{Service: name, Code: string(code), Summary: what},
+			class:      classNote,
+			comment:    noteBlock(fmt.Sprintf("%s service %q: %s", noteMarker, esc(name), esc(what)), why, next),
+		})
+	}
+	for _, v := range svc.Volumes {
+		src, target, _, ok := splitMount(v)
+		if !ok {
+			continue
+		}
+		switch {
+		case strings.Contains(src, "docker.sock") || strings.Contains(target, "docker.sock"):
+			note(codeDockerSocket, "mounts the Docker socket, which Apple container does not have",
+				[]string{
+					"Apple container is not the Docker daemon and exposes no socket, so a",
+					"tool that drives Docker through it cannot work here at all. There is no",
+					"compose change that fixes this.",
+				},
+				[]string{
+					"drop the service, or run it against a real Docker daemon elsewhere.",
+				})
+		case isHostDevicePath(src):
+			note(codeHostDeviceMount, fmt.Sprintf("mounts the host path %s, which is a device or session socket", src),
+				[]string{
+					"Each container is its own VM, so host devices and session sockets (X11,",
+					"PulseAudio, /dev/dri) are not reachable from inside it. The mount will",
+					"exist but have nothing behind it.",
+				},
+				[]string{
+					"expect this service's device-dependent features not to work; there is no",
+					"compose change that grants a VM access to the host's devices.",
+				})
+		}
+	}
+	return out
+}
+
+// isHostDevicePath reports whether a host path is a device node or a session
+// socket directory — things a per-container VM has no route to.
+func isHostDevicePath(src string) bool {
+	for _, p := range []string{"/dev/", "/tmp/.X11-unix", "/run/user/", "/run/pulse", "/var/run/dbus"} {
+		if src == strings.TrimSuffix(p, "/") || strings.HasPrefix(src, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// noteBlock renders a note: what it is, why nothing can be done, and what to
+// expect instead. Notes carry no YAML, so they end at "What to expect".
+func noteBlock(what string, why, expect []string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "# %s\n", what)
+	section := func(label string, lines []string) {
+		for i, l := range lines {
+			if i == 0 {
+				fmt.Fprintf(&b, "# %s: %s\n", label, l)
+			} else {
+				fmt.Fprintf(&b, "#   %s\n", l)
+			}
+		}
+	}
+	section("Why", why)
+	section("What to expect", expect)
+	return b.String()
 }
 
 // adaptBindMountedDataDir swaps a bind-mounted database data directory for a named
 // volume. This MOVES WHERE THE DATA LIVES (out of the host directory, into a
 // volume the runtime manages), so the generated comment says so plainly — it's the
 // one automated change a user could be surprised by.
-func (o *Orchestrator) adaptBindMountedDataDir(name string, svc *compose.Service, claimed map[string]bool) (serviceAdaptation, bool) {
+func (o *Orchestrator) adaptBindMountedDataDir(name string, svc *compose.Service, claimed map[string]bool) ([]serviceAdaptation, bool) {
+	var out []serviceAdaptation
+	swappedPostgres := false
 	for _, v := range svc.Volumes {
 		src, target, mode, ok := splitMount(v)
 		if !ok || !isHostPath(src) {
@@ -190,7 +446,7 @@ func (o *Orchestrator) adaptBindMountedDataDir(name string, svc *compose.Service
 		// Both must hold: the path is a database data directory AND this service
 		// is the database that owns it. A read-only mount rules it out — a database
 		// can't run on one, so the service is something else looking at the files.
-		if !ownsDataDir(svc, target) || readOnlyMount(mode) {
+		if !ownsDataDir(svc, target) || readOnlyMount(mode) || !runsAsServer(svc) {
 			continue
 		}
 		// Another service on the same host directory means deliberate sharing;
@@ -198,8 +454,18 @@ func (o *Orchestrator) adaptBindMountedDataDir(name string, svc *compose.Service
 		if o.sharesHostDataDir(name, src) {
 			continue
 		}
-		vol := o.freeVolumeName(compose.SanitizeName(name)+"-data", claimed)
-		return serviceAdaptation{
+		// The service's main data directory gets the plain "<svc>-data"; a second one
+		// (mongo's /data/configdb) is named after its path, so the two are telling
+		// apart at a glance and can't collide.
+		base := compose.SanitizeName(name) + "-data"
+		if len(out) > 0 {
+			base = compose.SanitizeName(name) + "-" + compose.SanitizeName(pathLeaf(target))
+		}
+		vol := o.freeVolumeName(base, claimed)
+		if target == postgresDataDir {
+			swappedPostgres = true
+		}
+		out = append(out, serviceAdaptation{
 			Adaptation: Adaptation{
 				Service: name,
 				Code:    string(codeBindDataDirChown),
@@ -225,14 +491,22 @@ func (o *Orchestrator) adaptBindMountedDataDir(name string, svc *compose.Service
 					"against the failure-signatures table in AGENTS.md.",
 				},
 			),
-			keys: []string{
-				"    volumes:",
-				fmt.Sprintf("      - %s:%s", esc(vol), esc(target)),
-			},
-			volume: vol,
-		}, true
+			block:   "volumes",
+			entries: []string{fmt.Sprintf("      - %s:%s", esc(vol), esc(target))},
+			volume:  vol,
+		})
 	}
-	return serviceAdaptation{}, false
+	return out, swappedPostgres
+}
+
+// pathLeaf is the last non-empty path element ("/data/configdb" -> "configdb"),
+// used to keep a second volume on the same service distinguishable.
+func pathLeaf(p string) string {
+	parts := strings.Split(strings.Trim(p, "/"), "/")
+	if len(parts) == 0 {
+		return "data"
+	}
+	return parts[len(parts)-1]
 }
 
 // adaptPGDATA points PGDATA at a subdirectory when Postgres's data directory is a
@@ -302,10 +576,8 @@ func (o *Orchestrator) adaptPGDATA(name string, svc *compose.Service, willBeName
 					"against the failure-signatures table in AGENTS.md.",
 				},
 			),
-			keys: []string{
-				"    environment:",
-				fmt.Sprintf("      PGDATA: %s", sub),
-			},
+			block:   "environment",
+			entries: []string{fmt.Sprintf("      PGDATA: %s", sub)},
 		}, true
 	}
 	return serviceAdaptation{}, false
@@ -341,6 +613,18 @@ func commentBlock(what string, why, verify, ifFails []string) string {
 // then one commented entry per adaptation, grouped under each service, then any
 // named volumes the adaptations introduced.
 func renderOverlay(plans []serviceAdaptation) string {
+	var applied, suggestions, notes []serviceAdaptation
+	for _, p := range plans {
+		switch p.class {
+		case classSuggestion:
+			suggestions = append(suggestions, p)
+		case classNote:
+			notes = append(notes, p)
+		default:
+			applied = append(applied, p)
+		}
+	}
+
 	var b strings.Builder
 	b.WriteString("# Generated by `opossum up --from-docker-compose`.\n" +
 		"#\n" +
@@ -349,43 +633,38 @@ func renderOverlay(plans []serviceAdaptation) string {
 		"# compose.override.yaml. docker compose does not read this file, so the same\n" +
 		"# directory still works with both tools and your own files are unchanged.\n" +
 		"#\n" +
-		"# Every entry below says what changed, why, how to check it, and how to undo it.\n" +
-		"# Edit or delete anything here — opossum will not overwrite this file.\n" +
-		"\n" +
-		"services:\n")
+		"# Entries come in three kinds, and each says which it is:\n" +
+		"#   " + overlayMarker + "  — applied. This is live.\n" +
+		"#   " + suggestionMarker + " — written out but commented; uncomment to apply.\n" +
+		"#   " + noteMarker + "                    — nothing to change; recorded so the\n" +
+		"#                                        failure isn't a mystery.\n" +
+		"#\n" +
+		"# Every entry says what it is about, why, how to check it, and how to undo it.\n" +
+		"# Edit or delete anything here — opossum will not overwrite this file.\n")
 
-	// Group entries by service so the file reads as compose, not as a changelog.
-	type group struct {
-		name     string
-		comments []string
-		keys     []string
+	if len(applied) > 0 {
+		b.WriteString("\nservices:\n")
+		b.WriteString(renderServiceBlocks(applied, false))
 	}
-	var groups []group
-	index := map[string]int{}
-	var volumes []string
-	for _, p := range plans {
-		i, ok := index[p.Service]
-		if !ok {
-			index[p.Service] = len(groups)
-			groups = append(groups, group{name: p.Service})
-			i = len(groups) - 1
+	if len(suggestions) > 0 {
+		b.WriteString("\n# ── Suggestions ─────────────────────────────────────────────────────────\n" +
+			"# opossum did NOT make these changes: each alters what the project means, so\n" +
+			"# the call is yours. Uncommenting a whole block applies it (the `services:`\n" +
+			"# line included — this file is merged like any compose file).\n")
+		b.WriteString(commentOut("services:\n" + renderServiceBlocks(suggestions, true)))
+	}
+	if len(notes) > 0 {
+		b.WriteString("\n# ── Notes ───────────────────────────────────────────────────────────────\n" +
+			"# Nothing to change for these: the compose file can't express a fix.\n")
+		for _, n := range notes {
+			b.WriteString(strings.TrimRight(n.comment, "\n") + "\n")
 		}
-		groups[i].comments = append(groups[i].comments, p.comment)
-		groups[i].keys = append(groups[i].keys, p.keys...)
+	}
+
+	var volumes []string
+	for _, p := range applied {
 		if p.volume != "" {
 			volumes = append(volumes, p.volume)
-		}
-	}
-	for _, g := range groups {
-		for _, c := range g.comments {
-			// Indent the comment under the service it belongs to.
-			for _, line := range strings.Split(strings.TrimRight(c, "\n"), "\n") {
-				b.WriteString("  " + line + "\n")
-			}
-		}
-		fmt.Fprintf(&b, "  %s:\n", esc(yamlKey(g.name)))
-		for _, k := range g.keys {
-			b.WriteString(k + "\n")
 		}
 	}
 	if len(volumes) > 0 {
@@ -394,6 +673,94 @@ func renderOverlay(plans []serviceAdaptation) string {
 		for _, v := range volumes {
 			fmt.Fprintf(&b, "  %s: {}\n", esc(yamlKey(v)))
 		}
+	}
+	return b.String()
+}
+
+// renderServiceBlocks lays entries out as compose, grouped by service, each
+// preceded by its comment. Two entries on one service share a single YAML key.
+func renderServiceBlocks(plans []serviceAdaptation, inlineVolumes bool) string {
+	type group struct {
+		name     string
+		comments []string
+		blocks   []string
+		entries  map[string][]string
+		volumes  []string
+	}
+	var groups []group
+	index := map[string]int{}
+	for _, p := range plans {
+		i, ok := index[p.Service]
+		if !ok {
+			index[p.Service] = len(groups)
+			groups = append(groups, group{name: p.Service, entries: map[string][]string{}})
+			i = len(groups) - 1
+		}
+		groups[i].comments = append(groups[i].comments, p.comment)
+		if p.block == "" {
+			continue
+		}
+		if _, seen := groups[i].entries[p.block]; !seen {
+			groups[i].blocks = append(groups[i].blocks, p.block)
+		}
+		groups[i].entries[p.block] = append(groups[i].entries[p.block], p.entries...)
+		if p.volume != "" {
+			groups[i].volumes = append(groups[i].volumes, p.volume)
+		}
+	}
+	var b strings.Builder
+	for _, g := range groups {
+		for _, c := range g.comments {
+			for _, line := range strings.Split(strings.TrimRight(c, "\n"), "\n") {
+				b.WriteString("  " + line + "\n")
+			}
+		}
+		fmt.Fprintf(&b, "  %s:\n", esc(yamlKey(g.name)))
+		for _, blk := range g.blocks {
+			fmt.Fprintf(&b, "    %s:\n", blk)
+			for _, e := range g.entries[blk] {
+				b.WriteString(e + "\n")
+			}
+		}
+	}
+	// A SUGGESTION that introduces volumes has to carry their declarations, or
+	// uncommenting the block would leave the project referencing volumes nobody
+	// declared. They go in ONE section after every service — a `volumes:` key
+	// emitted between services would either be a duplicate top-level key (invalid
+	// YAML) or, worse, swallow the services that follow it as if they were volume
+	// declarations, so the later suggestions would silently do nothing.
+	if inlineVolumes {
+		var all []string
+		seen := map[string]bool{}
+		for _, g := range groups {
+			for _, v := range g.volumes {
+				if !seen[v] {
+					seen[v] = true
+					all = append(all, v)
+				}
+			}
+		}
+		if len(all) > 0 {
+			sort.Strings(all)
+			b.WriteString("volumes:\n")
+			for _, v := range all {
+				fmt.Fprintf(&b, "  %s: {}\n", esc(yamlKey(v)))
+			}
+		}
+	}
+	return b.String()
+}
+
+// commentOut prefixes every line with "# " so a block of real YAML sits inert in
+// the file until someone uncomments it.
+func commentOut(s string) string {
+	var b strings.Builder
+	for _, line := range strings.Split(strings.TrimRight(s, "\n"), "\n") {
+		if line == "" {
+			b.WriteString("#\n")
+			continue
+		}
+		b.WriteString("# " + line + "\n")
 	}
 	return b.String()
 }
@@ -531,4 +898,116 @@ func (o *Orchestrator) freeVolumeName(base string, claimed map[string]bool) stri
 	}
 	claimed[name] = true
 	return name
+}
+
+// suggestSharedVolumeFix proposes — without applying — a way out of the one
+// incompatibility that is purely about sharing: Apple `container` attaches a named
+// volume to a single container at a time, so two services that mount the same one
+// cannot both run (OPSM-102). A host directory IS shareable, so swapping the
+// volume for a bind mount fixes it.
+//
+// This is a suggestion rather than a fix because it changes what the project
+// means: the data leaves the runtime's storage for a directory on the Mac, and
+// that directory's contents and permissions become the user's problem. Nobody
+// should discover that from a tool doing it silently.
+func (o *Orchestrator) suggestSharedVolumeFix(order []string) []serviceAdaptation {
+	users := map[string][]string{} // volume -> services mounting it
+	target := map[string]string{}  // volume -> where the first user mounts it
+	for _, name := range order {
+		svc := o.Project.Services[name]
+		if svc == nil {
+			continue
+		}
+		for _, v := range svc.Volumes {
+			src, tgt, _, ok := splitMount(v)
+			if !ok || !isNamedVolume(src) || o.isExternalVolume(src) {
+				continue
+			}
+			users[src] = append(users[src], name)
+			if _, seen := target[src]; !seen {
+				target[src] = tgt
+			}
+		}
+	}
+	var vols []string
+	for v, u := range users {
+		if len(u) > 1 {
+			vols = append(vols, v)
+		}
+	}
+	sort.Strings(vols)
+
+	var out []serviceAdaptation
+	for _, vol := range vols {
+		svcs := users[vol]
+		sort.Strings(svcs)
+		host := "./" + compose.SanitizeName(vol)
+		for _, name := range svcs {
+			out = append(out, serviceAdaptation{
+				Adaptation: Adaptation{
+					Service: name,
+					Code:    string(codeSharedVolume),
+					Summary: fmt.Sprintf("service %q shares named volume %q with %d other service(s); a bind mount would let them all run", name, vol, len(svcs)-1),
+				},
+				class: classSuggestion,
+				comment: suggestionBlock(
+					fmt.Sprintf("%s service %q: mount the shared data from a host directory instead of the named volume %q.",
+						suggestionMarker, esc(name), esc(vol)),
+					[]string{
+						"Apple container attaches a named volume to one container at a time, so",
+						fmt.Sprintf("%s cannot all run while they share %q — whichever starts", quotedList(svcs), esc(vol)),
+						"first gets it and the rest fail to attach. Diagnostic: " + string(codeSharedVolume) + ".",
+						"A host directory is shareable, so a bind mount lets them all mount it.",
+						"NOT APPLIED, because it changes what the project means: the data moves out",
+						"of the runtime's storage onto the Mac, and that directory's contents and",
+						"permissions become yours to manage. A database's data directory in",
+						"particular should NOT be moved this way — it needs to be chownable.",
+					},
+					[]string{
+						fmt.Sprintf("uncomment the block for every service sharing %q (all of them,", esc(vol)),
+						"or none), create the directory, then `opossum up`. `opossum ps`",
+						"should show them all running.",
+					},
+				),
+				block:   "volumes",
+				entries: []string{fmt.Sprintf("      - %s:%s", esc(host), esc(target[vol]))},
+			})
+		}
+	}
+	return out
+}
+
+// suggestionBlock renders a suggestion: what it proposes, why (with the code),
+// and how to apply it. The YAML that follows is commented out by the renderer.
+func suggestionBlock(what string, why, apply []string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "# %s\n", what)
+	section := func(label string, lines []string) {
+		for i, l := range lines {
+			if i == 0 {
+				fmt.Fprintf(&b, "# %s: %s\n", label, l)
+			} else {
+				fmt.Fprintf(&b, "#   %s\n", l)
+			}
+		}
+	}
+	section("Why", why)
+	section("To apply", apply)
+	section("To ignore", []string{"delete this block. Nothing here is in effect until you uncomment it."})
+	return b.String()
+}
+
+// quotedList renders names for prose: `"a", "b" and "c"`.
+func quotedList(names []string) string {
+	q := make([]string, len(names))
+	for i, n := range names {
+		q[i] = fmt.Sprintf("%q", esc(n))
+	}
+	switch len(q) {
+	case 0:
+		return ""
+	case 1:
+		return q[0]
+	}
+	return strings.Join(q[:len(q)-1], ", ") + " and " + q[len(q)-1]
 }

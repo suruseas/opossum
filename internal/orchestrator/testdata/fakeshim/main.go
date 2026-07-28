@@ -69,8 +69,8 @@ func run(args []string) int {
 		if state == "" {
 			state = "running"
 		}
-		fmt.Printf(`[{"status":{"state":"%s","networks":[{"network":"n","ipv4Address":"192.168.64.10/24","ipv4Gateway":"192.168.64.1"}]},"configuration":{"labels":{%s},"publishedPorts":[{"containerPort":8080,"hostAddress":"0.0.0.0","hostPort":8080,"proto":"tcp"}]}}]`+"\n",
-			state, strings.Join(labels, ","))
+		fmt.Printf(`[{"status":{"state":"%s","networks":[{"network":"n","ipv4Address":"192.168.64.10/24","ipv4Gateway":"192.168.64.1"}]},"configuration":{"labels":{%s},"publishedPorts":[%s]}}]`+"\n",
+			state, strings.Join(labels, ","), publishedPorts(arg(1)))
 
 	case "network":
 		if arg(1) == "create" {
@@ -96,6 +96,19 @@ func run(args []string) int {
 			}
 			if cname != "" && chash != "" {
 				os.WriteFile(filepath.Join(dir, cname+".hash"), []byte(chash), 0o644)
+			}
+			// Record what was actually published, so a later inspect reports the
+			// real mapping. Without this the fake always claims 8080:8080 and no
+			// test can express "last time we published on <some other port>",
+			// which is the only interesting input to port stickiness.
+			if cname != "" {
+				var pub []string
+				for i, a := range args {
+					if i > 0 && args[i-1] == "-p" {
+						pub = append(pub, a)
+					}
+				}
+				os.WriteFile(filepath.Join(dir, cname+".ports"), []byte(strings.Join(pub, ",")), 0o644)
 			}
 		}
 		// A foreground run of $RUN_FAIL exits non-zero (drives failure evals).
@@ -185,4 +198,36 @@ func run(args []string) int {
 		}
 	}
 	return 0
+}
+
+// publishedPorts renders the ports a previous `run` recorded for this container,
+// falling back to the historical fixed mapping when nothing was recorded (most
+// tests don't care, and changing their expectations would be noise).
+func publishedPorts(name string) string {
+	dir := os.Getenv("STATE_DIR")
+	if dir == "" || name == "" {
+		return `{"containerPort":8080,"hostAddress":"0.0.0.0","hostPort":8080,"proto":"tcp"}`
+	}
+	b, err := os.ReadFile(filepath.Join(dir, name+".ports"))
+	if err != nil || len(strings.TrimSpace(string(b))) == 0 {
+		return `{"containerPort":8080,"hostAddress":"0.0.0.0","hostPort":8080,"proto":"tcp"}`
+	}
+	var out []string
+	for _, spec := range strings.Split(strings.TrimSpace(string(b)), ",") {
+		proto := "tcp"
+		if i := strings.LastIndex(spec, "/"); i >= 0 {
+			proto, spec = spec[i+1:], spec[:i]
+		}
+		parts := strings.Split(spec, ":")
+		if len(parts) < 2 {
+			continue
+		}
+		host, container := parts[len(parts)-2], parts[len(parts)-1]
+		out = append(out, fmt.Sprintf(`{"containerPort":%s,"hostAddress":"0.0.0.0","hostPort":%s,"proto":"%s"}`,
+			container, host, proto))
+	}
+	if len(out) == 0 {
+		return `{"containerPort":8080,"hostAddress":"0.0.0.0","hostPort":8080,"proto":"tcp"}`
+	}
+	return strings.Join(out, ",")
 }

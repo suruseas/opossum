@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -495,6 +496,12 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 		}
 	}
 
+	// Move any host port opossum picked itself that turns out to be taken, before
+	// the check below decides what counts as a conflict — a container-only port
+	// spec leaves the host side to the engine, so a busy port is opossum's problem
+	// to solve, not the user's to fix.
+	o.remapAutoHostPorts(order)
+
 	// Pre-flight: fail before starting anything if a published host port is already
 	// taken, with a clearer message than the runtime's raw bind error.
 	if err := o.checkHostPorts(order); err != nil {
@@ -825,6 +832,168 @@ func hostPublishAddrs(ports []string) []string {
 	return out
 }
 
+// remapAutoHostPorts moves a published port opossum chose itself, when the port
+// it chose is already taken.
+//
+// Compose says a container-only entry (`ports: ["3000"]`) leaves the host port to
+// the engine, and docker picks a free one. Apple `container` has no such option,
+// so opossum mirrors the container port — predictable, and right nearly always —
+// but a mirror is a guess, and a taken port turns a project docker compose would
+// have started into a hard failure. So the guess is retried rather than fatal.
+//
+// Only mirrored entries move. An explicit `"3000:3000"` is a contract the user
+// wrote down, so it still fails loudly (checkHostPorts) rather than quietly
+// listening somewhere else.
+func (o *Orchestrator) remapAutoHostPorts(order []string) {
+	// Host ports this project has already spoken for. Probing the OS alone isn't
+	// enough: two services that both declare `ports: ["3000"]` would each find
+	// 3000 free and both take it, and only the second would fail — at bind time,
+	// far from the compose file that caused it. docker compose gives them
+	// different ports, so track what's been handed out here too.
+	claimed := map[string]bool{}
+	note := func(spec string) {
+		if _, addr, _, ok := hostPortBinding(spec); ok {
+			claimed[addr] = true
+		}
+	}
+	for _, name := range order {
+		svc := o.Project.Services[name]
+		if svc == nil {
+			continue
+		}
+		if len(svc.AutoHostPort) == 0 {
+			for _, spec := range svc.Ports {
+				note(spec) // an explicit mapping still occupies the port
+			}
+			continue
+		}
+		// What this service's own RUNNING container publishes. Reusing those keeps
+		// the port — and so the config hash — stable across re-ups. It must be
+		// running: a stopped container doesn't hold its ports, so reusing them
+		// would hand back a port something else may have taken meanwhile, which is
+		// exactly the failure this function exists to prevent.
+		held := map[string]int{} // "<container port>/<proto>" -> host port we published
+		if info := o.rt.Inspect(o.containerName(name)); info.Exists &&
+			info.State == "running" && info.Labels[projectLabel] == o.Project.Name {
+			for _, pm := range info.Ports {
+				held[fmt.Sprintf("%d/%s", pm.ContainerPort, pm.Proto)] = pm.HostPort
+			}
+		}
+		for i, spec := range svc.Ports {
+			if !svc.AutoHostPort[spec] {
+				note(spec)
+				continue
+			}
+			network, address, port, ok := hostPortBinding(spec)
+			if !ok {
+				continue // no fixed host port to move (a range)
+			}
+			key := fmt.Sprintf("%d/%s", specContainerPort(spec), network)
+			if h, sticky := held[key]; sticky && h != 0 {
+				// Keep what we already published, even though it reads as in use —
+				// it is in use by this very container.
+				if newSpec, ok := withHostPort(spec, h); ok {
+					svc.Ports[i] = newSpec
+					delete(svc.AutoHostPort, spec)
+					svc.AutoHostPort[newSpec] = true
+					note(newSpec)
+					continue
+				}
+			}
+			if !claimed[address] && !hostPortInUse(network, address) {
+				note(spec) // the mirror is free: keep it, nothing to explain
+				continue
+			}
+			free, err := freeHostPort(network, address)
+			if err != nil {
+				continue // fall through to checkHostPorts' error, no worse than before
+			}
+			newSpec, ok := withHostPort(spec, free)
+			if !ok {
+				continue
+			}
+			svc.Ports[i] = newSpec
+			delete(svc.AutoHostPort, spec)
+			svc.AutoHostPort[newSpec] = true
+			note(newSpec)
+			o.warnf(codeHostPortRemapped, "service %q publishes container port %s, and the compose file "+
+				"doesn't say which host port to use — host port %s is taken, so opossum published it on %d "+
+				"instead. docker compose picks a free port here too. Run `opossum ps` for the ports actually "+
+				"in use; to pin one, write it in the compose file as \"<host>:%d\".\n",
+				name, port, port, free, specContainerPort(spec))
+		}
+	}
+}
+
+// specContainerPort returns the container-side port of a normalized spec, or 0.
+func specContainerPort(spec string) int {
+	s := spec
+	if i := strings.LastIndexByte(s, '/'); i >= 0 {
+		s = s[:i]
+	}
+	i := strings.LastIndexByte(s, ':')
+	if i < 0 {
+		return 0
+	}
+	n, err := strconv.Atoi(s[i+1:])
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// withHostPort rewrites a normalized spec's host port, keeping any host IP and
+// protocol suffix. ok is false for a spec it can't rewrite safely (a range).
+func withHostPort(spec string, host int) (string, bool) {
+	s, proto := spec, ""
+	if i := strings.LastIndexByte(s, '/'); i >= 0 {
+		proto, s = s[i:], s[:i]
+	}
+	i := strings.LastIndexByte(s, ':')
+	if i < 0 {
+		return "", false
+	}
+	container := s[i+1:]
+	if strings.ContainsAny(container, "-") { // a range can't be remapped to one port
+		return "", false
+	}
+	rest := s[:i] // "host" or "ip:host"
+	j := strings.LastIndexByte(rest, ':')
+	prefix := ""
+	if j >= 0 {
+		prefix = rest[:j+1] // keep "ip:"
+	}
+	return fmt.Sprintf("%s%d:%s%s", prefix, host, container, proto), true
+}
+
+// freeHostPort asks the OS for an unused port by binding to :0 and releasing it.
+// There is a window between this and the container binding it, the same one
+// docker lives with; losing that race just yields the runtime's own bind error,
+// which is where an unremapped port would have ended up anyway.
+func freeHostPort(network, address string) (int, error) {
+	// Ask on the same scope the spec publishes on: a port free on loopback can be
+	// held on another interface, and a wildcard publish would then fail at bind.
+	probe := "127.0.0.1:0"
+	if isWildcardAddr(address) {
+		probe = ":0"
+		network += "4" // wildcards are published on IPv4 (see probeNetworks)
+	}
+	if strings.HasPrefix(network, "udp") {
+		c, err := net.ListenPacket(network, probe)
+		if err != nil {
+			return 0, err
+		}
+		defer c.Close()
+		return c.LocalAddr().(*net.UDPAddr).Port, nil
+	}
+	l, err := net.Listen(network, probe)
+	if err != nil {
+		return 0, err
+	}
+	defer l.Close()
+	return l.Addr().(*net.TCPAddr).Port, nil
+}
+
 // checkHostPorts fails if any service's published host port is already in use,
 // with a clearer message (and a macOS AirPlay hint) than the runtime's raw
 // "Address already in use" that appears mid-startup after a partial rollback.
@@ -889,21 +1058,68 @@ func hostPortBinding(spec string) (network, address, port string, ok bool) {
 }
 
 // hostPortInUse reports whether the host address can't be bound (already taken).
+// A wildcard probe must name the address family. Asking for "tcp" on a wildcard
+// address gets a dual-stack IPv6 socket, and on macOS that binds happily
+// alongside an existing IPv4-only listener — so the port reads as free while
+// something is very much using it. That is the case the check most needs to
+// catch: the daemons that squat ports (AirPlay's receiver on 5000/7000 among
+// them) listen on IPv4.
 func hostPortInUse(network, address string) bool {
-	if network == "udp" {
-		c, err := net.ListenPacket("udp", address)
+	for _, n := range probeNetworks(network, address) {
+		if portBusy(n, address) {
+			return true
+		}
+	}
+	return false
+}
+
+// probeNetworks picks the families to test. A wildcard is probed as IPv4 only,
+// because that is what Apple `container` publishes on: an IPv4 probe already
+// fails against a dual-stack listener, so adding an IPv6 probe would detect
+// nothing extra — it would only report a conflict for an IPv6-only listener,
+// which the runtime happily binds alongside. Reporting that would turn a project
+// that starts fine into a refusal. An address that names a host carries its own
+// family, so it is probed once, as given.
+func probeNetworks(network, address string) []string {
+	if !isWildcardAddr(address) {
+		return []string{network}
+	}
+	if strings.HasPrefix(network, "udp") {
+		return []string{"udp4"}
+	}
+	return []string{"tcp4"}
+}
+
+// portBusy reports whether binding address on network fails. Any bind error
+// counts as "in use": the probe can't tell EADDRINUSE from a rarer refusal, and
+// erring toward "taken" turns a would-be silent startup failure into the clearer
+// pre-flight message.
+func portBusy(network, address string) bool {
+	if strings.HasPrefix(network, "udp") {
+		c, err := net.ListenPacket(network, address)
 		if err != nil {
 			return true
 		}
 		c.Close()
 		return false
 	}
-	l, err := net.Listen("tcp", address)
+	l, err := net.Listen(network, address)
 	if err != nil {
 		return true
 	}
 	l.Close()
 	return false
+}
+
+// isWildcardAddr reports whether an address names no specific host, in any of the
+// spellings that mean "every interface" — so the probe covers the family the
+// runtime will actually bind rather than trusting one dual-stack bind.
+func isWildcardAddr(address string) bool {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return false
+	}
+	return host == "" || host == "0.0.0.0" || host == "::"
 }
 
 // airPlayHint flags the ports macOS's AirPlay Receiver commonly holds, a frequent

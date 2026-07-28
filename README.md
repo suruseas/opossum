@@ -281,7 +281,7 @@ startup, demonstrating name-based discovery.
 | `image` | ✅ | |
 | `build` | ✅ | string context or `{context, dockerfile, args, target}` (multi-stage `target`) |
 | `platform` | ✅ | passed to `container run --platform`; `linux/amd64` also enables `--rosetta` so x86-64-only images run on Apple silicon |
-| `ports` | ✅ | passed to `container run -p`; both the short form (`"8080:80"`, `"3000"`) and the long mapping form (`{target, published, protocol, host_ip}`) are accepted. A bare container port gets a host port (Apple's runtime requires one). |
+| `ports` | ✅ | passed to `container run -p`; both the short form (`"8080:80"`, `"3000"`) and the long mapping form (`{target, published, protocol, host_ip}`) are accepted. A bare container port gets a host port (Apple's runtime requires one): the same number when it's free, otherwise a free one, with a notice. |
 | `environment` | ✅ | list or map form; null value passes host value through |
 | `env_file` | ✅ | string or list (short, or long `{path, required}`); `KEY=VALUE` files folded in, `environment` overrides them. Missing file errors unless `required: false` |
 | `volumes` | ✅ | bind mounts (host paths resolved against the compose dir; `~` expanded; a missing source directory is created), named volumes (namespaced `<project>_<volume>`), and `type: tmpfs` (mounted via `--tmpfs`); short `src:dst[:ro]` or long form (`{type, source, target, read_only}`) |
@@ -332,12 +332,22 @@ properties of the runtime rather than mistakes in your file:
 | A named volume mounted at Postgres's data directory | The volume is a mount point, so the directory isn't empty and `initdb` refuses it (`OPSM-101`) | Points `PGDATA` at a subdirectory — the data stays in the same volume |
 | A database's data directory on a bind mount | Bind mounts are host-owned and can't be chowned from inside the container, which every official DB image does at startup (`OPSM-105`) | Mounts a named volume there instead — **this changes where the data lives**; the host directory is left untouched, not copied |
 
-Each entry it writes says what changed, why (with the diagnostic code), how to
-check it worked, what to do if it didn't, and how to undo it. opossum **never
-overwrites an existing `compose.opossum.yaml`**, never modifies your own compose
-file, and only writes one when it found something to fix. Anything that would
-change what the project *means* — sharing semantics, published ports,
-app-specific seeding — stays a warning for you to decide on.
+The file is the whole compatibility picture for the project, not just the fixes,
+so what opossum *couldn't* fix is in the same place. Entries come in three kinds,
+each marked:
+
+- **applied** — changed, and in effect. This is what made the project run.
+- **suggestion — NOT APPLIED** — a concrete change written out but commented,
+  because it alters what the project means (where data lives, how services share
+  it). Uncomment the block to apply it; it's self-contained, including any
+  `volumes:` declaration it needs.
+- **note** — nothing to change: the compose file can't express a fix (a Docker
+  socket mount, a host device). Recorded so the failure isn't a mystery. Notes carry no YAML, so there's nothing to uncomment.
+
+Each entry says what it's about and why (with the diagnostic code); applied entries
+add how to check it and how to undo it, suggestions add how to apply or ignore
+them, and notes add what to expect instead. opossum **never overwrites an
+existing `compose.opossum.yaml`** and never modifies your own compose file.
 
 ## Command support
 
@@ -408,7 +418,7 @@ features aren't supported. The detailed rationale for each is in
 | Named volumes | shared globally by name | namespaced `<project>_<volume>`; `down -v` only removes this project's |
 | Volume seeding | a fresh named/anonymous volume is pre-filled from the image's contents at that path | **not seeded** — a fresh volume always mounts empty (named *and* anonymous) |
 | Networks | user-defined networks + aliases | `networks:` **is** supported — a per-project default network (`<project>-net`), plus top-level `internal:`/`external:` and multiple networks per service; per-network **aliases** and static IPs aren't applied (see [Networking model](#networking-model)) |
-| Published ports | a bare `ports: - "3000"` picks a random host port | mirrors it to `3000:3000` — Apple `container` requires a host port and has no random option |
+| Published ports | a bare `ports: - "3000"` picks a random host port | mirrors it to `3000:3000` when that port is free, else falls back to a free port and says so (`opossum ps` shows the real one; two services that both leave the host port open get different ones). Apple `container` requires a host port and has no random option, so the mirror is a predictable default rather than a random one |
 | Healthcheck | engine-native | no native support — opossum runs `healthcheck.test` via `container exec` and polls |
 | `service_completed_successfully` | engine tracks exit | opossum runs the one-shot in the **foreground** (an exit code is only observable there) |
 

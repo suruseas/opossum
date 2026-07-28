@@ -41,16 +41,27 @@ shared files. Merging one prints a one-line stderr notice; delete the file to op
 out. (Only auto-merged when no `-f` is given, same as the standard override.)
 
 `up --from-docker-compose` **generates** that overlay when it finds a known
-incompatibility (`OPSM-101` Postgres PGDATA, `OPSM-105` bind-mounted DB data dir),
-then re-resolves and starts — so migrating a docker compose project is one command.
+incompatibility — applied fixes for `OPSM-101` (Postgres PGDATA) and `OPSM-105`
+(bind-mounted DB data dir), suggestions for `OPSM-102` (a shared named volume) and
+`OPSM-105` (an app's own data directory), notes for `OPSM-204` (Docker socket) and
+`OPSM-106` (host devices) — then re-resolves and starts — so migrating a docker compose project is one command.
 Facts to rely on:
 
-- Generated entries are marked `# [opossum --from-docker-compose]` — a **stable
-  string**; grep it to tell generated entries from hand-written ones.
-- Each entry carries a fixed five-part comment: **what** changed, **Why** (with the
-  diagnostic code, cross-referable to the tables above), **Verify** (the command to
-  confirm it), **If this still fails** (what to run next), **To undo** (delete the
-  entry or the file).
+- Entries come in three classes, each with a **stable marker** to grep for:
+  - `# [opossum --from-docker-compose]` — **applied**. In effect; this is what made
+    the project run.
+  - `# [opossum suggestion — NOT APPLIED]` — a concrete change opossum will not make
+    for you, written out but **commented**. It alters what the project means (where
+    data lives, how services share it). Uncomment the whole block to apply it; the
+    block is self-contained, including any `volumes:` declaration it needs.
+  - `# [opossum note]` — **nothing to change**; the compose file can't express a fix
+    (a Docker socket mount, a host device). Recorded so the failure isn't a mystery.
+    Notes carry no YAML, so there is nothing to uncomment.
+- Each entry carries a fixed comment shape for its class, always starting with what
+  it is about and a **Why** that cites the diagnostic code (cross-referable to the
+  tables above). Applied entries then give **Verify** / **If this still fails** /
+  **To undo**; suggestions give **To apply** / **To ignore**; notes give **What to
+  expect**.
 - The file is **never overwritten** once it exists, and your compose file is never
   modified. Editing or deleting the overlay is safe and is the intended way to
   disagree with a fix.
@@ -191,9 +202,23 @@ list; codes are add-only and never change meaning.
   bind mounts are host-owned (virtiofs) and can't be chowned from inside the
   container, but every official DB image chowns its data directory at startup, so
   it fails there. Use a named volume for that path (it *is* chownable).
+  Covers Postgres, MySQL/MariaDB, ClickHouse (`/var/lib/clickhouse`), MongoDB
+  (`/data/db`) and Redis/Valkey (`/data`) — each confirmed to fail this way on the
+  real runtime. Note `up` still reports success: the container starts, then its
+  entrypoint fails the chown and exits, so `ps` right afterwards shows `stopped`.
   `up --from-docker-compose` writes this swap into `compose.opossum.yaml` for you;
   note it changes where the data lives (into the volume — the host directory is
   left untouched, not copied).
+- **`[OPSM-206]` … `opossum published it on <port> instead`** → the compose file gave
+  only a container port (`ports: ["3000"]`), so the host port is opossum's to choose;
+  the mirrored port was taken, so a free one was used. docker compose does the same.
+  `opossum ps` shows the port actually published; write `"<host>:<container>"` in the
+  compose file to pin one. An explicit mapping is never moved (that's `OPSM-201`).
+- **`[OPSM-106]` … a host device or session socket is mounted** → each container is
+  its own VM, so `/dev/*`, an X11 socket or a PulseAudio socket on the host is not
+  reachable from inside it. The mount exists with nothing behind it; no compose
+  change grants a VM access to the host's devices. Recorded as a note in
+  `compose.opossum.yaml`.
 - **`[OPSM-202]` … `DNS domain "opossum" not found`** → run `sudo container system
   dns create opossum` once, then `up` again (needed for bare-name discovery).
 - **`[OPSM-203]` … `network <n> is internal (host-only): … no internet egress`** →
@@ -230,11 +255,13 @@ Every `[OPSM-NNN]` opossum can emit (add-only; grouped 1xx storage / 2xx network
 - `OPSM-103` — a named volume is already attached to another running container (cross-project VZError).
 - `OPSM-104` — couldn't create a bind mount's host source directory (permissions).
 - `OPSM-105` — a database data directory is a bind mount (host-owned, can't be chowned).
+- `OPSM-106` — a host device or session socket is mounted (a per-container VM can't reach it).
 - `OPSM-201` — a published host port is already taken (pre-flight).
 - `OPSM-202` — the DNS domain isn't registered (no bare-name discovery).
 - `OPSM-203` — an internal network: no internet egress and no name resolution.
 - `OPSM-204` — a service mounts `docker.sock` (Apple container has no Docker socket).
 - `OPSM-205` — a network declared `external: true` doesn't exist (pre-flight; create it or drop `external`).
+- `OPSM-206` — a container-only port's mirrored host port was taken; opossum published on a free port.
 - `OPSM-301` — build context under `/private/tmp` (the builder VM can't read it).
 - `OPSM-302` — build context is a symlink (the builder may reject it).
 - `OPSM-401` — a dependency's container exited before becoming healthy (logs embedded).

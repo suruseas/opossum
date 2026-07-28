@@ -35,32 +35,39 @@ const NetworkModeNone = "none"
 
 // Service is a single service definition.
 type Service struct {
-	Name        string          `yaml:"-"`
-	Image       string          `yaml:"image"`
-	Platform    string          `yaml:"platform"` // e.g. linux/amd64; runs via Rosetta on Apple silicon
-	Build       *Build          `yaml:"build"`
-	Command     Command         `yaml:"command"`
-	Entrypoint  Command         `yaml:"entrypoint"`
-	Environment Environment     `yaml:"environment"`
-	EnvFile     EnvFiles        `yaml:"env_file"`
-	Ports       Ports           `yaml:"ports"`
-	Volumes     Volumes         `yaml:"volumes"`
-	Tmpfs       StringOrSlice   `yaml:"tmpfs"` // service-level tmpfs targets (#93); volume-form `type: tmpfs` folds in (#79)
-	Secrets     SecretRefs      `yaml:"secrets"`
-	DependsOn   DependsOn       `yaml:"depends_on"`
-	Healthcheck *Healthcheck    `yaml:"healthcheck"`
-	Profiles    []string        `yaml:"profiles"`     // service starts only when one of these profiles is active (empty = always)
-	MemLimit    scalarStr       `yaml:"mem_limit"`    // legacy memory limit ("512m", "2g", …)
-	CPUs        scalarStr       `yaml:"cpus"`         // legacy CPU limit (may be fractional)
-	SSH         bool            `yaml:"ssh"`          // forward the host SSH agent (--ssh) for private git over SSH
-	User        string          `yaml:"user"`         // --user (name|uid[:gid]) the process runs as
-	WorkingDir  string          `yaml:"working_dir"`  // --workdir the process starts in
-	Init        bool            `yaml:"init"`         // --init: run a tini-like init as PID 1 to reap zombies
-	ReadOnly    bool            `yaml:"read_only"`    // --read-only root filesystem
-	CapAdd      StringOrSlice   `yaml:"cap_add"`      // --cap-add Linux capabilities
-	CapDrop     StringOrSlice   `yaml:"cap_drop"`     // --cap-drop Linux capabilities
-	NetworkMode string          `yaml:"network_mode"` // only "none" acted on: full network isolation (--network none)
-	Networks    ServiceNetworks `yaml:"networks"`     // declared networks this service joins (one --network each; aliases/static IPs not applied)
+	Name        string      `yaml:"-"`
+	Image       string      `yaml:"image"`
+	Platform    string      `yaml:"platform"` // e.g. linux/amd64; runs via Rosetta on Apple silicon
+	Build       *Build      `yaml:"build"`
+	Command     Command     `yaml:"command"`
+	Entrypoint  Command     `yaml:"entrypoint"`
+	Environment Environment `yaml:"environment"`
+	EnvFile     EnvFiles    `yaml:"env_file"`
+	Ports       Ports       `yaml:"ports"`
+	// AutoHostPort marks the entries of Ports whose HOST port opossum chose,
+	// because the compose file named only a container port (`ports: ["3000"]`).
+	// Compose leaves the host port to the engine for those, so opossum is free to
+	// move one that turns out to be taken — unlike an explicit `"3000:3000"`,
+	// which is the user's declared contract and is never moved. Set during load,
+	// not read from YAML.
+	AutoHostPort map[string]bool `yaml:"-"`
+	Volumes      Volumes         `yaml:"volumes"`
+	Tmpfs        StringOrSlice   `yaml:"tmpfs"` // service-level tmpfs targets (#93); volume-form `type: tmpfs` folds in (#79)
+	Secrets      SecretRefs      `yaml:"secrets"`
+	DependsOn    DependsOn       `yaml:"depends_on"`
+	Healthcheck  *Healthcheck    `yaml:"healthcheck"`
+	Profiles     []string        `yaml:"profiles"`     // service starts only when one of these profiles is active (empty = always)
+	MemLimit     scalarStr       `yaml:"mem_limit"`    // legacy memory limit ("512m", "2g", …)
+	CPUs         scalarStr       `yaml:"cpus"`         // legacy CPU limit (may be fractional)
+	SSH          bool            `yaml:"ssh"`          // forward the host SSH agent (--ssh) for private git over SSH
+	User         string          `yaml:"user"`         // --user (name|uid[:gid]) the process runs as
+	WorkingDir   string          `yaml:"working_dir"`  // --workdir the process starts in
+	Init         bool            `yaml:"init"`         // --init: run a tini-like init as PID 1 to reap zombies
+	ReadOnly     bool            `yaml:"read_only"`    // --read-only root filesystem
+	CapAdd       StringOrSlice   `yaml:"cap_add"`      // --cap-add Linux capabilities
+	CapDrop      StringOrSlice   `yaml:"cap_drop"`     // --cap-drop Linux capabilities
+	NetworkMode  string          `yaml:"network_mode"` // only "none" acted on: full network isolation (--network none)
+	Networks     ServiceNetworks `yaml:"networks"`     // declared networks this service joins (one --network each; aliases/static IPs not applied)
 
 	Deploy  *Deploy  `yaml:"deploy"`  // only deploy.resources.limits.{memory,cpus} is acted on
 	Develop *Develop `yaml:"develop"` // develop.watch drives `opossum watch` (file-change sync)
@@ -363,14 +370,16 @@ func (p *Ports) UnmarshalYAML(value *yaml.Node) error {
 		spec := target
 		switch {
 		case lf.HostIP != "":
-			if pub == "" {
-				pub = target // host_ip with no published: mirror the target port
-			}
+			// A host_ip with no published port leaves the host port to the engine,
+			// exactly like the short `ip::80`. Emit that form rather than mirroring
+			// here, so the one place that decides host ports (normalizePort) also
+			// records that opossum chose it — otherwise it would look user-written
+			// and could never be moved off a busy port.
 			host := lf.HostIP
 			if strings.Contains(host, ":") {
 				host = "[" + host + "]" // bracket an IPv6 host (e.g. ::1 -> [::1])
 			}
-			spec = host + ":" + pub + ":" + target
+			spec = host + ":" + pub + ":" + target // pub may be "" -> "ip::target"
 		case pub != "":
 			spec = pub + ":" + target
 		}
