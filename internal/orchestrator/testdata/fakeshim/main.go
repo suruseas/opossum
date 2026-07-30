@@ -5,8 +5,10 @@
 //
 // It logs each invocation's arguments (space-joined) to $FAKE_LOG and returns
 // output shaped like the real CLI. Behaviour is steered entirely through the
-// environment (FAKE_LOG, STATE_DIR, INSPECT_STATE, NET_EXISTS, RUN_FAIL,
-// HEALTH_*, VOLUME_*, LS_*, IMAGE_ABSENT), so tests need no t.Setenv and stay
+// environment (FAKE_LOG, STATE_DIR, INSPECT_STATE, INSPECT_STOPPED,
+// INSPECT_ABSENT, NET_EXISTS, NETWORK_ABSENT, RUN_FAIL, HEALTH_*, VOLUME_*, LS_*,
+// IMAGE_ABSENT),
+// so tests need no t.Setenv and stay
 // isolated: the orchestrator passes these per-Runtime via RunOptions-style Env.
 package main
 
@@ -65,7 +67,25 @@ func run(args []string) int {
 				labels = append(labels, `"opossum.config-hash":"`+strings.TrimSpace(string(h))+`"`)
 			}
 		}
+		// $INSPECT_ABSENT names containers that do not exist: the real CLI exits
+		// non-zero for those, which is how opossum tells "stopped" from "never
+		// created". Same knob and meaning as the shim in cmd/opossum/testdata.
+		for _, m := range strings.Fields(os.Getenv("INSPECT_ABSENT")) {
+			if arg(1) == m {
+				fmt.Fprintf(os.Stderr, "Error: container not found: %s\n", arg(1))
+				return 1
+			}
+		}
+		// $INSPECT_STOPPED names individual containers that exist but are not
+		// running — $INSPECT_STATE is the blunt version that applies to every
+		// container and cannot express "db is down while web is up". Same knob and
+		// meaning as the shim in cmd/opossum/testdata.
 		state := os.Getenv("INSPECT_STATE")
+		for _, m := range strings.Fields(os.Getenv("INSPECT_STOPPED")) {
+			if arg(1) == m {
+				state = "stopped"
+			}
+		}
 		if state == "" {
 			state = "running"
 		}
@@ -73,6 +93,17 @@ func run(args []string) int {
 			state, strings.Join(labels, ","), publishedPorts(arg(1)))
 
 	case "network":
+		// `network inspect` exits non-zero for a network that isn't there, which is
+		// how opossum decides whether one exists. $NETWORK_ABSENT lists the ones to
+		// report missing; same knob as the shim in cmd/opossum/testdata.
+		if arg(1) == "inspect" {
+			for _, m := range strings.Fields(os.Getenv("NETWORK_ABSENT")) {
+				if arg(2) == m {
+					fmt.Fprintf(os.Stderr, "Error: network not found: %s\n", arg(2))
+					return 1
+				}
+			}
+		}
 		if arg(1) == "create" {
 			if os.Getenv("NET_EXISTS") != "" {
 				fmt.Fprintf(os.Stderr, "network %s already exists\n", arg(2))

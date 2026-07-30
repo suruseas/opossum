@@ -146,8 +146,12 @@ services:
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	// container_name and restart are unsupported; image/ports are not flagged.
-	if got := proj.Services["web"].Unsupported; !reflect.DeepEqual(got, []string{"container_name", "restart"}) {
-		t.Errorf("Unsupported = %#v, want [container_name restart]", got)
+	// container_name is unsupported; image/ports/restart are acted on and not flagged
+	// (restart drives the per-project supervisor).
+	if got := proj.Services["web"].Unsupported; !reflect.DeepEqual(got, []string{"container_name"}) {
+		t.Errorf("Unsupported = %#v, want [container_name]", got)
+	}
+	if got := proj.Services["web"].Restart; got != "unless-stopped" {
+		t.Errorf("Restart = %q, want unless-stopped", got)
 	}
 }

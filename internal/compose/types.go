@@ -44,6 +44,9 @@ type Service struct {
 	Environment Environment `yaml:"environment"`
 	EnvFile     EnvFiles    `yaml:"env_file"`
 	Ports       Ports       `yaml:"ports"`
+	// Restart is the compose restart policy. opossum honours it with a small
+	// per-project supervisor started by `up`; see internal/orchestrator/supervisor.go.
+	Restart string `yaml:"restart"`
 	// AutoHostPort marks the entries of Ports whose HOST port opossum chose,
 	// because the compose file named only a container port (`ports: ["3000"]`).
 	// Compose leaves the host port to the engine for those, so opossum is free to

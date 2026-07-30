@@ -6,6 +6,25 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-07-30
+
+### Added
+
+- `restart:` is now honoured. A project that declares a policy gets a small supervisor of its own, started by `up` and stopped by `down`, that brings a service back when it exits — the job Docker's always-running engine does and Apple `container` has no equivalent for. `always` and `unless-stopped` behave as they do under Docker, including leaving a service you stopped on purpose alone. `on-failure` can only be approximated: the runtime doesn't report a container's exit code, so a crash and a clean exit look the same, and opossum retries a bounded number of times rather than looping a service that may have finished. `opossum config` says so for the services affected.
+- `opossum destroy` removes everything opossum created for a project in one command: containers (including orphans), the project network, named volumes, images it built or pulled, the restart supervisor, the `.opossum/` state directory and the generated `compose.opossum.yaml`. Your compose file, `.env` and sources are never touched, and neither is anything shared — volumes declared `external: true` and other projects' containers stay, while the DNS domain and the build cache are reported with the command to remove them rather than removed for you. It lists what it will remove and asks first; `--force` skips the question for scripts and agents, `--dry-run` lists and stops, and `--keep-overlay` keeps `compose.opossum.yaml` in case you edited it.
+- `opossum destroy` now reports volumes it cannot account for instead of leaving them invisible. A volume named for the project that no service claims — left behind when a service was renamed or removed from the compose file — is listed as kept, with the command to remove it, because opossum cannot tell such a volume from an `external: true` one by name alone. Previously the teardown reported that everything was gone while these stayed on disk.
+
+### Changed
+
+- Changes are now recorded one file at a time under `changelog.d/` instead of by editing `CHANGELOG.md` directly, and the `[Unreleased]` section is generated from those files (`make changelog`). Two branches adding entries no longer conflict, and an entry can no longer land inside an already-published release because the other branch shipped first.
+- The restart supervisor's log is now capped at 1MB. A service that fails permanently is restarted for as long as its policy asks, and each attempt writes a line — about 270KB a day, previously without limit, for a project you may have forgotten about. On reaching the cap the log keeps its newest half and says so on its first line (`[OPSM-410]`); the recent lines are the ones that explain why a service is down.
+
+### Fixed
+
+- A service declaring `restart:` is no longer left unwatched when `up` fails. A service that exits immediately after starting fails the up, but the rest of the stack stays running — opossum stopped there without starting its supervisor, so `restart: always` quietly did nothing for the containers that were still up. A bring-up that fails and is rolled back still starts no supervisor: nothing survives it to watch.
+- `opossum up <service>` no longer stops watching the services it didn't touch. Bringing up one service used to replace the project's restart supervisor with one covering only that service, so anything else still running quietly lost the `restart:` policy the compose file gives it. A partial up now watches what it started plus whatever was already being watched and is still there.
+- `opossum destroy -p <other-project>` no longer removes the current directory's generated files under another project's name. The runtime objects belong to the name you gave; `.opossum/` and the generated `compose.opossum.yaml` belong to the directory you are standing in, which is usually a different project. The plan now names that directory and says whose files they are, and `--force` refuses rather than act on the guess — add `--keep-local` to remove only the named project's containers, volumes, images and supervisor.
+
 ## [0.16.0] - 2026-07-29
 
 ### Added
@@ -629,7 +648,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/suruseas/opossum/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/suruseas/opossum/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/suruseas/opossum/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/suruseas/opossum/compare/v0.13.0...v0.14.0

@@ -11,10 +11,12 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/suruseas/opossum/internal/compose"
@@ -29,6 +31,10 @@ import (
 var version = "0.1.0-dev"
 
 var (
+	// nameWithoutFlag is the project name the compose file and its directory imply,
+	// recorded by loadOrchestrator before -p overrides it.
+	nameWithoutFlag string
+
 	composeFiles []string
 	projectName  string
 	dnsDomain    string
@@ -57,6 +63,8 @@ func newRootCmd() *cobra.Command {
 		stopCmd(), restartCmd(), startCmd(), execCmd(),
 		buildCmd(), pullCmd(), killCmd(), runCmd(),
 		importCmd(), configCmd(), doctorCmd(), cpCmd(), watchCmd(), wsCmd(),
+		destroyCmd(),
+		superviseCmd(),
 	)
 
 	// Preflight: every runtime-touching command needs Apple's `container` CLI on
@@ -101,7 +109,21 @@ func newRootCmd() *cobra.Command {
 // it auto-starts; logs/stats included, since they'd otherwise just fail.
 var runtimeReadOnly = map[string]bool{"ps": true, "images": true}
 
-func cmdReadOnlyRuntime(cmd *cobra.Command) bool { return runtimeReadOnly[cmd.Name()] }
+func cmdReadOnlyRuntime(cmd *cobra.Command) bool {
+	if runtimeReadOnly[cmd.Name()] {
+		return true
+	}
+	// `destroy --dry-run` only prints a list. Starting a VM to answer a question
+	// about what would be removed is the same surprise `ps` and `images` avoid —
+	// and it is a poor introduction for someone who ran it to decide whether to
+	// keep opossum at all.
+	if cmd.Name() == "destroy" {
+		if f := cmd.Flags().Lookup("dry-run"); f != nil && f.Value.String() == "true" {
+			return true
+		}
+	}
+	return false
+}
 
 // runtimePreflightExempt names commands that must run without the `container` CLI
 // installed: `config` only parses/renders compose, `doctor` self-diagnoses the
@@ -394,7 +416,7 @@ func main() {
 func upCmd() *cobra.Command {
 	var foreground bool
 	var profiles []string
-	var forceRecreate, build, noBuild, removeOrphans, fromDockerCompose, fromDockerLegacy, dryRun bool
+	var forceRecreate, build, noBuild, removeOrphans, fromDockerCompose, fromDockerLegacy, dryRun, noSupervisor bool
 	cmd := &cobra.Command{
 		Use:   "up [service...]",
 		Short: "Build and start services in dependency order (all, or the named services plus their dependencies)",
@@ -449,7 +471,25 @@ func upCmd() *cobra.Command {
 				os.Exit(130)
 			}()
 			o.OnSignal(ctx)
-			return o.Up(!foreground, args...)
+			upErr := o.Up(!foreground, args...)
+			// Deliberately also on the error path. Most failures roll the stack back,
+			// leaving nothing to watch — but one doesn't: a service that exits right
+			// after starting fails the up as a post-start health report, and every
+			// container stays. Those carry the compose file's `restart:` policy, which
+			// docker applies whatever `up` exited with, and bailing out here left them
+			// unwatched. Started() is empty after a rollback, so this only starts a
+			// supervisor when something really is up.
+			//
+			// Still after Up returns, never during it: a watcher started earlier would
+			// see the half-built stack and try to "fix" containers still being made.
+			// --dry-run resolves without starting anything, so there is nothing to
+			// watch. A foreground `up` means "run it here until it ends" — leaving a
+			// watcher to restart the service the user just watched finish would
+			// contradict it.
+			if !dryRun && !foreground {
+				startSupervisorFor(cmd.ErrOrStderr(), o, noSupervisor, profiles, upErr != nil)
+			}
+			return upErr
 		},
 	}
 	cmd.Flags().BoolVar(&foreground, "foreground", false, "run a single service attached in the foreground instead of detached (rejected for multiple long-running services)")
@@ -469,6 +509,7 @@ func upCmd() *cobra.Command {
 	// accepted, so nothing is lost.
 	cmd.Flags().BoolVar(&fromDockerLegacy, "from-docker", false, "deprecated alias for --from-docker-compose")
 	_ = cmd.Flags().MarkHidden("from-docker")
+	cmd.Flags().BoolVar(&noSupervisor, "no-supervisor", false, "don't leave a background process watching `restart:` services (they won't be brought back automatically)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "resolve and print the plan (startup order and the container commands that would run) without executing anything")
 	return cmd
 }
@@ -485,6 +526,17 @@ func downCmd() *cobra.Command {
 			case "", "local", "all":
 			default:
 				return fmt.Errorf("--rmi must be \"local\" or \"all\", got %q", rmi)
+			}
+			// Stop the supervisor BEFORE the compose file is needed. A watcher is a
+			// resident process, and `down` is the only thing that stops it — so it
+			// must not be reachable only when the compose file still parses. Deleting
+			// or renaming the file would otherwise strand a process the user has no
+			// opossum command to remove.
+			if name := projectNameWithoutCompose(); name != "" {
+				if orchestrator.StopSupervisor(name) {
+					fmt.Fprintln(cmd.ErrOrStderr(), "opossum: stopped the restart supervisor")
+				}
+				orchestrator.ClearWatched(name)
 			}
 			o, err := loadOrchestrator(cmd.OutOrStdout())
 			if err != nil {
@@ -511,6 +563,213 @@ func imagesCmd() *cobra.Command {
 			return o.Images()
 		},
 	}
+}
+
+// destroyCmd is the exit from a trial run. `down` is the daily command; this is
+// the one that leaves no trace, so it is deliberately louder: it lists what it
+// will remove and asks, and it refuses to guess when nobody can answer.
+func destroyCmd() *cobra.Command {
+	var force, dryRun, keepOverlay, keepImages, keepLocal bool
+	cmd := &cobra.Command{
+		Use:   "destroy",
+		Short: "Remove everything opossum created for this project (containers, volumes, images, state)",
+		Long: "Remove everything opossum created for this project: containers, the project " +
+			"network, named volumes, images it built or pulled, the restart supervisor, the " +
+			"`.opossum/` state directory and the generated `compose.opossum.yaml`.\n\n" +
+			"Your own files are never touched — the compose file, `.env` and your sources are " +
+			"left exactly as they are. Nothing shared beyond this project is removed either: " +
+			"volumes declared `external: true`, other projects' containers, the DNS domain and " +
+			"the builder cache all stay (the last two are reported with the command to remove " +
+			"them, since they are shared and one needs sudo).\n\n" +
+			"Destroy asks before it acts. Use --force in a script or agent loop, and --dry-run " +
+			"to see the list without removing anything. (There is no -f shorthand: -f is the " +
+			"global --file.)",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			o, err := loadOrchestrator(cmd.OutOrStdout())
+			if err != nil {
+				return err
+			}
+			plan, err := o.DestroyPlanFor(keepOverlay, keepImages, keepLocal)
+			if err != nil {
+				return err
+			}
+			// Only a name given on the command line can be mistargeted. A compose file
+			// whose `name:` differs from its directory is ordinary and means nothing here.
+			// Fail closed: if a name was given on the command line and we could not work
+			// out what this directory calls itself, treat it as mistargeted. A safety
+			// guard that goes quiet when its input is missing is not a guard.
+			if projectName != "" && nameWithoutFlag != o.Project.Name {
+				plan.MistargetedName = nameWithoutFlag
+				if plan.MistargetedName == "" {
+					plan.MistargetedName = "(unknown)"
+				}
+			}
+			out := cmd.OutOrStdout()
+			if plan.Empty() {
+				fmt.Fprintf(out, "Nothing to remove: opossum has nothing left for project %q.\n", o.Project.Name)
+				printSystemLeftovers(out)
+				return nil
+			}
+			// A project named on the command line is not the project this directory
+			// belongs to. The runtime objects are the named project's and removing them
+			// is the whole point; the generated files are *this* directory's and removing
+			// them almost certainly is not what was meant. Interactively the plan says so
+			// and the question that follows is the consent. With --force there is nobody
+			// to read a warning, so this refuses rather than act on the guess.
+			// dry-run excluded: it removes nothing, so refusing it would fail a preview
+			// and explain the failure with something that was never going to happen.
+			if plan.MistargetedName != "" && !keepLocal && len(plan.LocalPaths) > 0 && force && !dryRun {
+				return fmt.Errorf("refusing to destroy %q from a directory that belongs to %q: "+
+					"--force would remove this directory's generated files (%s) under another "+
+					"project's name, with nothing asked and nobody to read a warning.\n"+
+					"  To remove only %[1]q's containers, volumes, images and supervisor, add "+
+					"--keep-local.\n"+
+					"  To take this directory apart, run it here without -p.",
+					o.Project.Name, plan.MistargetedName, strings.Join(plan.LocalPaths, ", "))
+			}
+			printDestroyPlan(out, o.Project.Name, plan, dryRun)
+			if dryRun {
+				return nil
+			}
+			if !force {
+				ok, err := confirmDestroy(cmd, o.Project.Name)
+				if err != nil {
+					return err
+				}
+				if !ok {
+					fmt.Fprintln(out, "Left everything as it was.")
+					return nil
+				}
+			}
+			if err := o.Destroy(plan); err != nil {
+				return err
+			}
+			fmt.Fprintf(out, "Removed everything opossum created for %q. Your compose file, .env and sources are untouched.\n", o.Project.Name)
+			printSystemLeftovers(out)
+			return nil
+		},
+	}
+	// No `-f` shorthand: that is the global `--file`, and a destroy that could be
+	// spelled the same way as "use this compose file" is a trap worth avoiding.
+	cmd.Flags().BoolVar(&force, "force", false, "don't ask for confirmation (for scripts and agents)")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "list what would be removed and stop")
+	cmd.Flags().BoolVar(&keepOverlay, "keep-overlay", false, "keep compose.opossum.yaml even when opossum generated it — including one you edited, which is otherwise removed (one you wrote from scratch is always kept)")
+	cmd.Flags().BoolVar(&keepImages, "keep-images", false, "keep the images: a pulled one may be shared with other projects and slow to fetch again")
+	cmd.Flags().BoolVar(&keepLocal, "keep-local", false, "leave this directory's generated files (`.opossum/`, compose.opossum.yaml) alone and remove only the runtime objects — what you want when destroying a project by name from somewhere else")
+	return cmd
+}
+
+// printDestroyPlan writes the plan as a list of concrete names. Groups with
+// nothing in them are left out: a heading with no items under it reads like
+// something was missed.
+func printDestroyPlan(out io.Writer, project string, p orchestrator.DestroyPlan, dryRun bool) {
+	verb := "will remove"
+	if dryRun {
+		verb = "would remove"
+	}
+	fmt.Fprintf(out, "Destroying project %q %s:\n", project, verb)
+	if p.SupervisorRunning {
+		fmt.Fprintln(out, "  restart supervisor:")
+		fmt.Fprintln(out, "    - the background process watching this project")
+	}
+	for _, g := range []struct {
+		label string
+		items []string
+	}{
+		{"containers", p.Containers},
+		{"networks", p.Networks},
+		{"volumes (data in them is lost)", p.Volumes},
+		{"images", p.Images},
+	} {
+		if len(g.items) == 0 {
+			continue
+		}
+		fmt.Fprintf(out, "  %s:\n", g.label)
+		for _, item := range g.items {
+			fmt.Fprintf(out, "    - %s\n", item)
+		}
+	}
+	// Named separately from the runtime objects above, and with the directory
+	// spelled out: those belong to a project name, these belong to a place. Reading
+	// "destroying project X" as a promise about X's directory is exactly the mistake
+	// that made `destroy -p other --force` dangerous.
+	if len(p.LocalPaths) > 0 {
+		where := "files opossum generated"
+		if p.LocalDir != "" {
+			where = fmt.Sprintf("files opossum generated in %s", p.LocalDir)
+		}
+		fmt.Fprintf(out, "  %s:\n", where)
+		for _, item := range p.LocalPaths {
+			fmt.Fprintf(out, "    - %s\n", item)
+		}
+		if p.MistargetedName != "" {
+			fmt.Fprintf(out, "    ! this directory belongs to project %q, not %q — these files are "+
+				"%[1]q's. Use --keep-local to remove only %[2]q's containers, volumes and images.\n",
+				p.MistargetedName, project)
+		}
+	}
+	// Keyed by the project name, not by this directory: worth its own line so the
+	// heading above stays true.
+	var byName []string
+	local := map[string]bool{}
+	for _, l := range p.LocalPaths {
+		local[l] = true
+	}
+	for _, path := range p.Paths {
+		if !local[path] {
+			byName = append(byName, path)
+		}
+	}
+	if len(byName) > 0 {
+		fmt.Fprintf(out, "  state opossum keeps for the project %q:\n", project)
+		for _, item := range byName {
+			fmt.Fprintf(out, "    - %s\n", item)
+		}
+	}
+	if len(p.StrandedVolumes) > 0 {
+		fmt.Fprintln(out, "  named for this project but not claimed by any service — NOT removed:")
+		for _, item := range p.StrandedVolumes {
+			fmt.Fprintf(out, "    - %s\n", item)
+		}
+		fmt.Fprintln(out, "    One of these may be left over from a service you renamed or deleted, in")
+		fmt.Fprintln(out, "    which case it is yours to remove. It may equally belong to another project")
+		fmt.Fprintf(out, "    whose name starts with %q, or be an `external: true` volume — opossum\n", project+"_")
+		fmt.Fprintln(out, "    cannot tell from the name, which is why it leaves them alone. Check what")
+		fmt.Fprintln(out, "    uses one (`container volume inspect <name>`) before removing it.")
+	}
+	if p.KeptOverlay != "" {
+		fmt.Fprintln(out, "  kept, not removed:")
+		fmt.Fprintf(out, "    - %s\n", p.KeptOverlay)
+	}
+	fmt.Fprintln(out, "  your compose file, .env and sources are NOT touched.")
+}
+
+// printSystemLeftovers names what destroy leaves alone because it is shared with
+// every other project, and gives the command for each. It prints them rather than
+// running them: removing a DNS domain needs sudo, and clearing the builder cache
+// would slow down every unrelated project on the machine.
+func printSystemLeftovers(out io.Writer) {
+	fmt.Fprintln(out, "Shared with other projects, so left alone:")
+	fmt.Fprintf(out, "  - the %q DNS domain — remove with: sudo container system dns delete %s\n", dnsDomain, dnsDomain)
+	fmt.Fprintln(out, "  - the build cache and unused images — reclaim with: container builder delete --force && container image prune -a")
+}
+
+// confirmDestroy asks, once, on the command's own streams. Without a terminal
+// there is nobody to ask: rather than assume yes (destructive) or assume no
+// (silently doing nothing in a script), it says which flag to pass.
+func confirmDestroy(cmd *cobra.Command, project string) (bool, error) {
+	if !stdinIsTerminal() {
+		return false, fmt.Errorf("destroy removes data and asks first, but stdin isn't a terminal "+
+			"so there's nobody to ask — re-run with --force to destroy %q without asking, or "+
+			"--dry-run to see what it would remove", project)
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Remove all of it? [y/N] ")
+	var answer string
+	if _, err := fmt.Fscanln(cmd.InOrStdin(), &answer); err != nil {
+		return false, nil // no answer (EOF, a bare newline) means no
+	}
+	return strings.EqualFold(answer, "y") || strings.EqualFold(answer, "yes"), nil
 }
 
 func psCmd() *cobra.Command {
@@ -950,13 +1209,20 @@ func loadOrchestrator(out io.Writer) (*orchestrator.Orchestrator, error) {
 	if err != nil {
 		return nil, err
 	}
+	// What this project is called when nobody overrides it: the compose file's own
+	// `name:`, or failing that its directory. Remembered before -p is applied so a
+	// destructive command can tell "you named another project" from "this file names
+	// its project something other than its folder", which is ordinary.
+	if proj.Name != "" {
+		nameWithoutFlag = compose.SanitizeName(proj.Name)
+	} else {
+		nameWithoutFlag = compose.SanitizeName(filepath.Base(proj.BaseDir))
+	}
 	switch {
 	case projectName != "":
 		proj.Name = compose.SanitizeName(projectName)
-	case proj.Name != "":
-		proj.Name = compose.SanitizeName(proj.Name)
 	default:
-		proj.Name = compose.SanitizeName(filepath.Base(proj.BaseDir))
+		proj.Name = nameWithoutFlag
 	}
 	rt := runtime.New()
 	rt.Verbose = verbose
@@ -1046,4 +1312,202 @@ func reportEntries(stderr io.Writer, changes []orchestrator.Adaptation) {
 			fmt.Fprintf(stderr, "opossum:   [%s] %s\n", c.Code, c.Summary)
 		}
 	}
+}
+
+// superviseCmd is the background watcher `up` starts for a project with
+// `restart:` policies. It is hidden because it isn't a thing to run by hand: the
+// lifecycle is `up` starts it, `down` stops it, and running a second one would
+// mean two watchers racing to restart the same container.
+func superviseCmd() *cobra.Command {
+	var profiles []string
+	var watch []string
+	cmd := &cobra.Command{
+		Use:    "__supervise",
+		Short:  "internal: watch this project's restart: services",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			o, err := loadOrchestrator(cmd.OutOrStdout())
+			if err != nil {
+				return err
+			}
+			o.EnableProfiles(profiles)
+			o.EnableProfiles(strings.Split(os.Getenv("COMPOSE_PROFILES"), ","))
+			// The set is decided by the `up` that started this watcher and handed
+			// over here — what it started plus what was already watched and still
+			// exists. Re-deriving it from the compose file would put services nobody
+			// started under supervision; re-deriving it from `up`'s own arguments
+			// would drop the ones it carried over.
+			services := o.SupervisedServices(watch)
+			if len(services) == 0 {
+				return nil
+			}
+			// Claim the project before watching anything. Losing the race means
+			// another supervisor is already on it, which is success, not failure —
+			// exit quietly rather than become a second watcher nothing can stop.
+			if err := orchestrator.ClaimSupervisor(o.Project.Name); err != nil {
+				if orchestrator.ErrAlreadySupervised(err) {
+					return nil
+				}
+				return err
+			}
+			// Record what this watcher took on, so a later `up` can tell whether the
+			// compose file has moved on since.
+			_ = orchestrator.RecordWatched(o.Project.Name, services)
+			// Exit cleanly when `down` asks, so the pid file doesn't outlive us.
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			sig := make(chan os.Signal, 1)
+			signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+			defer signal.Stop(sig)
+			go func() { <-sig; cancel() }()
+			// Write through a bounded log rather than the inherited stdout: a service
+			// that fails permanently is restarted for as long as its policy says, and
+			// each attempt is a line. stdout stays connected to the same file, so a
+			// panic — the one thing that doesn't come through here — is still recorded.
+			logw, err := orchestrator.OpenSupervisorLog(o.Project.Name)
+			if err != nil {
+				// Say so rather than degrade quietly: stdout goes to the same file, so
+				// the log looks identical while the cap silently stops applying.
+				fmt.Fprintf(cmd.OutOrStdout(), "%s %s\n", time.Now().Format(time.RFC3339),
+					orchestrator.NoticeSupervisorLogUncapped(err))
+				return o.Supervise(ctx, services, cmd.OutOrStdout())
+			}
+			defer logw.Close()
+			return o.Supervise(ctx, services, logw)
+		},
+	}
+	cmd.Flags().StringArrayVar(&profiles, "profile", nil, "profiles the supervised project was started with")
+	cmd.Flags().StringArrayVar(&watch, "watch-service", nil, "the exact services to watch, as worked out by the `up` that started this watcher")
+	return cmd
+}
+
+// startSupervisorFor leaves a watcher running for this project when the compose
+// file asks for one. Enabled by default: a `restart:` policy is the user saying
+// they want the service kept up, and honouring it is what compose parity means.
+// The notice makes the process visible, and --no-supervisor / OPOSSUM_NO_SUPERVISOR
+// turn it off for the cases where a background process outliving the command is
+// worse than a service staying down (CI, one-shot agent runs).
+// mergeServices returns the union of two service lists, sorted, without
+// duplicates. The supervisor sorts again when it records the set, so the sort
+// here is for the notice: a set that reads the same way every time.
+func mergeServices(a, b []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range append(append([]string(nil), a...), b...) {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// upFailed reports whether the `up` that is asking for a supervisor returned an
+// error. It only ever makes this function do less: a failed `up` may not take an
+// existing supervisor away, because what it started is not a reliable statement
+// about what is running.
+func startSupervisorFor(stderr io.Writer, o *orchestrator.Orchestrator, disabled bool, profiles []string, upFailed bool) {
+	if disabled || os.Getenv("OPOSSUM_NO_SUPERVISOR") != "" {
+		return
+	}
+	// What `up` actually started, not the whole compose file: `up web` must not
+	// announce (or poll for) services nobody asked to run, and a profile-gated
+	// service that stayed down isn't supervised either.
+	order := o.Started()
+	if len(order) == 0 {
+		return
+	}
+	services := o.SupervisedServices(order)
+	// …plus whatever a previous `up` was watching that is still there. `up web`
+	// makes no statement about `db`, so replacing a supervisor watching [db web]
+	// with one watching [web] would silently drop a running service's `restart:`
+	// policy — the notice would be accurate and the behaviour still wrong. The
+	// union keeps both true: only services with a live container are carried over,
+	// so this can't go back to announcing services that were never started.
+	services = mergeServices(services, o.StillSupervised(orchestrator.Watched(o.Project.Name)))
+	if len(services) == 0 {
+		return
+	}
+	logPath, err := orchestrator.SupervisorLogFile(o.Project.Name)
+	if err != nil {
+		return
+	}
+	// Re-invoke ourselves with the same compose selection, so the watcher resolves
+	// exactly the project that was just started.
+	// The child runs with its own working directory, so every path has to be
+	// absolute: a relative `-f` would be re-resolved against a different directory
+	// and the watcher would die on startup — while `up` had just announced that
+	// supervision was running.
+	args := []string{"__supervise", "-p", o.Project.Name, "--dns-domain", dnsDomain}
+	for _, f := range composeFiles {
+		args = append(args, "-f", absPathOr(f))
+	}
+	for _, f := range envFiles {
+		args = append(args, "--env-file", absPathOr(f))
+	}
+	// The child re-resolves the project, so it needs the same profiles — otherwise
+	// it would decide a different set of services is in play.
+	for _, p := range profiles {
+		args = append(args, "--profile", p)
+	}
+	// …and the exact set worked out above — what this `up` started plus what was
+	// already watched and is still there. Passing the started set alone would make
+	// the child re-narrow to it the moment a supervisor actually has to be
+	// (re)started, so the union would live only in the notice and the comparison:
+	// true on paper, and the carried-over services unwatched in fact.
+	for _, n := range services {
+		args = append(args, "--watch-service", n)
+	}
+	// A watcher started before the compose file changed would keep enforcing the
+	// old policies while this `up` announced the new ones. Replace it rather than
+	// print a notice describing a supervisor that isn't watching those services.
+	//
+	// Not when the up failed, though. `up web` that fails leaves a Started() of
+	// just [web], and replacing a supervisor watching [db web] with one watching
+	// [web] would drop `db` — still running, still asking to be restarted —
+	// precisely by way of the change that exists to stop services going unwatched.
+	// A failed up may add a supervisor where there was none; it may not narrow one.
+	if orchestrator.SupervisorPID(o.Project.Name) != 0 && !orchestrator.WatchedMatches(o.Project.Name, services) {
+		// Not when the up failed, though. `up web` that fails leaves a Started() of
+		// just [web], and replacing a supervisor watching [db web] with one watching
+		// [web] would drop `db` — still running, still asking to be restarted —
+		// precisely by way of the change that exists to stop services going
+		// unwatched. A failed up may add a supervisor where there was none; it may
+		// not narrow one. What is being watched stays visible in `opossum ps`.
+		if upFailed {
+			return
+		}
+		orchestrator.StopSupervisor(o.Project.Name)
+	}
+	if _, err := orchestrator.StartSupervisor(o.Project.Name, o.Project.BaseDir, args); err != nil {
+		fmt.Fprintf(stderr, "opossum: couldn't start the restart supervisor (%v) — services with `restart:` "+
+			"will not be brought back automatically\n", err)
+		return
+	}
+	fmt.Fprintln(stderr, "opossum: "+orchestrator.NoticeSupervisorStarted(o.Project.Name, services, logPath))
+}
+
+// absPathOr makes a path absolute, leaving it alone if that isn't possible.
+func absPathOr(p string) string {
+	if abs, err := filepath.Abs(p); err == nil {
+		return abs
+	}
+	return p
+}
+
+// projectNameWithoutCompose derives the project name the way loadOrchestrator
+// would, minus the part that needs the compose file (its `name:`). It is enough
+// to find a running supervisor: `-p` is authoritative when given, and otherwise
+// the directory name is what `up` used unless the file named the project.
+func projectNameWithoutCompose() string {
+	if projectName != "" {
+		return compose.SanitizeName(projectName)
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return compose.SanitizeName(filepath.Base(wd))
 }

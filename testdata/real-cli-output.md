@@ -37,6 +37,26 @@ Error: failed to delete one or more networks: ["<name>"]
 → `DeleteNetwork`: この文字列は **`not found` を含まない**。`networkAlreadyGone` が
 `failed to delete one or more networks` も「既に無い」と見なして誤警告を抑制する。
 
+## `container network inspect <name>`  （存在, exit 0）
+```
+[
+  {
+    "configuration" : {
+      "creationDate" : "2026-07-22T07:47:15Z",
+      "labels" : { },
+      "mode" : "nat",
+      "name" : "<name>",
+      ...
+```
+
+## `container network inspect <name>`  （不在, exit 1）
+```
+Error: network not found: <name>
+```
+→ `NetworkExists`: 終了コードだけを見る。`destroy` はこれを削除の可否のゲートに
+使うので（存在しない網を計画に並べない）、この契約が崩れると destroy は `down`
+より消し残す。2026-07-30 に macOS 26 上で実測。
+
 ## `container inspect <name>`  （不在, exit 1）
 ```
 Error: container not found: <name>

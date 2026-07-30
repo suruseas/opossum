@@ -410,6 +410,12 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 		if _, _, err := svc.Resources(); err != nil {
 			return nil, err
 		}
+		// A misspelled restart policy would otherwise be accepted and then quietly
+		// ignored — the service simply never gets supervised, with nothing to explain
+		// why. Fail at load, where the typo is.
+		if _, err := svc.RestartPolicy(); err != nil {
+			return nil, fmt.Errorf("service %q: %w", name, err)
+		}
 		// network_mode: only "none" (full isolation) is acted on. Any other value
 		// (host, bridge, service:x, …) has no faithful mapping on Apple `container`,
 		// so ignore it — the service joins the project network — and report it as an

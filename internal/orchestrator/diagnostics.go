@@ -30,34 +30,38 @@ import "fmt"
 type diagCode string
 
 const (
-	codePGDATADatadir     diagCode = "OPSM-101" // named volume mounted directly at Postgres's data dir
-	codeSharedVolume      diagCode = "OPSM-102" // a named volume shared by two running services
-	codeVolumeAttachBusy  diagCode = "OPSM-103" // a named volume is already attached to another running container
-	codeBindDirCreate     diagCode = "OPSM-104" // couldn't create a bind mount's host source directory
-	codeBindDataDirChown  diagCode = "OPSM-105" // a database data directory is a bind mount (can't be chowned)
-	codeHostPortInUse     diagCode = "OPSM-201" // a published host port is already taken (pre-flight)
-	codeDNSDomainAbsent   diagCode = "OPSM-202" // the DNS domain isn't registered (no bare-name discovery)
-	codeInternalEgress    diagCode = "OPSM-203" // an internal network: no internet egress / no name resolution
-	codeDockerSocket      diagCode = "OPSM-204" // a service mounts docker.sock (Apple container has none)
-	codeExternalNetAbsent diagCode = "OPSM-205" // a network declared external: true doesn't exist
-	codeHostDeviceMount   diagCode = "OPSM-106" // a host device or session socket is mounted (a per-container VM can't reach it)
-	codeHostPortRemapped  diagCode = "OPSM-206" // a container-only port's mirrored host port was taken, so opossum picked a free one
-	codeBuildTmpContext   diagCode = "OPSM-301" // build context under /private/tmp (builder can't read it)
-	codeBuildSymlink      diagCode = "OPSM-302" // build context is a symlink (builder may reject it)
-	codeDepNotRunning     diagCode = "OPSM-401" // a dependency's container exited before becoming healthy
-	codeOrphans           diagCode = "OPSM-402" // containers left by services no longer in the compose
-	codeDepNoHealth       diagCode = "OPSM-403" // a service_healthy dependency defines no healthcheck
-	codeRuntimeAbsent     diagCode = "OPSM-404" // the `container` CLI isn't installed / not on PATH
-	codeRuntimeStopped    diagCode = "OPSM-405" // the `container` system (daemon) is installed but not running
-	codeRuntimeAutoStart  diagCode = "OPSM-406" // the runtime wasn't running; opossum is starting it
-	codeServiceExited     diagCode = "OPSM-407" // a service's container exited right after starting (no health gate)
-	codeIgnoredTopField   diagCode = "OPSM-501" // unsupported top-level compose field(s), ignored
-	codeIgnoredField      diagCode = "OPSM-502" // unsupported service compose field(s), ignored
-	codeWatchRebuild      diagCode = "OPSM-601" // a `watch` rebuild action failed
-	codeWatchRestart      diagCode = "OPSM-602" // a `watch` restart action failed
-	codeWatchSync         diagCode = "OPSM-603" // a `watch` file sync failed
-	codeWatchSetup        diagCode = "OPSM-604" // `watch` couldn't start watching a path
-	codeWatchError        diagCode = "OPSM-605" // the `watch` file watcher reported an error
+	codePGDATADatadir         diagCode = "OPSM-101" // named volume mounted directly at Postgres's data dir
+	codeSharedVolume          diagCode = "OPSM-102" // a named volume shared by two running services
+	codeVolumeAttachBusy      diagCode = "OPSM-103" // a named volume is already attached to another running container
+	codeBindDirCreate         diagCode = "OPSM-104" // couldn't create a bind mount's host source directory
+	codeBindDataDirChown      diagCode = "OPSM-105" // a database data directory is a bind mount (can't be chowned)
+	codeHostPortInUse         diagCode = "OPSM-201" // a published host port is already taken (pre-flight)
+	codeDNSDomainAbsent       diagCode = "OPSM-202" // the DNS domain isn't registered (no bare-name discovery)
+	codeInternalEgress        diagCode = "OPSM-203" // an internal network: no internet egress / no name resolution
+	codeDockerSocket          diagCode = "OPSM-204" // a service mounts docker.sock (Apple container has none)
+	codeExternalNetAbsent     diagCode = "OPSM-205" // a network declared external: true doesn't exist
+	codeHostDeviceMount       diagCode = "OPSM-106" // a host device or session socket is mounted (a per-container VM can't reach it)
+	codeHostPortRemapped      diagCode = "OPSM-206" // a container-only port's mirrored host port was taken, so opossum picked a free one
+	codeBuildTmpContext       diagCode = "OPSM-301" // build context under /private/tmp (builder can't read it)
+	codeBuildSymlink          diagCode = "OPSM-302" // build context is a symlink (builder may reject it)
+	codeDepNotRunning         diagCode = "OPSM-401" // a dependency's container exited before becoming healthy
+	codeOrphans               diagCode = "OPSM-402" // containers left by services no longer in the compose
+	codeDepNoHealth           diagCode = "OPSM-403" // a service_healthy dependency defines no healthcheck
+	codeRuntimeAbsent         diagCode = "OPSM-404" // the `container` CLI isn't installed / not on PATH
+	codeRuntimeStopped        diagCode = "OPSM-405" // the `container` system (daemon) is installed but not running
+	codeRuntimeAutoStart      diagCode = "OPSM-406" // the runtime wasn't running; opossum is starting it
+	codeSupervisorStarted     diagCode = "OPSM-408" // a per-project supervisor is watching `restart:` services
+	codeSupervisorAction      diagCode = "OPSM-409" // the supervisor restarted a service, or gave up on one
+	codeSupervisorLogTrimmed  diagCode = "OPSM-410" // the supervisor's log hit its size cap and lost its older half
+	codeSupervisorLogUncapped diagCode = "OPSM-411" // the supervisor could not open a size-capped log and is writing without a bound
+	codeServiceExited         diagCode = "OPSM-407" // a service's container exited right after starting (no health gate)
+	codeIgnoredTopField       diagCode = "OPSM-501" // unsupported top-level compose field(s), ignored
+	codeIgnoredField          diagCode = "OPSM-502" // unsupported service compose field(s), ignored
+	codeWatchRebuild          diagCode = "OPSM-601" // a `watch` rebuild action failed
+	codeWatchRestart          diagCode = "OPSM-602" // a `watch` restart action failed
+	codeWatchSync             diagCode = "OPSM-603" // a `watch` file sync failed
+	codeWatchSetup            diagCode = "OPSM-604" // `watch` couldn't start watching a path
+	codeWatchError            diagCode = "OPSM-605" // the `watch` file watcher reported an error
 )
 
 // allDiagCodes lists every code opossum can emit. A test asserts each appears in
@@ -67,7 +71,8 @@ var allDiagCodes = []diagCode{
 	codeHostPortInUse, codeDNSDomainAbsent, codeInternalEgress, codeDockerSocket, codeExternalNetAbsent, codeHostPortRemapped,
 	codeBuildTmpContext, codeBuildSymlink,
 	codeDepNotRunning, codeOrphans, codeDepNoHealth,
-	codeIgnoredTopField, codeIgnoredField, codeRuntimeAbsent, codeRuntimeStopped, codeRuntimeAutoStart, codeServiceExited,
+	codeIgnoredTopField, codeIgnoredField, codeRuntimeAbsent, codeRuntimeStopped, codeRuntimeAutoStart, codeServiceExited, codeSupervisorStarted, codeSupervisorAction,
+	codeSupervisorLogTrimmed, codeSupervisorLogUncapped,
 	codeWatchRebuild, codeWatchRestart, codeWatchSync, codeWatchSetup, codeWatchError,
 }
 

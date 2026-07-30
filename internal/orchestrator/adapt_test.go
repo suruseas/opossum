@@ -1209,3 +1209,47 @@ services:
 		t.Errorf("a read-only mount must not be suggested away, got %d:\n%s", len(changes), body)
 	}
 }
+
+// `on-failure` is the one policy opossum can only approximate. Someone migrating
+// a project meets the compatibility surprises in the overlay, so it belongs there
+// too — not only in `config` and the docs, which they may never open.
+func TestPlanOverlayNotesTheOnFailureApproximation(t *testing.T) {
+	body, changes := planFor(t, `
+name: demo
+services:
+  worker:
+    image: busybox
+    restart: on-failure
+`)
+	found := false
+	for _, c := range changes {
+		if c.Kind == "note" && strings.Contains(c.Summary, "on-failure") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("an on-failure policy should be noted, got %+v:\n%s", changes, body)
+	}
+	if !strings.Contains(body, "exit code") {
+		t.Errorf("the note should say why it can't be honoured, got:\n%s", body)
+	}
+	// It must be a note, not a change: nothing here is applied.
+	if strings.Contains(body, "\nservices:") {
+		t.Errorf("a notes-only finding should carry no YAML, got:\n%s", body)
+	}
+}
+
+// The policies opossum honours exactly must not be flagged — a note on every
+// project with `restart:` would be noise, and `always` genuinely works.
+func TestPlanOverlayNoNoteForHonouredPolicies(t *testing.T) {
+	for _, p := range []string{"always", "unless-stopped", "no", ""} {
+		src := "name: demo\nservices:\n  web:\n    image: nginx\n"
+		if p != "" {
+			src += "    restart: " + p + "\n"
+		}
+		body, changes := planFor(t, src)
+		if body != "" || len(changes) != 0 {
+			t.Errorf("restart: %q is honoured exactly and needs no note, got %d:\n%s", p, len(changes), body)
+		}
+	}
+}

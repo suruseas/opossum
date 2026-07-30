@@ -115,7 +115,7 @@ Notes:
 - Pair it with `cap_drop: [ALL]` if you want to stop the agent from reconfiguring
   its own networking.
 - See the main README's
-  [Constraining egress (agent sandboxes)](../../README.md#constraining-egress-agent-sandboxes)
+  [Constraining egress (agent sandboxes)](../../docs/agent-sandbox.md)
   for the underlying network model.
 
 ## Giving the agent tools (MCP servers) — the box and its toolbox in one file

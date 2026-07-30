@@ -736,3 +736,21 @@ func TestStatsSnapshotParses(t *testing.T) {
 		t.Error("StatsSnapshot should surface a runtime error")
 	}
 }
+
+// ListVolumes reads the `volume ls` table. Two details decide whether its callers
+// can trust it: the header row is not a volume, and a failure is not "there are
+// none" — a caller looking for volumes a compose file no longer accounts for would
+// otherwise report the word "NAME" as a leftover, or report a clean slate it never
+// managed to check.
+func TestListVolumes(t *testing.T) {
+	real := "NAME\ndemo_data\ndemo_cache\n" // the shape `container volume ls` prints
+	got := replayShim(t, real, 0).ListVolumes()
+	want := []string{"demo_data", "demo_cache"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ListVolumes() = %v, want %v — the header row is not a volume", got, want)
+	}
+
+	if got := replayShim(t, "boom\n", 1).ListVolumes(); got != nil {
+		t.Errorf("a failed listing must report nothing rather than guess, got %v", got)
+	}
+}

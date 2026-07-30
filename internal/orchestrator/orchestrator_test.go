@@ -3132,3 +3132,77 @@ func TestUpGivesDistinctPortsToTwoBareServices(t *testing.T) {
 		t.Errorf("expected two distinct host ports, got %v", seen)
 	}
 }
+
+// Started() is what decides which services get a restart supervisor, so it has
+// to mean "still running" — not "we got as far as starting it". When the
+// bring-up fails, Up rolls the stack back and deletes what it made, and a
+// caller acting on a stale list would announce it was watching containers that
+// no longer exist.
+func TestStartedIsEmptyAfterARolledBackUp(t *testing.T) {
+	rt, _ := fakeShim(t)
+	setShimEnv(rt, "HEALTH_HANG=1") // db never becomes healthy, so web never starts
+	p := project("demo", map[string]*compose.Service{
+		"db": {
+			Image:   "postgres:16",
+			Restart: "always",
+			Healthcheck: &compose.Healthcheck{
+				Test:    []string{"pg_isready"},
+				Timeout: 100 * time.Millisecond,
+				Retries: 1,
+			},
+		},
+		"web": {
+			Image:     "web:latest",
+			Restart:   "always",
+			DependsOn: compose.DependsOn{{Name: "db", Condition: compose.ConditionHealthy}},
+		},
+	})
+	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
+	if err := o.Up(true); err == nil {
+		t.Fatal("up should fail when a dependency never becomes healthy")
+	}
+	if got := o.Started(); len(got) != 0 {
+		t.Errorf("nothing survives a rolled-back up, so Started() should be empty, got %v", got)
+	}
+}
+
+// The other side of the same coin: a service that exits right after starting
+// fails the up, but is NOT rolled back (that's a post-start health report, not a
+// failed bring-up). Those containers are still there, still carrying a
+// `restart:` policy, so Started() must still list them.
+func TestStartedSurvivesAPostStartCrash(t *testing.T) {
+	rt, _ := fakeShim(t)
+	setShimEnv(rt, "INSPECT_STATE=stopped") // the container exits right after `run`
+	p := project("demo", map[string]*compose.Service{"web": {Image: "web", Restart: "always"}})
+	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
+	err := o.Up(true)
+	if err == nil || !strings.Contains(err.Error(), "OPSM-407") {
+		t.Fatalf("expected the post-start crash to fail the up, got %v", err)
+	}
+	if got := o.Started(); len(got) != 1 || got[0] != "web" {
+		t.Errorf("a crashed-but-present service still needs watching; Started() = %v", got)
+	}
+}
+
+// StillSupervised decides what a partial `up` carries over, so it has to answer
+// two questions at once: would this project supervise the service at all, and is
+// its container still there. Neither had a unit test.
+func TestStillSupervised(t *testing.T) {
+	rt, _ := fakeShim(t)
+	setShimEnv(rt, "INSPECT_ABSENT=gone.demo.opossum")
+	p := project("demo", map[string]*compose.Service{
+		"web":     {Image: "web", Restart: "always"},
+		"gone":    {Image: "g", Restart: "always"},
+		"plain":   {Image: "p"},
+		"migrate": {Image: "m", Restart: "always"},
+		"app": {Image: "a", Restart: "always",
+			DependsOn: compose.DependsOn{{Name: "migrate", Condition: compose.ConditionCompleted}}},
+	})
+	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
+	got := o.StillSupervised([]string{"web", "gone", "plain", "migrate", "absent-from-compose"})
+	want := []string{"web"}
+	if len(got) != len(want) || (len(got) > 0 && got[0] != want[0]) {
+		t.Errorf("StillSupervised = %v, want %v — gone has no container, plain has no policy, "+
+			"migrate runs to completion, and absent-from-compose isn't a service", got, want)
+	}
+}

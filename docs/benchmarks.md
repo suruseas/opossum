@@ -97,3 +97,25 @@ docker info --format '{{.MemTotal}}'   # bytes of guest RAM provisioned
 Numbers move with hardware, image cache, and Docker Desktop's memory settings;
 re-run before quoting them. The **shape** (Docker faster per start, Apple
 `container` far lighter at rest) is what matters.
+
+## What is this service actually costing my Mac? (`stats --host`)
+
+Plain `opossum stats` shows the **guest** view: how much of its RAM limit each
+container uses inside its VM. What you often really want on a Mac is the **host**
+view: how much memory this service is taking from your machine. Because Apple
+`container` gives every container its own VM, that's a real, separable number —
+and `opossum stats --host` reports it per service:
+
+```
+SERVICE  GUEST MEM      HOST FOOTPRINT
+web      1.9MiB / 1GiB  330.4MiB
+db       1.9MiB / 1GiB  330.7MiB
+         total          661.2MiB
+```
+
+A shared-VM tool (Docker Desktop, Colima, OrbStack) structurally can't break this
+down per service — all containers live in one VM. The figure is the resident size
+of the service's VM process (what Activity Monitor shows for "Virtual Machine
+Service…"), read from the host; it's **approximate and host-derived**, and a
+service whose VM can't be mapped shows `—` rather than failing. (`opossum doctor`
+gives a rougher, introspection-free estimate.)

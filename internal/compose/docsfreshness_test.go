@@ -26,20 +26,30 @@ import (
 var partiallySupported = map[string]bool{"network_mode": true, "deploy": true}
 
 var (
-	parenRE = regexp.MustCompile(`\([^)]*\)`)                                          // (…) clarifications
+	// (…) clarifications, in both the ASCII and the full-width form the Japanese
+	// README uses — without the latter, its "（`networks` は効きます）" aside reads as
+	// a claim that networks is ignored.
+	parenRE = regexp.MustCompile(`\([^)]*\)|（[^）]*）`)
 	refRE   = regexp.MustCompile("(?i)\\b(under|beyond|except|other than)\\s+`[^`]+`") // "under `networks`", "beyond `resources.limits`"
 	tokenRE = regexp.MustCompile("`([a-z_]+)`")                                        // a backtick-quoted field name
 	// Capture only the ignored-field enumeration, stopping at the next bold span so
 	// the following prose (e.g. AGENTS.md's "Don't set `dns`…" paragraph) — which
 	// isn't an ignored list and could name a supported field — is never scanned.
 	agentsIgn = regexp.MustCompile(`(?s)Ignored \(file still loads\):\*\*(.*?)\*\*`)
-	readmeIgn = regexp.MustCompile(`(?s)\*\*Ignored fields\*\*(.*?)\n- `)
+	// The field-level list used to live in both READMEs, and the Japanese copy
+	// drifted independently: `restart` stayed in it for a whole release after the
+	// English one was corrected (the translation ratchet compares only headings,
+	// tables and fences, so prose divergence like that is invisible to it). The
+	// list now has exactly one home for people — docs/compatibility.md — and one
+	// for agents, AGENTS.md. That is the fix for that class of drift: not a third
+	// scanner, but nowhere left to drift to.
+	compatIgn = regexp.MustCompile(`(?s)\*\*Ignored fields\*\*(.*?)\n- `)
 )
 
 func TestSupportedFieldsNotDocumentedAsIgnored(t *testing.T) {
 	docs := map[string]*regexp.Regexp{
-		filepath.Join("..", "..", "AGENTS.md"): agentsIgn,
-		filepath.Join("..", "..", "README.md"): readmeIgn,
+		filepath.Join("..", "..", "AGENTS.md"):                agentsIgn,
+		filepath.Join("..", "..", "docs", "compatibility.md"): compatIgn,
 	}
 	for path, blockRE := range docs {
 		data, err := os.ReadFile(path)

@@ -4,13 +4,24 @@
 
 <p align="right"><a href="README.ja.md">日本語</a></p>
 
-A Docker Compose–like orchestrator for [Apple's `container`](https://github.com/apple/container)
-runtime on macOS. Define a multi-service stack in a familiar `compose.yaml`, and
-`opossum` starts each service in dependency order on a shared network so they can
-reach each other by name.
+# opossum — run docker compose projects on Apple's container runtime
 
-opossum is compatible with Docker Compose files (`docker-compose.yml`) and
-implements a subset of the open [Compose specification](https://compose-spec.io).
+Apple's `container` starts one container at a time — no compose file, no
+dependency order, no name-based service discovery. opossum runs the
+`compose.yaml` you already have on it, with no Docker Desktop and no daemon.
+
+It reads Docker Compose files (`docker-compose.yml`) and implements a subset of
+the open [Compose specification](https://compose-spec.io): services start in
+dependency order on a shared per-project network, so they reach each other by
+name. Requires macOS 26 or later and [Apple's
+`container`](https://github.com/apple/container).
+
+<!-- compat-figures -->
+Measured on 156 real-world compose projects: 61 (39%) ran completely as written,
+78 (50%) with `--from-docker-compose`, and 0 were made worse — see [measured
+compatibility](docs/compatibility.md) for the method and the breakdown of what is
+still in the way.
+<!-- /compat-figures -->
 
 > **Using opossum from an AI agent?** Point it at [`AGENTS.md`](AGENTS.md) — a
 > high-density, facts-only reference (command surface, the supported/ignored/
@@ -22,81 +33,38 @@ implements a subset of the open [Compose specification](https://compose-spec.io)
 > so this kind of orchestration isn't possible. `container` reached 1.0 in
 > June 2026.
 
-## Features
+## Why this and not the alternatives
 
-- **Dependency-ordered startup** — topologically sorted `depends_on`, torn down in reverse.
-- **Health-gated & one-shot dependencies** — `service_healthy` waits on a healthcheck; `service_completed_successfully` runs a one-shot to exit 0 first.
-- **Bare-name service discovery** — peers reach each other by service name over a per-project network.
-- **Multiple projects at once** — containers are namespaced per project, so stacks with the same service names run side by side (no extra setup).
-- **Commands** — `up [service…]` (whole project or a subset), `down`, `ps` (IP/ports/status), `logs [-f] [-n]`, `stop`, `restart`.
-- **Compose subset** — `image`, `build`, `ports`, `environment`, `volumes`, `command`, `entrypoint`, `healthcheck`, plus `.env` / `${VAR}` interpolation.
-- **Fails clean** — a failed `up` rolls back the containers it started and the network it created.
+Three things, with the measurement behind each.
 
-See the [`CHANGELOG`](CHANGELOG.md) for the full history and [`examples/`](examples/README.md) for a walkthrough.
+**1. Real compose files, measured.** 156 self-hosting projects from
+[Compose-Examples](https://github.com/Haxxnet/Compose-Examples), run unmodified:
+61 (39%) came up completely as written, 78 (50%) with `--from-docker-compose`, and
+0 were made worse. Every remaining failure is reported with a diagnostic code and
+a suggested fix rather than a raw runtime error.
+[Method, corpus and the full breakdown →](docs/compatibility.md)
 
-## Why opossum (vs docker compose)?
+**2. It fixes the incompatibilities for you.** `opossum up --from-docker-compose`
+writes a `compose.opossum.yaml` beside your file with the adjustments Apple
+`container` needs — a database data directory that has to be a named volume,
+Postgres's `PGDATA` moved into a subdirectory — and starts the project with them
+merged. Your compose file is never modified. That is where the 39% → 50% comes
+from, and nothing else does it.
 
-opossum gives you a familiar `docker compose`-style workflow, but on Apple's
-`container` instead of Docker Desktop. That swaps Docker's one big always-on
-Linux VM for **a lightweight VM per container**, which changes the trade-offs.
-Measured on one Mac (macOS 26, Apple silicon; container 1.0.0 vs Docker Engine
-29.5.3 — [full method & caveats](docs/benchmarks.md)):
+**3. Nothing runs when nothing is running.** Docker Desktop keeps one always-on
+Linux VM; Apple `container` gives each container its own and keeps none at rest.
+Measured on one Mac (macOS 26, Apple silicon; `container` 1.0.0 vs Docker Engine
+29.5.3):
 
 | | Docker Desktop | Apple `container` (opossum) |
 |---|---|---|
-| Memory at idle | ~373 MB host procs **+ ~7.8 GB provisioned always-on Linux VM** (`docker info` MemTotal) | **~58 MB** helpers, **no always-on VM** (memory only while containers run — each is its own VM at ~250–400 MB) |
+| Memory at idle | ~373 MB host procs **+ ~7.8 GB provisioned always-on Linux VM** | **~58 MB** helpers, **no always-on VM** |
 | Single-container start | **~0.19 s** | ~0.81 s |
 | Isolation | shared VM kernel | **per-container VM** |
 | License | paid subscription for larger orgs | open source, none |
 
-**The honest summary:** Docker starts an individual container faster (its VM is
-already warm), but Apple `container` is *far* lighter at rest — no multi-GB VM
-sitting idle — and gives per-container VM isolation with no Docker Desktop
-dependency. opossum layers the compose UX (dependency ordering, bare-name
-discovery, health gating, multi-project isolation) on top of that. It's the
-better fit when you want compose ergonomics without a heavy always-on VM;
-Docker still wins when per-start latency across many short-lived containers
-dominates. One thing it does **not** fix: bind-mount file I/O is the same
-host↔VM shared-filesystem model as Docker (metadata-heavy small-file work is
-slow in both) — keep hot paths like DB data and `node_modules` in a **named
-volume**. See [`docs/benchmarks.md`](docs/benchmarks.md), and
-[`docs/vs-docker-desktop.md`](docs/vs-docker-desktop.md) for a measured,
-honest side-by-side (idle footprint, throwaway-container speed, build, disk,
-and the daily-op gaps).
-
-**Native networking, not reimplemented.** opossum leans on Apple `container`'s
-built-in DNS (macOS 26) instead of building its own: it names each container
-`<service>.<project>.<domain>` and gives it the matching search domain — exactly
-the way the runtime expects — so services resolve each other by their **bare
-service name** and separate projects stay isolated, with no overlay network or
-`/etc/hosts` rewriting of opossum's own. Because opossum is a thin layer over
-`container` 1.0, it *inherits* the runtime's networking rather than working
-around it: the name resolution is the runtime's built-in DNS doing the work, and
-opossum just follows its naming convention.
-
-## Design
-
-opossum is a thin orchestration layer — it never re-implements the runtime:
-
-- **Parsing** — reads a subset of the compose schema (`image`, `build`, `ports`,
-  `environment`, `volumes`, `depends_on`, `command`, `entrypoint`).
-- **Ordering** — topologically sorts services by `depends_on` (cycles are
-  rejected) and starts them in that order, tears them down in reverse.
-- **Service discovery** — creates a per-project network (`<project>-net`) and
-  attaches every service to it. The runtime registers a container in its DNS
-  server when the container is **named `<name>.<domain>`**, so opossum names each
-  container `<service>.<domain>` (e.g. `db.opossum`) and starts it with
-  `--dns-domain <domain>` (default `opossum`). Because every container then has
-  `<domain>` in its search list, peers reach each other by the **bare service
-  name** (`db`, `cache`, …) — matching compose semantics. The domain must be
-  created once (see Setup); this relies on `container`'s built-in DNS on
-  macOS 26+.
-- **Runtime** — everything is delegated to the `container` CLI
-  (`build`, `run`, `stop`, `delete`, `network`, `inspect`).
-
-```
-compose.yaml ─▶ compose.Load ─▶ StartupOrder ─▶ orchestrator ─▶ container CLI
-```
+Docker starts an individual container faster — its VM is already warm. opossum is
+the lighter thing to leave installed. [Full method and caveats →](docs/benchmarks.md)
 
 ## Requirements
 
@@ -175,65 +143,42 @@ opossum down          # stop + remove (add -v to also drop named volumes)
 
 **Prefer to build with Apple's builder?** Drop `--from-docker-compose` and run
 `opossum up` — opossum builds any `build:` service itself (a heavy build can be
-slow; see [Troubleshooting builds](#troubleshooting-builds)). Either way, run
+slow; see [Troubleshooting builds](docs/troubleshooting.md#troubleshooting-builds)). Either way, run
 `opossum config` first to preview the resolved configuration and any fields
-opossum ignores (`restart`, `dns_search`, …).
+opossum ignores (`dns_search`, `container_name`, …).
 
-**If a service doesn't come up**, each of these is also warned about at `up` time
-(see [Differences from docker compose](#differences-from-docker-compose)):
+**If a service doesn't come up**, opossum warns about the usual causes at `up`
+time and names the fix — an unregistered DNS domain, Postgres data on a named
+volume, a host port already taken (on macOS a busy 5000/7000 is often AirPlay
+Receiver), a build context under `/private/tmp`.
+[Each one, and what to do →](docs/troubleshooting.md)
 
-1. **DNS domain not registered** → services can't resolve each other by name. Run the setup line above.
-2. **Postgres data on a named volume** → `initdb` fails. Set `PGDATA` to a subdirectory (`environment: PGDATA=/var/lib/postgresql/data/pgdata`). MySQL/MariaDB are fine.
-3. **Host port already in use** → `up` names the port and service; on macOS a taken 5000/7000 is often the **AirPlay Receiver** (turn it off in System Settings › General › AirDrop & Handoff, or remap the host port).
-4. **Building from a temp/scratch dir** → Apple's builder can't read a context under `/private/tmp` or a symlink. Build from a real path under your home directory (or use `--from-docker-compose`).
+### Removing it cleanly
 
-### Reuse images you already built with Docker
-
-Images are OCI-standard, so a Docker-built image runs on Apple `container` — the
-two just keep separate stores. If you're coming from `docker compose`, you almost
-certainly already have your services built; `opossum import` copies them over so
-the first `up` starts everything **without rebuilding** in Apple's builder:
+Trying something new should be reversible. Teardown comes in three widths:
 
 ```sh
-docker compose build          # (or you already have the images)
-opossum import                # docker save → container image load, per build service
-opossum up                    # starts immediately; no rebuild
-
-# …or in one step — import each build service instead of building it, then start:
-opossum up --from-docker-compose
+opossum down               # daily: stop + remove containers and the network
+opossum destroy            # this project, gone: containers, volumes, images, generated state
+opossum destroy --dry-run  # see exactly what that would remove, and remove nothing
 ```
 
-`docker compose` and opossum name a built image the same way
-(`<project>-<service>:latest`), so the import lands under the tag `up` looks for.
-This is also the escape hatch when Apple's builder can't handle a Dockerfile
-(BuildKit-specific features): build it with Docker and import it. `docker` is only
-invoked by `import` — the normal path never shells out to it. Alternatively, push
-the image to a registry and let `opossum pull` fetch it.
+`destroy` removes everything opossum created for the project — containers
+(including orphans), the project network, named volumes, images it built or
+pulled, the restart supervisor, the `.opossum/` state directory and the generated
+`compose.opossum.yaml`. It asks first, and lists what it will remove; `--force`
+skips the question for scripts and agents.
 
-### Safe to try alongside Docker
+**Your files are never touched** — the compose file, `.env` and your sources are
+left exactly as they are. Neither is anything shared: volumes declared
+`external: true`, other projects' containers, and two machine-wide things that
+`destroy` reports rather than removes, since one needs `sudo` and the other would
+slow down every unrelated project:
 
-opossum drives Apple's `container` runtime, which is **entirely separate from
-Docker** — separate images, containers, and volumes, in their own storage. So you
-can run `opossum up` in a project you already use with `docker compose` without
-disturbing it:
-
-- **Your Docker containers and named volumes are not touched.** opossum only ever
-  invokes the `container` CLI, never `docker`. It creates its *own* named volumes
-  in the `container` runtime, and even `opossum down -v` removes only those — a
-  Docker volume of the same name (and its data) is left intact.
-- **Bind mounts are the one shared surface.** A `./path:/…` bind mount points both
-  engines at the same host directory, so don't run opossum and Docker against the
-  same bind-mounted data (e.g. a database dir) *at the same time* — that's the
-  usual "two engines, one data directory" hazard, not something opossum does to
-  you.
-- **Ports and data.** If your Docker stack is already up on the same host ports,
-  opossum's `up` simply fails to bind (nothing is harmed). And because named-volume
-  data isn't shared between the two runtimes, opossum starts such a service from a
-  fresh, empty volume rather than your Docker data.
-
-In short: **point opossum at your existing `docker-compose.yml` and try `opossum
-up`** — the worst case is a port clash or an unsupported field it simply skips
-(run `opossum config`, or `--verbose`, to see which), not lost data.
+```sh
+sudo container system dns delete opossum                  # the local DNS domain
+container builder delete --force && container image prune -a  # build cache + unused images
+```
 
 ## Usage
 
@@ -274,508 +219,41 @@ opossum -f hello.yaml ps
 The example's `web` service prints the resolved IPs of `db` and `cache` on
 startup, demonstrating name-based discovery.
 
-## Compose support
-
-| Field | Supported | Notes |
-|-------|-----------|-------|
-| `image` | ✅ | |
-| `build` | ✅ | string context or `{context, dockerfile, args, target}` (multi-stage `target`) |
-| `platform` | ✅ | passed to `container run --platform`; `linux/amd64` also enables `--rosetta` so x86-64-only images run on Apple silicon |
-| `ports` | ✅ | passed to `container run -p`; both the short form (`"8080:80"`, `"3000"`) and the long mapping form (`{target, published, protocol, host_ip}`) are accepted. A bare container port gets a host port (Apple's runtime requires one): the same number when it's free, otherwise a free one, with a notice. |
-| `environment` | ✅ | list or map form; null value passes host value through |
-| `env_file` | ✅ | string or list (short, or long `{path, required}`); `KEY=VALUE` files folded in, `environment` overrides them. Missing file errors unless `required: false` |
-| `volumes` | ✅ | bind mounts (host paths resolved against the compose dir; `~` expanded; a missing source directory is created), named volumes (namespaced `<project>_<volume>`), and `type: tmpfs` (mounted via `--tmpfs`); short `src:dst[:ro]` or long form (`{type, source, target, read_only}`) |
-| `tmpfs` | ✅ | service-level tmpfs targets (string or list); folded together with any `type: tmpfs` volume entries |
-| `secrets` | ✅ | file-based only; mounted read-only at `/run/secrets/<name>` (the `*_FILE` pattern). `external` secrets are rejected; `uid`/`gid`/`mode` are not applied |
-| `depends_on` | ✅ | list or long (`condition`) form — orders startup and gates on `service_healthy` / `service_completed_successfully` |
-| `healthcheck` | ✅ | `test` (CMD / CMD-SHELL / string), `interval`, `timeout`, `retries`, `start_period` |
-| `command` | ✅ | list, or a string that is shell-word-split (`sh -c "echo hi"` → `sh`, `-c`, `echo hi`) |
-| `entrypoint` | ✅ | overrides the image ENTRYPOINT; string (shell-split) or list, same as `command` |
-| `profiles` | ✅ | a gated service starts only when one of its profiles is active (`--profile <name>`, `COMPOSE_PROFILES`, or naming the service); services with no `profiles` always start |
-| `mem_limit` / `cpus` | ✅ | passed to `container run` as `-m` / `-c`. Also reads `deploy.resources.limits.{memory,cpus}` (the two forms must agree); memory is rounded up to MiB, CPUs to a whole number (Apple's runtime allocates whole vCPUs) |
-| `ssh` | ✅ | `ssh: true` forwards the host's SSH agent into the container (`container run --ssh`), so a service can `git clone`/`push` private repos over SSH using your host keys — without baking keys into the image. Also available per one-off as `opossum run --ssh`. (An opossum extension; docker compose only has build-time `build.ssh`.) |
-| `develop.watch` | ✅ | drives `opossum watch`: on host file changes under `path`, `action: sync` copies the changed file to `target` in the running container; `rebuild` rebuilds the image and recreates the container; `sync+restart` copies then restarts the container. Rebuilds/restarts are batched (a burst of edits triggers one). `ignore` globs are honored and ignored subtrees aren't watched. Prefer a **directory** `path` — a single-file `path` can miss an editor's atomic save (rename). |
-| `user` / `working_dir` | ✅ | passed to `container run` as `--user` (`name\|uid[:gid]`) and `--workdir` |
-| `init` | ✅ | `init: true` → `--init`: run a tini-like init as PID 1 to reap zombies |
-| `read_only` | ✅ | `read_only: true` → `--read-only` root filesystem |
-| `cap_add` / `cap_drop` | ✅ | Linux capabilities → `--cap-add` / `--cap-drop` (e.g. `NET_ADMIN`, or `ALL`) |
-| `network_mode` | ✅ (`none`) | `network_mode: none` → `--network none`: full network isolation (loopback only, no egress and no name resolution) — the floor for sandboxing an untrusted workload. Other values (e.g. `host`) have no equivalent on Apple `container`, so they're ignored (the service joins the project network) and listed among the ignored fields — the file still loads. |
-| `networks` (top-level + per-service) | ✅ | declare networks and place services on them (a service may join several — one `--network` each, in declaration order). A top-level `internal: true` network is created host-only (`container network create --internal`): no internet egress, though the host stays reachable — see [Constraining egress](#constraining-egress-agent-sandboxes). `external: true` (with optional `name`) uses a pre-existing network by its real name (never created or removed). Peers on an internal network can't resolve each other by name (use IPs). Network **aliases** aren't applied. |
-| `${VAR}` interpolation | ✅ | `$VAR`, `${VAR}`, `${VAR:-default}`, `${VAR:?required}`, `$$` escape; values from a `.env` file next to the compose file (or `--env-file` paths, which replace `.env`; later files win), overridden by the shell |
-
-Other compose fields (e.g. `container_name`, `restart`)
-are parsed but not acted on — `opossum config` (or `opossum up --verbose`) lists
-the ignored fields, so a `docker-compose.yml` runs without surprises.
-
-**Multiple files merge** like docker compose: pass `-f base.yml -f override.yml`
-(later files override earlier ones — mappings merge by key, most sequences append,
-`command`/`entrypoint` replace), and a `compose.override.yaml` (or
-`docker-compose.override.yml`) next to a discovered compose file is merged
-automatically. `volumes` are keyed by **mount point**: if more than one entry
-mounts the same container path, the last one wins — so an override can swap a bind
-mount for a named volume, rather than leaving two sources on one path.
-
-**opossum overlay.** A `compose.opossum.yaml` (or `.yml`) next to a discovered
-compose file is merged **last, at the highest precedence** — after the base file
-and any `compose.override.yaml`. docker compose doesn't read this name, so the same
-directory works with both tools and your original files stay untouched: put the
-tweaks that make a project run on Apple `container` here and keep them out of the
-shared compose file. When one is merged, opossum prints a one-line notice naming it
-(delete the file to opt out).
-
-`opossum up --from-docker-compose` **writes that overlay for you**. Two things
-about a `docker-compose.yml` can stop it starting here for reasons that are
-properties of the runtime rather than mistakes in your file:
-
-| What | Why it fails on Apple `container` | What the overlay does |
-|---|---|---|
-| A named volume mounted at Postgres's data directory | The volume is a mount point, so the directory isn't empty and `initdb` refuses it (`OPSM-101`) | Points `PGDATA` at a subdirectory — the data stays in the same volume |
-| A database's data directory on a bind mount | Bind mounts are host-owned and can't be chowned from inside the container, which every official DB image does at startup (`OPSM-105`) | Mounts a named volume there instead — **this changes where the data lives**; the host directory is left untouched, not copied |
-
-The file is the whole compatibility picture for the project, not just the fixes,
-so what opossum *couldn't* fix is in the same place. Entries come in three kinds,
-each marked:
-
-- **applied** — changed, and in effect. This is what made the project run.
-- **suggestion — NOT APPLIED** — a concrete change written out but commented,
-  because it alters what the project means (where data lives, how services share
-  it). Uncomment the block to apply it; it's self-contained, including any
-  `volumes:` declaration it needs.
-- **note** — nothing to change: the compose file can't express a fix (a Docker
-  socket mount, a host device). Recorded so the failure isn't a mystery. Notes carry no YAML, so there's nothing to uncomment.
-
-Each entry says what it's about and why (with the diagnostic code); applied entries
-add how to check it and how to undo it, suggestions add how to apply or ignore
-them, and notes add what to expect instead. opossum **never overwrites an
-existing `compose.opossum.yaml`** and never modifies your own compose file.
-
-## Command support
-
-opossum mirrors the common `docker compose` subcommands, delegating each to the
-`container` CLI.
-
-| Command | Supported | Notes |
-|---------|-----------|-------|
-| `up [service…]` | ✅ | build + start the project, or named services plus their deps. Leaves a running service untouched when its config is unchanged (build images only if missing), and flags orphan containers from removed services; `--force-recreate`, `--build`, `--no-build`, `--from-docker-compose` (import build images from Docker instead of building; formerly `--from-docker`, which still works and warns), `--remove-orphans`, `--foreground`, `--profile` |
-| `down [-v] [--rmi local\|all]` | ✅ | stop, remove, and delete the project network; `-v` also removes named volumes; `--rmi local` removes opossum-built images (`all` also removes pulled ones); `--remove-orphans` also removes containers for services no longer in the compose |
-| `ps` | ✅ | service / container / IP / ports / status |
-| `images` | ✅ | each service's image, whether opossum builds it, and whether it's present locally |
-| `logs [service…]` | ✅ | `--follow` (several services multiplexed, each line prefixed with its name), `-n/--tail` |
-| `stats [service…]` | ✅ | live CPU / memory / net / block I/O / pids (streams; `--no-stream` for a snapshot). `--host` shows each service's **host** memory footprint — the resident size of its VM on your Mac — which a shared-VM tool can't report per service (see below) |
-| `exec [-it] <service> <cmd…>` | ✅ | run a command in a running service |
-| `build [service…]` | ✅ | build images for services with `build:` |
-| `pull [service…]` | ✅ | pull images for services with `image:` |
-| `import [service…]` | ✅ (extra) | copy a service's Docker-built image into `container`'s store, so `up` skips the rebuild |
-| `doctor` | ✅ (extra) | diagnose the environment (runtime, DNS domain, outbound network, build VM memory, reclaimable storage, stack memory estimate); prints ✅/⚠️/❌ + a one-line fix each. `--format json` emits machine-readable `{healthy, checks[]}` for scripts/agents; a failed check exits non-zero in either format |
-| `cp <src> <dst>` | ✅ | copy files between a service's container and the host (each path is a host path or `service:path`), like `docker compose cp` |
-| `watch` | ✅ | watch each service's `develop.watch` paths and act on changes (like `docker compose watch`): `sync` copies files in, `rebuild` rebuilds + recreates, `sync+restart` copies + restarts; runs until Ctrl-C. Start the stack with `up` first |
-| `start [service…]` | ✅ | start existing (stopped) containers |
-| `stop [service…]` | ✅ | stop without removing |
-| `restart [service…]` | ✅ | stop then start in place |
-| `kill [service…]` | ✅ | send a signal (default KILL); `-s/--signal` |
-| `run [--rm] [--no-deps] [-T] <service> [cmd]` | ✅ | one-off foreground container; starts deps unless `--no-deps`; `-T`/`--no-tty` disables the pseudo-terminal; progress goes to stderr so the one-off's stdout stays clean (usable as an MCP stdio bridge); no published ports |
-| `config [--services]` | ✅ | validate and print the resolved config (interpolation + env_file applied), noting ignored fields; mirrors what `up` starts, so `profiles:`-gated services appear only with `--profile` |
-
-Add `--verbose` to any command to print each underlying `container` invocation
-(as `+ container …`) to stderr — handy when filing a bug report, so you can see
-exactly what opossum ran.
-
-### What is this service actually costing my Mac? (`stats --host`)
-
-Plain `opossum stats` shows the **guest** view: how much of its RAM limit each
-container uses inside its VM. What you often really want on a Mac is the **host**
-view: how much memory this service is taking from your machine. Because Apple
-`container` gives every container its own VM, that's a real, separable number —
-and `opossum stats --host` reports it per service:
-
-```
-SERVICE  GUEST MEM      HOST FOOTPRINT
-web      1.9MiB / 1GiB  330.4MiB
-db       1.9MiB / 1GiB  330.7MiB
-         total          661.2MiB
-```
-
-A shared-VM tool (Docker Desktop, Colima, OrbStack) structurally can't break this
-down per service — all containers live in one VM. The figure is the resident size
-of the service's VM process (what Activity Monitor shows for "Virtual Machine
-Service…"), read from the host; it's **approximate and host-derived**, and a
-service whose VM can't be mapped shows `—` rather than failing. (`opossum doctor`
-gives a rougher, introspection-free estimate.)
-
-## Differences from docker compose
-
-opossum aims to run a familiar `compose.yaml`, but it delegates to Apple's
-`container` (not the Docker engine), so some behaviors differ and some compose
-features aren't supported. The detailed rationale for each is in
-[Known limitations](#known-limitations); this is the scannable overview.
-
-**Behaves differently** (same field, different mechanics):
-
-| Area | docker compose | opossum (on Apple `container`) |
-|------|----------------|--------------------------------|
-| Setup | none | one-time `sudo container system dns create opossum` for name resolution |
-| Container names | `<project>-<service>-N` | `<service>.<project>.<domain>` (DNS-registered for bare-name discovery) |
-| Named volumes | shared globally by name | namespaced `<project>_<volume>`; `down -v` only removes this project's |
-| Volume seeding | a fresh named/anonymous volume is pre-filled from the image's contents at that path | **not seeded** — a fresh volume always mounts empty (named *and* anonymous) |
-| Networks | user-defined networks + aliases | `networks:` **is** supported — a per-project default network (`<project>-net`), plus top-level `internal:`/`external:` and multiple networks per service; per-network **aliases** and static IPs aren't applied (see [Networking model](#networking-model)) |
-| Published ports | a bare `ports: - "3000"` picks a random host port | mirrors it to `3000:3000` when that port is free, else falls back to a free port and says so (`opossum ps` shows the real one; two services that both leave the host port open get different ones). Apple `container` requires a host port and has no random option, so the mirror is a predictable default rather than a random one |
-| Healthcheck | engine-native | no native support — opossum runs `healthcheck.test` via `container exec` and polls |
-| `service_completed_successfully` | engine tracks exit | opossum runs the one-shot in the **foreground** (an exit code is only observable there) |
-
-**Not supported / hard constraints:**
-
-- **Platform**: macOS 26+ on Apple silicon, single host only (no Swarm/remote). Relies on `container`'s macOS-26 networking + DNS.
-- **Ignored fields** (parsed and listed by `opossum config` / `--verbose`, not acted on): `restart`, `container_name`, `dns`/`dns_search` (service discovery is automatic — see [Networking model](#networking-model)), `network_mode` other than `none`, per-network **aliases** and static IPs (`ipam`), `deploy` (except `resources.limits`), `sysctls`, `devices`, `privileged`, and top-level volume `driver`/`labels`. (`networks`, `cap_add`/`cap_drop` *are* acted on.)
-- **`secrets`**: file-based only; `external` secrets and `uid`/`gid`/`mode` are not applied.
-- **DB data dirs**: Postgres `initdb` fails on a named-volume mount point — use a **subdirectory** (`PGDATA=/var/lib/postgresql/data/pgdata`). Very common in real app composes (gitea, nextcloud, …), so `up` **warns** when it sees a named volume at `/var/lib/postgresql/data` without a PGDATA subdirectory. (MySQL/MariaDB tolerate the mount point.)
-- **DB data dirs can't be bind-mounted** (use a **named volume**): Apple `container`'s bind mounts are host-owned (virtiofs) and can't be `chown`ed from inside the container, so a DB image (MySQL/Postgres/…) that chowns its data directory fails to start with `chown: … Operation not permitted`. A named volume *is* chownable, so mount the data directory from one. Self-host composes that put data under a bind-mounted `/mnt/docker-volumes/<svc>/…` (a Linux-host convention) hit this on macOS — when a DB crashes this way, `up` points at the fix.
-- **Volumes aren't seeded from the image**: Docker copies an image's directory contents into a *fresh* named or anonymous volume the first time it's used; Apple `container` mounts it **empty**. This breaks the common dev pattern of a bind-mounted source plus a `- /app/node_modules` volume to preserve the image's installed dependencies — on opossum that `node_modules` is empty and the app fails to start (`ng serve`/`vite`/etc. can't find their packages). Work around it by installing deps at container start (`command: sh -c "npm ci && npm start"`), or by not shadowing the dependency dir with a volume. Applies to **named volumes too**, not just anonymous ones.
-- **Build context**: Apple's builder can't read a context under `/private/tmp` or a symlinked directory — build from a real path under your home dir (`up` warns).
-- **Won't run at all**: composes that need Linux-host kernel access (WireGuard's `NET_ADMIN` + `/lib/modules`) — Apple `container` doesn't provide it (also true of Docker Desktop for the host-path cases). Tools that drive Docker through `/var/run/docker.sock` (e.g. Portainer) also can't manage opossum's containers: bind-mounting a host Unix socket into a container *does* work now (since `container` 1.1.0), but Apple `container` exposes no Docker-compatible daemon socket — it talks to the host over XPC — so the mount has nothing on the other end.
-- **cgroup-sensitive JVM images (e.g. Elasticsearch 7.x)**: the container's bundled JDK reads the host cgroup to size the heap, and Apple `container`'s VM doesn't expose the cgroup mount the way it expects — the process crashes at launch with `CgroupInfo.getMountPoint() … null` before any config applies (`ES_JAVA_OPTS`/`JAVA_TOOL_OPTIONS` don't help; observed on Elasticsearch 7.16 and 7.17). `opossum ps` shows such a service as `stopped`; check `opossum logs <svc>`. This is a runtime/JDK–VM incompatibility, not an opossum limitation.
-- **Not parsed**: `configs`, `extends`, and the map form of `external`.
-
-Everything else in the [Compose support](#compose-support) and
-[Command support](#command-support) tables works as in docker compose.
-
-## Networking model
-
-The place opossum diverges most from docker compose is the network — because Apple
-`container`'s network model is genuinely different from the Docker engine's. opossum
-maps your compose onto it rather than reimplementing Docker's; this is the map.
-
-At a glance, here is where the two models line up and where opossum has to bridge a gap:
-
-```mermaid
-flowchart LR
-    subgraph DC["docker compose (Docker engine)"]
-        direction TB
-        dc_svc["services"] --> dc_net["bridge network<br/>+ embedded DNS"]
-        dc_net --> dc_disc["bare-name discovery<br/>(automatic)"]
-        dc_net --> dc_host["host.docker.internal"]
-        dc_net --> dc_nat["internet via NAT"]
-    end
-
-    subgraph OP["opossum (Apple container)"]
-        direction TB
-        op_svc["services"] --> op_net["per-project network<br/>&lt;project&gt;-net"]
-        op_net --> op_disc["bare-name discovery<br/>needs 1x: dns create"]
-        op_net --> op_host["$OPOSSUM_HOST_GATEWAY<br/>(host LAN IP)"]
-        op_net --> op_nat["internet via NAT<br/>internal:true removes it"]
-    end
-
-    dc_disc -.same idea, one-time setup.-> op_disc
-    dc_host -.no host alias; opossum computes it.-> op_host
-    dc_nat -.plus declarative egress control.-> op_nat
-```
-
-The table below is the same map in detail — each row is one thing you might reach for in docker compose, and what you write instead:
-
-| Concern | docker compose (Docker engine) | opossum (Apple `container`) — what you write |
-|---------|--------------------------------|----------------------------------------------|
-| Default connectivity | bridge network, outbound via NAT | per-project network, outbound via NAT — nothing to write |
-| Reaching the **host** | `host.docker.internal` / `--add-host` | **no `host.docker.internal`** — use the built-in **`${OPOSSUM_HOST_GATEWAY}`** (the host's LAN IP; the host service must bind `0.0.0.0`) — see [Reaching a service on the host](#reaching-a-service-on-the-host) |
-| Service **discovery** | automatic embedded DNS on the network | built-in DNS, but it needs a **registered domain** — one-time `sudo container system dns create opossum`; peers then resolve each other by bare service name (`db`, `web`) |
-| Container names / **project isolation** | `<project>-<service>-N`, name-scoped | `<service>.<project>.<domain>` on a per-project network (`<project>-net`); projects stay isolated automatically — see [Running multiple projects](#running-multiple-projects-at-once) |
-| Restricting **internet egress** | no native control (needs an external firewall) | `internal: true` on a network **removes the route to the internet** (host still reachable); `network_mode: none` = loopback only — see [Constraining egress](#constraining-egress-agent-sandboxes) |
-| Multiple networks / **external** | supported, with aliases | multiple networks per service (one `--network` each) and `external: true` (reuse a pre-existing network by name) both work |
-| Name resolution **on an `internal:` network** | works | **doesn't** — the DNS resolver sits on the gateway an internal network can't route to, so address peers by **IP** (or reach a host proxy via `${OPOSSUM_HOST_GATEWAY}`) |
-| Per-network **aliases** / static IPs (`ipam`) | applied | **not applied** (the `<project>` subdomain is what keeps names unique) |
-
-The three surprises for a docker-compose user, and why:
-
-- **There's no `host.docker.internal`.** Apple `container`'s default network is NAT-only and exposes no host alias, so opossum computes the host's LAN address and hands it to you as `${OPOSSUM_HOST_GATEWAY}`, interpolated into your compose at load time. The host service must listen on `0.0.0.0` (not just loopback) to be reachable from the container.
-- **Bare-name discovery needs a one-time DNS domain.** The runtime's built-in DNS only serves a *registered* domain, so `sudo container system dns create opossum` (once) is what makes `db`/`web` resolve. Skip it and services can't find each other by name (`opossum doctor` flags this, and startup warns with `[OPSM-202]`).
-- **An `internal:` network has no name resolution at all.** Removing the internet route (the point of `internal:`, for agent sandboxes) also removes the route to the DNS resolver — so on an internal network, peers must talk by IP, and the one sanctioned way out is a host proxy at `${OPOSSUM_HOST_GATEWAY}`.
-
-`opossum doctor` checks the two things that most often go wrong here — whether the DNS domain is registered and whether outbound networking works — and prints a one-line fix for each.
-
-## Running multiple projects at once
-
-Projects are isolated automatically — no extra setup beyond the single `opossum`
-domain. opossum namespaces each container by project: it names them
-`<service>.<project>.<domain>` and puts `<project>.<domain>` in the DNS search
-list, so a peer still resolves a bare service name, but to *its own* project's
-copy (in project `demo`, `db` → `db.demo.opossum`). Each project also gets its
-own network (`<project>-net`) and its own named volumes (`<project>_<volume>`).
-So two projects can share service names and run concurrently, fully isolated:
-
-```sh
-opossum -p shopapi up      # db → db.shopapi.opossum
-opossum -p blog   up       # its own db → db.blog.opossum, no collision
-```
-
-Bare-name resolution still relies on the one registered domain (see *Setup*);
-`container` exposes no network aliases, so the `<project>` subdomain is what
-keeps names from colliding. As a backstop for the no-DNS-domain case
-(`--dns-domain ""`, where containers take bare names), every container is labeled
-`opossum.project=<name>` and opossum **refuses to start** (rather than silently
-replacing) a container another project already owns.
-
-## Run your MCP servers on Apple container
-
-MCP servers are exactly the shape Apple `container` is good at: small images,
-several of them, ~99% idle, each isolated in its own VM — and third-party code
-that holds your tokens, kept per-VM. If you're running a couple of them today,
-you're probably keeping Docker Desktop (multiple GB of always-on RAM) alive just
-for that. Apple `container` has no always-on base VM: an on-demand stdio server
-costs memory only while it runs, and an HTTP server only while it's `up` (each
-running server is its own ~250–400 MB VM, freed on `down`).
-
-**Start with the raw command — opossum earns its place at a boundary, not before
-it.** A single, secret-free, stdio MCP server needs no opossum:
-
-```jsonc
-// .mcp.json — a raw one-off, honestly the right tool here
-{ "mcpServers": { "terraform": {
-    "command": "container",
-    "args": ["run", "-i", "--rm", "hashicorp/terraform-mcp-server"] } } }
-```
-
-Graduate to a compose file (see [`examples/mcp-stack`](examples/mcp-stack)) when
-you hit any of:
-
-1. **a secret** — a token you don't want inline in a committed `.mcp.json`;
-2. **several servers** — one file to `pull` / `config` / manage lifecycle;
-3. **HTTP transport** — a long-running server you `up`/`down`/`ps`/`logs`.
-
-**A token-bearing stdio server** — the token stays in `.env` (git-ignored), and
-your `.mcp.json` just invokes opossum, which injects it:
-
-```jsonc
-// .mcp.json
-{ "mcpServers": { "github": {
-    "command": "opossum",
-    "args": ["-f", "/path/to/mcp-stack/compose.yaml", "run", "--rm", "github"] } } }
-```
-
-**An HTTP (streamable) server** — `opossum up` it once, then point your client at
-the URL (the server must bind `0.0.0.0`, e.g. `--transport-host 0.0.0.0`, so the
-published port reaches it):
-
-```sh
-opossum -f mcp-stack/compose.yaml up          # starts the HTTP servers
-```
-```jsonc
-// .mcp.json
-{ "mcpServers": { "terraform-http": { "url": "http://localhost:8080/mcp" } } }
-```
-
-> **"Connected, but tool calls fail"?** stdio is transport-independent of the
-> guest network, so a server can report *connected* while the container can't
-> reach the internet — usually a **wedged default network** after long runtime
-> uptime. Run `opossum doctor` (it probes exactly this) and, if flagged,
-> `container system stop && container system start`.
-
-## Known limitations
-
-- **Named volumes are mount points, so a database's data directory can't sit
-  directly on one.** opossum passes named volumes through and the runtime
-  auto-creates them, but `container` mounts a volume as a filesystem mount point
-  containing `lost+found`. Postgres/MySQL `initdb` refuses a non-empty data
-  directory, so `-v pgdata:/var/lib/postgresql/data` fails. Point the database at
-  a **subdirectory** of the mount instead — e.g. for Postgres set
-  `environment: { PGDATA: /var/lib/postgresql/data/pgdata }`. Only bind-mount host
-  paths are resolved to absolute paths. Named volumes are namespaced per project
-  (`<project>_<volume>`), so concurrent projects don't share one — except a
-  volume declared `external: true` in the top-level `volumes:` block, which is
-  used by its real name (its declared `name:`, or the key) and never removed by
-  `down -v` — the user manages it. `external` takes the bool form; the volume
-  must already exist (opossum doesn't create it). Other top-level volume settings
-  (`driver`, `labels`, …) are not applied.
-- **A named volume can't be shared by two running containers.** `container`
-  attaches a named volume as an exclusive block device, so if two services mount
-  the same named volume, the first to start gets it and the others fail with `The
-  storage device attachment is invalid`. (Docker shares named volumes; a common
-  case is an app + nginx sharing a `public`/assets volume.) `up` **warns** when it
-  sees this — use a **bind mount** (a host path, which *is* shareable) for the
-  shared data, or bake it into the image.
-- **`networks:` — aliases and static IPs (`ipam`) aren't applied**, and an
-  `internal:` network has no name resolution (peers must use IPs). Multiple networks
-  per service and `external:` reuse both work. See [Networking
-  model](#networking-model) for the full picture.
-- **`restart:` policies are ignored** — opossum does not restart a container that
-  exits (`up` warns). Also, `restart` (the command) reassigns a container's IP;
-  its name and config are preserved, so name-based discovery is unaffected.
-- **No Docker-in-Docker / nested containers inside a service.** A service runs in
-  a `container run` VM with no nested virtualization (no `/dev/kvm`), so it can't
-  run its own containers — a build/test job that shells out to `docker` won't
-  work inside a service. Apple `container` *can* do nested virtualization, but
-  only through a separate `container machine --virtualization` VM, which needs
-  Apple silicon **M3 or newer** (with macOS 15+). opossum doesn't yet drive
-  container machines, so there's no supported nested-container path today. This is
-  a natural area to extend — **contributions welcome** (see the tracking issue for
-  agent/sandbox use cases).
-
-### Health-gated startup
-
-`depends_on: {<svc>: {condition: service_healthy}}` makes opossum wait until the
-dependency is healthy before starting the dependent. Apple's `container` runtime
-has no native healthcheck, so opossum runs the dependency's `healthcheck.test`
-via `container exec` and polls it (`retries` attempts, `interval` apart, after an
-initial `start_period`) until it passes. The dependency must define a
-`healthcheck`, or the file is rejected. The default condition (`service_started`)
-still just orders startup.
-
-`depends_on: {<svc>: {condition: service_completed_successfully}}` treats the
-dependency as a one-shot (e.g. a migration/init step): opossum runs it in the
-**foreground** and only starts the dependent if it exits 0. The runtime exposes
-an exit code only from a foreground `run` — `container inspect` reports a bare
-`stopped` with no code — so a run-to-completion service can't also be required
-`service_healthy` (it stops when it finishes); that combination is rejected.
-
-### Variable interpolation
-
-References in the compose file are expanded before parsing. Values come from a
-`.env` file sitting next to the compose file (`KEY=value` lines, `#` comments,
-optional surrounding quotes), and the process environment overrides them — so
-`FOO=bar opossum up` wins over `FOO` in `.env`. Supported forms: `$VAR`,
-`${VAR}`, `${VAR:-default}` (default when unset **or empty**), `${VAR-default}`
-(default only when unset), `${VAR:?message}` / `${VAR?message}` (fail if
-unset/empty), and `$$` for a literal `$`. An undefined variable with no default
-expands to an empty string. A reference may span lines via a YAML double-quoted
-`\`-continuation, and a reference nested in another's default (`${A:-${B:-x}}`) is
-resolved too.
-
-Because expansion runs on the raw file **before** YAML parsing — which is what lets
-it reach every field uniformly, including `x-` extensions and block scalars — a
-`${…}` written inside a **comment** is expanded as well, unlike docker compose
-(which interpolates after parsing and so ignores comments). For a `${VAR}` this is
-harmless (the comment is dropped anyway), but a `${VAR:?required}` in a comment will
-**fail the load**. Keep interpolation syntax out of comments, or write the `$` as
-`$$` to keep it literal.
-
-opossum also provides one built-in: **`${OPOSSUM_HOST_GATEWAY}`** — the address a
-container can use to reach a service running on the host (see below). A shell env
-var or `.env` entry of the same name overrides it.
-
-### Reaching a service on the host
-
-A common local-AI setup keeps the heavy piece — say an LLM server like Ollama or
-an MLX endpoint — running **natively on the host** (fastest access to the GPU),
-with the rest of the stack (app, vector DB, workers) in containers. The
-containers then need to call back to that host service.
-
-Apple `container`'s default network is NAT-only: there's no `host.docker.internal`
-name and no `--add-host`. But a container **can** reach the host at the host's own
-LAN address, so opossum exposes that as the built-in `${OPOSSUM_HOST_GATEWAY}`:
-
-```yaml
-services:
-  app:
-    image: my-rag-app
-    environment:
-      # resolves to the host's LAN IP at load time, e.g. http://192.168.11.22:11434
-      OLLAMA_HOST: http://${OPOSSUM_HOST_GATEWAY}:11434
-  qdrant:
-    image: qdrant/qdrant:latest
-    ports:
-      - "6333:6333"
-```
-
-Two requirements for the host service to be reachable:
-
-- **Bind on `0.0.0.0`, not `127.0.0.1`.** A loopback-only bind is invisible to
-  the container. For Ollama, `OLLAMA_HOST=0.0.0.0 ollama serve`.
-- **The host needs a LAN address.** The value is the host's current outbound IP,
-  so it changes with the network and is empty when the host is offline. Guard
-  with a default if you need one: `${OPOSSUM_HOST_GATEWAY:-127.0.0.1}`. Run
-  `opossum config` to see the value that will be used.
-
-See [`examples/local-ai-stack`](examples/local-ai-stack) for a full stack.
-
-### Constraining egress (agent sandboxes)
-
-When you run an untrusted workload — a coding agent, an LLM tool-runner, anything
-that executes code it wrote — the question is what it can reach on the network.
-There are two levels opossum lets you declare:
-
-**Full isolation.** `network_mode: none` gives the container loopback only — no
-egress at all, and no name resolution. Use it when the workload needs nothing off
--box:
-
-```yaml
-services:
-  sandbox:
-    image: my-agent
-    network_mode: none
-```
-
-**Host-only, egress through a proxy you control.** Apple `container` has no
-per-destination allowlist, but an **internal** network (`container network create
---internal`) removes the route to the internet while leaving the host reachable.
-Put the agent on an internal network and it *physically cannot* reach the internet
-directly — its only way out is a proxy you run on the host, reachable via
-`${OPOSSUM_HOST_GATEWAY}`. Because the internet route is gone, the allowlist is
-**enforced**, not merely advised (the agent can't bypass the proxy by dialing a
-destination itself):
-
-```yaml
-networks:
-  caged:
-    internal: true          # host-only: no internet egress
-services:
-  agent:
-    image: my-agent
-    networks: [caged]
-    environment:
-      # the only route out — a host allowlist proxy at :8080
-      HTTPS_PROXY: http://${OPOSSUM_HOST_GATEWAY}:8080
-      HTTP_PROXY: http://${OPOSSUM_HOST_GATEWAY}:8080
-```
-
-Run an allowlist proxy (e.g. a filtering forward proxy) on the host bound to
-`0.0.0.0:8080`, and only the destinations it permits get through. Pair this with
-`cap_drop: [ALL]` and a non-root `user:` to keep the workload from reconfiguring
-its own networking.
-
-Two things to know about internal networks:
-
-- **No name resolution.** The DNS resolver sits on the network gateway, which an
-  internal network can't route to — so peers can't resolve each other by service
-  name. Reach the host proxy by `${OPOSSUM_HOST_GATEWAY}` (an IP), and address any
-  in-network peer by IP.
-- **Changing `internal:` on an existing network needs a `down` first.** opossum
-  doesn't reconfigure a network that already exists; `opossum down` then `up`
-  recreates it with the new setting.
-
-## Troubleshooting builds
-
-Builds run in Apple's shared `container` builder VM, which starts with modest
-resources (2 CPUs / 2 GB). Since each running service is its own VM too, a heavy
-build can starve.
-
-- **A build is very slow, runs out of memory, or fails with `Unavailable` /
-  `EOF`** (e.g. a large multi-stage image, or a big `apt-get install`): give the
-  builder more resources. It's a shared VM, so this is a one-time setup, not
-  per-project.
-  ```sh
-  container builder delete --force
-  container builder start --cpus 4 --memory 8g
-  opossum up
-  ```
-  Also make sure the host has RAM to spare — stopping other heavy services while
-  the first build runs helps, since every service is a separate VM.
-- **A build hangs or fails with `unable to read root manifest` /
-  `failed to load cache key`** (often after interrupting a build with Ctrl-C):
-  the builder cache is in a bad state. Reset it and retry:
-  ```sh
-  container builder delete --force
-  opossum up
-  ```
-- **A build fails with `no space left on device`**: the host volume is out of
-  disk. A real build pulls multi-GB base images and writes build layers onto the
-  host, so this is common when disk is tight. Free space and retry — don't grow
-  the builder, which only uses more disk:
-  ```sh
-  container image prune -f          # remove unused images
-  container builder delete --force  # clear the builder's cache (recreated automatically)
-  df -h /                           # confirm there's room, then: opossum up
-  ```
-- **`transferring context` is slow**: your build context is large. Add a
-  `.dockerignore` next to the Dockerfile that excludes things the image doesn't
-  need — `.git`, `node_modules`, `tmp`, `log`, `vendor/bundle`, build artifacts —
-  so less data is sent to the builder.
+## Using it from an AI agent
+
+Point the agent at [`AGENTS.md`](AGENTS.md) and ask it your question. It is a
+facts-only reference written for a context window: the command surface, every
+compose field opossum acts on / ignores / refuses, and a table mapping failure
+signatures to fixes. The detailed compatibility questions — "will this field
+work?", "why did this fail?" — are answered better by an agent that has read that
+file than by a section of this README.
+
+## Documentation
+
+| | |
+|---|---|
+| [Compatibility](docs/compatibility.md) | The measurement and its method; every compose field and command; where behaviour differs from `docker compose`; reusing images you built with Docker |
+| [Networking model](docs/networking.md) | How services find each other, running several projects at once, reaching a service from the host |
+| [Troubleshooting](docs/troubleshooting.md) | Build failures on `container`, and the limits worth knowing before you hit them |
+| [Benchmarks](docs/benchmarks.md) | Idle cost, start-up time, and what `stats --host` measures |
+| [vs Docker Desktop](docs/vs-docker-desktop.md) | A measured side-by-side: idle footprint, throwaway-container speed, build, disk, and the daily-operation gaps |
+| [MCP servers](docs/mcp.md) | Give an agent a tool server in its own VM |
+| [Agent sandboxes](docs/agent-sandbox.md) | Run something untrusted with no route out |
+| [`AGENTS.md`](AGENTS.md) | The same facts, for an AI agent |
+| [`CHANGELOG.md`](CHANGELOG.md) · [`examples/`](examples/README.md) | History, and a walkthrough of every subcommand |
+
+## What it doesn't do
+
+Honestly, and in one place: opossum needs **macOS 26** (container-to-container
+networking depends on it — on macOS 15 this kind of orchestration isn't possible).
+It implements a subset of the Compose specification, and refuses rather than
+guesses when a field would change what your project means — `docker.sock` mounts
+have no equivalent and are rejected up front. A named volume can only be attached
+to one running container at a time, which is Apple `container`'s constraint, not a
+choice. Swarm/`deploy` beyond `resources.limits`, `configs`, and `extends` are
+ignored, and `opossum config` tells you which fields in your file were skipped.
+
+[The details, and what to do about each →](docs/troubleshooting.md)
 
 ## Development
 
@@ -786,6 +264,10 @@ go test ./...
 OPOSSUM_CONTAINER_BIN="$PWD/testdata/fake-container.sh" \
   go run ./cmd/opossum -f examples/compose.yaml up
 ```
+
+Changes that users would notice are recorded as one file per change under
+[`changelog.d/`](changelog.d/README.md) rather than by editing `CHANGELOG.md`;
+see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 `OPOSSUM_CONTAINER_BIN` overrides which binary is invoked as the runtime. The
 fake shim's output is kept in sync with the real CLI (see

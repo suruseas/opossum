@@ -390,10 +390,47 @@ func (r *Runtime) Copy(src, dst string) error {
 	return r.stream("cp", src, dst)
 }
 
-// VolumeExists reports whether a named volume already exists. It gates seeding
-// (which copies image contents into a volume), so on a query error it fails
-// SAFE — reporting "exists" — rather than risk re-seeding a volume that's really
-// there and overwriting its contents.
+// ListVolumes returns the names of every volume the runtime knows about, or nil
+// if it can't be asked. Callers use it to find volumes a compose file no longer
+// accounts for; nil therefore has to mean "found none to report", never "there
+// are none", which is why the error is swallowed rather than guessed at.
+func (r *Runtime) ListVolumes() []string {
+	out, err := r.capture("volume", "ls")
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for i, line := range strings.Split(out, "\n") {
+		f := strings.Fields(line)
+		if len(f) == 0 || (i == 0 && strings.EqualFold(f[0], "name")) {
+			continue // the header row
+		}
+		names = append(names, f[0])
+	}
+	return names
+}
+
+// VolumeListed reports whether a volume is present, and separately whether the
+// question could be answered at all. Callers deciding "is this gone?" need the
+// difference: reading an unreachable runtime as "still there" turns a successful
+// teardown into a reported failure, and an agent's retry loop never goes green.
+func (r *Runtime) VolumeListed(name string) (exists, known bool) {
+	out, err := r.capture("volume", "ls")
+	if err != nil {
+		return false, false
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if f := strings.Fields(line); len(f) > 0 && f[0] == name {
+			return true, true
+		}
+	}
+	return false, true
+}
+
+// ListVolumes returns the names of every volume the runtime knows about, or nil
+// if it can't be asked. Callers use it to find volumes a compose file no longer
+// accounts for; nil therefore has to mean "found none to report", never "there
+// are none", which is why the error is swallowed rather than guessed at.
 func (r *Runtime) VolumeExists(name string) bool {
 	out, err := r.capture("volume", "ls")
 	if err != nil {

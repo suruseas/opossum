@@ -31,6 +31,7 @@ type configService struct {
 	Entrypoint  []string             `yaml:"entrypoint,omitempty"`
 	Environment []string             `yaml:"environment,omitempty"`
 	Ports       []string             `yaml:"ports,omitempty"`
+	Restart     string               `yaml:"restart,omitempty"`
 	Volumes     []string             `yaml:"volumes,omitempty"`
 	Tmpfs       []string             `yaml:"tmpfs,omitempty"`
 	MemLimit    string               `yaml:"mem_limit,omitempty"`
@@ -82,6 +83,7 @@ func RenderConfig(p *Project) (string, error) {
 			Entrypoint:  svc.Entrypoint,
 			Environment: svc.Environment,
 			Ports:       svc.Ports,
+			Restart:     svc.Restart,
 			Volumes:     svc.Volumes,
 			Tmpfs:       svc.Tmpfs,
 			MemLimit:    mem,
@@ -140,6 +142,9 @@ func RenderConfig(p *Project) (string, error) {
 	if ignored := ignoredComment(p); ignored != "" {
 		b.WriteString(ignored)
 	}
+	if caveat := restartCaveat(p); caveat != "" {
+		b.WriteString(caveat)
+	}
 	return b.String(), nil
 }
 
@@ -165,4 +170,33 @@ func ignoredComment(p *Project) string {
 		fmt.Fprintf(&b, "#   %s: %s\n", name, strings.Join(p.Services[name].Unsupported, ", "))
 	}
 	return b.String()
+}
+
+// restartCaveat warns, as a YAML comment, about the one restart policy opossum
+// cannot honour exactly. `on-failure` means "restart only if it failed", but Apple
+// `container` doesn't report a container's exit code, so a crash and a clean exit
+// are indistinguishable from outside. opossum retries a bounded number of times
+// rather than looping a service that may have finished on purpose — and says so
+// here, because a user reading their resolved config is exactly who needs to know
+// their policy is being approximated.
+func restartCaveat(p *Project) string {
+	var names []string
+	for name, svc := range p.Services {
+		if pol, err := svc.RestartPolicy(); err == nil && pol.Mode == RestartOnFailure {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	sort.Strings(names)
+	verb := "uses"
+	if len(names) > 1 {
+		verb = "use"
+	}
+	return fmt.Sprintf("\n# note: %s %s `restart: on-failure`, which opossum can only approximate —\n"+
+		"#   Apple container does not report a container's exit code, so a crash and a clean\n"+
+		"#   exit look the same. opossum retries a few times and then stops, rather than\n"+
+		"#   restarting a service that may have finished on purpose. `always` and\n"+
+		"#   `unless-stopped` are honoured exactly.\n", strings.Join(names, ", "), verb)
 }

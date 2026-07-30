@@ -6,7 +6,7 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//')
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: build test cover install snapshot
+.PHONY: build test cover install snapshot changelog changelog-preview
 
 build: ## build the opossum binary with the version stamped in
 	go build -ldflags "$(LDFLAGS)" -o opossum ./cmd/opossum
@@ -22,3 +22,9 @@ install: ## build and install onto GOBIN/PATH
 
 snapshot: ## build release artifacts locally without publishing (needs goreleaser)
 	goreleaser release --snapshot --clean
+
+changelog: ## regenerate CHANGELOG.md's [Unreleased] from changelog.d/ fragments
+	go run ./cmd/changelog sync
+
+changelog-preview: ## print what [Unreleased] would contain, without writing
+	go run ./cmd/changelog preview

@@ -29,7 +29,7 @@ archives:
 checksum:
   name_template: checksums.txt
 
-# We hand-maintain CHANGELOG.md, so don't let GoReleaser generate release notes
+# CHANGELOG.md is assembled from changelog.d/ fragments, so don't let GoReleaser generate release notes
 # from commits.
 changelog:
   disable: true

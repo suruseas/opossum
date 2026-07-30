@@ -31,6 +31,51 @@ jobs:
       - name: test (race + coverage)
         run: go test ./... -race -cover
 
+  # A user-facing change without a changelog fragment is a release note that will
+  # be missing. The check runs only on pull requests, where there is a base to
+  # diff against, and only complains about changes to shipped code — tests, docs
+  # and the repo's own tooling don't need an entry. Put `[skip changelog]` in the
+  # PR body for the rare shipped change that genuinely has nothing to announce.
+  changelog-fragment:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: a shipped change needs a changelog.d fragment
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          # Three-dot: only what THIS branch changed. A two-dot diff also lists
+          # everything main gained since the branch point — including other PRs'
+          # fragments — so the check would pass for a branch that added none.
+          changed="$(git diff --name-only "$BASE...$HEAD")"
+          added="$(git diff --name-only --diff-filter=A "$BASE...$HEAD")"
+          shipped="$(echo "$changed" | grep -E '^(cmd|internal)/' | grep -v '_test\.go$' | grep -v '^cmd/changelog/' | grep -v '^internal/changelog/' || true)"
+          if [ -z "$shipped" ]; then
+            echo "No shipped code changed — no fragment needed."; exit 0
+          fi
+          if echo "$BODY" | grep -qF '[skip changelog]'; then
+            echo "PR body opts out with [skip changelog]."; exit 0
+          fi
+          # An ADDED file directly in changelog.d/ — not README.md, not a deletion,
+          # and not a subdirectory (Load ignores those, so the entry would be
+          # silently dropped from the release while every check passed).
+          if echo "$added" | grep -qE '^changelog\.d/[^/]+\.md$' \
+             && ! [ "$(echo "$added" | grep -E '^changelog\.d/[^/]+\.md$')" = "changelog.d/README.md" ]; then
+            echo "Fragment present."; exit 0
+          fi
+          echo "This PR changes shipped code but adds no changelog.d/ fragment:"
+          echo "$shipped" | sed 's/^/  /'
+          echo
+          echo "Add changelog.d/<number>-<slug>.<type>.md (see changelog.d/README.md),"
+          echo "then run 'make changelog'. If the change truly needs no release note,"
+          echo "put [skip changelog] in the PR body."
+          exit 1
+
   release-config:
     runs-on: ubuntu-latest
     steps:

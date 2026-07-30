@@ -149,3 +149,57 @@ services:
 		t.Errorf("config should list top-level ignored keys, got:\n%s", out)
 	}
 }
+
+// `on-failure` is the one policy opossum can only approximate, because Apple
+// `container` doesn't report exit codes. Someone reading their resolved config is
+// exactly who needs to know their policy isn't being honoured literally.
+func TestConfigNotesTheOnFailureApproximation(t *testing.T) {
+	p := writeTemp(t, `
+name: demo
+services:
+  db:
+    image: postgres:16
+    restart: on-failure:5
+  web:
+    image: nginx
+    restart: always
+`)
+	proj, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := RenderConfig(proj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "restart: on-failure:5") || !strings.Contains(out, "restart: always") {
+		t.Errorf("the resolved config should show each restart policy, got:\n%s", out)
+	}
+	if !strings.Contains(out, "can only approximate") || !strings.Contains(out, "exit code") {
+		t.Errorf("config should explain the on-failure approximation, got:\n%s", out)
+	}
+	if !strings.Contains(out, "db uses") {
+		t.Errorf("the note should name the service that uses it, got:\n%s", out)
+	}
+	// The services that ARE honoured exactly must not be implicated.
+	if strings.Contains(out, "web uses") || strings.Contains(out, "db, web") {
+		t.Errorf("only on-failure services should be named, got:\n%s", out)
+	}
+}
+
+// A project without on-failure gets no note — the caveat must not become noise
+// every user learns to skip.
+func TestConfigNoRestartNoteWhenNotNeeded(t *testing.T) {
+	p := writeTemp(t, "name: demo\nservices:\n  web:\n    image: nginx\n    restart: always\n")
+	proj, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := RenderConfig(proj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "can only approximate") {
+		t.Errorf("no on-failure service means no note, got:\n%s", out)
+	}
+}

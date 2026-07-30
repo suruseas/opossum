@@ -42,6 +42,11 @@ type Orchestrator struct {
 	// HostFP supplies per-service host memory footprints for `stats --host`. Left
 	// nil in production (the real macOS introspector is used); tests inject a fake.
 	HostFP HostFootprinter
+	// started is what the last Up actually brought up, after profile filtering and
+	// any service names on the command line. The supervisor watches this, not the
+	// whole compose file: `up web` must not leave a watcher polling for services
+	// nobody started.
+	started []string
 }
 
 // upOptions holds the `up` recreate/build flags.
@@ -733,6 +738,13 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 	// Every service started successfully. A crash from here on is a post-start
 	// health report, not a failed bring-up, so don't roll the stack back.
 	broughtUp = true
+	o.started = append([]string(nil), order...)
+	// Everything the project asked to be kept up is up, and any stop opossum
+	// recorded earlier is over. Clearing the markers here is what makes `up` the
+	// point at which supervision resumes — the analogue of a daemon restart.
+	for _, name := range order {
+		o.ClearStopped(name)
+	}
 	// For a detached up, verify each long-running service is still running — a
 	// container that exited right after starting (with no healthcheck/depends_on to
 	// catch it) would otherwise leave `up` reporting success over a dead service. A
@@ -1285,6 +1297,17 @@ func (o *Orchestrator) waitHealthy(name string, hc *compose.Healthcheck) error {
 // project network, and — when removeVolumes is set — removes the project's named
 // volumes.
 func (o *Orchestrator) Down(removeVolumes bool, rmi string, removeOrphans bool) error {
+	// Before anything is torn down: a supervisor watching this project would see
+	// containers stopping and try to bring them back, fighting the teardown it
+	// can't know about.
+	if StopSupervisor(o.Project.Name) {
+		o.logf("Stopped the restart supervisor\n")
+	}
+	// …and forget what it was watching: the stack is coming down, so a later
+	// `up <service>` has nothing here to carry over. This is the call that counts —
+	// the one `down` makes before the compose file is read can only guess the
+	// project name from the directory, which is wrong whenever the file names it.
+	ClearWatched(o.Project.Name)
 	order, err := o.Project.StartupOrder()
 	if err != nil {
 		return err
@@ -1959,7 +1982,21 @@ func (o *Orchestrator) Ps() error {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
 			name, cname, image, dash(info.IP), dash(formatPorts(info.Ports)), status)
 	}
-	return tw.Flush()
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	// A background process the user didn't name should be visible wherever they
+	// look at the project, not only in the line `up` printed once. It goes to
+	// stderr: `ps` is a column table that agents and scripts parse, and a trailing
+	// prose line on stdout would break them.
+	if pid := SupervisorPID(o.Project.Name); pid != 0 {
+		msg := fmt.Sprintf("restart supervisor: running (pid %d)", pid)
+		if log, err := SupervisorLogFile(o.Project.Name); err == nil {
+			msg += " — " + log
+		}
+		fmt.Fprintln(os.Stderr, msg)
+	}
+	return nil
 }
 
 // formatPorts renders published ports docker-ps style: "0.0.0.0:8080->8080/tcp".
@@ -2384,6 +2421,8 @@ func (o *Orchestrator) Start(services []string) error {
 	}
 	for _, name := range targets {
 		o.logf("Starting %s\n", name)
+		// Starting it by hand undoes an earlier stop, so supervision resumes.
+		o.ClearStopped(name)
 		if err := o.rt.Start(o.containerName(name)); err != nil {
 			return fmt.Errorf("starting service %q: %w\n  `start` only (re)starts an already-created container — if it doesn't exist yet, run `opossum up %s` first", name, err, name)
 		}
@@ -2414,6 +2453,9 @@ func (o *Orchestrator) Stop(services []string) error {
 	}
 	for i := len(targets) - 1; i >= 0; i-- {
 		o.logf("Stopping %s\n", targets[i])
+		// Record it before stopping: the supervisor polls, and a stop it sees before
+		// the marker exists would be read as a crash and undone.
+		o.MarkStopped(targets[i])
 		o.rt.Stop(o.containerName(targets[i]))
 	}
 	return nil
@@ -2426,6 +2468,10 @@ func (o *Orchestrator) Restart(services []string) error {
 	targets, err := o.resolveServices(services)
 	if err != nil {
 		return err
+	}
+	// Restarting says "bring this back", so an earlier `stop` no longer stands.
+	for _, name := range targets {
+		o.ClearStopped(name)
 	}
 	for i := len(targets) - 1; i >= 0; i-- {
 		o.rt.Stop(o.containerName(targets[i]))
@@ -2604,3 +2650,14 @@ func (o *Orchestrator) ensureBindDirs(vols []string) {
 		}
 	}
 }
+
+// Started returns the services the last Up brought up (profile filtering and any
+// named services applied), or nil if Up hasn't run.
+//
+// It is meaningful even when Up returned an error, and the two failure shapes are
+// deliberately different: a bring-up that fails is rolled back, so nothing was
+// brought up and this stays nil; a post-start crash (OPSM-407) leaves the
+// containers in place, so this lists them. Callers deciding what to supervise
+// depend on that distinction. Run-to-completion services are included — the
+// supervisor filters them out itself, since they are meant to exit.
+func (o *Orchestrator) Started() []string { return o.started }
