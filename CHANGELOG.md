@@ -6,6 +6,12 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-08-01
+
+### Fixed
+
+- `healthcheck: disable: true` now works. Only the `test: ["NONE"]` spelling was read, so the compose spec's other way of switching a healthcheck off did nothing at all — the check stayed live, and a service depending on it with `condition: service_healthy` waited on a check the user had switched off. Both spellings now mean the same thing, and `disable: true` wins over a `test:` written beside it.
+
 ## [0.18.0] - 2026-07-31
 
 ### Added
@@ -663,7 +669,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.18.1...HEAD
+[0.18.1]: https://github.com/suruseas/opossum/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/suruseas/opossum/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/suruseas/opossum/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/suruseas/opossum/compare/v0.15.0...v0.16.0

@@ -43,7 +43,8 @@ var codesWithRecoveryProse = []diagCode{
 	codeBindDataDirChown, codeHostDeviceMount, codeBindFilePlaceholder,
 	codeHostPortInUse, codeDNSDomainAbsent, codeInternalEgress, codeDockerSocket,
 	codeExternalNetAbsent, codeHostPortRemapped,
-	codeBuildTmpContext,
+	codeBuildTmpContext, codeBuildSymlink,
+	codeOrphans,
 	codeDepNotRunning, codeRuntimeAbsent, codeRuntimeStopped, codeRuntimeAutoStart,
 	codeServiceExited, codeSupervisorStarted, codeSupervisorAction,
 }

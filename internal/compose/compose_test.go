@@ -958,3 +958,76 @@ services:
 		t.Errorf("scheduler.depends_on = %+v, want db service_healthy from the anchor", s.DependsOn)
 	}
 }
+
+// `disable: true` is the compose spec's other spelling of `test: ["NONE"]`, and
+// only the NONE spelling was read. Writing `disable: true` did nothing at all: the
+// check stayed live, a `service_healthy` dependant waited on it, and nothing said
+// why the line had no effect — the silent-ignore that teaches an agent to write a
+// setting again and again.
+func TestHealthcheckDisableMatchesNone(t *testing.T) {
+	p, err := Load(writeTemp(t, `
+services:
+  none:
+    image: x
+    healthcheck:
+      test: ["NONE"]
+  disabled:
+    image: y
+    healthcheck:
+      disable: true
+  both:
+    image: z
+    healthcheck:
+      test: ["CMD", "true"]
+      disable: true
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	none, disabled := p.Services["none"].Healthcheck, p.Services["disabled"].Healthcheck
+	if none == nil || disabled == nil {
+		t.Fatalf("both spellings should produce a healthcheck: %+v %+v", none, disabled)
+	}
+	// The whole point is that the two spellings mean the same thing, so compare them
+	// rather than each against a hand-written expectation.
+	if !reflect.DeepEqual(*none, *disabled) {
+		t.Errorf("`disable: true` should mean what `test: [NONE]` means:\n  NONE    = %+v\n  disable = %+v", *none, *disabled)
+	}
+	if !disabled.Disabled {
+		t.Errorf("`disable: true` should disable the healthcheck, got %+v", disabled)
+	}
+	// Asking for it to be off wins over a test given alongside: that is what the
+	// request means, and leaving the test in would keep a dependant waiting.
+	if hc := p.Services["both"].Healthcheck; hc == nil || !hc.Disabled || len(hc.Test) != 0 {
+		t.Errorf("`disable: true` should win over a test beside it, got %+v", hc)
+	}
+}
+
+// The load-time check that a `service_healthy` dependency actually has a
+// healthcheck reads Healthcheck.Disabled, so the spelling it does not understand
+// slips past it too — the dependant loads and then waits on a check the user
+// switched off.
+func TestServiceHealthyRejectsADisabledDependency(t *testing.T) {
+	for _, spelling := range []string{`test: ["NONE"]`, `disable: true`} {
+		_, err := Load(writeTemp(t, `
+services:
+  web:
+    image: x
+    depends_on:
+      db:
+        condition: service_healthy
+  db:
+    image: y
+    healthcheck:
+      `+spelling+`
+`))
+		if err == nil {
+			t.Errorf("a service_healthy dependency on a service whose healthcheck is off (%s) "+
+				"should be rejected at load", spelling)
+			continue
+		}
+		if !strings.Contains(err.Error(), "defines no healthcheck") {
+			t.Errorf("%s: expected the no-healthcheck error, got %v", spelling, err)
+		}
+	}
+}

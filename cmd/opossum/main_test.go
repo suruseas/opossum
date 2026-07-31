@@ -3529,3 +3529,73 @@ func TestDestroyDryRunReportsTheSameLeftoversAsTheRealRun(t *testing.T) {
 		t.Errorf("the preview and the real run disagree about what is left alone\npreview:\n%s\n\nreal:\n%s", got, want)
 	}
 }
+
+// The interactive question comes before the leftovers, and `--dry-run` prints them
+// with no question at all. Both halves are deliberate (see printSystemLeftovers),
+// and both are here because the reasoning lives in a comment that cannot stop the
+// call from being moved.
+//
+// The failure this guards against is not a crash: moving the list above the prompt
+// reads as an improvement — it is what `--dry-run` does — and nothing else would
+// notice that the question had been pushed off the screen by four lines about
+// things destroy does not touch.
+func TestDestroyAsksBeforeItSaysWhatItLeaves(t *testing.T) {
+	const heading = "Left alone, because it isn't this project's to remove:"
+	const question = "Remove all of it?"
+
+	// destroy refuses to guess without a terminal, so the interactive path is only
+	// reachable through this seam.
+	orig := stdinIsTerminal
+	stdinIsTerminal = func() bool { return true }
+	defer func() { stdinIsTerminal = orig }()
+
+	fakeShim(t)
+	t.Setenv("STATE_DIR", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("INSPECT_PROJECT", "asks")
+	dir := destroyProject(t, "name: asks\nservices:\n  web:\n    image: web\n")
+	t.Chdir(dir)
+
+	// The preview is the other half of the same decision: no question, and the list
+	// is the point of running it. It runs FIRST — after the interactive destroy there
+	// is nothing left, so a preview then goes down the "Nothing to remove" path, which
+	// prints the list from somewhere else entirely and would assert nothing about
+	// --dry-run at all.
+	preview, err := run(t, "destroy", "--dry-run")
+	if err != nil {
+		t.Fatalf("dry-run: %v", err)
+	}
+	if !strings.Contains(preview, "would remove") {
+		t.Fatalf("the preview found nothing to remove, so it is not exercising the "+
+			"--dry-run path this means to check:\n%s", preview)
+	}
+	if strings.Contains(preview, question) {
+		t.Errorf("--dry-run should not ask anything, got:\n%s", preview)
+	}
+	if !strings.Contains(preview, heading) {
+		t.Errorf("--dry-run is read to decide with, so it has to say what stays, got:\n%s", preview)
+	}
+
+	root := newRootCmd()
+	var buf strings.Builder
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetIn(strings.NewReader("y\n"))
+	root.SetArgs([]string{"destroy"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("destroy: %v\n%s", err, buf.String())
+	}
+	out := buf.String()
+	q, l := strings.Index(out, question), strings.Index(out, heading)
+	if q < 0 {
+		t.Fatalf("the confirmation was never asked, so this proves nothing:\n%s", out)
+	}
+	if l < 0 {
+		t.Fatalf("the leftovers were never printed:\n%s", out)
+	}
+	if q > l {
+		t.Errorf("the leftovers came before the question — they say what destroy will NOT "+
+			"touch, so they cannot change the answer, and putting them there separates the "+
+			"question from the plan it is about:\n%s", out)
+	}
+}

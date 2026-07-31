@@ -103,7 +103,8 @@ long `{target, published, protocol, host_ip}`), `environment`, `env_file`,
 `volumes` (bind, named, `type: tmpfs`, short+long form), `tmpfs`, `secrets`
 (file-based only, mounted at `/run/secrets/<name>`), `depends_on` (+ `condition:
 service_healthy`/`service_completed_successfully`), `healthcheck` (CMD/CMD-SHELL/
-string, `interval`/`timeout`/`retries`/`start_period`), `command`, `entrypoint`,
+string, `interval`/`timeout`/`retries`/`start_period`, and either spelling of off —
+`disable: true` or `test: ["NONE"]`), `command`, `entrypoint`,
 `profiles`, `mem_limit`/`cpus` (and `deploy.resources.limits.{memory,cpus}`), `ssh`
 (forwards the host SSH agent), `develop.watch`, `user`, `working_dir`, `init`,
 `read_only`, `cap_add`/`cap_drop`, `networks` (top-level + per-service, incl.
@@ -141,7 +142,9 @@ container system dns create opossum`, see `[OPSM-202]`); an `internal:` network 
 `file:`; a service with neither `image` nor `build`; `network_mode: none` combined
 with `networks:`; a top-level network that is both `internal` and `external`; a
 service referencing an undeclared network; `depends_on` on an unknown service;
-`service_healthy` on a service with no healthcheck.
+`service_healthy` on a service whose healthcheck is absent or switched off (either
+spelling) — docker compose accepts that and the dependant then waits on a check that
+will never report, so opossum says so at load instead.
 
 ## Failure signatures → fix
 
@@ -230,6 +233,15 @@ list; codes are add-only and never change meaning.
   again. The name is all opossum has to go on, so a directory legitimately named like a
   file (`conf.d`, `.ssh`) draws the same line — the message says so, and for that case
   there is nothing to do.
+- **`[OPSM-402]` … `found orphan container(s) not defined in the compose file`** →
+  containers carrying this project's label that no service in the current compose file
+  claims, left by a service that was renamed or deleted. They are left as they are —
+  the sweep looks at stopped ones too — so a running orphan keeps running, and keeps
+  its name and any published ports. **`down` neither reports nor removes them unless
+  asked**, so a quiet `down` is not evidence that none are left. Pass
+  `--remove-orphans` to either `up` or `down` to remove them. Not removing by default is
+  docker compose's behaviour too: a container you meant to keep is not opossum's to
+  delete because it left the file.
 - **`[OPSM-408]` … `watching <services> for restart:`** → the project declares
   `restart:`, so `up` left a small per-project supervisor running to bring those
   services back when they exit. `opossum down` stops it, `opossum ps` shows it, and
@@ -253,6 +265,16 @@ list; codes are add-only and never change meaning.
   composes that expect a shared `proxy` network.) `up` fails this up front.
 - **`[OPSM-301]` … `context … under /private/tmp … builder can't read`** → build
   from a path under your home directory (the builder VM doesn't mount `/private/tmp`).
+- **`[OPSM-302]` … `build context <path> is a symlink`** → the builder may refuse a
+  context reached through a symlink. Point `build.context` at the real directory —
+  `readlink -f <path>` (or `realpath`) prints it; plain `readlink` prints the link's
+  target, which is relative for a relative link. **If that comes back under
+  `/private/tmp`, re-spell it as `/tmp/…`**: the two name the same directory on macOS,
+  but the builder reads the `/tmp` spelling and not the `/private/tmp` one, which is
+  `OPSM-301`. (Moving the context under your home directory works too.) That asymmetry
+  is why opossum warns instead of rewriting the path for you — resolving symlinks in
+  general would turn a readable `/tmp/…` context into an unreadable `/private/tmp/…`
+  one.
 - **`unsupported network_mode "host"`** does NOT occur — such values are ignored, not
   rejected (the file loads); reported as `[OPSM-502]`.
 - **connected but a tool call / outbound request fails** with the runtime days-old →
@@ -290,6 +312,8 @@ Every `[OPSM-NNN]` opossum can emit (add-only; grouped 1xx storage / 2xx network
 - `OPSM-401` — a dependency's container exited before becoming healthy (logs embedded).
 - `OPSM-402` — orphan containers left by services no longer in the compose.
 - `OPSM-403` — a `service_healthy` dependency defines no healthcheck (not waited on).
+  Defensive only: loading rejects that compose file first, with a clearer message, so
+  this cannot be reached through `up`. No recovery entry above for that reason.
 - `OPSM-404` — the `container` CLI isn't installed / not on PATH (every runtime command fails).
 - `OPSM-405` — the `container` system (daemon) is installed but not running (`ps`/`images` fail loudly; the opt-out error for mutating commands).
 - `OPSM-406` — the runtime was stopped; a mutating command auto-started it (notice, not an error; `OPOSSUM_NO_AUTO_START` opts out).

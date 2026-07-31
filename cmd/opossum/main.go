@@ -767,6 +767,16 @@ func printDestroyPlan(out io.Writer, project string, p orchestrator.DestroyPlan,
 // every other project, and gives the command for each. It prints them rather than
 // running them: removing a DNS domain needs sudo, and clearing the builder cache
 // would slow down every unrelated project on the machine.
+//
+// It runs after the confirmation, not before it, and that is deliberate. `--dry-run`
+// prints this because a preview is read to decide with; the interactive question is
+// not the same thing. Everything here is what destroy will NOT touch, so none of it
+// changes the answer to "remove all of it?" — what does is the plan above, which is
+// already on screen. Putting this between the plan and the question would separate the
+// two — and push the question further down — to say nothing that bears on it.
+//
+// The ordering is pinned by a test rather than left to this comment, because a
+// comment does not stop the call from being moved.
 func printSystemLeftovers(out io.Writer, snapshotDirs []string) {
 	fmt.Fprintln(out, "Left alone, because it isn't this project's to remove:")
 	fmt.Fprintf(out, "  - the %q DNS domain — remove with: sudo container system dns delete %s\n", dnsDomain, dnsDomain)

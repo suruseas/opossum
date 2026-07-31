@@ -1,6 +1,7 @@
 package site
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -345,6 +346,39 @@ func TestBuildTheRepositorysSite(t *testing.T) {
 // Build empties its output directory, and takes that directory from the command
 // line. `go run ./internal/site/build ~/work` should be a refusal, not a bad
 // afternoon — so it only empties a directory it can see it wrote itself.
+
+// The favicon must actually travel. head-custom.html is the primer theme's only
+// <head> hook, and every icon it references must exist in the output byte-for-
+// byte — a link to a missing or stale file is the browser's globe again, and
+// nothing else on the site would notice.
+func TestBuildShipsTheFavicon(t *testing.T) {
+	out := t.TempDir()
+	if err := Build(filepath.Join("..", ".."), out); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	headHTML, err := os.ReadFile(filepath.Join(out, "_includes", "head-custom.html"))
+	if err != nil {
+		t.Fatalf("head-custom.html: %v (without it the theme renders no icon links at all)", err)
+	}
+	for _, name := range []string{"favicon.png", "favicon-512.png", "apple-touch-icon.png"} {
+		if !strings.Contains(string(headHTML), "/assets/"+name) {
+			t.Errorf("head-custom.html does not reference %s", name)
+		}
+		src, err := os.ReadFile(filepath.Join("..", "..", "docs", "assets", name))
+		if err != nil {
+			t.Fatalf("source icon %s: %v", name, err)
+		}
+		got, err := os.ReadFile(filepath.Join(out, "assets", name))
+		if err != nil {
+			t.Errorf("%s was not copied into the site: %v", name, err)
+			continue
+		}
+		if !bytes.Equal(src, got) {
+			t.Errorf("%s differs from docs/assets/%s — not copied verbatim", name, name)
+		}
+	}
+}
+
 func TestBuildRefusesADirectoryItDidNotWrite(t *testing.T) {
 	out := t.TempDir()
 	keep := filepath.Join(out, "someone-elses-work.txt")

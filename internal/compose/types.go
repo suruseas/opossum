@@ -790,6 +790,7 @@ func (h *Healthcheck) UnmarshalYAML(value *yaml.Node) error {
 		Timeout     string        `yaml:"timeout"`
 		Retries     int           `yaml:"retries"`
 		StartPeriod string        `yaml:"start_period"`
+		Disable     bool          `yaml:"disable"`
 	}
 	if err := value.Decode(&raw); err != nil {
 		return err
@@ -810,6 +811,16 @@ func (h *Healthcheck) UnmarshalYAML(value *yaml.Node) error {
 	default:
 		// a list without a directive is taken as a direct argv
 		h.Test = append([]string(nil), test...)
+	}
+
+	// `disable: true` is the spec's other spelling of `test: ["NONE"]`, and it wins
+	// over any test given alongside it — that is what asking for the check to be off
+	// means. Reading only the `NONE` spelling left the other one doing nothing at all:
+	// the check stayed live, a `service_healthy` dependant waited on it, and nothing
+	// said why the line had no effect.
+	if raw.Disable {
+		h.Disabled = true
+		h.Test = nil
 	}
 
 	var err error
