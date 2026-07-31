@@ -36,7 +36,8 @@ drifting quietly.
 
 If the change isn't visible to someone using opossum — tests, internal
 refactoring, docs — there's no entry to write. That's the same bar the changelog
-has always had.
+has always had. Changes to this changelog process itself are the canonical
+example: nobody upgrading opossum can see them, so they get no entry.
 
 ## Releasing
 

@@ -5,7 +5,7 @@
 //
 // It logs each invocation's arguments (space-joined) to $FAKE_LOG and returns
 // output shaped like the real CLI. Behaviour is steered entirely through the
-// environment (FAKE_LOG, STATE_DIR, INSPECT_STATE, INSPECT_STOPPED,
+// environment (FAKE_LOG, STATE_DIR, DELETE_STICKY, INSPECT_STATE, INSPECT_STOPPED,
 // INSPECT_ABSENT, NET_EXISTS, NETWORK_ABSENT, RUN_FAIL, HEALTH_*, VOLUME_*, LS_*,
 // IMAGE_ABSENT),
 // so tests need no t.Setenv and stay
@@ -56,7 +56,36 @@ func run(args []string) int {
 		if arg(1) == "status" {
 			fmt.Println("status running")
 		}
+	case "delete", "rm":
+		// Remember it as gone, so a later `inspect` can answer "not there". Gated on
+		// $STATE_DIR, which the orchestrator tests' fakeShim helper always sets — so
+		// in this package deletion is modelled everywhere, not opt-in. Without it
+		// every container would exist forever, and "did the teardown work?" could not
+		// be asked at all.
+		// $DELETE_STICKY names containers whose delete succeeds and yet leaves them
+		// there — a teardown that trusted the exit code would report them gone. Same
+		// knob and meaning as the shim in cmd/opossum/testdata.
+		if dir := os.Getenv("STATE_DIR"); dir != "" && len(args) > 0 {
+			name := args[len(args)-1]
+			sticky := false
+			for _, m := range strings.Fields(os.Getenv("DELETE_STICKY")) {
+				if name == m {
+					sticky = true
+				}
+			}
+			if !sticky {
+				_ = os.WriteFile(gonePath(dir, name), []byte("1"), 0o644)
+			}
+		}
+
 	case "inspect":
+		// Gone until something creates it again (see the `run` case).
+		if dir := os.Getenv("STATE_DIR"); dir != "" {
+			if _, err := os.Stat(gonePath(dir, arg(1))); err == nil {
+				fmt.Fprintf(os.Stderr, "Error: container not found: %s\n", arg(1))
+				return 1
+			}
+		}
 		// Build the labels object from INSPECT_PROJECT and any recorded config-hash.
 		var labels []string
 		if p := os.Getenv("INSPECT_PROJECT"); p != "" {
@@ -113,6 +142,14 @@ func run(args []string) int {
 		}
 
 	case "run":
+		// Creating it again means it is no longer gone (see the `delete` case).
+		if dir := os.Getenv("STATE_DIR"); dir != "" {
+			for k, a := range args {
+				if k > 0 && args[k-1] == "--name" {
+					_ = os.Remove(gonePath(dir, a))
+				}
+			}
+		}
 		// Record the config-hash (from -l opossum.config-hash=…) keyed by --name,
 		// so a later inspect reports it and up-idempotency evals can detect it.
 		if dir := os.Getenv("STATE_DIR"); dir != "" {
@@ -229,6 +266,14 @@ func run(args []string) int {
 		}
 	}
 	return 0
+}
+
+// gonePath is where a removed object's marker lives. The name is sanitised the
+// same way the shim in cmd/opossum/testdata does it, so a name carrying `/` or
+// `:` — an image ref, if this ever covers more than containers — can't escape the
+// state directory.
+func gonePath(dir, name string) string {
+	return filepath.Join(dir, "gone-"+strings.NewReplacer("/", "_", ":", "_", ".", "_").Replace(name))
 }
 
 // publishedPorts renders the ports a previous `run` recorded for this container,

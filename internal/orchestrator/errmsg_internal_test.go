@@ -48,7 +48,7 @@ func TestEnsureBindDirsWarnsOnFailure(t *testing.T) {
 	p := &compose.Project{Name: "demo", BaseDir: t.TempDir(), Services: map[string]*compose.Service{}}
 	var out bytes.Buffer
 	o := New(p, &rt.Runtime{}, "", &out)
-	o.ensureBindDirs([]string{filepath.Join(parent, "child") + ":/data"})
+	o.ensureBindDirs("svc", []string{filepath.Join(parent, "child") + ":/data"})
 
 	s := out.String()
 	if !strings.Contains(s, "[OPSM-104]") || !strings.Contains(s, "mkdir -p") {

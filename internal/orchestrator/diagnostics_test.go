@@ -9,16 +9,137 @@ import (
 	"testing"
 )
 
-// Every diagnostic code opossum can emit must be documented in AGENTS.md, so an
-// agent that sees a `[OPSM-NNN]` can always look up its fix. Adding a code forces
-// documenting it (1:1 with the failure-signature / diagnostic-codes tables).
+// AGENTS.md documents each code twice, and the two entries do different jobs: the
+// failure-signature section says what happened and how to recover, the list is the
+// index an agent scans. A code in only one of them is half-documented.
+//
+// The sections are named here rather than searched for, because a check that looks
+// at the whole file passes when either table is deleted outright — which is what
+// this one used to do.
+const (
+	agentsMdSignatures = "## Failure signatures → fix"
+	agentsMdCodeList   = "### Diagnostic codes"
+)
+
+var (
+	// An entry in the failure-signature section, which opens `- **`[OPSM-NNN]` …`.
+	// Matching the entry's head rather than any mention is what lets an entry refer
+	// to a neighbouring code in passing without counting as documenting it.
+	proseEntryRE = regexp.MustCompile("(?m)^- \\*\\*`\\[(OPSM-[0-9]+)\\]`")
+	// A line in the index, which is `- `OPSM-NNN` — …`.
+	indexEntryRE = regexp.MustCompile("(?m)^- `(OPSM-[0-9]+)`")
+)
+
+// codesWithRecoveryProse are the codes the failure-signature section explains at
+// length: what happened, why, and how to get moving again.
+//
+// Not every code earns one. Some are notes rather than failures — an ignored
+// compose field, a `watch` action that failed and will be retried — and writing a
+// recovery narrative for those would pad the section an agent reads first. So the
+// split is declared here instead of inferred: a code is on this list or it isn't,
+// and the test says so either way when the document drifts from it.
+var codesWithRecoveryProse = []diagCode{
+	codePGDATADatadir, codeSharedVolume, codeVolumeAttachBusy, codeBindDirCreate,
+	codeBindDataDirChown, codeHostDeviceMount, codeBindFilePlaceholder,
+	codeHostPortInUse, codeDNSDomainAbsent, codeInternalEgress, codeDockerSocket,
+	codeExternalNetAbsent, codeHostPortRemapped,
+	codeBuildTmpContext,
+	codeDepNotRunning, codeRuntimeAbsent, codeRuntimeStopped, codeRuntimeAutoStart,
+	codeServiceExited, codeSupervisorStarted, codeSupervisorAction,
+}
+
+// The index is what an agent scans to turn a code it just saw into a fix, so it
+// has to list every code opossum can emit and nothing else.
+//
+// Reading the section rather than the whole file is the point. The previous
+// version searched all of AGENTS.md, so a code documented in either place counted
+// as documented in both — either of a code's two entries could be deleted and the
+// search still found the other. Deleting the whole prose section was green for the
+// same reason. (Deleting the whole index was not: ten codes appear nowhere else,
+// so the old test did catch that one. The hole was per-entry, and on the prose
+// side it was total.)
 func TestDiagCodesDocumentedInAgentsMd(t *testing.T) {
-	md := readAgentsMd(t)
+	listed := codesIn(indexEntryRE, agentsMdSection(t, readAgentsMd(t), agentsMdCodeList))
+	compareCodeSets(t, agentsMdCodeList, allDiagCodes, listed,
+		"add it to the index", "remove it, or add the code to the ledger")
+}
+
+// The failure-signature section is the other half, and it drifts the same way: an
+// entry deleted with the code left in the ledger, or prose written for a code
+// nobody declared worth explaining. Both directions are checked against the list
+// above, so the section cannot be emptied without this failing.
+func TestFailureSignaturesMatchTheDeclaredCodes(t *testing.T) {
+	explained := codesIn(proseEntryRE, agentsMdSection(t, readAgentsMd(t), agentsMdSignatures))
+	compareCodeSets(t, agentsMdSignatures, codesWithRecoveryProse, explained,
+		"write the entry, or drop it from codesWithRecoveryProse",
+		"add it to codesWithRecoveryProse, or fold the entry into an existing one")
+	inLedger := map[diagCode]bool{}
 	for _, c := range allDiagCodes {
-		if !strings.Contains(md, string(c)) {
-			t.Errorf("diagnostic code %q is not documented in AGENTS.md — add it to the Diagnostic codes list", c)
+		inLedger[c] = true
+	}
+	for _, c := range codesWithRecoveryProse {
+		if !inLedger[c] {
+			t.Errorf("codesWithRecoveryProse lists %q, which is not a code in the ledger", c)
 		}
 	}
+}
+
+// codesIn returns the codes an entry pattern finds in a section, in no order.
+func codesIn(re *regexp.Regexp, section string) map[diagCode]bool {
+	out := map[diagCode]bool{}
+	for _, m := range re.FindAllStringSubmatch(section, -1) {
+		out[diagCode(m[1])] = true
+	}
+	return out
+}
+
+// compareCodeSets reports both directions of a mismatch, since the two mean
+// opposite things and need opposite fixes.
+func compareCodeSets(t *testing.T, where string, want []diagCode, got map[diagCode]bool, missingFix, extraFix string) {
+	t.Helper()
+	if len(got) == 0 {
+		t.Fatalf("no entries found in %q — the section's format changed, so this check is "+
+			"reading nothing and would pass whatever the document said", where)
+	}
+	declared := map[diagCode]bool{}
+	for _, c := range want {
+		declared[c] = true
+		if !got[c] {
+			t.Errorf("%q is not in %q — %s", c, where, missingFix)
+		}
+	}
+	for c := range got {
+		if !declared[c] {
+			t.Errorf("%q is in %q but not declared — %s", c, where, extraFix)
+		}
+	}
+}
+
+// agentsMdSection returns the body under heading, up to the next heading of any
+// level. It fails rather than returning nothing when the heading has moved: a
+// section check that silently scans an empty string passes every assertion made
+// against it, which is the failure this whole test is here to stop.
+func agentsMdSection(t *testing.T, md, heading string) string {
+	t.Helper()
+	// Anchored to the start of a line: `### X` is a substring of `#### X`, so an
+	// unanchored count keeps saying 1 while the heading changes level underneath it.
+	if n := strings.Count("\n"+md, "\n"+heading+"\n"); n != 1 {
+		t.Fatalf("AGENTS.md has %d headings %q, want exactly 1 — if it was renamed, "+
+			"update the constant here so this keeps checking something", n, heading)
+	}
+	_, rest, _ := strings.Cut(md, heading+"\n")
+	var body []string
+	for _, line := range strings.Split(rest, "\n") {
+		if strings.HasPrefix(line, "#") {
+			break
+		}
+		body = append(body, line)
+	}
+	out := strings.Join(body, "\n")
+	if strings.TrimSpace(out) == "" {
+		t.Fatalf("the section %q in AGENTS.md is empty", heading)
+	}
+	return out
 }
 
 // The reverse of the above, closing the 1:1 loop: every `OPSM-NNN` that AGENTS.md

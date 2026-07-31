@@ -32,7 +32,14 @@ var (
 // in outside this repository. Scanning them would mean either a permanently red
 // test or teaching the checker to ignore particular strings, and neither says
 // anything about whether the project's own documentation hangs together.
-var docsSkipped = map[string]bool{"articles": true}
+var docsSkipped = map[string]bool{
+	"articles": true,
+	// Built by internal/site and gitignored; its links are absolute URLs to
+	// GitHub by design, and a developer who has built it locally should not get a
+	// confusing failure from this ratchet.
+	"_site_src": true,
+	"_site":     true,
+}
 
 // blankFences replaces the contents of fenced code blocks with empty lines, so a
 // scan of the whole file sees no example code but still counts lines correctly.

@@ -119,3 +119,5 @@ of the service's VM process (what Activity Monitor shows for "Virtual Machine
 Service…"), read from the host; it's **approximate and host-derived**, and a
 service whose VM can't be mapped shows `—` rather than failing. (`opossum doctor`
 gives a rougher, introspection-free estimate.)
+
+[← back to the README](../README.md)

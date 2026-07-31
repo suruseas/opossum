@@ -24,10 +24,12 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// snapshotDirName is the directory, kept beside the workspace (not inside it, so
+// SnapshotDirName is the directory, kept beside the workspace (not inside it, so
 // it's never part of what gets cloned and never lands in a bind mount), where
-// snapshots are stored.
-const snapshotDirName = ".opossum-snapshots"
+// snapshots are stored. Exported because `destroy` names these directories when
+// it reports what it is leaving alone, and a second copy of the string is a
+// second thing to keep in step.
+const SnapshotDirName = ".opossum-snapshots"
 
 // autosavePrefix marks the snapshots Rollback takes automatically (of the state
 // it's about to overwrite). Prune targets these by default, since they accumulate
@@ -69,7 +71,7 @@ func (m *Manager) dir() (string, error) {
 		// snapshot dir would land inside the workspace and get cloned into itself.
 		return "", fmt.Errorf("workspace %q is a filesystem root; snapshot a subdirectory instead", m.Root)
 	}
-	return filepath.Join(parent, snapshotDirName), nil
+	return filepath.Join(parent, SnapshotDirName), nil
 }
 
 // Snapshot saves the current workspace under name. fastClone is false when the

@@ -477,8 +477,18 @@ func upCmd() *cobra.Command {
 			// after starting fails the up as a post-start health report, and every
 			// container stays. Those carry the compose file's `restart:` policy, which
 			// docker applies whatever `up` exited with, and bailing out here left them
-			// unwatched. Started() is empty after a rollback, so this only starts a
-			// supervisor when something really is up.
+			// unwatched. Started() reports what is running when Up finishes — after a
+			// rollback that is whatever the failed call left alone, which may be
+			// nothing — so this starts a supervisor exactly when something really is up.
+			//
+			// That includes a bring-up the user interrupted: Ctrl-C stops what opossum
+			// is doing, not what was already running. A service left up from an earlier
+			// `up`, with a `restart:` policy the compose file still asks for, is not
+			// something to stop watching because a later command was cut short. `down`
+			// is how you stop it. The reach of that: if no supervisor was running — the
+			// project was brought up with --no-supervisor, or its watcher died — an
+			// interrupted `up` can leave a background process where there was none.
+			// --no-supervisor still opts out of that, and `down` still ends it.
 			//
 			// Still after Up returns, never during it: a watcher started earlier would
 			// see the half-built stack and try to "fix" containers still being made.
@@ -580,7 +590,10 @@ func destroyCmd() *cobra.Command {
 			"left exactly as they are. Nothing shared beyond this project is removed either: " +
 			"volumes declared `external: true`, other projects' containers, the DNS domain and " +
 			"the builder cache all stay (the last two are reported with the command to remove " +
-			"them, since they are shared and one needs sudo).\n\n" +
+			"them, since they are shared and one needs sudo). Workspace snapshots stay too: a " +
+			"`.opossum-snapshots/` directory belongs to the directory that was snapshotted, not " +
+			"to a project, so any found in this directory or one below it are reported " +
+			"rather than removed.\n\n" +
 			"Destroy asks before it acts. Use --force in a script or agent loop, and --dry-run " +
 			"to see the list without removing anything. (There is no -f shorthand: -f is the " +
 			"global --file.)",
@@ -608,7 +621,7 @@ func destroyCmd() *cobra.Command {
 			out := cmd.OutOrStdout()
 			if plan.Empty() {
 				fmt.Fprintf(out, "Nothing to remove: opossum has nothing left for project %q.\n", o.Project.Name)
-				printSystemLeftovers(out)
+				printSystemLeftovers(out, plan.SnapshotDirs)
 				return nil
 			}
 			// A project named on the command line is not the project this directory
@@ -630,6 +643,11 @@ func destroyCmd() *cobra.Command {
 			}
 			printDestroyPlan(out, o.Project.Name, plan, dryRun)
 			if dryRun {
+				// The preview is where this list is worth most: it is read before
+				// deciding, and what destroy leaves behind is part of that decision.
+				// Printing it only after the fact meant the one mode for looking first
+				// was the one that didn't say.
+				printSystemLeftovers(out, plan.SnapshotDirs)
 				return nil
 			}
 			if !force {
@@ -646,7 +664,7 @@ func destroyCmd() *cobra.Command {
 				return err
 			}
 			fmt.Fprintf(out, "Removed everything opossum created for %q. Your compose file, .env and sources are untouched.\n", o.Project.Name)
-			printSystemLeftovers(out)
+			printSystemLeftovers(out, plan.SnapshotDirs)
 			return nil
 		},
 	}
@@ -749,10 +767,21 @@ func printDestroyPlan(out io.Writer, project string, p orchestrator.DestroyPlan,
 // every other project, and gives the command for each. It prints them rather than
 // running them: removing a DNS domain needs sudo, and clearing the builder cache
 // would slow down every unrelated project on the machine.
-func printSystemLeftovers(out io.Writer) {
-	fmt.Fprintln(out, "Shared with other projects, so left alone:")
+func printSystemLeftovers(out io.Writer, snapshotDirs []string) {
+	fmt.Fprintln(out, "Left alone, because it isn't this project's to remove:")
 	fmt.Fprintf(out, "  - the %q DNS domain — remove with: sudo container system dns delete %s\n", dnsDomain, dnsDomain)
 	fmt.Fprintln(out, "  - the build cache and unused images — reclaim with: container builder delete --force && container image prune -a")
+	// Snapshots belong to the directory that was snapshotted, not to a project, so
+	// destroy has no business removing them — but they are usually the biggest
+	// thing left behind, and silence here is how you find gigabytes a month later.
+	//
+	// `ls` rather than `opossum ws ls`: `ws` reads its snapshots from beside the
+	// workspace given to --path, so the bare command would list a different
+	// directory than the one on this line whenever the workspace isn't the default.
+	for _, dir := range snapshotDirs {
+		fmt.Fprintf(out, "  - workspace snapshots in %s — they belong to that directory, not to "+
+			"this project; see them with: ls %[1]s, remove with: rm -rf %[1]s\n", dir)
+	}
 }
 
 // confirmDestroy asks, once, on the command's own streams. Without a terminal

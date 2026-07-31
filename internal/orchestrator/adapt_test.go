@@ -1253,3 +1253,63 @@ func TestPlanOverlayNoNoteForHonouredPolicies(t *testing.T) {
 		}
 	}
 }
+
+// A bind source that does not exist is created as a directory whatever it was
+// meant to be, so a file the user was told to supply becomes an empty directory —
+// and by the time the suggestion looks, it is indistinguishable from a data
+// directory. Measured over 156 real-world projects this was the only wrong
+// suggestion: overleaf mounts `./mongodb-init-replica-set.js`, which its README
+// says to download before the first start, and the suggestion offered to replace
+// it with a named volume — advice to hide the file you are about to put there.
+func TestPlanOverlayDoesNotSuggestAVolumeForAFileHandedThrough(t *testing.T) {
+	dir := t.TempDir()
+	// Empty, exactly as `up` leaves a bind source it had to create.
+	if err := os.MkdirAll(filepath.Join(dir, "mongodb-init-replica-set.js"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "appdata"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, changes := planForIn(t, dir, `
+name: demo
+services:
+  app:
+    image: someapp:1
+    volumes:
+      - ./mongodb-init-replica-set.js:/docker-entrypoint-initdb.d/mongodb-init-replica-set.js
+      - ./appdata:/opt/app/data
+`)
+	// The directory mount beside it still gets its suggestion, so this is a test of
+	// the file rule and not of the suggestion being switched off.
+	var targets []string
+	for _, c := range changes {
+		if c.Code == "OPSM-105" {
+			targets = append(targets, c.Summary)
+		}
+	}
+	if len(targets) != 1 || !strings.Contains(targets[0], "/opt/app/data") {
+		t.Errorf("expected the directory mount to be suggested and the file mount left alone, got %v", targets)
+	}
+}
+
+func TestHandsThroughAFile(t *testing.T) {
+	for _, tc := range []struct {
+		src, target string
+		want        bool
+	}{
+		// The same name on both sides with an extension: a single file passed in.
+		{"./mongodb-init-replica-set.js", "/docker-entrypoint-initdb.d/mongodb-init-replica-set.js", true},
+		{"./nginx.conf", "/etc/nginx/nginx.conf", true},
+		// A directory handed over, which is what the suggestion is for.
+		{"./appdata", "/opt/app/data", false},
+		{"./volume-data/influxdb/data", "/var/lib/influxdb", false},
+		// Same name, no extension — a directory, not a file.
+		{"./data", "/data", false},
+		// An extension but different names: not the pass-a-file shape.
+		{"./conf", "/etc/nginx/nginx.conf", false},
+	} {
+		if got := handsThroughAFile(tc.src, tc.target); got != tc.want {
+			t.Errorf("handsThroughAFile(%q, %q) = %v, want %v", tc.src, tc.target, got, tc.want)
+		}
+	}
+}

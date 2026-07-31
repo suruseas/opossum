@@ -42,3 +42,7 @@ CLAUDE.md
 # Stray build output: `go build ./internal/orchestrator/testdata/fakeshim`
 # writes the binary into the working directory unless -o says otherwise.
 /fakeshim
+
+# Generated documentation site (built by internal/site; never committed)
+_site_src/
+_site/

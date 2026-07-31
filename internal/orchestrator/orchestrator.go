@@ -424,6 +424,10 @@ func (o *Orchestrator) searchDomain() string {
 // names it starts the whole project; otherwise it starts only the named services
 // plus their transitive dependencies, leaving unrelated services untouched.
 func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
+	// Before anything else, including the checks that can return early: this call
+	// owns the answer from here, and a caller reading it after a failed Up must not
+	// get the previous call's stack. The caller decides what to supervise from it.
+	o.started = nil
 	if !o.rt.Available() {
 		return ErrRuntimeAbsent()
 	}
@@ -561,6 +565,10 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 	// containers we started (reverse order) and remove any networks we created,
 	// so a failed up leaves no residue behind.
 	var started []string
+	// The services this call created, by service name. The rollback tears these
+	// down; anything else in the project that is still running afterwards was not
+	// this call's to remove, and is what Started() reports.
+	createdSvc := map[string]bool{}
 	broughtUp := false // set once every service has started; suppresses rollback for a
 	// post-start crash (that's a health report, not a failed bring-up — leave the
 	// containers for inspection like docker compose does).
@@ -579,6 +587,32 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 		for _, n := range createdNets {
 			o.rt.DeleteNetwork(n)
 		}
+		// Ask what is still running rather than reasoning about it. A service left
+		// alone because it was already up to date is not in the teardown above, and
+		// neither is one the loop never reached — so a list built while walking the
+		// order would depend on where the failure happened, which is not a property
+		// anyone wants Started() to have.
+		//
+		// Services this call created are excluded even if their removal failed:
+		// promoting a container the rollback was trying to delete into the supervised
+		// set would have the supervisor fight the teardown.
+		//
+		// Presence, not liveness — the same test StillSupervised makes, and for the
+		// same reason. A service that crashed while nobody was watching is exactly
+		// what `restart:` is for, so requiring "running" here would drop it from
+		// supervision every time some other service failed a bring-up. A container
+		// the user stopped is held down by its stop marker, not by being left out of
+		// this list.
+		var survivors []string
+		for _, name := range order {
+			if createdSvc[name] {
+				continue
+			}
+			if o.rt.Inspect(o.containerName(name)).Exists {
+				survivors = append(survivors, name)
+			}
+		}
+		o.started = survivors
 	}()
 
 	if o.DNSDomain != "" && !o.rt.DNSDomainExists(o.DNSDomain) {
@@ -693,7 +727,7 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 		if !o.up.dryRun {
 			// Create any missing bind-mount host directories (docker compose does; the
 			// runtime errors on a missing bind source).
-			o.ensureBindDirs(svc.Volumes)
+			o.ensureBindDirs(name, svc.Volumes)
 		}
 		// Seed fresh named/anonymous volumes from the image before the container
 		// mounts them (Apple `container` mounts them empty, unlike Docker). This runs
@@ -708,6 +742,7 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 		// Track before running so rollback also removes a container whose run
 		// failed (it may have been created before erroring).
 		started = append(started, cname)
+		createdSvc[name] = true
 		if oneShot[name] {
 			// Run to completion in the foreground so a non-zero exit surfaces as a
 			// run error; a dependent's service_completed_successfully gate is then
@@ -2288,7 +2323,7 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 	cname := o.containerName(service + "-run")
 	o.rt.Delete(cname) // clear a stale one-off of the same name
 
-	o.ensureBindDirs(svc.Volumes)
+	o.ensureBindDirs(service, svc.Volumes)
 	o.seedVolumes(service, image, svc.Volumes)
 	// Pre-flight the exclusive-attach conflict for the one-off too (as `up` does):
 	// if a running container — including this service's own `up` container — already
@@ -2629,35 +2664,78 @@ func (o *Orchestrator) resolvePath(p string) string {
 // doesn't exist yet, matching docker compose (Apple `container` errors on a
 // missing bind source instead of creating it). Only bind mounts are touched;
 // named/anonymous volumes and external volumes are left to the runtime.
-func (o *Orchestrator) ensureBindDirs(vols []string) {
+func (o *Orchestrator) ensureBindDirs(service string, vols []string) {
 	for _, v := range vols {
-		parts := strings.SplitN(v, ":", 2)
-		if len(parts) < 2 || !isHostPath(parts[0]) {
+		mount, target, _, ok := splitMount(v)
+		if !ok || !isHostPath(mount) {
 			continue // single path = anonymous volume; non-path = named/external
 		}
-		src := o.resolvePath(parts[0])
-		if _, err := os.Stat(src); os.IsNotExist(err) {
-			if mkErr := os.MkdirAll(src, 0o755); mkErr == nil {
-				o.logf("Created host directory %s for a bind mount\n", src)
-			} else {
-				// Don't fail silently: a missing bind source makes the container fail
-				// to start later with an opaque runtime error, so say what couldn't be
-				// created and how to unblock it.
-				o.warnf(codeBindDirCreate, "couldn't create host directory %s for a bind mount: %v — "+
-					"create it yourself (`mkdir -p %s`) or fix the parent directory's permissions, then run `opossum up` again\n",
-					src, mkErr, src)
-			}
+		src := o.resolvePath(mount)
+		if _, err := os.Stat(src); !os.IsNotExist(err) {
+			continue
+		}
+		if mkErr := os.MkdirAll(src, 0o755); mkErr != nil {
+			// Don't fail silently: a missing bind source makes the container fail
+			// to start later with an opaque runtime error, so say what couldn't be
+			// created and how to unblock it.
+			o.warnf(codeBindDirCreate, "couldn't create host directory %s for a bind mount: %v — "+
+				"create it yourself (`mkdir -p %s`) or fix the parent directory's permissions, then run `opossum up` again\n",
+				src, mkErr, src)
+			continue
+		}
+		o.logf("Created host directory %s for a bind mount\n", src)
+		// A directory is all this can create, and for a mount that names a file
+		// that is the wrong thing. The container starts either way — an init script
+		// that isn't there simply doesn't run, a config that isn't there falls back
+		// to a default — so the failure arrives later, as something else, with
+		// nothing connecting it back to here. Say it now.
+		//
+		// The name is all there is to go on, so this cannot be certain: a directory
+		// legitimately named `conf.d` or `.ssh` looks the same. The instruction is
+		// therefore conditional — opossum says what it did and what to check, and
+		// does not tell anyone to delete something it may have been right to create.
+		//
+		// No `%[n]` indices in this format: warnf puts the code in front of the
+		// arguments, so an explicit index here points one place to the left of what
+		// it reads like. That is how the first version of this told the user to
+		// `rmdir` the *service name*.
+		if handsThroughAFile(mount, target) {
+			o.warnf(codeBindFilePlaceholder, "service %q mounts %s at %s, which names a file — but nothing "+
+				"was there, and a bind mount needs its source to exist, so opossum created a directory "+
+				"(docker compose does the same). If that path is meant to be a file, the service will "+
+				"find a directory where it expects one and carry on without it — an init script "+
+				"won't run, a config won't be read — so remove the empty directory (`rmdir %s`), put "+
+				"the real file there, and run `opossum up` again. If it is meant to be a directory "+
+				"(`conf.d`, `.ssh`), there is nothing to do.\n",
+				service, src, target, src)
 		}
 	}
 }
 
-// Started returns the services the last Up brought up (profile filtering and any
-// named services applied), or nil if Up hasn't run.
+// Started returns the services this project had up when the last Up finished —
+// created by that call or left standing by it — with profile filtering and any
+// named services applied. It is nil if Up hasn't run, and nil for a failure that
+// returned before the startup order was even worked out (a missing runtime, an
+// unresolvable compose file): nothing was measured, so nothing is claimed.
 //
-// It is meaningful even when Up returned an error, and the two failure shapes are
-// deliberately different: a bring-up that fails is rolled back, so nothing was
-// brought up and this stays nil; a post-start crash (OPSM-407) leaves the
-// containers in place, so this lists them. Callers deciding what to supervise
-// depend on that distinction. Run-to-completion services are included — the
-// supervisor filters them out itself, since they are meant to exit.
+// Callers use it to decide what to supervise, so it answers "what is up", not
+// "what did this call create".
+//
+// It is meaningful when Up returned an error. A failed bring-up is rolled back,
+// and the services this call created are excluded from the answer even if their
+// removal failed — supervising a container the teardown was trying to delete
+// would have the supervisor fight it. Anything else still running is listed:
+// a service left alone because it was already up to date, or one from an earlier
+// Up. A post-start crash (OPSM-407) is not rolled back, so its containers are
+// listed too.
+//
+// After a rollback the answer is measured from the runtime: a container that
+// exists counts, running or not, because a service that crashed unwatched is what
+// `restart:` is for. Elsewhere it is the startup order, which is why a foreground
+// up — whose container has already exited by the time Up returns — still lists it.
+//
+// The answer is not accumulated: a second call on the same Orchestrator replaces
+// it, and a container that disappeared in between is not reported.
+// Run-to-completion services can appear — the supervisor filters them out itself,
+// since they are meant to exit.
 func (o *Orchestrator) Started() []string { return o.started }

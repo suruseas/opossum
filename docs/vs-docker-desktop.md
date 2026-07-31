@@ -141,3 +141,5 @@ gaps:
    the missing aggregate `df`.
 4. **Builder cold start** — the first build of a session pays ~6 s for the
    builder VM. Minor; just set expectations.
+
+[← back to the README](../README.md)

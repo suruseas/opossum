@@ -16,6 +16,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/suruseas/opossum/internal/workspace"
 )
 
 // doctor's ❌→non-zero-exit contract (which CI and `opossum doctor && …` depend
@@ -1964,6 +1966,10 @@ func TestRolledBackUpStartsNoSupervisor(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", state)
 	t.Setenv("OPOSSUM_SELF_BIN", opossumBin)
 	t.Setenv("IMAGE_ABSENT", "rolled-app:latest") // so --no-build has something to refuse
+	// The container is never created, and `up` now reports what is *running* when it
+	// finishes — so the shim has to admit this one does not exist. Its default is
+	// that every container does, which would report one that was never created.
+	t.Setenv("INSPECT_ABSENT", "app.rolled.opossum app-run.rolled.opossum")
 	dir := t.TempDir()
 	// `build:` with --no-build fails inside the start loop, which is what triggers
 	// the rollback (a pre-flight refusal would never reach it).
@@ -3355,5 +3361,171 @@ func TestDestroyDoesNotSayNothingLeftWhileVolumesRemain(t *testing.T) {
 	}
 	if !strings.Contains(out, "left_old") {
 		t.Errorf("the volume that is still there should be reported, got:\n%s", out)
+	}
+}
+
+// The changelog's promise, at the layer the user sees it: a bring-up that fails
+// and rolls back still leaves a supervisor watching the service it never touched.
+// The orchestrator tests measure the set; this one measures that the set reaches
+// the supervisor.
+func TestRolledBackUpStillSupervisesAnUntouchedService(t *testing.T) {
+	fakeShim(t)
+	state := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", state)
+	t.Setenv("OPOSSUM_SELF_BIN", opossumBin)
+	t.Setenv("STATE_DIR", t.TempDir()) // the shim remembers deletions
+	t.Setenv("INSPECT_PROJECT", "survive")
+	dir := t.TempDir()
+	// cache has no `build:`, so it comes up and stays up. app must be built, and
+	// --no-build refuses inside the start loop — which is what rolls the call back.
+	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"),
+		[]byte("name: survive\nservices:\n"+
+			"  cache:\n    image: cache\n    restart: always\n"+
+			"  zapp:\n    build: .\n    restart: always\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	t.Cleanup(func() { run(t, "down") })
+
+	// First: everything up, so cache's config hash is recorded and it is left alone
+	// next time.
+	if _, err := run(t, "up"); err != nil {
+		t.Fatalf("first up: %v", err)
+	}
+	waitFor(t, "the first supervisor", func() bool { return supervisorPID(t, state, "survive") != 0 })
+	if _, err := run(t, "down"); err != nil {
+		t.Fatalf("down: %v", err)
+	}
+	if _, err := run(t, "up"); err != nil {
+		t.Fatalf("second up: %v", err)
+	}
+	waitFor(t, "the supervisor to be back", func() bool { return supervisorPID(t, state, "survive") != 0 })
+	first := supervisorPID(t, state, "survive")
+
+	// Now a bring-up that fails: zapp needs building and --no-build refuses. cache is
+	// unchanged, so it is skipped — and survives the rollback.
+	t.Setenv("IMAGE_ABSENT", "survive-zapp:latest")
+	if _, err := run(t, "up", "--no-build"); err == nil {
+		t.Fatal("up should fail when a service must be built and --no-build was given")
+	}
+	// cache is still running under `restart: always`, so it must still be watched.
+	if pid := supervisorPID(t, state, "survive"); pid == 0 {
+		t.Error("the failed up left cache running, so a supervisor must still be watching it")
+	} else if pid != first {
+		t.Errorf("the supervisor was replaced (%d -> %d) when its set did not change", first, pid)
+	}
+	b, _ := os.ReadFile(filepath.Join(state, "opossum", "survive", "supervised"))
+	if !strings.Contains(string(b), "cache") {
+		t.Errorf("cache should be in the watched set, it holds %q", b)
+	}
+}
+
+// `ws` snapshots are the largest thing opossum leaves behind, and destroy will
+// not remove them: a snapshot belongs to the directory that was snapshotted, and
+// that directory outlives any number of projects. So the teardown has to name
+// them — and it must not name them for a project that never took one, or the
+// leftovers list becomes something people stop reading.
+func TestDestroyReportsWorkspaceSnapshotsOnlyWhenThereAreSome(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		snapshots bool
+	}{{"with snapshots", true}, {"without", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeShim(t)
+			t.Setenv("STATE_DIR", t.TempDir())
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			t.Setenv("INSPECT_PROJECT", "snaps")
+			dir := destroyProject(t, "name: snaps\nservices:\n  web:\n    image: web\n")
+			snapDir := filepath.Join(dir, workspace.SnapshotDirName)
+			if tc.snapshots {
+				if err := os.MkdirAll(filepath.Join(snapDir, "try-1"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Chdir(dir)
+
+			out, err := run(t, "destroy", "--force")
+			if err != nil {
+				t.Fatalf("destroy: %v", err)
+			}
+			if got := strings.Contains(out, workspace.SnapshotDirName); got != tc.snapshots {
+				t.Errorf("mentions snapshots = %v, want %v, got:\n%s", got, tc.snapshots, out)
+			}
+			if !tc.snapshots {
+				return
+			}
+			// The path matters more than the mention: this hands the user an `rm -rf`,
+			// and a check that only looks for the directory's name is satisfied by the
+			// first half of the line while the command points somewhere else entirely.
+			if !strings.Contains(out, "rm -rf "+snapDir) {
+				t.Errorf("the removal command should name this project's snapshot directory %q, got:\n%s", snapDir, out)
+			}
+			// `ws` reads its snapshots from beside the workspace given to --path, so a
+			// bare `opossum ws ls` lists a different directory than the one on this line
+			// whenever the workspace isn't the default.
+			if !strings.Contains(out, "ls "+snapDir) {
+				t.Errorf("the way to look inside has to name this directory, not send the reader "+
+					"to whatever `ws` defaults to, got:\n%s", out)
+			}
+			// Snapshots are not shared with other projects — they belong to a directory.
+			// A heading that says otherwise contradicts the line under it.
+			if strings.Contains(out, "Shared with other projects") {
+				t.Errorf("the heading claims these are shared between projects, which snapshots "+
+					"are not, got:\n%s", out)
+			}
+			if _, err := os.Stat(filepath.Join(snapDir, "try-1")); err != nil {
+				t.Errorf("destroy removed a workspace snapshot it said it was leaving alone: %v", err)
+			}
+		})
+	}
+}
+
+// `--dry-run` is the mode for looking before deciding, and what destroy leaves
+// behind is part of that decision. It used to be the one mode that didn't say:
+// the leftovers were printed after the removal, so a preview of a project with
+// something to remove ended without them.
+//
+// The two outputs are compared rather than checked for keywords, because the
+// failure this guards against is a one-sided change — a leftover added to the
+// real run and forgotten in the preview reads as "nothing else is left".
+func TestDestroyDryRunReportsTheSameLeftoversAsTheRealRun(t *testing.T) {
+	leftovers := func(out string) string {
+		_, rest, found := strings.Cut(out, "Left alone, because it isn't this project's to remove:")
+		if !found {
+			return ""
+		}
+		return strings.TrimSpace(rest)
+	}
+	fakeShim(t)
+	t.Setenv("STATE_DIR", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("INSPECT_PROJECT", "preview")
+	dir := destroyProject(t, "name: preview\nservices:\n  web:\n    image: web\n")
+	// A snapshot directory, so the section has something project-specific in it and
+	// the comparison is not just two copies of the same two static lines.
+	if err := os.MkdirAll(filepath.Join(dir, workspace.SnapshotDirName, "try-1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	preview, err := run(t, "destroy", "--dry-run")
+	if err != nil {
+		t.Fatalf("dry-run: %v", err)
+	}
+	if leftovers(preview) == "" {
+		t.Fatalf("the preview says nothing about what it would leave behind:\n%s", preview)
+	}
+	// There is something to remove, or this would be the already-working
+	// "Nothing to remove" path and the test would prove nothing.
+	if !strings.Contains(preview, "would remove") {
+		t.Fatalf("this project should have something to remove, got:\n%s", preview)
+	}
+
+	real, err := run(t, "destroy", "--force")
+	if err != nil {
+		t.Fatalf("destroy: %v", err)
+	}
+	if got, want := leftovers(preview), leftovers(real); got != want {
+		t.Errorf("the preview and the real run disagree about what is left alone\npreview:\n%s\n\nreal:\n%s", got, want)
 	}
 }

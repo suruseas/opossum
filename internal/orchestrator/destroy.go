@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/suruseas/opossum/internal/compose"
+	"github.com/suruseas/opossum/internal/workspace"
 )
 
 // Destroy is the way out of a trial run: everything opossum made for this
@@ -78,6 +79,14 @@ type DestroyPlan struct {
 	// orphan needs care, and a teardown that says "everything is gone" while these
 	// sit on disk is the more urgent problem.
 	StrandedVolumes []string
+
+	// SnapshotDirs are `.opossum-snapshots` directories found here. They are never
+	// removed: a snapshot belongs to a *directory*, and the same directory outlives
+	// any number of projects — an agent's workspace is not this project's to throw
+	// away. But they are often the largest thing opossum leaves on the disk, and a
+	// command that promises to leave no trace should not be the reason someone finds
+	// them a month later.
+	SnapshotDirs []string
 }
 
 // Empty reports whether there is nothing to remove, so a caller can say so
@@ -180,7 +189,64 @@ func (o *Orchestrator) DestroyPlanFor(keepOverlay, keepImages, keepLocal bool) (
 			p.Paths = append(p.Paths, path)
 		}
 	}
+	// Last, once the removal list is settled: a snapshot directory that sits inside
+	// something being removed is not being left alone, and saying it is — with an
+	// `rm -rf` for a path that will not exist — is the worst version of this report.
+	// A workspace under `.opossum/` puts its snapshots there, and `.opossum/` goes.
+	p.SnapshotDirs = outside(o.snapshotDirs(), p.Paths)
 	return p, nil
+}
+
+// outside drops the directories that lie inside something being removed.
+func outside(dirs, removed []string) []string {
+	var kept []string
+	for _, dir := range dirs {
+		inside := false
+		for _, path := range removed {
+			if dir == path || strings.HasPrefix(dir, path+string(filepath.Separator)) {
+				inside = true
+				break
+			}
+		}
+		if !inside {
+			kept = append(kept, dir)
+		}
+	}
+	return kept
+}
+
+// snapshotDirs finds the workspace snapshot directories under this project's
+// directory. `ws` puts them beside the workspace, so the default `./work` leaves
+// one here, and a workspace a level down leaves one in that subdirectory.
+//
+// A workspace given as `.` puts its snapshots in the *parent*, which is shared
+// with every sibling directory; that one is deliberately not looked for, because
+// naming a directory outside the project as something destroy considered is worse
+// than not mentioning it.
+func (o *Orchestrator) snapshotDirs() []string {
+	base := o.Project.BaseDir
+	if base == "" {
+		base = "."
+	}
+	var found []string
+	add := func(dir string) {
+		p := filepath.Join(dir, workspace.SnapshotDirName)
+		if fi, err := os.Stat(p); err == nil && fi.IsDir() {
+			found = append(found, p)
+		}
+	}
+	add(base)
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return found
+	}
+	for _, e := range entries {
+		if e.IsDir() && e.Name() != workspace.SnapshotDirName {
+			add(filepath.Join(base, e.Name()))
+		}
+	}
+	sort.Strings(found)
+	return found
 }
 
 // strandedVolumes finds volumes named for this project that the compose file no

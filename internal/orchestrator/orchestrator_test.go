@@ -3140,7 +3140,11 @@ func TestUpGivesDistinctPortsToTwoBareServices(t *testing.T) {
 // no longer exist.
 func TestStartedIsEmptyAfterARolledBackUp(t *testing.T) {
 	rt, _ := fakeShim(t)
-	setShimEnv(rt, "HEALTH_HANG=1") // db never becomes healthy, so web never starts
+	// web is declared absent because the bring-up never reaches it, and the shim's
+	// default is that every container exists — without this it would be reported as
+	// a survivor of a call that never created it. (db needs no such declaration: it
+	// is created by this call, so it is excluded whatever the runtime says.)
+	setShimEnv(rt, "HEALTH_HANG=1", "INSPECT_ABSENT=web.demo.opossum") // db never becomes healthy
 	p := project("demo", map[string]*compose.Service{
 		"db": {
 			Image:   "postgres:16",

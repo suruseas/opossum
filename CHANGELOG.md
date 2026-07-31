@@ -6,6 +6,22 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-07-31
+
+### Added
+
+- `up` now says so when a bind mount names a file that isn't there. A missing bind source has to be created or the container won't start, and a directory is the only thing that can be created — so a file you were meant to supply (`./init.js:/docker-entrypoint-initdb.d/init.js`) quietly became a directory, the service started anyway, and the init script simply never ran. The failure showed up later as something else entirely. opossum now names the path, says a directory is standing in for the file, and tells you how to put the real one there (`OPSM-107`).
+
+### Changed
+
+- `destroy` now names any `.opossum-snapshots/` directories it found, alongside the DNS domain and the builder cache it already reported. Snapshots are still never removed — a snapshot belongs to the directory that was snapshotted, and that directory outlives any number of projects — but they are usually the largest thing left on disk, and a command that promises to leave no trace shouldn't be the reason you find them a month later.
+
+### Fixed
+
+- `up --from-docker-compose` no longer suggests a named volume for a bind mount that passes a single file through (`./init.js:/docker-entrypoint-initdb.d/init.js`). A bind source that doesn't exist yet is created as a directory whatever it was meant to be, so a file you were told to supply looked exactly like an empty data directory — and the suggestion, if applied, would have hidden the file you were about to put there.
+- A service that `up` left alone because it was already up to date now keeps its `restart:` supervision when a later service fails the bring-up. The failed start is rolled back, but an untouched container is not part of that rollback — it is still running, and opossum was reporting that nothing was left, so nothing watched it.
+- `destroy --dry-run` now reports what it would leave behind — the DNS domain, the build cache, and any workspace snapshots — the same way the real run does. The preview is the mode you read before deciding, and it was the one that didn't say: when there was something to remove, the list of what stays came only after it was gone.
+
 ## [0.17.0] - 2026-07-30
 
 ### Added
@@ -16,7 +32,6 @@ All notable changes to opossum are documented here. The format follows
 
 ### Changed
 
-- Changes are now recorded one file at a time under `changelog.d/` instead of by editing `CHANGELOG.md` directly, and the `[Unreleased]` section is generated from those files (`make changelog`). Two branches adding entries no longer conflict, and an entry can no longer land inside an already-published release because the other branch shipped first.
 - The restart supervisor's log is now capped at 1MB. A service that fails permanently is restarted for as long as its policy asks, and each attempt writes a line — about 270KB a day, previously without limit, for a project you may have forgotten about. On reaching the cap the log keeps its newest half and says so on its first line (`[OPSM-410]`); the recent lines are the ones that explain why a service is down.
 
 ### Fixed
@@ -648,7 +663,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/suruseas/opossum/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/suruseas/opossum/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/suruseas/opossum/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/suruseas/opossum/compare/v0.14.0...v0.15.0

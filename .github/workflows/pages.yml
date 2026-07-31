@@ -1,0 +1,65 @@
+# Publish the documentation site.
+#
+# The site is generated from the repository's own markdown (internal/site says
+# why it is generated rather than served from docs/ directly), so there is no
+# second copy of the documentation to keep in step: change a page, and the site
+# follows on the next push.
+#
+# It runs only on the public repository. The development repository is a mirror
+# with the same files, and a deploy step there would fail on every push — a red
+# build that means nothing is worse than no build at all.
+name: pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Granted per job rather than to the whole workflow: the build reads the
+# repository and writes an artifact, and only the deploy needs an identity token
+# to prove to Pages which workflow it came from.
+permissions:
+  contents: read
+
+# One deploy at a time, and let a run in progress finish: cancelling a deploy
+# can leave the site half-published.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository == 'suruseas/opossum'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # The generator is tested (internal/site); running its tests here means a
+      # broken site fails before it is published rather than after.
+      - run: go test ./internal/site/
+      - run: go run ./internal/site/build _site_src
+      - uses: actions/configure-pages@v5
+      - uses: actions/jekyll-build-pages@v1
+        with:
+          source: _site_src
+          destination: _site
+      - uses: actions/upload-pages-artifact@v3
+
+  deploy:
+    needs: build
+    if: github.repository == 'suruseas/opossum'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
