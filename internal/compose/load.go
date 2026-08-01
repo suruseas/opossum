@@ -532,6 +532,10 @@ func (p *Project) validateDeps() error {
 			switch dep.Condition {
 			case ConditionStarted, ConditionCompleted:
 			case ConditionHealthy:
+				// Disabled is redundant today — both spellings of "off" clear Test, so the
+				// length check fires first — but it is the clause that states the intent.
+				// Keep it: the day a healthcheck keeps its test while disabled (round-tripping
+				// `config`, say), the length check alone would silently start accepting this.
 				if target.Healthcheck == nil || target.Healthcheck.Disabled || len(target.Healthcheck.Test) == 0 {
 					return fmt.Errorf("service %q requires %q to be healthy, but %q defines no healthcheck", name, dep.Name, dep.Name)
 				}

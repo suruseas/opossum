@@ -1260,6 +1260,9 @@ func (o *Orchestrator) awaitHealthyDeps(name string, svc *compose.Service) error
 			continue
 		}
 		hc := o.Project.Services[dep.Name].Healthcheck
+		// Same trio as the load-time check in compose.validateDeps, and kept in step
+		// with it deliberately: hc.Disabled is redundant while both spellings of "off"
+		// clear the test, and load-bearing the moment one stops.
 		if hc == nil || hc.Disabled || len(hc.Test) == 0 {
 			// Load-time validation rejects this; guard defensively anyway.
 			o.warnf(codeDepNoHealth, "%s wants %s healthy but it has no healthcheck — not waiting\n", name, dep.Name)

@@ -1004,11 +1004,25 @@ services:
 }
 
 // The load-time check that a `service_healthy` dependency actually has a
-// healthcheck reads Healthcheck.Disabled, so the spelling it does not understand
-// slips past it too — the dependant loads and then waits on a check the user
-// switched off.
+// healthcheck reads Healthcheck.Disabled as well as an empty test.
+//
+// The third case is the one this test originally lacked, and the only one that
+// guards the change: with `disable` unread, a `test:` beside it leaves a non-empty
+// test list and nothing disabled, so the file LOADS and the dependant goes on to
+// wait. The other two arms are rejected either way — with `disable` unread they
+// simply look like a healthcheck with no test — so they asserted the error they
+// would have got anyway and guarded nothing.
+//
+// Note what this still does not reach: the `Disabled ||` half of the load check.
+// Both spellings clear the test list, so `len(Test) == 0` always fires first and
+// that clause is redundant defence. Removing it keeps every test here green.
 func TestServiceHealthyRejectsADisabledDependency(t *testing.T) {
-	for _, spelling := range []string{`test: ["NONE"]`, `disable: true`} {
+	for _, spelling := range []string{
+		`test: ["NONE"]`,
+		`disable: true`,
+		// The one the length check cannot reach: a test list that is not empty.
+		"test: [\"CMD\", \"true\"]\n      disable: true",
+	} {
 		_, err := Load(writeTemp(t, `
 services:
   web:

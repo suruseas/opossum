@@ -114,7 +114,7 @@ them.
 | `tmpfs` | ✅ | service-level tmpfs targets (string or list); folded together with any `type: tmpfs` volume entries |
 | `secrets` | ✅ | file-based only; mounted read-only at `/run/secrets/<name>` (the `*_FILE` pattern). `external` secrets are rejected; `uid`/`gid`/`mode` are not applied |
 | `depends_on` | ✅ | list or long (`condition`) form — orders startup and gates on `service_healthy` / `service_completed_successfully` |
-| `healthcheck` | ✅ | `test` (CMD / CMD-SHELL / string), `interval`, `timeout`, `retries`, `start_period` |
+| `healthcheck` | ✅ | `test` (CMD / CMD-SHELL / string), `interval`, `timeout`, `retries`, `start_period`, and either way of switching it off (`disable: true` or `test: ["NONE"]`) |
 | `command` | ✅ | list, or a string that is shell-word-split (`sh -c "echo hi"` → `sh`, `-c`, `echo hi`) |
 | `entrypoint` | ✅ | overrides the image ENTRYPOINT; string (shell-split) or list, same as `command` |
 | `profiles` | ✅ | a gated service starts only when one of its profiles is active (`--profile <name>`, `COMPOSE_PROFILES`, or naming the service); services with no `profiles` always start |
@@ -183,7 +183,9 @@ dependency is healthy before starting the dependent. Apple's `container` runtime
 has no native healthcheck, so opossum runs the dependency's `healthcheck.test`
 via `container exec` and polls it (`retries` attempts, `interval` apart, after an
 initial `start_period`) until it passes. The dependency must define a
-`healthcheck`, or the file is rejected. The default condition (`service_started`)
+`healthcheck` that is switched on, or the file is rejected — a healthcheck turned
+off with `disable: true` or `test: ["NONE"]` counts as none at
+all. The default condition (`service_started`)
 still just orders startup.
 
 `depends_on: {<svc>: {condition: service_completed_successfully}}` treats the

@@ -778,7 +778,7 @@ type Healthcheck struct {
 	Timeout     time.Duration // enforced per-attempt timeout (default 30s)
 	Retries     int           // attempts before giving up (default 3)
 	StartPeriod time.Duration // grace period before the first attempt (default 0)
-	Disabled    bool          // test: ["NONE"]
+	Disabled    bool          // switched off: `test: ["NONE"]` or `disable: true`
 }
 
 // UnmarshalYAML parses the compose healthcheck schema, normalizing `test` into

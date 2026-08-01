@@ -143,8 +143,8 @@ container system dns create opossum`, see `[OPSM-202]`); an `internal:` network 
 with `networks:`; a top-level network that is both `internal` and `external`; a
 service referencing an undeclared network; `depends_on` on an unknown service;
 `service_healthy` on a service whose healthcheck is absent or switched off (either
-spelling) — docker compose accepts that and the dependant then waits on a check that
-will never report, so opossum says so at load instead.
+spelling). `docker compose config` accepts that combination; opossum turns it down at
+load instead, since a check that has been switched off will never report healthy.
 
 ## Failure signatures → fix
 

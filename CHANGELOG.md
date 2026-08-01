@@ -6,6 +6,12 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.18.2] - 2026-08-01
+
+### Fixed
+
+- Correction to the 0.18.1 note on `healthcheck: disable: true`. That note said the check stayed live and a service depending on it with `condition: service_healthy` waited on a check you had switched off. That is what happened when `disable: true` was written beside a `test:` that actually ran, and that case is genuinely fixed. Written on its own, the line never got that far: the healthcheck looked absent rather than disabled, so a `service_healthy` dependant was already turned away at load — with the same message, before and after the fix. What 0.18.1 changed for `disable: true` on its own is that `opossum config` now echoes it back instead of dropping it.
+
 ## [0.18.1] - 2026-08-01
 
 ### Fixed
@@ -669,7 +675,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.18.1...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.18.2...HEAD
+[0.18.2]: https://github.com/suruseas/opossum/compare/v0.18.1...v0.18.2
 [0.18.1]: https://github.com/suruseas/opossum/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/suruseas/opossum/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/suruseas/opossum/compare/v0.16.0...v0.17.0
