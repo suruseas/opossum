@@ -56,21 +56,27 @@ type Service struct {
 	AutoHostPort map[string]bool `yaml:"-"`
 	Volumes      Volumes         `yaml:"volumes"`
 	Tmpfs        StringOrSlice   `yaml:"tmpfs"` // service-level tmpfs targets (#93); volume-form `type: tmpfs` folds in (#79)
-	Secrets      SecretRefs      `yaml:"secrets"`
-	DependsOn    DependsOn       `yaml:"depends_on"`
-	Healthcheck  *Healthcheck    `yaml:"healthcheck"`
-	Profiles     []string        `yaml:"profiles"`     // service starts only when one of these profiles is active (empty = always)
-	MemLimit     scalarStr       `yaml:"mem_limit"`    // legacy memory limit ("512m", "2g", …)
-	CPUs         scalarStr       `yaml:"cpus"`         // legacy CPU limit (may be fractional)
-	SSH          bool            `yaml:"ssh"`          // forward the host SSH agent (--ssh) for private git over SSH
-	User         string          `yaml:"user"`         // --user (name|uid[:gid]) the process runs as
-	WorkingDir   string          `yaml:"working_dir"`  // --workdir the process starts in
-	Init         bool            `yaml:"init"`         // --init: run a tini-like init as PID 1 to reap zombies
-	ReadOnly     bool            `yaml:"read_only"`    // --read-only root filesystem
-	CapAdd       StringOrSlice   `yaml:"cap_add"`      // --cap-add Linux capabilities
-	CapDrop      StringOrSlice   `yaml:"cap_drop"`     // --cap-drop Linux capabilities
-	NetworkMode  string          `yaml:"network_mode"` // only "none" acted on: full network isolation (--network none)
-	Networks     ServiceNetworks `yaml:"networks"`     // declared networks this service joins (one --network each; aliases/static IPs not applied)
+	// NoCopy are the container paths whose volume must NOT be filled from the
+	// image. Docker seeds a fresh volume from the image at the mount point, and
+	// `volume: {nocopy: true}` turns that off; opossum emulates the seeding, so it
+	// has to honour the same switch. Lifted out of Volumes during parsing, like
+	// tmpfs, so the marker never escapes.
+	NoCopy      []string        `yaml:"-"`
+	Secrets     SecretRefs      `yaml:"secrets"`
+	DependsOn   DependsOn       `yaml:"depends_on"`
+	Healthcheck *Healthcheck    `yaml:"healthcheck"`
+	Profiles    []string        `yaml:"profiles"`     // service starts only when one of these profiles is active (empty = always)
+	MemLimit    scalarStr       `yaml:"mem_limit"`    // legacy memory limit ("512m", "2g", …)
+	CPUs        scalarStr       `yaml:"cpus"`         // legacy CPU limit (may be fractional)
+	SSH         bool            `yaml:"ssh"`          // forward the host SSH agent (--ssh) for private git over SSH
+	User        string          `yaml:"user"`         // --user (name|uid[:gid]) the process runs as
+	WorkingDir  string          `yaml:"working_dir"`  // --workdir the process starts in
+	Init        bool            `yaml:"init"`         // --init: run a tini-like init as PID 1 to reap zombies
+	ReadOnly    bool            `yaml:"read_only"`    // --read-only root filesystem
+	CapAdd      StringOrSlice   `yaml:"cap_add"`      // --cap-add Linux capabilities
+	CapDrop     StringOrSlice   `yaml:"cap_drop"`     // --cap-drop Linux capabilities
+	NetworkMode string          `yaml:"network_mode"` // only "none" acted on: full network isolation (--network none)
+	Networks    ServiceNetworks `yaml:"networks"`     // declared networks this service joins (one --network each; aliases/static IPs not applied)
 
 	Deploy  *Deploy  `yaml:"deploy"`  // only deploy.resources.limits.{memory,cpus} is acted on
 	Develop *Develop `yaml:"develop"` // develop.watch drives `opossum watch` (file-change sync)
@@ -269,9 +275,14 @@ func (s *Service) UnmarshalYAML(value *yaml.Node) error {
 		for _, m := range s.Volumes {
 			if target, ok := strings.CutPrefix(m, tmpfsMarker); ok {
 				s.Tmpfs = append(s.Tmpfs, target)
-			} else {
-				mounts = append(mounts, m)
+				continue
 			}
+			if mount, ok := strings.CutPrefix(m, nocopyMarker); ok {
+				// The flag is about the target, which is what seeding is keyed on.
+				s.NoCopy = append(s.NoCopy, mountTarget(mount))
+				m = mount
+			}
+			mounts = append(mounts, m)
 		}
 		s.Volumes = mounts
 	}
@@ -333,6 +344,40 @@ func deployHasExtra(n yaml.Node) bool {
 // appear in a real volume spec, so it never collides with a bind/named mount and
 // never escapes parsing (#79).
 const tmpfsMarker = "\x00tmpfs\x00"
+
+// nocopyMarker tags a mount whose `volume: {nocopy: true}` asked for seeding to
+// be skipped. Same trick as tmpfsMarker: the flag belongs to the mount, but the
+// parsed form of a mount is a single string, so it rides along as a prefix and
+// Service.UnmarshalYAML lifts it off.
+const nocopyMarker = "\x00nocopy\x00"
+
+// cutMountOption removes one comma-separated option from a short-form mount's
+// mode field, reporting whether it was there. `deps:/app:ro,nocopy` keeps the
+// `ro` and loses the `nocopy`, because only the first is a mount mode — the
+// runtime would reject or misread the other.
+func cutMountOption(mount, opt string) (string, bool) {
+	parts := strings.SplitN(mount, ":", 3)
+	if len(parts) < 3 {
+		return mount, false
+	}
+	var kept []string
+	found := false
+	for _, m := range strings.Split(parts[2], ",") {
+		if strings.TrimSpace(m) == opt {
+			found = true
+			continue
+		}
+		kept = append(kept, m)
+	}
+	if !found {
+		return mount, false
+	}
+	out := parts[0] + ":" + parts[1]
+	if len(kept) > 0 {
+		out += ":" + strings.Join(kept, ",")
+	}
+	return out, true
+}
 
 // Ports is a service's published ports. Each entry is normalized to the short
 // `[host_ip:]host:container[/proto]` string opossum's runtime understands, so
@@ -410,6 +455,13 @@ func (v *Volumes) UnmarshalYAML(value *yaml.Node) error {
 	out := make(Volumes, 0, len(value.Content))
 	for _, item := range value.Content {
 		if item.Kind == yaml.ScalarNode {
+			// `src:target:nocopy` is the short spelling of the same switch, and
+			// docker accepts it. Left in place it would reach the runtime as a mount
+			// mode, which is not what it is.
+			if mount, ok := cutMountOption(item.Value, "nocopy"); ok {
+				out = append(out, nocopyMarker+mount)
+				continue
+			}
 			out = append(out, item.Value)
 			continue
 		}
@@ -418,6 +470,9 @@ func (v *Volumes) UnmarshalYAML(value *yaml.Node) error {
 			Source   string `yaml:"source"`
 			Target   string `yaml:"target"`
 			ReadOnly bool   `yaml:"read_only"`
+			Volume   struct {
+				NoCopy bool `yaml:"nocopy"`
+			} `yaml:"volume"`
 		}
 		if err := item.Decode(&lf); err != nil {
 			return err
@@ -444,6 +499,9 @@ func (v *Volumes) UnmarshalYAML(value *yaml.Node) error {
 		}
 		if lf.ReadOnly {
 			s += ":ro"
+		}
+		if lf.Volume.NoCopy {
+			s = nocopyMarker + s
 		}
 		out = append(out, s)
 	}

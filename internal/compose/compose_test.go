@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -1042,6 +1043,180 @@ services:
 		}
 		if !strings.Contains(err.Error(), "defines no healthcheck") {
 			t.Errorf("%s: expected the no-healthcheck error, got %v", spelling, err)
+		}
+	}
+}
+
+// `volume: {nocopy: true}` tells the engine not to fill a fresh volume from the
+// image. opossum emulates the seeding, so it has to read the switch — and it was
+// dropping it silently: the option never reached anything, and the volume was
+// seeded against an explicit instruction. Measured against docker compose v5.1.4,
+// which leaves such a volume empty (~/opossum-dogfood/results/df366-golden.md).
+//
+// The short spelling matters too. docker accepts `src:target:nocopy` and treats
+// it as the same switch; opossum used to pass `nocopy` through as a mount mode,
+// which is not what it is.
+func TestNoCopyIsReadInBothSpellings(t *testing.T) {
+	p, err := Load(writeTemp(t, `
+services:
+  long:
+    image: x
+    volumes:
+      - type: volume
+        source: deps
+        target: /app/node_modules
+        volume:
+          nocopy: true
+  short:
+    image: y
+    volumes:
+      - deps:/app/node_modules:nocopy
+  both:
+    image: z
+    volumes:
+      - deps:/app/node_modules:ro,nocopy
+  plain:
+    image: w
+    volumes:
+      - deps:/app/node_modules
+volumes:
+  deps: {}
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	for _, name := range []string{"long", "short", "both"} {
+		svc := p.Services[name]
+		if len(svc.NoCopy) != 1 || svc.NoCopy[0] != "/app/node_modules" {
+			t.Errorf("%s: NoCopy = %v, want the mount's target", name, svc.NoCopy)
+		}
+		// The marker must never escape parsing, and `nocopy` must not survive as a
+		// mount mode: the runtime would take it for one.
+		for _, v := range svc.Volumes {
+			if strings.Contains(v, "nocopy") || strings.Contains(v, "\x00") {
+				t.Errorf("%s: %q still carries the option", name, v)
+			}
+		}
+	}
+	// `ro` is a real mode and stays; only `nocopy` is lifted out.
+	if got := p.Services["both"].Volumes; len(got) != 1 || got[0] != "deps:/app/node_modules:ro" {
+		t.Errorf("both: volumes = %v, want the ro mode kept", got)
+	}
+	if got := p.Services["plain"].NoCopy; len(got) != 0 {
+		t.Errorf("a mount without the option should set nothing, got %v", got)
+	}
+}
+
+// An anonymous volume has no source, so the short spelling has nowhere to put
+// the option: `- /anon/only:nocopy` reads back as a mount FROM `/anon/only` TO
+// `nocopy`, which is a different mount entirely. `config` therefore prints it
+// plain and the option is lost on the way back in — a real hole, recorded in
+// docs/compatibility.md rather than papered over.
+//
+// This pins the shape of it. If the renderer ever starts appending here, the
+// output stops being a compose file that means what the input meant, and that
+// has to fail loudly rather than produce a plausible-looking wrong mount.
+func TestConfigCannotCarryNoCopyOnAnAnonymousVolume(t *testing.T) {
+	p, err := Load(writeTemp(t, `
+services:
+  a:
+    image: x
+    volumes:
+      - type: volume
+        target: /anon/only
+        volume:
+          nocopy: true
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := p.Services["a"].NoCopy; len(got) != 1 || got[0] != "/anon/only" {
+		t.Fatalf("the option should be read from the file, got %v", got)
+	}
+	rendered, err := RenderConfig(p)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	p2, err := Load(writeTemp(t, rendered))
+	if err != nil {
+		t.Fatalf("the rendered config should still load: %v\n%s", err, rendered)
+	}
+	// The mount itself must come back unchanged — still anonymous, still at that
+	// path. This is what an appended option would break.
+	if got := p2.Services["a"].Volumes; len(got) != 1 || got[0] != "/anon/only" {
+		t.Errorf("the mount did not survive intact: %v\n%s", got, rendered)
+	}
+	// And the option is gone, which is the documented limit.
+	if got := p2.Services["a"].NoCopy; len(got) != 0 {
+		t.Errorf("nothing carries the option through here, got %v", got)
+	}
+}
+
+// `config` prints a compose file you could run, so an option that changes what
+// opossum does has to survive the round trip. Parsing lifts `nocopy` off the
+// mount string into Service.NoCopy; without putting it back, feeding the output
+// in again turns the copy on — and for the short spelling the option simply
+// vanished from view, which is less than the user wrote.
+//
+// Asserted by loading the rendered output rather than by matching text: the
+// question is whether the meaning survives, not how it is spelled.
+func TestConfigRoundTripsNoCopy(t *testing.T) {
+	const src = `
+services:
+  a:
+    image: x
+    volumes:
+      - deps:/app/node_modules:nocopy
+      - type: volume
+        source: more
+        target: /opt/more
+        volume:
+          nocopy: true
+      # A mount that already has a mode. The option joins it with a comma; a colon
+      # would make a fourth field, which is not a mount spec — the runtime takes it
+      # as written and nothing can read the option back.
+      - "ro:/var/ro:ro,nocopy"
+      - plain:/var/plain
+volumes:
+  deps: {}
+  more: {}
+  ro: {}
+  plain: {}
+`
+	p, err := Load(writeTemp(t, src))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	rendered, err := RenderConfig(p)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	// The rendered file has no top-level `volumes:` declarations problem to worry
+	// about — it carries them — so it loads on its own.
+	p2, err := Load(writeTemp(t, rendered))
+	if err != nil {
+		t.Fatalf("the rendered config should load: %v\n%s", err, rendered)
+	}
+	got := append([]string(nil), p2.Services["a"].NoCopy...)
+	sort.Strings(got)
+	want := []string{"/app/node_modules", "/opt/more", "/var/ro"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("NoCopy did not survive `config`: got %v, want %v\n%s", got, want, rendered)
+	}
+	// The mode it already had has to survive too, or the round trip is not one.
+	var roMount string
+	for _, v := range p2.Services["a"].Volumes {
+		if strings.HasPrefix(v, "ro:/var/ro") {
+			roMount = v
+		}
+	}
+	if roMount != "ro:/var/ro:ro" {
+		t.Errorf("the ro mode did not survive the round trip: %q\n%s", roMount, rendered)
+	}
+	// The mount that never asked for it must not acquire it.
+	for _, t2 := range got {
+		if t2 == "/var/plain" {
+			t.Errorf("a plain mount gained the option:\n%s", rendered)
 		}
 	}
 }

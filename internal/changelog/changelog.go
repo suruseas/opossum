@@ -86,6 +86,14 @@ func Load(dir string) ([]Fragment, error) {
 			return nil, fmt.Errorf("%s: the body has a line starting with \"## [<version>\", which would be read as a "+
 				"release heading — indent it or reword it", e.Name())
 		}
+		// The changelog is written in English, and a fragment is published into it
+		// verbatim. Everything else about a change is discussed in Japanese, so
+		// writing the entry in Japanese too is the easy mistake — and it is only
+		// visible once the entry has been assembled into the file the world reads.
+		if r := firstCJK(body); r != "" {
+			return nil, fmt.Errorf("%s: the entry is published into CHANGELOG.md as written, which is in English — "+
+				"this one has %q in it", e.Name(), r)
+		}
 		f.Path = filepath.Join(dir, e.Name())
 		f.Body = body
 		out = append(out, f)
@@ -97,6 +105,27 @@ func Load(dir string) ([]Fragment, error) {
 		return out[i].Slug < out[j].Slug
 	})
 	return out, nil
+}
+
+// firstCJK returns the first Han, Hiragana, or Katakana character in s, or "" if
+// there is none. It reports the character rather than a bool so the error can show
+// what it found — "there is Japanese in this file" is a slow thing to act on when
+// the file is a paragraph long.
+//
+// Deliberately not a general script check. Accented Latin, Greek letters in maths,
+// and the em dashes and arrows this changelog is full of are all fine; what is
+// being caught is an entry written in the language everything around the code is
+// discussed in.
+func firstCJK(s string) string {
+	for _, r := range s {
+		switch {
+		case r >= 0x3040 && r <= 0x309F, // hiragana
+			r >= 0x30A0 && r <= 0x30FF, // katakana
+			r >= 0x4E00 && r <= 0x9FFF: // CJK unified ideographs
+			return string(r)
+		}
+	}
+	return ""
 }
 
 // parseName splits `<number>-<slug>.<type>.md`.

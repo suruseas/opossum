@@ -84,7 +84,7 @@ func RenderConfig(p *Project) (string, error) {
 			Environment: svc.Environment,
 			Ports:       svc.Ports,
 			Restart:     svc.Restart,
-			Volumes:     svc.Volumes,
+			Volumes:     volumesWithNoCopy(svc),
 			Tmpfs:       svc.Tmpfs,
 			MemLimit:    mem,
 			CPUs:        cpu,
@@ -199,4 +199,43 @@ func restartCaveat(p *Project) string {
 		"#   exit look the same. opossum retries a few times and then stops, rather than\n"+
 		"#   restarting a service that may have finished on purpose. `always` and\n"+
 		"#   `unless-stopped` are honoured exactly.\n", strings.Join(names, ", "), verb)
+}
+
+// volumesWithNoCopy puts the `nocopy` option back on the mounts that carry it.
+// Parsing lifts it off the string into Service.NoCopy, and `config` is meant to
+// print a compose file you could run — so a mount whose seeding was switched off
+// has to say so, or feeding the output back in would turn the copy on again.
+// Rendered in the short spelling, which is what the long form means.
+func volumesWithNoCopy(svc *Service) []string {
+	if len(svc.NoCopy) == 0 {
+		return svc.Volumes
+	}
+	off := map[string]bool{}
+	for _, t := range svc.NoCopy {
+		off[strings.TrimRight(t, "/")] = true
+	}
+	out := make([]string, 0, len(svc.Volumes))
+	for _, v := range svc.Volumes {
+		if !off[mountTarget(v)] {
+			out = append(out, v)
+			continue
+		}
+		// An anonymous volume is written as the target alone: there is no source, so
+		// there is no mode field to hang the option on and no short spelling that
+		// says this. Left as it is, which loses the option — documented, not silent.
+		if !strings.Contains(v, ":") {
+			out = append(out, v)
+			continue
+		}
+		// The mode field is comma-separated, and a mount may already have one.
+		// Appending with another colon produces `deps:/app:ro:nocopy`, which is not
+		// a mount spec at all: the runtime takes it as written and the option is
+		// unreadable on the way back in.
+		if strings.Count(v, ":") >= 2 {
+			out = append(out, v+",nocopy")
+			continue
+		}
+		out = append(out, v+":nocopy")
+	}
+	return out
 }

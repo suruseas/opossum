@@ -40,7 +40,7 @@ var (
 // and the test says so either way when the document drifts from it.
 var codesWithRecoveryProse = []diagCode{
 	codePGDATADatadir, codeSharedVolume, codeVolumeAttachBusy, codeBindDirCreate,
-	codeBindDataDirChown, codeHostDeviceMount, codeBindFilePlaceholder,
+	codeBindDataDirChown, codeHostDeviceMount, codeBindFilePlaceholder, codeVolumeNotSeeded,
 	codeHostPortInUse, codeDNSDomainAbsent, codeInternalEgress, codeDockerSocket,
 	codeExternalNetAbsent, codeHostPortRemapped,
 	codeBuildTmpContext, codeBuildSymlink,

@@ -179,6 +179,92 @@ func run(args []string) int {
 				os.WriteFile(filepath.Join(dir, cname+".ports"), []byte(strings.Join(pub, ",")), 0o644)
 			}
 		}
+		// $SEED_FAIL makes the seeding container fail the way an image with no shell
+		// does: the runtime cannot start the process, so nothing is copied. The seed
+		// run has no --name, so RUN_FAIL below cannot express this.
+		if os.Getenv("SEED_FAIL") != "" {
+			for _, a := range args {
+				if strings.Contains(a, "/__opossum_seed__") {
+					// The real runtime's shape, captured from `container` 1.1.0: the
+					// same sentence nested four deep inside quoted `internalError:`
+					// wrappers, behind two container UUIDs. A flat one-liner here would
+					// let the code that digs the reason out of this be deleted without
+					// any test noticing.
+					fmt.Fprintln(os.Stderr, `Error: failed to start process 2eb0ceac-5ba0-434f-b339-62f39be9203b in container `+
+						`2eb0ceac-5ba0-434f-b339-62f39be9203b (cause: "internalError: "failed to start process `+
+						`(cause: "internalError: "startProcess: failed to start process: internalError: "vmexec error: `+
+						`internalError: "failed to find target executable sh"""")"")`)
+					return 1
+				}
+			}
+		}
+		// $SEED_NONROOT makes the image declare a non-root `USER`, the way node:*
+		// and most database images do. A fresh volume's root belongs to 0:0 and is
+		// mode 755, so a seed that does not ask for root cannot create anything in
+		// it — measured on the real runtime, where the copy wrote nothing and the
+		// volume came up empty. Asking for root (`--user 0`) makes it succeed, so
+		// this models the difference the flag actually makes rather than its
+		// presence in the argv.
+		if os.Getenv("SEED_NONROOT") != "" {
+			seed, root := false, false
+			for i, a := range args {
+				if strings.Contains(a, "/__opossum_seed__") {
+					seed = true
+				}
+				if i > 0 && args[i-1] == "--user" && (a == "0" || a == "root" || a == "0:0") {
+					root = true
+				}
+			}
+			if seed && !root {
+				// busybox `cp`'s wording, captured from the same run.
+				fmt.Fprintln(os.Stderr, `cp: can't create '/__opossum_seed__/./rootfile': Permission denied`)
+				return 1
+			}
+		}
+		// The read-only look inside an existing volume (VolumeEntries). $LOOK_ENTRIES
+		// is what it holds, space-separated; $LOOK_FAIL makes the look fail the way a
+		// shell-less image or a busy volume does, which must read as "unknown", never
+		// as "empty". `.` and `..` are printed because a real `ls -a` prints them and
+		// the parser has to drop them.
+		for _, a := range args {
+			if !strings.Contains(a, "/__opossum_look__") {
+				continue
+			}
+			if os.Getenv("LOOK_FAIL") != "" {
+				fmt.Fprintln(os.Stderr, "Error: failed to start process (cause: \"internalError: \"failed to find target executable sh\"\")")
+				return 1
+			}
+			// Progress goes to stderr, exactly as the real runtime does — a caller that
+			// folded the two streams together would read this as volume contents.
+			fmt.Fprintln(os.Stderr, "[6/6] Starting container [0s]")
+			fmt.Println(".")
+			fmt.Println("..")
+			for _, e := range strings.Fields(os.Getenv("LOOK_ENTRIES")) {
+				fmt.Println(e)
+			}
+			return 0
+		}
+		// $SEED_COPY_FAIL is the other half of SEED_FAIL: the container starts and
+		// the copy itself fails. The distinction matters because the two used to be
+		// indistinguishable from outside — the script ended in `|| true`, so only a
+		// container that could not start at all was ever reported. The message is the
+		// busybox wording captured from the non-root run above; the shim has no
+		// filesystem of its own to fail on, so it stands in for any copy that starts
+		// and cannot finish.
+		//
+		// Note what this shim cannot model: it never runs the seed script, it decides
+		// an exit code from the argv. So it says nothing about whether that script
+		// still reports its own failures — only the runtime package's real-`sh` eval
+		// can see that. A test here that reads as if it guarded the script would be
+		// claiming a coverage the shim structurally cannot provide.
+		if os.Getenv("SEED_COPY_FAIL") != "" {
+			for _, a := range args {
+				if strings.Contains(a, "/__opossum_seed__") {
+					fmt.Fprintln(os.Stderr, `cp: can't create '/__opossum_seed__/./rootfile': Permission denied`)
+					return 1
+				}
+			}
+		}
 		// A foreground run of $RUN_FAIL exits non-zero (drives failure evals).
 		if fail := os.Getenv("RUN_FAIL"); fail != "" {
 			for i, a := range args {
@@ -212,7 +298,13 @@ func run(args []string) int {
 			return 1
 		}
 		if arg(1) == "ls" {
-			fmt.Println(os.Getenv("VOLUME_LS"))
+			// One name per line, as the real `container volume ls` prints them. A
+			// single line holding several names would answer "exists" only for the
+			// first — the parser reads the first field of each line — and a test that
+			// listed three volumes would silently be testing one.
+			for _, v := range strings.Fields(os.Getenv("VOLUME_LS")) {
+				fmt.Println(v)
+			}
 		}
 
 	case "logs":

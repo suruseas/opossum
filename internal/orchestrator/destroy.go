@@ -324,6 +324,12 @@ func (o *Orchestrator) destroyPaths(keepOverlay, keepLocal bool) (local, byName 
 	return local, byName, keptOverlay
 }
 
+// GeneratedOverlay reports whether the overlay at path is one opossum wrote,
+// which is what makes deleting it a safe thing to suggest. The overlay is also a
+// documented place for people to keep their own adjustments, so the same advice
+// aimed at a hand-written file would be advice to throw work away.
+func GeneratedOverlay(path string) bool { return generatedOverlay(path) }
+
 // generatedOverlay reports whether this overlay file starts with the header
 // opossum writes. Reading one line is enough: the header is the first thing in
 // every file opossum generates, and its absence is what matters.

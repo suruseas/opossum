@@ -439,8 +439,176 @@ func TestSeedVolumeArgv(t *testing.T) {
 		t.Fatal("SeedVolume issued no command")
 	}
 	line := lines[len(lines)-1]
-	if !strings.HasPrefix(line, "run --rm -v demo_data:") || !strings.Contains(line, "img:1 sh -c") {
-		t.Errorf("SeedVolume argv = %q, want a `run --rm -v demo_data:… img:1 sh -c …`", line)
+	if !strings.HasPrefix(line, "run --rm --user 0 -v demo_data:") || !strings.Contains(line, "img:1 sh -c") {
+		t.Errorf("SeedVolume argv = %q, want a `run --rm --user 0 -v demo_data:… img:1 sh -c …`", line)
+	}
+	// The `--user 0` in that prefix is the load-bearing part: a fresh volume's root
+	// is 0:0/755, so an image with a non-root USER cannot write into it and the copy
+	// moves nothing at all. What that looks like from the outside is covered where
+	// the shim can act on it (TestSeedsWithRootSoANonRootImageCanFillTheVolume).
+}
+
+// The seed script is opossum's own program, so run it under a real `sh` rather
+// than only reading it. (The interpreter that matters at runtime is the image's;
+// what is pinned here is the error handling opossum wrote around the copy.)
+func TestSeedScriptIsQuietWhenTheImageLacksThePath(t *testing.T) {
+	dst := t.TempDir()
+	// No src directory at all: the ordinary case for a volume mounted at a path
+	// the image doesn't ship. It must succeed and say nothing.
+	out, err := exec.Command("/bin/sh", "-c", seedScript(filepath.Join(t.TempDir(), "absent"), dst)).CombinedOutput()
+	if err != nil {
+		t.Errorf("a missing source path made the seed fail: %v (%s)", err, out)
+	}
+	if len(out) > 0 {
+		t.Errorf("a missing source path was not silent: %q", out)
+	}
+	if ents, _ := os.ReadDir(dst); len(ents) != 0 {
+		t.Errorf("nothing should have been copied, found %d entries", len(ents))
+	}
+}
+
+// The look mounts the volume read-only and runs as root. `:ro` is the load-bearing
+// half: it is what makes "opossum reads a volume it did not create" a claim the
+// runtime enforces rather than one this code merely intends.
+//
+// Pinned on the argv, which is unusual here — elsewhere these evals prefer to
+// assert the effect. There is no effect to assert: the fake shim has no
+// filesystem to refuse a write on, so nothing below this line can tell a
+// read-only mount from a writable one. The argv is the last place the difference
+// is visible, so it is asserted there and stated plainly rather than left to a
+// test that would pass either way.
+func TestVolumeEntriesMountsTheVolumeReadOnly(t *testing.T) {
+	rt, read := loggingShim(t)
+	rt.VolumeEntries("demo_pgdata", "postgres:16")
+	lines := read()
+	if len(lines) == 0 {
+		t.Fatal("VolumeEntries issued no command")
+	}
+	line := lines[len(lines)-1]
+	if !strings.Contains(line, "demo_pgdata:/__opossum_look__:ro") {
+		t.Errorf("the look must mount the volume read-only, got: %q", line)
+	}
+	if !strings.Contains(line, "--user 0") {
+		t.Errorf("the look must run as root or it cannot read a 0:0 volume, got: %q", line)
+	}
+}
+
+// VolumeEntries reads what a volume holds. The runtime writes its own progress to
+// stderr while doing it, so this pins that the listing is read from stdout alone —
+// folding the streams together would have opossum reading `[1/6] Fetching image`
+// as the volume's contents, and deciding about someone's data on that.
+func TestVolumeEntriesReadsTheListingAndNotTheProgress(t *testing.T) {
+	shim := filepath.Join(t.TempDir(), "c.sh")
+	body := "#!/bin/sh\n" +
+		"echo '[1/6] Fetching image [0s]' >&2\n" +
+		"echo '[6/6] Starting container [0s]' >&2\n" +
+		// The name with a space is what forces the listing to be read a line at a
+		// time: split on whitespace, "my data" becomes two entries and an empty
+		// volume becomes indistinguishable from one holding a file called " ".
+		"printf '.\\n..\\nlost+found\\nPG_VERSION\\nmy data\\n'\n"
+	if err := os.WriteFile(shim, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got, err := (&Runtime{Bin: shim}).VolumeEntries("demo_pgdata", "postgres:16")
+	if err != nil {
+		t.Fatalf("VolumeEntries: %v", err)
+	}
+	if !reflect.DeepEqual(got, []string{"lost+found", "PG_VERSION", "my data"}) {
+		t.Errorf("entries = %q, want exactly the volume's own three (`.` and `..` dropped, progress not read, one name kept whole)", got)
+	}
+}
+
+// A read that failed is not an empty volume. Returning nil with no error would let
+// a caller conclude "nothing in it" from a container that never ran.
+func TestVolumeEntriesReportsAFailedLook(t *testing.T) {
+	shim := filepath.Join(t.TempDir(), "c.sh")
+	body := "#!/bin/sh\necho 'Error: failed to find target executable sh' >&2\nexit 1\n"
+	if err := os.WriteFile(shim, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got, err := (&Runtime{Bin: shim}).VolumeEntries("demo_pgdata", "distroless")
+	if err == nil {
+		t.Fatalf("a look that could not run must not read as an empty volume (got %q)", got)
+	}
+	if !strings.Contains(err.Error(), "failed to find target executable sh") {
+		t.Errorf("the error should carry what the runtime said, got: %v", err)
+	}
+}
+
+// Apple `container` gives each volume its own ext4 filesystem, so a fresh volume
+// arrives holding `lost+found` where docker's arrives empty. Removing it is what
+// makes a plain `pgdata:/var/lib/postgresql/data` work: initdb refuses a data
+// directory that isn't empty, and names that directory as the reason.
+func TestSeedScriptClearsLostFoundSoTheVolumeStartsEmpty(t *testing.T) {
+	dst := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dst, "lost+found"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// No source path: the removal has to happen on its own, not as a side effect of
+	// copying. A volume mounted at a path the image doesn't ship still has to come
+	// up empty.
+	out, err := exec.Command("/bin/sh", "-c", seedScript(filepath.Join(t.TempDir(), "absent"), dst)).CombinedOutput()
+	if err != nil {
+		t.Errorf("the seed failed: %v (%s)", err, out)
+	}
+	if ents, _ := os.ReadDir(dst); len(ents) != 0 {
+		t.Errorf("the volume should start empty, found %v", ents)
+	}
+	if len(out) > 0 {
+		t.Errorf("removing it is not news: %q", out)
+	}
+}
+
+// `rmdir`, not `rm -rf`: it can only take an empty directory. If `lost+found` ever
+// holds files an fsck recovered, they stay — a step meant to make a volume look
+// like docker's must not be able to destroy what it finds there.
+func TestSeedScriptLeavesALostFoundThatHoldsSomething(t *testing.T) {
+	dst := t.TempDir()
+	lf := filepath.Join(dst, "lost+found")
+	if err := os.Mkdir(lf, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(lf, "#12345"), []byte("recovered"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command("/bin/sh", "-c", seedScript(filepath.Join(t.TempDir(), "absent"), dst)).CombinedOutput()
+	if err != nil {
+		t.Errorf("a lost+found it cannot remove is not an error: %v (%s)", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(lf, "#12345")); err != nil {
+		t.Errorf("a recovered file was destroyed: %v", err)
+	}
+}
+
+func TestSeedScriptReportsACopyItCannotMake(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: an unwritable directory is still writable")
+	}
+	src, dst := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "f"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The destination stands in for a fresh volume the copying user cannot write —
+	// exactly what a non-root image meets. The failure must reach the exit code:
+	// an earlier `2>/dev/null || true` threw away the message and the status
+	// together, which is how a volume that received nothing was reported as filled.
+	//
+	// `cp -a src/. dst/` also applies src's own mode to dst, so this leans on the
+	// copy setting that after moving the contents rather than before. BSD `cp` does
+	// (this passes on macOS) and so does GNU `cp` (this passes on CI, which is
+	// ubuntu). If some `cp` ever ordered it the other way the copy would succeed and
+	// this would fail loudly — it cannot pass vacuously — so read a failure here as
+	// a question about the test before assuming it is about the script.
+	if err := os.Chmod(dst, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dst, 0o755) })
+	out, err := exec.Command("/bin/sh", "-c", seedScript(src, dst)).CombinedOutput()
+	if err == nil {
+		t.Errorf("a copy that could not write anything exited 0 (%s)", out)
+	}
+	if len(out) == 0 {
+		t.Error("the failure was silent; the caller has nothing to report")
 	}
 }
 
@@ -752,5 +920,28 @@ func TestListVolumes(t *testing.T) {
 
 	if got := replayShim(t, "boom\n", 1).ListVolumes(); got != nil {
 		t.Errorf("a failed listing must report nothing rather than guess, got %v", got)
+	}
+}
+
+// A runtime error says what went wrong on its last line; the lines above it are
+// progress. That is the whole rule — the reason is passed to the user as the
+// runtime wrote it, nesting and all.
+//
+// An earlier version parsed Apple `container`'s wrappers off to shorten the
+// warning. It was removed: unwrapping someone else's error format is a
+// dependency that a bit of readability does not pay for, and the raw line is
+// better evidence anyway.
+func TestLastNonEmptyLine(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"[1/6] Fetching image\n[2/6] Starting\nError: boom", "Error: boom"},
+		{"Error: no space left on device", "Error: no space left on device"},
+		// Trailing blank lines are common in captured output and are not the reason.
+		{"Error: boom\n\n  \n", "Error: boom"},
+		{"", ""},
+		{"   \n\n", ""},
+	} {
+		if got := lastNonEmptyLine(tc.in); got != tc.want {
+			t.Errorf("lastNonEmptyLine(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }

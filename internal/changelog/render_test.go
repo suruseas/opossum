@@ -119,6 +119,32 @@ func TestLoadRejectsMalformedFragments(t *testing.T) {
 	}
 }
 
+// A fragment is published into CHANGELOG.md exactly as written, and the changelog
+// is in English — while everything else about a change (the commit, the PR, the
+// issue) is discussed in Japanese. That makes writing the entry in Japanese too
+// the easy slip, and one that only shows up once it has been assembled into the
+// published file. It happened three times in one release before this check.
+func TestLoadRejectsAnEntryNotWrittenInEnglish(t *testing.T) {
+	for name, body := range map[string]string{
+		"1-hiragana.fixed.md": "- 新しい volume が空で始まるようになった\n",
+		"2-katakana.added.md": "- ボリュームのシード\n",
+		"3-kanji.changed.md":  "- The warning now reports 実際に見たもの instead of a guess\n",
+	} {
+		dir := t.TempDir()
+		write(t, dir, name, body)
+		if _, err := changelog.Load(dir); err == nil {
+			t.Errorf("%s (%q) should have been rejected", name, body)
+		}
+	}
+	// What must keep working: the punctuation this changelog is actually full of.
+	// A check that fired on em dashes or arrows would be turned off within a week.
+	dir := t.TempDir()
+	write(t, dir, "4-punctuation.fixed.md", "- An entry — with an em dash, a → arrow, a café, and «guillemets» — is fine\n")
+	if _, err := changelog.Load(dir); err != nil {
+		t.Errorf("ordinary non-ASCII punctuation must be allowed: %v", err)
+	}
+}
+
 // README.md in changelog.d documents the format; it is not a fragment.
 func TestLoadIgnoresReadme(t *testing.T) {
 	dir := t.TempDir()

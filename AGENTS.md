@@ -153,9 +153,17 @@ stamped with a stable `[OPSM-NNN]` code. Match the code (or the signature) and
 apply the fix — no need to re-read the prose. See "Diagnostic codes" for the full
 list; codes are add-only and never change meaning.
 
-- **`[OPSM-101]` … `a named volume mounted at /var/lib/postgresql/data makes
-  Postgres initdb fail`** → the DB's data dir is a mount point (has `lost+found`);
-  add `environment: PGDATA=/var/lib/postgresql/data/pgdata` and re-run `up`.
+- **`[OPSM-101]` … `the volume … was not created by this opossum and still holds
+  lost+found`** (before the service starts) → opossum read the volume and found
+  ext4's `lost+found` with no cluster in it; initdb will refuse it. Same two fixes
+  as below.
+- **`[OPSM-101]` … `Postgres will not initialise a data directory that isn't empty,
+  and … still holds lost+found`** (in a crashed service's report) → the volume was
+  not made by this opossum, so it still has ext4's `lost+found` in it. Either let
+  opossum make it (`opossum down -v`, then `up` — only when nothing else wrote to
+  that volume), or add `environment: PGDATA=/var/lib/postgresql/data/pgdata`.
+  Volumes opossum creates are cleared, so a plain `pgdata:/var/lib/postgresql/data`
+  works without either.
 - **`[OPSM-204]` … `mounts the Docker socket … Apple container has no Docker daemon
   socket`** → the service needs Docker (e.g. Portainer); it can't work here. Remove
   the `docker.sock` mount or run that tool differently.
@@ -202,17 +210,19 @@ list; codes are add-only and never change meaning.
   parent directory is read-only). Create it yourself (`mkdir -p <path>`) or fix the
   parent's permissions, then `up` again — otherwise the container fails to start on
   a missing bind source.
-- **`[OPSM-105]` … a database data directory is a bind mount** → Apple `container`
-  bind mounts are host-owned (virtiofs) and can't be chowned from inside the
-  container, but every official DB image chowns its data directory at startup, so
-  it fails there. Use a named volume for that path (it *is* chownable).
-  Covers Postgres, MySQL/MariaDB, ClickHouse (`/var/lib/clickhouse`), MongoDB
-  (`/data/db`) and Redis/Valkey (`/data`) — each confirmed to fail this way on the
-  real runtime. Note `up` still reports success: the container starts, then its
-  entrypoint fails the chown and exits, so `ps` right afterwards shows `stopped`.
-  `up --from-docker-compose` writes this swap into `compose.opossum.yaml` for you;
-  note it changes where the data lives (into the volume — the host directory is
-  left untouched, not copied).
+- **`[OPSM-105]` … a data directory is a bind mount** → Apple `container` bind mounts
+  are host-owned and cannot be chowned from inside, so an image that takes ownership
+  of its data directory at startup dies there. Two paths reach this code, and they
+  claim different things. `up --from-docker-compose` **applies** the swap to a named
+  volume for the databases whose behaviour is known (Postgres, MySQL/MariaDB,
+  ClickHouse, MongoDB, Redis — matched on image name, so a sidecar built on the same
+  image is left alone). For anything else opossum waits: when a container actually
+  dies with this signature, that service and that mount are recorded, and the next
+  `up --from-docker-compose` proposes a **suggestion** naming exactly that mount —
+  into the overlay when there isn't one yet, on screen when there is (an existing
+  `compose.opossum.yaml` is never overwritten). It never proposes a swap for a
+  directory that has not failed: an earlier version guessed from the shape of the
+  mount and was wrong about half the time.
 - **`[OPSM-206]` … `opossum published it on <port> instead`** → the compose file gave
   only a container port (`ports: ["3000"]`), so the host port is opossum's to choose;
   the mirrored port was taken, so a free one was used. docker compose does the same.
@@ -233,6 +243,19 @@ list; codes are add-only and never change meaning.
   again. The name is all opossum has to go on, so a directory legitimately named like a
   file (`conf.d`, `.ssh`) draws the same line — the message says so, and for that case
   there is nothing to do.
+- **`[OPSM-108]` … `couldn't prepare the new volume … keeps lost+found`** → the same
+  shell-less image, on a volume the compose file asked to mount empty
+  (`volume: {nocopy: true}`). Nothing was copied into it, as asked, but ext4's
+  `lost+found` could not be cleared out either — so a program that checks whether its
+  data directory is empty (Postgres's initdb) will refuse it. Same fixes as below.
+- **`[OPSM-108]` … `couldn't fill the new volume … it will mount empty`** → Docker
+  pre-fills a fresh volume from the image's contents at that path and Apple `container`
+  does not, so opossum does the copy itself — by running `cp -a` inside a throwaway
+  container built from that image. An image with no shell (most distroless and scratch
+  builds) has nothing to run the copy with, so the volume mounts empty. That is
+  indistinguishable from a service that lost its data, which is why it is said out loud.
+  Put the content there another way (an init container, or a bind mount), or add
+  `volume: {nocopy: true}` to record that the empty mount is what you meant.
 - **`[OPSM-402]` … `found orphan container(s) not defined in the compose file`** →
   containers carrying this project's label that no service in the current compose file
   claims, left by a service that was renamed or deleted. They are left as they are —
@@ -294,13 +317,14 @@ list; codes are add-only and never change meaning.
 Every `[OPSM-NNN]` opossum can emit (add-only; grouped 1xx storage / 2xx network /
 3xx build / 4xx lifecycle / 5xx compose):
 
-- `OPSM-101` — named volume mounted directly at Postgres's data dir (initdb fails).
+- `OPSM-101` — Postgres refused a data directory that still holds `lost+found` (a volume opossum didn't create).
 - `OPSM-102` — a named volume shared by two running services (exclusive attach).
 - `OPSM-103` — a named volume is already attached to another running container (cross-project VZError).
 - `OPSM-104` — couldn't create a bind mount's host source directory (permissions).
 - `OPSM-105` — a database data directory is a bind mount (host-owned, can't be chowned).
 - `OPSM-106` — a host device or session socket is mounted (a per-container VM can't reach it).
 - `OPSM-107` — a bind mount names a file that doesn't exist, so a directory stands in its place.
+- `OPSM-108` — a fresh volume couldn't be filled from the image, or cleared of ext4's `lost+found` (no shell in it to run either with).
 - `OPSM-201` — a published host port is already taken (pre-flight).
 - `OPSM-202` — the DNS domain isn't registered (no bare-name discovery).
 - `OPSM-203` — an internal network: no internet egress and no name resolution.

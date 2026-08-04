@@ -8,7 +8,7 @@ import "fmt"
 //  2. why (the cause; if it's an Apple `container` constraint, state it in a line),
 //  3. what to do next (a concrete, runnable command or config change).
 //
-// The good exemplars to copy: warnPostgresDatadir (OPSM-101), buildFailed (#170),
+// The good exemplars to copy: initdbNotEmptyHint (OPSM-101), buildFailed (#170),
 // the embedded-logs dependency failure (OPSM-401), and every `doctor` check. When
 // adding an error, prefer naming the fix inline over leaving the user to guess.
 //
@@ -42,6 +42,7 @@ const (
 	codeExternalNetAbsent     diagCode = "OPSM-205" // a network declared external: true doesn't exist
 	codeHostDeviceMount       diagCode = "OPSM-106" // a host device or session socket is mounted (a per-container VM can't reach it)
 	codeBindFilePlaceholder   diagCode = "OPSM-107" // a bind mount names a file that doesn't exist, so a directory stands in its place
+	codeVolumeNotSeeded       diagCode = "OPSM-108" // a fresh volume could not be filled or cleared using the image (no shell to run it with)
 	codeHostPortRemapped      diagCode = "OPSM-206" // a container-only port's mirrored host port was taken, so opossum picked a free one
 	codeBuildTmpContext       diagCode = "OPSM-301" // build context under /private/tmp (builder can't read it)
 	codeBuildSymlink          diagCode = "OPSM-302" // build context is a symlink (builder may reject it)
@@ -69,7 +70,7 @@ const (
 // AGENTS.md, so adding a code forces documenting it.
 var allDiagCodes = []diagCode{
 	codePGDATADatadir, codeSharedVolume, codeVolumeAttachBusy, codeBindDirCreate, codeBindDataDirChown, codeHostDeviceMount,
-	codeBindFilePlaceholder,
+	codeBindFilePlaceholder, codeVolumeNotSeeded,
 	codeHostPortInUse, codeDNSDomainAbsent, codeInternalEgress, codeDockerSocket, codeExternalNetAbsent, codeHostPortRemapped,
 	codeBuildTmpContext, codeBuildSymlink,
 	codeDepNotRunning, codeOrphans, codeDepNoHealth,

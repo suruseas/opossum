@@ -271,6 +271,22 @@ func (r *Runtime) capture(args ...string) (string, error) {
 	return buf.String(), err
 }
 
+// captureSplitQuery runs a read-only command and returns stdout and stderr
+// separately, for a caller that has to parse the output: the runtime writes its
+// progress to stderr, so the combined stream of capture cannot be read as data.
+//
+// It bypasses the dry-run recording on purpose, so callers must be sure of what
+// they are running. Its one caller (VolumeEntries) reads a volume mounted `:ro`.
+func (r *Runtime) captureSplitQuery(args ...string) (string, string, error) {
+	r.trace(args)
+	cmd := r.newCmd(r.baseCtx(), args...)
+	cmd.WaitDelay = 2 * time.Second
+	var out, errOut bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &errOut
+	err := cmd.Run()
+	return out.String(), errOut.String(), err
+}
+
 // captureStdout runs a command and returns stdout only (stderr goes to the
 // process's stderr). Used when the output is parsed (e.g. JSON), so a warning the
 // child writes to stderr on an otherwise-successful run can't corrupt the parse.
@@ -445,15 +461,159 @@ func (r *Runtime) VolumeExists(name string) bool {
 }
 
 // SeedVolume copies the image's contents at srcPath into volume, by running a
-// throwaway container (which also creates the volume). Best-effort: a missing
-// path, missing shell, or copy error leaves the volume empty. This mirrors
-// Docker seeding a fresh volume from the image at that path — Apple `container`
-// mounts a fresh volume empty, which breaks the common "bind source + a volume
-// to preserve the image's node_modules" dev pattern.
-func (r *Runtime) SeedVolume(volume, image, srcPath string) {
-	const dst = "/__opossum_seed__"
-	script := fmt.Sprintf("[ -d %q ] && cp -a %q/. %q/ 2>/dev/null || true", srcPath, srcPath, dst)
-	r.capture("run", "--rm", "-v", volume+":"+dst, image, "sh", "-c", script)
+// throwaway container (which also creates the volume). This mirrors Docker
+// seeding a fresh volume from the image at that path — Apple `container` mounts a
+// fresh volume empty, which breaks the common "bind source + a volume to preserve
+// the image's node_modules" dev pattern.
+//
+// A path the image does not have is the ordinary case and stays quiet: the volume
+// is simply new. Anything else — an image with no shell to copy with, a copy that
+// cannot write — comes back as an error for the caller to report.
+//
+// The copy runs as root (`--user 0`), not as the image's own default user. A
+// fresh volume's root is owned by 0:0 and mode 755, so an image that declares a
+// non-root `USER` cannot write a single byte into it: measured on the real
+// runtime, such a seed copied nothing at all and the volume came up holding only
+// ext4's `lost+found`. Running as root is also what carries the image's ownership
+// across, and it is the same privilege docker seeds with — the copy there is done
+// by the engine. For images whose default user is already root, which is most of
+// them, it changes nothing.
+func (r *Runtime) SeedVolume(volume, image, srcPath string) error {
+	return r.runOnNewVolume(volume, image, seedScript(srcPath, seedMountPoint))
+}
+
+// PrepareVolume creates a volume and clears `lost+found` out of it, without
+// copying anything into it. It is the seeding path minus the copy, for a volume
+// the compose file asked to be mounted empty (`nocopy: true`).
+//
+// "Empty" has to mean the same thing in both cases. Without this, saying "mount
+// this one empty" would be the only way to get a volume that still holds ext4's
+// `lost+found` — the very thing the caller asked against, and the thing Postgres
+// refuses to initialise into.
+func (r *Runtime) PrepareVolume(volume, image string) error {
+	return r.runOnNewVolume(volume, image, prepareScript(seedMountPoint))
+}
+
+// seedMountPoint is where a volume being prepared is mounted while opossum works
+// on it. Nothing runs from this path; it only has to be somewhere no image keeps
+// anything.
+const seedMountPoint = "/__opossum_seed__"
+
+// runOnNewVolume runs one script against a volume opossum is creating, in a
+// throwaway container. The container failing to run at all is what comes back as
+// an error: the volume then exists but was never prepared, and only the caller can
+// say what that means for the service about to mount it.
+func (r *Runtime) runOnNewVolume(volume, image, script string) error {
+	out, err := r.capture("run", "--rm", "--user", "0", "-v", volume+":"+seedMountPoint, image, "sh", "-c", script)
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, lastNonEmptyLine(out))
+	}
+	return nil
+}
+
+// VolumeEntries lists what a volume holds, by mounting it read-only in a
+// throwaway container and running `ls -a`. `.` and `..` are dropped; an empty
+// volume comes back as an empty slice.
+//
+// It never writes. opossum removes `lost+found` from volumes it creates, but a
+// volume that already exists belongs to whoever made it — reading is the only
+// thing allowed here, and the mount is `:ro` so a mistake below cannot become a
+// mistake in someone's data.
+//
+// An error means the answer is unknown, never "empty": an image with no shell, a
+// volume held by another container, a runtime that will not start one. Callers
+// must treat unknown as "say nothing" — a warning built on a failed read is a
+// guess wearing evidence's clothes.
+func (r *Runtime) VolumeEntries(volume, image string) ([]string, error) {
+	const at = "/__opossum_look__"
+	// Split, not combined: `container run` writes its own progress ([1/6] Fetching
+	// image, …) to stderr, and folding that into the listing would have opossum
+	// reading the runtime's chatter as the volume's contents.
+	//
+	// Not recorded under DryRun either, though it is spelled `run`. This is a query
+	// — the same class as the inspects that resolve what a dry-run would do — and a
+	// plan is a list of what a real `up` would change. Listing it would put a
+	// command in the plan that changes nothing, and skipping it would leave a
+	// dry-run unable to say the one thing it is for.
+	out, errOut, err := r.captureSplitQuery("run", "--rm", "--user", "0", "-v", volume+":"+at+":ro", image, "sh", "-c", "ls -a "+at)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s", err, lastNonEmptyLine(errOut))
+	}
+	var entries []string
+	// By line, not by field: a name with a space in it is one entry, and splitting
+	// on whitespace would make an empty volume and a volume holding a file called
+	// " " look the same.
+	for _, line := range strings.Split(out, "\n") {
+		e := strings.TrimRight(line, "\r")
+		if e == "" || e == "." || e == ".." {
+			continue
+		}
+		entries = append(entries, e)
+	}
+	return entries, nil
+}
+
+// seedScript is what opossum runs inside the throwaway container: the whole of
+// what it asks the image's shell to do to a volume it has just created.
+//
+// It does two things. First it removes `lost+found`, the directory ext4 puts in
+// every filesystem it creates. Docker's volumes are directories on the host and
+// start genuinely empty; Apple `container` gives each volume its own ext4
+// filesystem, so a "fresh" volume already holds one entry. Programs that check
+// whether their data directory is empty see the difference — Postgres's `initdb`
+// refuses to start and names it: `directory "…" exists but is not empty` /
+// `It contains a lost+found directory`. Removing it is what makes a plain
+// `pgdata:/var/lib/postgresql/data` work here as it does on Docker.
+//
+// `rmdir`, deliberately, not `rm -rf`: it succeeds only while the directory is
+// empty. If `lost+found` ever holds anything — files an fsck recovered — the
+// removal fails, the directory stays, and nothing of the user's is destroyed by
+// a step meant to be cosmetic. Its failure is not the caller's business either
+// way (an image where the copy cannot run is), so it is the one part of this
+// script allowed to fail quietly.
+//
+// Then the copy. It distinguishes the two things that look alike from outside: an
+// image without srcPath is the ordinary case — the volume is simply new — and
+// exits 0 with nothing said, while a copy that starts and fails comes back with
+// its exit code for the caller to report. An earlier version ended in
+// `2>/dev/null || true`, which threw away the message and the exit code together;
+// that is what let every non-root image silently receive an empty volume for as
+// long as seeding existed.
+//
+// Written as a function so a test can run it under a real `sh` — the interpreter
+// that matters is the one inside the image, but what the script does is opossum's
+// own and can be pinned here.
+func seedScript(srcPath, dst string) string {
+	return fmt.Sprintf("%s; if [ -d %q ]; then cp -a %q/. %q/; fi",
+		prepareScript(dst), srcPath, srcPath, dst)
+}
+
+// prepareScript is the first half of seedScript on its own: make the volume look
+// like a directory that was just created, and copy nothing into it.
+func prepareScript(dst string) string {
+	return fmt.Sprintf("rmdir %q 2>/dev/null || true", dst+"/lost+found")
+}
+
+// lastNonEmptyLine is the final non-empty line of s. A runtime error says what
+// went wrong on its last line; everything above it is progress.
+//
+// Deliberately not more than this. An earlier version unwrapped the nesting
+// Apple `container` puts around the reason (`internalError: "…"` four deep,
+// behind two UUIDs) to make the warning shorter. That traded a dependency on
+// someone else's error formatting for readability — a worse bargain than the
+// failure-decoding elsewhere in opossum, which at least keys on a specific
+// signature behind two gates. The raw line is longer but it is evidence: it is
+// what the runtime actually said. If the noise proves to be a real problem in
+// use, the answer is a decoder for a signature we have actually collected, not
+// a parser for a format nobody promised us.
+func lastNonEmptyLine(s string) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if t := strings.TrimSpace(lines[i]); t != "" {
+			return t
+		}
+	}
+	return ""
 }
 
 // Output runs a container subcommand and returns its combined output, for

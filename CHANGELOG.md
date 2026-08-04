@@ -6,6 +6,25 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-08-05
+
+### Added
+
+- `volume: {nocopy: true}` now works, and so does its short spelling `src:target:nocopy`. opossum fills a fresh volume from the image the way Docker does, and this is how a compose file turns that off — for a dependency directory the image ships stale, say, or one that is populated another way. It was being dropped during parsing, so the volume was filled anyway and nothing said why the line had no effect; the short spelling was worse, reaching the runtime as if `nocopy` were a mount mode. Measured against docker compose, which leaves such a volume empty.
+- `up` now says when it couldn't fill a fresh volume from the image. opossum emulates Docker's volume seeding by running `cp -a` inside a throwaway container built from that image, and an image with no shell — most distroless and scratch builds — has nothing to run the copy with. The volume then mounts empty, which looks exactly like a service that lost its data. The warning names the volume, says why the copy couldn't run, and points at the ways out: put the content there another way, or add `volume: {nocopy: true}` to record that an empty mount is what you meant (`OPSM-108`).
+
+### Changed
+
+- `up --from-docker-compose` no longer proposes a named volume for every empty read-write bind directory. It used to read an empty directory as "the app will put its data here"; measured over 156 real-world projects that guess produced 193 proposals and about half were wrong — `/config` files you edit, `/downloads` and `/media` you open, `/logs` you read. A suggestion that is a coin flip is worse than none, because it teaches you to skip the section that also holds the good ones. Suggestions are now driven by what actually happened: when a container dies taking ownership of a bind mount — the failure Apple `container` produces because bind mounts are host-owned — that service and that mount are remembered, and the next `up --from-docker-compose` proposes a named volume for exactly that mount — written into the overlay when there isn't one yet, and reported on screen when there is (opossum never overwrites an existing `compose.opossum.yaml`). The automatic fixes for databases whose behaviour is known (Postgres, MySQL/MariaDB, ClickHouse, MongoDB, Redis) are unchanged.
+- Declining `opossum destroy` at the prompt now ends with a pointer to `opossum destroy --dry-run`. Saying no skips the after-removal report, so nothing ever told you about the things destroy leaves alone (the DNS domain, workspace snapshots, unclaimed volumes) — the one-line pointer keeps them discoverable without burying a "no" in output.
+- The warning about Postgres's data directory (`OPSM-101`) now reports what opossum found instead of predicting from the shape of the mount. It used to fire whenever a named volume sat directly at `/var/lib/postgresql/data`; with `lost+found` now cleared from the volumes opossum creates, that mount is the one that works, and the prediction would have been wrong on every `up` of a healthy stack — a warning that is wrong half the time teaches you to skip the paragraph that also holds the true ones. In its place: before the service starts, opossum reads a volume that already exists and warns only if it holds `lost+found` and no cluster; and if a service dies anyway, initdb's own refusal is decoded into the same guidance. What is left is the case that is genuinely still broken — a volume opossum didn't create, made by an older opossum, by `container volume create`, or by another project — and the message names it, says what it costs to recreate it, and gives the `PGDATA` route as the alternative that keeps the data.
+
+### Fixed
+
+- Filling a fresh volume from an image whose default user isn't root — anything with a `USER` line, which is the node images and most database images — copied nothing at all, and said nothing about it. A fresh volume's root belongs to `0:0` and is mode 755, so the image's own user cannot create a single file in it: this was never a matter of ownership not surviving the copy, the volume simply came up empty, and a service that had lost its data looked exactly the same. The copy now runs as root, which is the privilege Docker seeds with — there the engine does the copying — so the contents and their ownership both arrive intact. Failures of the copy are no longer swallowed either: one that starts and fails is reported (`OPSM-108`), while a path the image doesn't have stays quiet, because that one is the ordinary case.
+- The compatibility documentation said opossum does not seed volumes. It does, and has since volume support landed: a fresh named or anonymous volume is filled from the image's contents at that path before the service starts, which is what makes the bind-mounted-source plus `- /app/node_modules` pattern work. The docs told you to work around a limitation that isn't there — installing dependencies at container start, or not using a volume for them — so if you did that, you no longer need to. The docs now say what is actually emulated and what still isn't (an image without a shell is skipped, `external: true` volumes are never touched).
+- A fresh named or anonymous volume now starts empty, the way it does on Docker. Apple `container` gives every volume its own ext4 filesystem, so one arrives already holding `lost+found` — where a Docker volume, being a directory on the host, holds nothing — and any program that checks whether its data directory is empty sees the difference. Postgres is the one people hit: `initdb` refuses to initialise into a directory that isn't empty, and says so by name. opossum now clears `lost+found` out of the volumes it creates, so a compose file that writes `pgdata:/var/lib/postgresql/data` works here as it does on Docker, with no need to move `PGDATA` into a subdirectory of the mount. Volumes opossum didn't create are left alone, and the clearing is an `rmdir`: a `lost+found` that holds anything — files an fsck recovered — makes it fail and stay, so a step meant to make a volume look like Docker's cannot destroy what it finds there.
+
 ## [0.18.2] - 2026-08-01
 
 ### Fixed
@@ -675,7 +694,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.18.2...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.19.0...HEAD
+[0.19.0]: https://github.com/suruseas/opossum/compare/v0.18.2...v0.19.0
 [0.18.2]: https://github.com/suruseas/opossum/compare/v0.18.1...v0.18.2
 [0.18.1]: https://github.com/suruseas/opossum/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/suruseas/opossum/compare/v0.17.0...v0.18.0

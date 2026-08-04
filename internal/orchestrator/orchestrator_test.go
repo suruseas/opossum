@@ -1426,7 +1426,7 @@ func TestExternalVolumeNotNamespacedOrRemoved(t *testing.T) {
 
 func TestUpSeedsFreshVolumesFromImage(t *testing.T) {
 	// A fresh named or anonymous volume is seeded from the image's contents at the
-	// mount path (a throwaway `run --rm -v <vol>:/__opossum_seed__`), mirroring
+	// mount path (a throwaway `run --rm --user 0 -v <vol>:/__opossum_seed__`), mirroring
 	// Docker; a bind mount is not.
 	rt, log := fakeShim(t)
 	p := project("demo", map[string]*compose.Service{
@@ -1440,10 +1440,10 @@ func TestUpSeedsFreshVolumesFromImage(t *testing.T) {
 		t.Fatalf("Up: %v", err)
 	}
 	lines := log()
-	if indexOf(lines, "run --rm -v demo_data:/__opossum_seed__ web:latest") < 0 {
+	if indexOf(lines, "run --rm --user 0 -v demo_data:/__opossum_seed__ web:latest") < 0 {
 		t.Errorf("named volume should be seeded from the image, got %v", lines)
 	}
-	if indexOf(lines, "run --rm -v demo_web_app_node_modules_") < 0 || indexOf(lines, ":/__opossum_seed__ web:latest") < 0 {
+	if indexOf(lines, "run --rm --user 0 -v demo_web_app_node_modules_") < 0 || indexOf(lines, ":/__opossum_seed__ web:latest") < 0 {
 		t.Errorf("anonymous volume should be seeded from the image, got %v", lines)
 	}
 	// The bind mount's host path is never seeded.
@@ -1565,55 +1565,263 @@ func TestImagesListsBuiltAndPulled(t *testing.T) {
 	}
 }
 
-func TestWarnsPostgresDatadirNamedVolume(t *testing.T) {
-	// A named volume mounted directly at Postgres's data dir will fail initdb, so
-	// `up` warns and suggests the PGDATA subdirectory workaround — but only for
-	// Postgres, only for named volumes, and only when the workaround isn't set (#103).
-	const want = "won't start as written"
-	run := func(svc *compose.Service, top map[string]compose.VolumeDecl) string {
-		rt, _ := fakeShim(t)
-		p := project("demo", map[string]*compose.Service{"db": svc})
-		p.Volumes = top
-		var out bytes.Buffer
-		if err := orchestrator.New(p, rt, "opossum", &out).Up(true); err != nil {
-			t.Fatalf("Up: %v", err)
-		}
-		return out.String()
+func TestUpDoesNotPredictThePostgresDatadirFailure(t *testing.T) {
+	// A named volume mounted straight at Postgres's data directory used to earn a
+	// warning before anything ran: the volume would arrive holding `lost+found`,
+	// and initdb refuses a data directory that isn't empty. opossum now clears
+	// `lost+found` out of the volumes it creates, so that mount is the one that
+	// works — and a warning saying it "won't start as written" would be wrong on
+	// the ordinary path, every single up.
+	//
+	// The case that remains real — a volume opossum did not create — is answered by
+	// looking inside that volume (below) and by decoding initdb's own refusal if it
+	// gets that far (lostfound_internal_test.go).
+	rt, _ := fakeShim(t)
+	var out bytes.Buffer
+	p := project("demo", map[string]*compose.Service{
+		"db": {Image: "postgres:16", Volumes: []string{"pgdata:/var/lib/postgresql/data"}},
+	})
+	if err := orchestrator.New(p, rt, "opossum", &out).Up(true); err != nil {
+		t.Fatalf("Up: %v", err)
 	}
+	if s := out.String(); strings.Contains(s, "OPSM-101") || strings.Contains(s, "won't start as written") {
+		t.Errorf("nothing has failed, so there is nothing to predict:\n%s", s)
+	}
+}
 
-	cases := []struct {
-		desc string
+// The shim answers `volume ls` one name per line, as the runtime does. That is
+// load-bearing for the evals below: VolumeExists reads the first field of each
+// line, so a shim that printed several names on one line would answer "exists"
+// for the first only — and cases whose volume was silently missing would pass by
+// never getting as far as the thing they mean to test.
+func TestFakeVolumeListAnswersForEveryNameItWasGiven(t *testing.T) {
+	rt, _ := fakeShim(t)
+	setShimEnv(rt, "VOLUME_LS=demo_one demo_two")
+	for _, name := range []string{"demo_one", "demo_two"} {
+		if !rt.VolumeExists(name) {
+			t.Errorf("the shim was given %q; it must be listed as existing", name)
+		}
+	}
+	if rt.VolumeExists("demo_three") {
+		t.Error("a volume nobody listed must not exist")
+	}
+}
+
+// A volume opossum did not create still holds `lost+found`, and initdb will refuse
+// it. That case can no longer be told from the compose file — the same mount line
+// is the working one on a volume opossum made — so opossum looks inside the volume
+// and speaks only about what it finds there.
+func TestUpLooksInsideAnExistingPostgresVolume(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  []string
+		warn bool
+	}{
+		{"made elsewhere: lost+found and no cluster", []string{"VOLUME_LS=demo_pgdata", "LOOK_ENTRIES=lost+found"}, true},
+		{"already initialised: initdb will not run again", []string{"VOLUME_LS=demo_pgdata", "LOOK_ENTRIES=lost+found PG_VERSION base global"}, false},
+		{"prepared by opossum: nothing in it", []string{"VOLUME_LS=demo_pgdata", "LOOK_ENTRIES="}, false},
+		{"no such volume yet: opossum makes it, empty", []string{"LOOK_ENTRIES=lost+found"}, false},
+		{"the look failed: unknown is not evidence", []string{"VOLUME_LS=demo_pgdata", "LOOK_FAIL=1"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt, _ := fakeShim(t)
+			setShimEnv(rt, tc.env...)
+			var out bytes.Buffer
+			p := project("demo", map[string]*compose.Service{
+				"db": {Image: "postgres:16", Volumes: []string{"pgdata:/var/lib/postgresql/data"}},
+			})
+			if err := orchestrator.New(p, rt, "opossum", &out).Up(true); err != nil {
+				t.Fatalf("Up: %v", err)
+			}
+			if got := strings.Contains(out.String(), "OPSM-101"); got != tc.warn {
+				t.Errorf("warned=%v, want %v; output:\n%s", got, tc.warn, out.String())
+			}
+		})
+	}
+}
+
+// Which mounts the look applies to — the parsing half, kept from the eval of the
+// warning this replaced. The volume in every case holds `lost+found` and no
+// cluster, so the only thing deciding the answer is whether opossum reads that
+// mount as its own volume at Postgres's data directory.
+func TestUpLooksAtTheRightMounts(t *testing.T) {
+	for _, tc := range []struct {
+		name string
 		svc  *compose.Service
 		top  map[string]compose.VolumeDecl
 		warn bool
+		// canLook: whether a look into this mount is opossum's business at all.
+		// False for the mounts it does not own, where silence must come from never
+		// having read them, not from what was found.
+		canLook bool
 	}{
-		{"named volume at datadir, no PGDATA", &compose.Service{Image: "postgres:16", Volumes: []string{"pgdata:/var/lib/postgresql/data"}}, nil, true},
-		{"named volume + trailing slash + :ro", &compose.Service{Image: "postgres:16", Volumes: []string{"pgdata:/var/lib/postgresql/data/:ro"}}, nil, true},
-		{"named volume + :rw mode", &compose.Service{Image: "postgres:16", Volumes: []string{"pgdata:/var/lib/postgresql/data:rw"}}, nil, true},
-		{"named volume + :cached mode", &compose.Service{Image: "postgres:16", Volumes: []string{"pgdata:/var/lib/postgresql/data:cached"}}, nil, true},
-		{"PGDATA subdir set", &compose.Service{Image: "postgres:16", Environment: compose.Environment{"PGDATA=/var/lib/postgresql/data/pgdata"}, Volumes: []string{"pgdata:/var/lib/postgresql/data"}}, nil, false},
-		{"PGDATA = datadir itself (trailing slash)", &compose.Service{Image: "postgres:16", Environment: compose.Environment{"PGDATA=/var/lib/postgresql/data/"}, Volumes: []string{"pgdata:/var/lib/postgresql/data"}}, nil, true},
-		{"MySQL datadir", &compose.Service{Image: "mysql:8", Volumes: []string{"dbdata:/var/lib/mysql"}}, nil, false},
-		{"bind mount at datadir", &compose.Service{Image: "postgres:16", Volumes: []string{"./data:/var/lib/postgresql/data"}}, nil, false},
-		{"external volume at datadir", &compose.Service{Image: "postgres:16", Volumes: []string{"pgdata:/var/lib/postgresql/data"}}, map[string]compose.VolumeDecl{"pgdata": {External: true}}, false},
+		{"the plain form", &compose.Service{Image: "postgres:16", Volumes: []string{"pgdata:/var/lib/postgresql/data"}}, nil, true, true},
+		{"trailing slash and :ro", &compose.Service{Image: "postgres:16", Volumes: []string{"pgdata:/var/lib/postgresql/data/:ro"}}, nil, true, true},
+		{"an explicit :rw", &compose.Service{Image: "postgres:16", Volumes: []string{"pgdata:/var/lib/postgresql/data:rw"}}, nil, true, true},
+		{"a :cached mount", &compose.Service{Image: "postgres:16", Volumes: []string{"pgdata:/var/lib/postgresql/data:cached"}}, nil, true, true},
+		// PGDATA below the mount point is the arrangement that sidesteps this, but
+		// PGDATA set to the data directory ITSELF is not — initdb still looks at the
+		// directory that holds `lost+found`.
+		{"PGDATA is the data dir itself", &compose.Service{Image: "postgres:16", Environment: compose.Environment{"PGDATA=/var/lib/postgresql/data"}, Volumes: []string{"pgdata:/var/lib/postgresql/data"}}, nil, true, true},
+		{"PGDATA is the data dir with a slash", &compose.Service{Image: "postgres:16", Environment: compose.Environment{"PGDATA=/var/lib/postgresql/data/"}, Volumes: []string{"pgdata:/var/lib/postgresql/data"}}, nil, true, true},
+		{"PGDATA one level down", &compose.Service{Image: "postgres:16", Environment: compose.Environment{"PGDATA=/var/lib/postgresql/data/pgdata"}, Volumes: []string{"pgdata:/var/lib/postgresql/data"}}, nil, false, false},
+		// A bind mount is a host directory: no ext4 of its own, so no `lost+found`,
+		// and not opossum's to speak about either way.
+		{"a bind mount at the data dir", &compose.Service{Image: "postgres:16", Volumes: []string{"./data:/var/lib/postgresql/data"}}, nil, false, false},
+		// An external volume belongs to the user. opossum neither creates nor
+		// removes it, so it must not be told to `down -v` it away.
+		{"an external volume at the data dir", &compose.Service{Image: "postgres:16", Volumes: []string{"pgdata:/var/lib/postgresql/data"}}, map[string]compose.VolumeDecl{"pgdata": {External: true, Name: "real_pg_vol"}}, false, false},
+		// MySQL tolerates a data directory that isn't empty.
+		// Both of these DO exist and DO hold `lost+found` (see VOLUME_LS below), so
+		// the only thing keeping them quiet is that neither sits at Postgres's data
+		// directory. MySQL tolerates a non-empty data directory anyway.
+		{"MySQL's data dir", &compose.Service{Image: "mysql:8", Volumes: []string{"dbdata:/var/lib/mysql"}}, nil, false, false},
+		{"a volume somewhere else entirely", &compose.Service{Image: "postgres:16", Volumes: []string{"cache:/var/cache"}}, nil, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt, log := fakeShim(t)
+			// Every volume any of these cases could name already exists and holds
+			// only `lost+found`, so the mount is the only thing left to decide the
+			// answer. One name per line is what the runtime prints and what
+			// VolumeExists reads — listing them on one line would answer "exists"
+			// for the first name only, and most of these cases would then be
+			// passing because their volume was missing.
+			setShimEnv(rt, "VOLUME_LS=demo_pgdata\ndemo_dbdata\ndemo_cache\nreal_pg_vol", "LOOK_ENTRIES=lost+found")
+			var out bytes.Buffer
+			p := project("demo", map[string]*compose.Service{"db": tc.svc})
+			p.Volumes = tc.top
+			if err := orchestrator.New(p, rt, "opossum", &out).Up(true); err != nil {
+				t.Fatalf("Up: %v", err)
+			}
+			if got := strings.Contains(out.String(), "OPSM-101"); got != tc.warn {
+				t.Errorf("warned=%v, want %v; output:\n%s", got, tc.warn, out.String())
+			}
+			// Silence is not enough for the mounts opossum has no business reading:
+			// a bind mount and an external volume must not even be looked into.
+			if !tc.canLook {
+				if indexOf(log(), "__opossum_look__") >= 0 {
+					t.Errorf("nothing here is opossum's to read: %v", log())
+				}
+			}
+		})
 	}
-	for _, c := range cases {
-		got := strings.Contains(run(c.svc, c.top), want)
-		if got != c.warn {
-			t.Errorf("%s: warned=%v, want %v", c.desc, got, c.warn)
-		}
-	}
+}
 
-	// The warning is actionable: it names the fix (PGDATA subdirectory) and tells
-	// the user to re-run up. It must not leak an internal tracking number.
-	msg := run(&compose.Service{Image: "postgres:16", Volumes: []string{"pgdata:/var/lib/postgresql/data"}}, nil)
-	for _, must := range []string{"[OPSM-101]", "PGDATA=/var/lib/postgresql/data/pgdata", "opossum up` again"} {
-		if !strings.Contains(msg, must) {
-			t.Errorf("warning missing %q; got: %s", must, msg)
+// The clearing runs on volumes opossum creates and on nothing else. An
+// `external: true` volume is the user's: opossum neither creates nor removes it,
+// and must not run anything that touches its contents either.
+func TestUpNeverTouchesAnExternalVolume(t *testing.T) {
+	rt, log := fakeShim(t)
+	var out bytes.Buffer
+	p := project("demo", map[string]*compose.Service{
+		"web": {Image: "web:latest", Volumes: []string{"shared:/var/data"}},
+	})
+	p.Volumes = map[string]compose.VolumeDecl{"shared": {External: true}}
+	if err := orchestrator.New(p, rt, "opossum", &out).Up(true); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	for _, l := range log() {
+		if strings.Contains(l, "__opossum_seed__") || strings.Contains(l, "__opossum_look__") {
+			t.Errorf("an external volume must be neither prepared nor read: %s", l)
 		}
 	}
-	if strings.Contains(msg, "(#") {
-		t.Errorf("warning leaks an internal issue number: %s", msg)
+}
+
+// The look runs the service's image, and running an image that isn't here yet
+// fetches it. On a real `up` the image has already been pulled or built by this
+// point; under `--dry-run` it has not, and a dry-run that pulls gigabytes to
+// answer a question is not a dry run. Not knowing reads the same as not being
+// able to look: nothing is said.
+func TestUpDoesNotFetchAnImageJustToLookInAVolume(t *testing.T) {
+	rt, log := fakeShim(t)
+	setShimEnv(rt, "VOLUME_LS=demo_pgdata", "LOOK_ENTRIES=lost+found", "IMAGE_ABSENT=postgres:16")
+	var out bytes.Buffer
+	p := project("demo", map[string]*compose.Service{
+		"db": {Image: "postgres:16", Volumes: []string{"pgdata:/var/lib/postgresql/data"}},
+	})
+	o := orchestrator.New(p, rt, "opossum", &out)
+	o.SetDryRun(true)
+	if err := o.Up(true); err != nil {
+		t.Fatalf("Up --dry-run: %v", err)
+	}
+	if indexOf(log(), "__opossum_look__") >= 0 {
+		t.Errorf("the image is not here yet; looking would fetch it: %v", log())
+	}
+	if s := out.String(); strings.Contains(s, "OPSM-101") {
+		t.Errorf("opossum never looked, so it has nothing to report:\n%s", s)
+	}
+}
+
+// The other half of that: a real `up` looks even when the image is missing. It
+// does not pre-pull a plain `image:` service — the container start does that — so
+// declining here would go quiet on the first up after an image was pruned, which
+// is exactly when the volume is old enough for the warning to be true. The pull is
+// not a cost the look imposes; it was going to happen seconds later.
+func TestUpStillLooksWhenTheImageHasYetToBeFetched(t *testing.T) {
+	rt, log := fakeShim(t)
+	setShimEnv(rt, "VOLUME_LS=demo_pgdata", "LOOK_ENTRIES=lost+found", "IMAGE_ABSENT=postgres:16")
+	var out bytes.Buffer
+	p := project("demo", map[string]*compose.Service{
+		"db": {Image: "postgres:16", Volumes: []string{"pgdata:/var/lib/postgresql/data"}},
+	})
+	if err := orchestrator.New(p, rt, "opossum", &out).Up(true); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	if indexOf(log(), "__opossum_look__") < 0 {
+		t.Fatalf("a real up should still look: %v", log())
+	}
+	if s := out.String(); !strings.Contains(s, "OPSM-101") {
+		t.Errorf("the volume holds lost+found and no cluster; that has to be said:\n%s", s)
+	}
+}
+
+// A dry-run has to be able to say this — it is exactly the "what will happen"
+// question — but the plan it prints is the list of commands a real `up` would
+// run to change something. The look changes nothing, so it belongs in one and not
+// the other.
+func TestDryRunWarnsWithoutPuttingTheLookInThePlan(t *testing.T) {
+	rt, _ := fakeShim(t)
+	setShimEnv(rt, "VOLUME_LS=demo_pgdata", "LOOK_ENTRIES=lost+found")
+	var out bytes.Buffer
+	p := project("demo", map[string]*compose.Service{
+		"db": {Image: "postgres:16", Volumes: []string{"pgdata:/var/lib/postgresql/data"}},
+	})
+	o := orchestrator.New(p, rt, "opossum", &out)
+	o.SetDryRun(true)
+	if err := o.Up(true); err != nil {
+		t.Fatalf("Up --dry-run: %v", err)
+	}
+	s := out.String()
+	if !strings.Contains(s, "OPSM-101") {
+		t.Errorf("a dry-run should still say the service won't start as written:\n%s", s)
+	}
+	if strings.Contains(s, "__opossum_look__") {
+		t.Errorf("the plan lists what a real up would change; the look changes nothing:\n%s", s)
+	}
+}
+
+// PGDATA below the mount point is the end of it: initdb never looks at the
+// directory holding `lost+found`, so there is nothing to warn about — and no
+// reason to spend a container looking.
+func TestUpDoesNotLookWhenPGDATAIsAlreadyASubdirectory(t *testing.T) {
+	rt, log := fakeShim(t)
+	setShimEnv(rt, "VOLUME_LS=demo_pgdata", "LOOK_ENTRIES=lost+found")
+	var out bytes.Buffer
+	p := project("demo", map[string]*compose.Service{
+		"db": {
+			Image:       "postgres:16",
+			Environment: compose.Environment{"PGDATA=/var/lib/postgresql/data/pgdata"},
+			Volumes:     []string{"pgdata:/var/lib/postgresql/data"},
+		},
+	})
+	if err := orchestrator.New(p, rt, "opossum", &out).Up(true); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	if s := out.String(); strings.Contains(s, "OPSM-101") {
+		t.Errorf("the data already lives below the mount point:\n%s", s)
+	}
+	if indexOf(log(), "__opossum_look__") >= 0 {
+		t.Errorf("nothing to decide, so nothing should have been started to look: %v", log())
 	}
 }
 
@@ -3208,5 +3416,199 @@ func TestStillSupervised(t *testing.T) {
 	if len(got) != len(want) || (len(got) > 0 && got[0] != want[0]) {
 		t.Errorf("StillSupervised = %v, want %v — gone has no container, plain has no policy, "+
 			"migrate runs to completion, and absent-from-compose isn't a service", got, want)
+	}
+}
+
+// `nocopy` is the compose file saying "mount this empty" — the image's copy is
+// stale, or huge, or the real content arrives another way. Seeding it anyway
+// overrides an explicit instruction. Measured against docker compose v5.1.4,
+// which leaves such a volume empty while seeding its neighbour
+// (~/opossum-dogfood/results/df366-golden.md).
+//
+// The other mount in this fixture is what makes the test say something: with
+// nocopy ignored, both are seeded and nothing distinguishes "honoured" from
+// "seeding is off".
+func TestUpDoesNotSeedANoCopyVolume(t *testing.T) {
+	rt, log := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"web": {
+			Image: "web:latest",
+			// The trailing slash is deliberate: the target is normalised in one place
+			// when NoCopy is recorded and in another when seeding checks it, and the
+			// two have to agree. Written without it, either normalisation could be
+			// dropped and nothing here would notice.
+			Volumes: []string{"deps:/app/node_modules/", "data:/var/data"},
+			// Both carry a trailing slash the mount target does not have to match on:
+			// each side is normalised in a different place, so dropping either
+			// normalisation alone fails here. (Dropping both at once would agree
+			// again — but the load path always trims the recorded side, so only the
+			// hand-built Service in this test can put a slash there at all.)
+			NoCopy: []string{"/app/node_modules/"},
+		},
+	})
+	if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	lines := log()
+	// A container still runs for it — the volume is one opossum is creating, and
+	// `lost+found` has to come out of it like any other, or `nocopy` would be the
+	// one way to ask for an empty volume and get a non-empty one. What must not
+	// happen is the copy.
+	nocopyRun := ""
+	for _, l := range lines {
+		if strings.Contains(l, "demo_deps:/__opossum_seed__") {
+			nocopyRun = l
+		}
+	}
+	if nocopyRun == "" {
+		t.Fatalf("the new volume should still be prepared, got %v", lines)
+	}
+	if strings.Contains(nocopyRun, "cp -a") {
+		t.Errorf("the compose file asked for this volume not to be filled: %s", nocopyRun)
+	}
+	if !strings.Contains(nocopyRun, "rmdir") {
+		t.Errorf("an empty volume means empty, lost+found included: %s", nocopyRun)
+	}
+	// Its neighbour has no such request and is copied into as well.
+	filled := ""
+	for _, l := range lines {
+		if strings.Contains(l, "demo_data:/__opossum_seed__") {
+			filled = l
+		}
+	}
+	if filled == "" || !strings.Contains(filled, "cp -a") {
+		t.Errorf("a volume without the option should still be seeded, got %q of %v", filled, lines)
+	}
+	// The option is not a mount mode: it must not reach the runtime as one.
+	for _, l := range lines {
+		if strings.Contains(l, "nocopy") {
+			t.Errorf("nocopy leaked into a runtime argument: %s", l)
+		}
+	}
+}
+
+// opossum fills a fresh volume by running `cp -a` inside a throwaway container
+// built from the service's image. An image with no shell — most distroless and
+// scratch builds — has nothing to run that with, so the volume mounts empty.
+//
+// That is indistinguishable from a service that lost its data, and until now
+// opossum said nothing: the copy's exit status was discarded. The failure has to
+// be visible at the moment it happens, because nothing later can tell the two
+// apart. Verified on the real runtime too: `container run … distroless … sh -c`
+// reports `failed to find target executable sh`.
+func TestUpSaysWhenAVolumeCouldNotBeSeeded(t *testing.T) {
+	rt, _ := fakeShim(t)
+	setShimEnv(rt, "SEED_FAIL=1")
+	var out bytes.Buffer
+	p := project("demo", map[string]*compose.Service{
+		"web": {Image: "distroless:latest", Volumes: []string{"data:/var/data"}},
+	})
+	if err := orchestrator.New(p, rt, "opossum", &out).Up(true); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	s := out.String()
+	if !strings.Contains(s, "OPSM-108") {
+		t.Errorf("a volume that could not be filled should say so, got:\n%s", s)
+	}
+	// The three things a reader needs: which volume, why, and what to do instead.
+	// The "why" is the runtime's own words, dug out of the nesting it arrives in —
+	// asserting only that *something* was said would leave the digging deletable.
+	for _, want := range []string{"demo_data", "failed to find target executable sh", "mount empty", "nocopy"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("the warning should mention %q, got:\n%s", want, s)
+		}
+	}
+	// The reason is the runtime's own words, passed through as written. opossum
+	// does not unwrap the `internalError:` nesting Apple `container` puts around it:
+	// parsing someone else's error format to shorten a warning is a dependency that
+	// readability does not pay for, and the raw text is better evidence. So the
+	// wrapper comes through too, and that is the intended shape.
+	if !strings.Contains(s, "internalError:") {
+		t.Errorf("the runtime's message should reach the reader as it was written:\n%s", s)
+	}
+	// The explanation still has to follow it — the warning is the reason AND what to
+	// do about it, and a long first line must not have swallowed the rest.
+	if i, j := strings.Index(s, "OPSM-108"), strings.Index(s, "nocopy"); i < 0 || j < i {
+		t.Errorf("the guidance should follow the reason, not be lost before it:\n%s", s)
+	}
+	// A failure to seed is not a failure to start — the `Up` above returning nil is
+	// what says so, and the t.Fatalf on it is the assertion. (An earlier version
+	// looked for "starting service" in the output; that text only ever appears in
+	// the returned error, so it asserted nothing.)
+}
+
+// Seeding an image whose default user is not root — node:*, most database images,
+// anything with a `USER` line. A fresh volume's root belongs to 0:0 and is mode
+// 755, so that user cannot create anything in it: measured on the real runtime,
+// the copy moved nothing and the volume came up holding only ext4's `lost+found`.
+// docker does not have the problem because the engine, which is root, does the
+// copying; opossum asks for the same privilege with `--user 0`.
+//
+// The eval is the outcome, not the flag: the shim refuses the write unless root
+// was asked for, so dropping the flag turns the seed into a failure the warning
+// reports — which is what a user would have seen, minus the warning, before this.
+func TestSeedsWithRootSoANonRootImageCanFillTheVolume(t *testing.T) {
+	rt, log := fakeShim(t)
+	setShimEnv(rt, "SEED_NONROOT=1")
+	var out bytes.Buffer
+	p := project("demo", map[string]*compose.Service{
+		"web": {Image: "node:20-alpine", Volumes: []string{"data:/var/data"}},
+	})
+	if err := orchestrator.New(p, rt, "opossum", &out).Up(true); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	if indexOf(log(), "demo_data:/__opossum_seed__") < 0 {
+		t.Fatalf("the volume was never seeded at all, so this asserts nothing: %v", log())
+	}
+	if s := out.String(); strings.Contains(s, "OPSM-108") {
+		t.Errorf("the copy could not write into the fresh volume:\n%s", s)
+	}
+}
+
+// The mirror of the above: a copy that starts and then fails is reported, not
+// counted as a filled volume — the case OPSM-108 could not see when it only ever
+// heard about containers that failed to start.
+//
+// What this does NOT guard is the seed script's own error handling: the shim never
+// runs the script, it decides an exit code from the argv, so putting the old
+// `2>/dev/null || true` back leaves this test green. That regression is held by
+// TestSeedScriptReportsACopyItCannotMake in the runtime package, which runs the
+// script under a real `sh`. Two halves of one behaviour, in the two places that
+// can each see their half.
+func TestUpSaysWhenTheSeedingCopyCouldNotWrite(t *testing.T) {
+	rt, _ := fakeShim(t)
+	setShimEnv(rt, "SEED_COPY_FAIL=1")
+	var out bytes.Buffer
+	p := project("demo", map[string]*compose.Service{
+		"web": {Image: "node:20-alpine", Volumes: []string{"data:/var/data"}},
+	})
+	if err := orchestrator.New(p, rt, "opossum", &out).Up(true); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	s := out.String()
+	if !strings.Contains(s, "OPSM-108") {
+		t.Errorf("a copy that wrote nothing must not pass for a filled volume:\n%s", s)
+	}
+	// The copy's own words, not a generic "seeding failed" — a permission failure
+	// and a missing shell are different problems with different fixes.
+	if !strings.Contains(s, "Permission denied") {
+		t.Errorf("the warning should carry what the copy said:\n%s", s)
+	}
+}
+
+// The warning is about a copy that could not run. A seeding container that works
+// says nothing — a message on every fresh volume would be noise on the ordinary
+// path, and noise is what stops the real one from being read.
+func TestUpIsQuietWhenSeedingWorks(t *testing.T) {
+	rt, _ := fakeShim(t)
+	var out bytes.Buffer
+	p := project("demo", map[string]*compose.Service{
+		"web": {Image: "web:latest", Volumes: []string{"data:/var/data"}},
+	})
+	if err := orchestrator.New(p, rt, "opossum", &out).Up(true); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	if s := out.String(); strings.Contains(s, "OPSM-108") {
+		t.Errorf("seeding succeeded, so there is nothing to report:\n%s", s)
 	}
 }

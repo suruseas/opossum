@@ -21,7 +21,9 @@ changelog.d/318-suggestion-entries.added.md
 
 The body is the entry itself, exactly as it would read in the changelog: one
 bullet starting with `- `, written for the person upgrading, not for the reviewer.
-It may run to several lines.
+It may run to several lines. **Write it in English** — the fragment is published
+into `CHANGELOG.md` verbatim, and that file is read by people who don't share the
+language the work around it is discussed in. A check refuses a fragment that isn't.
 
 ```markdown
 - A `ports:` entry that names only a container port no longer fails when the

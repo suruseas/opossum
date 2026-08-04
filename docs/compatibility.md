@@ -110,7 +110,7 @@ them.
 | `ports` | ✅ | passed to `container run -p`; both the short form (`"8080:80"`, `"3000"`) and the long mapping form (`{target, published, protocol, host_ip}`) are accepted. A bare container port gets a host port (Apple's runtime requires one): the same number when it's free, otherwise a free one, with a notice. |
 | `environment` | ✅ | list or map form; null value passes host value through |
 | `env_file` | ✅ | string or list (short, or long `{path, required}`); `KEY=VALUE` files folded in, `environment` overrides them. Missing file errors unless `required: false` |
-| `volumes` | ✅ | bind mounts (host paths resolved against the compose dir; `~` expanded; a missing source directory is created), named volumes (namespaced `<project>_<volume>`), and `type: tmpfs` (mounted via `--tmpfs`); short `src:dst[:ro]` or long form (`{type, source, target, read_only}`) |
+| `volumes` | ✅ | bind mounts (host paths resolved against the compose dir; `~` expanded; a missing source directory is created), named volumes (namespaced `<project>_<volume>`), anonymous volumes (`- /app/node_modules`, named after the service and path), and `type: tmpfs` (mounted via `--tmpfs`); short `src:dst[:ro]` or long form (`{type, source, target, read_only}`) |
 | `tmpfs` | ✅ | service-level tmpfs targets (string or list); folded together with any `type: tmpfs` volume entries |
 | `secrets` | ✅ | file-based only; mounted read-only at `/run/secrets/<name>` (the `*_FILE` pattern). `external` secrets are rejected; `uid`/`gid`/`mode` are not applied |
 | `depends_on` | ✅ | list or long (`condition`) form — orders startup and gates on `service_healthy` / `service_completed_successfully` |
@@ -156,7 +156,7 @@ properties of the runtime rather than mistakes in your file:
 
 | What | Why it fails on Apple `container` | What the overlay does |
 |---|---|---|
-| A named volume mounted at Postgres's data directory | The volume is a mount point, so the directory isn't empty and `initdb` refuses it (`OPSM-101`) | Points `PGDATA` at a subdirectory — the data stays in the same volume |
+| A named volume mounted at Postgres's data directory | Historically the volume arrived holding `lost+found`, so the directory wasn't empty and `initdb` refused it (`OPSM-101`). opossum now clears that from volumes it creates, so this only bites on a volume made elsewhere | Points `PGDATA` at a subdirectory — the data stays in the same volume |
 | A database's data directory on a bind mount | Bind mounts are host-owned and can't be chowned from inside the container, which every official DB image does at startup (`OPSM-105`) | Mounts a named volume there instead — **this changes where the data lives**; the host directory is left untouched, not copied |
 
 The file is the whole compatibility picture for the project, not just the fixes,
@@ -167,7 +167,10 @@ each marked:
 - **suggestion — NOT APPLIED** — a concrete change written out but commented,
   because it alters what the project means (where data lives, how services share
   it). Uncomment the block to apply it; it's self-contained, including any
-  `volumes:` declaration it needs.
+  `volumes:` declaration it needs. A suggestion is only written for something
+  opossum watched happen — a container that died taking ownership of a bind mount,
+  a named volume two running services both need — never because a directory looked
+  like it might one day hold data.
 - **note** — nothing to change: the compose file can't express a fix (a Docker
   socket mount, a host device). Recorded so the failure isn't a mystery. Notes carry no YAML, so there's nothing to uncomment.
 
@@ -266,20 +269,21 @@ features aren't supported. The detailed rationale for each is in
 | Setup | none | one-time `sudo container system dns create opossum` for name resolution |
 | Container names | `<project>-<service>-N` | `<service>.<project>.<domain>` (DNS-registered for bare-name discovery) |
 | Named volumes | shared globally by name | namespaced `<project>_<volume>`; `down -v` only removes this project's |
-| Volume seeding | a fresh named/anonymous volume is pre-filled from the image's contents at that path | **not seeded** — a fresh volume always mounts empty (named *and* anonymous) |
+| Volume seeding | a fresh named/anonymous volume is pre-filled from the image's contents at that path | **emulated by opossum** — Apple `container` mounts a fresh volume empty, so opossum fills one it creates from the image at that path (`cp -a`) before the service starts. See the limits below |
 | Networks | user-defined networks + aliases | `networks:` **is** supported — a per-project default network (`<project>-net`), plus top-level `internal:`/`external:` and multiple networks per service; per-network **aliases** and static IPs aren't applied (see [Networking model](networking.md)) |
 | Published ports | a bare `ports: - "3000"` picks a random host port | mirrors it to `3000:3000` when that port is free, else falls back to a free port and says so (`opossum ps` shows the real one; two services that both leave the host port open get different ones). Apple `container` requires a host port and has no random option, so the mirror is a predictable default rather than a random one |
 | Healthcheck | engine-native | no native support — opossum runs `healthcheck.test` via `container exec` and polls |
 | `service_completed_successfully` | engine tracks exit | opossum runs the one-shot in the **foreground** (an exit code is only observable there) |
+
+**Volume seeding.** Docker copies an image's directory contents into a *fresh* named or anonymous volume the first time it's used; Apple `container` mounts it **empty**. opossum does the copy itself — before the service starts, a throwaway container copies the image's contents at that path into the volume with `cp -a`, run as root so that the image's ownership survives the copy the way it does on Docker, where the engine does it — so the common dev pattern of a bind-mounted source plus a `- /app/node_modules` volume works, for named and anonymous volumes alike. What it does not cover: only a volume **opossum creates** is filled, so an existing one is never touched and your data is safe; the copy needs `sh` inside the image, so a distroless/scratch image cannot be copied from and the volume mounts empty — opossum says so (`OPSM-108`) rather than leave you to find it, and the same warning covers any other reason the copy could not run; and `external: true` volumes are never seeded. `volume: {nocopy: true}` — and its short spelling `src:target:nocopy` — turns the copy off, as on Docker; `opossum config` prints it back so the output stays runnable — except on an anonymous volume, which has no source for the short spelling to attach to and so loses the option when the printed config is fed back in.
 
 **Not supported / hard constraints:**
 
 - **Platform**: macOS 26+ on Apple silicon, single host only (no Swarm/remote). Relies on `container`'s macOS-26 networking + DNS.
 - **Ignored fields** (parsed and listed by `opossum config` / `--verbose`, not acted on): `container_name`, `dns`/`dns_search` (service discovery is automatic — see [Networking model](networking.md)), `network_mode` other than `none`, per-network **aliases** and static IPs (`ipam`), `deploy` (except `resources.limits`), `sysctls`, `devices`, `privileged`, and top-level volume `driver`/`labels`. (`networks`, `cap_add`/`cap_drop` *are* acted on.)
 - **`secrets`**: file-based only; `external` secrets and `uid`/`gid`/`mode` are not applied.
-- **DB data dirs**: Postgres `initdb` fails on a named-volume mount point — use a **subdirectory** (`PGDATA=/var/lib/postgresql/data/pgdata`). Very common in real app composes (gitea, nextcloud, …), so `up` **warns** when it sees a named volume at `/var/lib/postgresql/data` without a PGDATA subdirectory. (MySQL/MariaDB tolerate the mount point.)
+- **DB data dirs**: a volume is its own ext4 filesystem here, so it arrives holding `lost+found` where Docker's arrives empty — and Postgres's `initdb` refuses a data directory that isn't empty. opossum **removes `lost+found` from the volumes it creates**, so a plain `pgdata:/var/lib/postgresql/data` works as it does on Docker. A volume opossum did not create (made by an older opossum, by `container volume create`, or by another project) still has it: `up` then reports Postgres's own refusal with `OPSM-101` and what to do about it. (MySQL/MariaDB tolerate the mount point either way.)
 - **DB data dirs can't be bind-mounted** (use a **named volume**): Apple `container`'s bind mounts are host-owned (virtiofs) and can't be `chown`ed from inside the container, so a DB image (MySQL/Postgres/…) that chowns its data directory fails to start with `chown: … Operation not permitted`. A named volume *is* chownable, so mount the data directory from one. Self-host composes that put data under a bind-mounted `/mnt/docker-volumes/<svc>/…` (a Linux-host convention) hit this on macOS — when a DB crashes this way, `up` points at the fix.
-- **Volumes aren't seeded from the image**: Docker copies an image's directory contents into a *fresh* named or anonymous volume the first time it's used; Apple `container` mounts it **empty**. This breaks the common dev pattern of a bind-mounted source plus a `- /app/node_modules` volume to preserve the image's installed dependencies — on opossum that `node_modules` is empty and the app fails to start (`ng serve`/`vite`/etc. can't find their packages). Work around it by installing deps at container start (`command: sh -c "npm ci && npm start"`), or by not shadowing the dependency dir with a volume. Applies to **named volumes too**, not just anonymous ones.
 - **Build context**: Apple's builder can't read a context under `/private/tmp` or a symlinked directory — build from a real path under your home dir (`up` warns).
 - **Won't run at all**: composes that need Linux-host kernel access (WireGuard's `NET_ADMIN` + `/lib/modules`) — Apple `container` doesn't provide it (also true of Docker Desktop for the host-path cases). Tools that drive Docker through `/var/run/docker.sock` (e.g. Portainer) also can't manage opossum's containers: bind-mounting a host Unix socket into a container *does* work now (since `container` 1.1.0), but Apple `container` exposes no Docker-compatible daemon socket — it talks to the host over XPC — so the mount has nothing on the other end.
 - **cgroup-sensitive JVM images (e.g. Elasticsearch 7.x)**: the container's bundled JDK reads the host cgroup to size the heap, and Apple `container`'s VM doesn't expose the cgroup mount the way it expects — the process crashes at launch with `CgroupInfo.getMountPoint() … null` before any config applies (`ES_JAVA_OPTS`/`JAVA_TOOL_OPTIONS` don't help; observed on Elasticsearch 7.16 and 7.17). `opossum ps` shows such a service as `stopped`; check `opossum logs <svc>`. This is a runtime/JDK–VM incompatibility, not an opossum limitation.

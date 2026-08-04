@@ -2,7 +2,6 @@ package orchestrator
 
 import (
 	"fmt"
-	"os"
 	"path"
 	"regexp"
 	"sort"
@@ -238,6 +237,7 @@ func (o *Orchestrator) PlanOverlay() (string, []Adaptation) {
 		plans = append(plans, o.adaptService(name, o.Project.Services[name], claimed)...)
 	}
 	plans = append(plans, o.suggestSharedVolumeFix(names)...)
+	plans = append(plans, o.suggestObservedChownFailures(plans, claimed)...)
 	if len(plans) == 0 {
 		return "", nil
 	}
@@ -276,101 +276,7 @@ func (o *Orchestrator) adaptService(name string, svc *compose.Service, claimed m
 	if p, ok := o.adaptPGDATA(name, svc, swappedPostgres); ok {
 		out = append(out, p)
 	}
-	out = append(out, o.suggestAppDataDir(name, svc, claimed)...)
 	out = append(out, o.noteUnfixable(name, svc)...)
-	return out
-}
-
-// suggestAppDataDir proposes a named volume for a directory the service will
-// populate itself. Applications that write into a bind-mounted directory hit the
-// same wall databases do — Apple `container` bind mounts are host-owned and can't
-// be chowned — but opossum can't be sure an application needs to own its directory
-// the way an official database image demonstrably does, so this is proposed rather
-// than applied.
-//
-// The decisive question is whether the host directory is SUPPLYING something.
-// A mount whose host side already has files is feeding content in (a config
-// directory, a site, data from a previous Docker run); turning that into a named
-// volume would hide it, which would be worse than the failure. So the suggestion
-// is limited to a host directory that EXISTS and is EMPTY — the shape of "the app
-// will create its data here", and the only shape where swapping loses nothing.
-//
-// An absent directory is deliberately not enough. `./conf:/etc/nginx/conf.d` on a
-// machine that hasn't got `./conf` yet looks identical to an empty data dir from
-// the compose file alone, and suggesting a volume for a config mount would be
-// advice to empty it.
-//
-// A caveat worth stating, because the emptiness this reads is often opossum's own
-// doing: a missing bind source is created as an empty directory before the
-// services start, so "exists and is empty" can mean "nobody has put anything here
-// yet" rather than "the user set this aside for data". Measured over 156
-// real-world projects, that gate never opens on a first migration, and opens four
-// times once the directories exist — all four correctly, a fifth having been
-// turned away by handsThroughAFile below. What it cannot see is intent, so the
-// suggestion stays a suggestion.
-func (o *Orchestrator) suggestAppDataDir(name string, svc *compose.Service, claimed map[string]bool) []serviceAdaptation {
-	var out []serviceAdaptation
-	for _, v := range svc.Volumes {
-		src, target, mode, ok := splitMount(v)
-		switch {
-		case !ok || !isHostPath(src):
-			continue
-		case readOnlyMount(mode):
-			continue // read-only: the host is supplying, and nothing chowns it
-		case isHostDevicePath(src):
-			continue // a note, not a suggestion
-		case ownsDataDir(svc, target):
-			continue // already handled as an applied fix
-		case o.sharesHostDataDir(name, src):
-			continue // shared: a named volume would break the sharing outright
-		case handsThroughAFile(src, target):
-			continue // a file the user supplies, not a directory the app fills
-		}
-		host := o.resolvePath(src)
-		fi, err := os.Stat(host)
-		if err != nil || !fi.IsDir() {
-			continue // absent (can't tell what it's for) or a single file
-		}
-		if entries, rerr := os.ReadDir(host); rerr != nil || len(entries) > 0 {
-			continue // the host is supplying content (or holds existing data)
-		}
-		// Same collision avoidance as an applied swap: a suggested name must not
-		// land on a volume the project already declares (an external one above all)
-		// or on one another entry has taken — uncommenting it would then re-declare
-		// someone else's volume and manufacture the very sharing failure the sibling
-		// suggestion exists to escape.
-		vol := o.freeVolumeName(compose.SanitizeName(name)+"-"+compose.SanitizeName(pathLeaf(target)), claimed)
-		out = append(out, serviceAdaptation{
-			Adaptation: Adaptation{
-				Service: name,
-				Code:    string(codeBindDataDirChown),
-				Summary: fmt.Sprintf("service %q writes into the bind mount %s; if it fails to chown that directory, a named volume fixes it", name, target),
-			},
-			class: classSuggestion,
-			comment: suggestionBlock(
-				fmt.Sprintf("%s service %q: use a named volume for %s instead of the host path %q.",
-					suggestionMarker, esc(name), esc(target), esc(src)),
-				[]string{
-					"Apple container bind mounts are host-owned and cannot be chowned from",
-					"inside the container. A service that takes ownership of its data",
-					"directory at startup fails on one — the same wall databases hit.",
-					"Diagnostic: " + string(codeBindDataDirChown) + ".",
-					"NOT APPLIED, because opossum can't tell whether this service needs to own",
-					fmt.Sprintf("%s the way an official database image demonstrably", esc(target)),
-					fmt.Sprintf("does. It is suggested only because %q exists and is empty,", esc(src)),
-					"so nothing is lost by switching — but the data would then live in the",
-					"volume, not on the Mac.",
-				},
-				[]string{
-					fmt.Sprintf("uncomment this block if `opossum logs %s` shows a chown or", name),
-					"permission failure on that directory, then `opossum up` again.",
-				},
-			),
-			block:   "volumes",
-			entries: []string{fmt.Sprintf("      - %s:%s", esc(vol), esc(target))},
-			volume:  vol,
-		})
-	}
 	return out
 }
 
@@ -552,6 +458,14 @@ func pathLeaf(p string) string {
 //
 // It fires when the data dir is already a named volume, and also when
 // adaptBindMountedDataDir is about to make it one.
+//
+// It keeps firing even though opossum now clears `lost+found` out of the volumes
+// it creates, which is what made the plain mount work. The overlay is a file: it
+// outlives the volume it was written for, and is read again on machines and days
+// where that volume is not the one opossum made. Dropping the line would also
+// strand a cluster already initialised one level down — the next up would find the
+// mount point holding `pgdata/`, which is not empty either. A durable artefact
+// should not encode a fact that is only true of the moment it was written.
 func (o *Orchestrator) adaptPGDATA(name string, svc *compose.Service, willBeNamedVolume bool) (serviceAdaptation, bool) {
 	// Any PGDATA the user set is theirs. Checking only for "a subdirectory of the
 	// default datadir" would treat a deliberate PGDATA elsewhere (a second volume,
@@ -600,9 +514,11 @@ func (o *Orchestrator) adaptPGDATA(name string, svc *compose.Service, willBeName
 				fmt.Sprintf("%s service %q: PGDATA moved to a subdirectory of the data volume.", overlayMarker, esc(name)),
 				[]string{
 					"Apple container attaches a named volume as a filesystem mount point, so",
-					"the directory is not empty (it contains lost+found). Postgres initdb",
-					fmt.Sprintf("refuses to initialize a non-empty data directory. Diagnostic: %s.", codePGDATADatadir),
-					"The data still lives inside the same volume, one level down.",
+					"the directory can hold lost+found, which Postgres initdb refuses to",
+					fmt.Sprintf("initialize into. Diagnostic: %s. opossum clears that from the", codePGDATADatadir),
+					"volumes it creates, so this is belt and braces: it also covers a volume",
+					"made before that, or by another tool. The data still lives inside the",
+					"same volume, one level down.",
 				},
 				[]string{
 					fmt.Sprintf("after `opossum up`, `opossum logs %s` should show initdb completing", name),
@@ -871,6 +787,27 @@ func hasPGDATA(svc *compose.Service) bool {
 	return false
 }
 
+// servicesSharingHostDir names the other services mounting the same host
+// directory. The applied path only needs to know whether any exist (it refuses);
+// a failure-driven suggestion is kept — the crash is real — so it has to say who
+// else is reading the directory it proposes detaching.
+func (o *Orchestrator) servicesSharingHostDir(self, src string) []string {
+	var peers []string
+	for name, svc := range o.Project.Services {
+		if name == self || svc == nil {
+			continue
+		}
+		for _, v := range svc.Volumes {
+			if s, _, _, ok := splitMount(v); ok && s == src {
+				peers = append(peers, name)
+				break
+			}
+		}
+	}
+	sort.Strings(peers)
+	return peers
+}
+
 // sharesHostDataDir reports whether another service mounts the same host path.
 // Two services on one host directory are sharing it deliberately — a database and
 // a backup/inspection sidecar, typically. Giving each its own named volume would
@@ -1052,20 +989,122 @@ func quotedList(names []string) string {
 // handsThroughAFile reports whether a mount is passing one file into the
 // container rather than handing over a directory.
 //
-// It matters because a bind source that does not exist is created as a directory
-// whatever it was meant to be — docker compose does the same — so a file the user
-// was told to supply becomes an empty directory, which is indistinguishable from a
-// data directory by the time anything downstream looks at it. Measured over 156
-// real-world compose projects this was the one wrong suggestion: overleaf mounts
-// `./mongodb-init-replica-set.js`, a file its README says to download before the
-// first start, and the suggestion offered to replace it with a named volume —
-// advice to hide the file you are about to put there.
+// A bind source that does not exist is created as a directory whatever it was
+// meant to be — docker compose does the same — so a file the user was told to
+// supply becomes an empty directory, indistinguishable from a data directory by
+// the time anything downstream looks at it. ensureBindDirs says so (OPSM-107)
+// rather than let the failure surface later as something else.
 //
 // The shape it looks for is the same name on both sides with an extension
 // (`./x.js:/somewhere/x.js`), which is how a single file is nearly always passed
-// through. A directory that happens to be named this way is turned away too; that
-// costs a suggestion, which is the cheaper of the two mistakes.
+// through. It misses a renamed file (`./config.yml:/app/conf.yml`) and one with no
+// extension (`./CaddyFile:/etc/caddy/Caddyfile`) — both real shapes in the wild,
+// both only worth a warning, never a change.
 func handsThroughAFile(src, target string) bool {
 	name := path.Base(target)
 	return name == path.Base(src) && path.Ext(name) != ""
+}
+
+// suggestObservedChownFailures turns each recorded crash into a suggestion for
+// the mount that actually died.
+//
+// Nothing here is inferred from the shape of a path. The service ran, its
+// entrypoint tried to take ownership of that directory, and Apple `container`
+// refused because a bind mount is host-owned — so the one thing a reader wants to
+// know, whether this actually breaks, is already answered. That is the difference
+// from the predicate this replaced, which proposed the same swap for any empty
+// read-write bind directory and was wrong about half the time.
+//
+// A record is skipped when the project has moved on: the service or the mount may
+// be gone, or the mount may already be a named volume because the suggestion was
+// taken. The record is evidence of what happened, not an instruction to keep
+// repeating it.
+func (o *Orchestrator) suggestObservedChownFailures(plans []serviceAdaptation, claimed map[string]bool) []serviceAdaptation {
+	var out []serviceAdaptation
+	for _, f := range o.recordedChownFailures() {
+		svc := o.Project.Services[f.Service]
+		if svc == nil {
+			continue
+		}
+		stillBound := false
+		for _, v := range svc.Volumes {
+			src, target, mode, ok := splitMount(v)
+			if ok && src == f.Source && target == f.Target && !readOnlyMount(mode) && isHostPath(src) {
+				stillBound = true
+				break
+			}
+		}
+		if !stillBound {
+			continue
+		}
+		// Suppress only when this plan really did emit an applied swap for the same
+		// mount. Asking `ownsDataDir` instead was close but not the same question:
+		// the applied path also requires the service to run its image's own server
+		// and the directory not to be shared, so a mysql with an overridden
+		// entrypoint would be silenced here while nothing was applied — the crash
+		// would leave no trace in the overlay at all.
+		if appliedSameMount(plans, f.Service, f.Target) {
+			continue
+		}
+		// Another service reading the same host directory is what makes this change
+		// cost more than it looks: detaching it silently ends the sharing. The applied
+		// path refuses outright for that reason; here the crash is real, so the entry
+		// stays and names who else is looking.
+		var sharedWith []string
+		if peers := o.servicesSharingHostDir(f.Service, f.Source); len(peers) > 0 {
+			sharedWith = []string{
+				"CAREFUL: " + quotedList(peers) + " also mount " + esc(f.Source) + ".",
+				"Switching this service to a volume ends that sharing — they keep reading",
+				"the directory on the Mac while this one stops writing to it.",
+			}
+		}
+		vol := o.freeVolumeName(compose.SanitizeName(f.Service)+"-"+compose.SanitizeName(pathLeaf(f.Target)), claimed)
+		out = append(out, serviceAdaptation{
+			Adaptation: Adaptation{
+				Service: f.Service,
+				Code:    string(codeBindDataDirChown),
+				Summary: fmt.Sprintf("service %q died taking ownership of %s; a named volume can be chowned, a bind mount cannot", f.Service, f.Target),
+			},
+			class: classSuggestion,
+			comment: suggestionBlock(
+				fmt.Sprintf("%s service %q: use a named volume for %s instead of the host path %q.",
+					suggestionMarker, esc(f.Service), esc(f.Target), esc(f.Source)),
+				append([]string{
+					"This is not a guess. That container started, tried to take ownership of",
+					esc(f.Target) + ", and exited: Apple container bind mounts are",
+					"host-owned and cannot be chowned from inside. A named volume can.",
+					"Diagnostic: " + string(codeBindDataDirChown) + ".",
+					"NOT APPLIED, because it moves where the data lives. Today it is on the",
+					"Mac at " + esc(f.Source) + " and you can open it; afterwards it",
+					"is inside a volume that only the runtime manages. Anything already in",
+					"that directory stays where it is and the service stops seeing it.",
+				}, sharedWith...),
+				[]string{
+					"uncomment this block, then `opossum up` again. To keep the data on the",
+					"Mac instead, run the service as the user that owns the directory",
+					"(`user:` in the compose file) so it has nothing to chown.",
+				},
+			),
+			block:   "volumes",
+			entries: []string{fmt.Sprintf("      - %s:%s", esc(vol), esc(f.Target))},
+			volume:  vol,
+		})
+	}
+	return out
+}
+
+// appliedSameMount reports whether the plan already changes this service's mount
+// at target, so the overlay does not carry two blocks for one mount.
+func appliedSameMount(plans []serviceAdaptation, service, target string) bool {
+	for _, p := range plans {
+		if p.class != classApplied || p.Service != service {
+			continue
+		}
+		for _, e := range p.entries {
+			if strings.HasSuffix(strings.TrimSpace(e), ":"+target) {
+				return true
+			}
+		}
+	}
+	return false
 }

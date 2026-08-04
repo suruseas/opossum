@@ -464,7 +464,10 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 
 	o.reportIgnoredFields(order, true)
 	for _, name := range order {
-		o.warnPostgresDatadir(name, o.Project.Services[name])
+		// No Postgres data-directory warning here any more: opossum clears
+		// `lost+found` out of the volumes it creates, so the mount that used to be
+		// predicted to fail is now the one that works. What is left is decoded from
+		// initdb's own refusal when it happens (crashHint).
 		o.warnDockerSocket(name, o.Project.Services[name])
 	}
 	o.warnSharedNamedVolumes(order)
@@ -733,7 +736,13 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 		// mounts them (Apple `container` mounts them empty, unlike Docker). This runs
 		// through the runtime, so under dry-run its `run --rm` is recorded (not
 		// executed) and appears in the plan.
-		o.seedVolumes(name, image, svc.Volumes)
+		// Before seeding, so that the look only ever runs on a volume that was
+		// already there. Either order gives the same answer — the two halves test
+		// existence in opposite directions — but seeding creates the volume, so
+		// looking afterwards would start a container to inspect what opossum had
+		// just prepared itself, on every fresh volume.
+		o.warnForeignPostgresDataVolume(name, svc, image)
+		o.seedVolumes(name, svc, image)
 
 		// Replace any stale container left by a previous run of THIS project (the
 		// pre-flight above already ruled out foreign owners).
@@ -811,7 +820,7 @@ func (o *Orchestrator) verifyStarted(order []string, oneShot map[string]bool) er
 			continue
 		}
 		if logs := o.rt.CaptureLogs(o.containerName(name), 15); logs != "" {
-			o.warnf(codeServiceExited, "service %q exited right after starting (state %q); its last log lines:\n%s%s\n", name, info.State, indentLines(logs), crashHint(logs, o.Project.Services[name]))
+			o.warnf(codeServiceExited, "service %q exited right after starting (state %q); its last log lines:\n%s%s\n", name, info.State, indentLines(logs), o.crashHint(name, logs))
 		} else {
 			o.warnf(codeServiceExited, "service %q exited right after starting (state %q) — check its command, image, and mounts\n", name, info.State)
 		}
@@ -1323,7 +1332,7 @@ func (o *Orchestrator) waitHealthy(name string, hc *compose.Healthcheck) error {
 			// container that's already gone.
 			if logs := o.rt.CaptureLogs(cname, 15); logs != "" {
 				return fmt.Errorf("[OPSM-401] container is not running (state %q); its last log lines:\n%s%s",
-					info.State, indentLines(logs), crashHint(logs, o.Project.Services[name]))
+					info.State, indentLines(logs), o.crashHint(name, logs))
 			}
 			return fmt.Errorf("[%s] container is not running (state %q)", codeDepNotRunning, info.State)
 		}
@@ -1857,35 +1866,65 @@ func quoteAll(ss []string) []string {
 	return out
 }
 
-// postgresDataDir is Postgres's default data directory. A named volume mounted
-// there fails `initdb` because the mount point isn't empty (contains lost+found),
-// unless PGDATA points at a subdirectory. This is the single most common snag in
-// real self-hosted app composes (gitea, nextcloud, …). MySQL/MariaDB tolerate the
-// mount point, so this is Postgres-specific (#57/#103).
+// postgresDataDir is Postgres's default data directory. `initdb` refuses to
+// initialise into it unless it is empty — which a volume was not, here, until
+// opossum began clearing ext4's `lost+found` out of the ones it creates. A volume
+// opossum made is now fine to mount straight at this path; one made elsewhere
+// still is not, and that is what the two OPSM-101 sites are about. This was the
+// single most common snag in real self-hosted app composes (gitea, nextcloud, …).
+// MySQL/MariaDB tolerate a non-empty data directory, so this is Postgres-specific
+// (#57/#103).
 const postgresDataDir = "/var/lib/postgresql/data"
 
-// warnPostgresDatadir warns when a service mounts a named volume directly at
-// Postgres's data directory without redirecting PGDATA to a subdirectory.
-func (o *Orchestrator) warnPostgresDatadir(name string, svc *compose.Service) {
-	for _, v := range svc.Volumes {
-		parts := strings.SplitN(v, ":", 2)
-		if len(parts) < 2 {
-			continue
-		}
-		src := parts[0]
-		// parts[1] is "target[:mode]" (mode = ro/rw/cached/…); a path has no colon.
-		target := strings.TrimRight(strings.SplitN(parts[1], ":", 2)[0], "/")
-		if target != postgresDataDir || !isNamedVolume(src) || o.isExternalVolume(src) {
-			continue
-		}
-		if hasPGDATASubdir(svc) {
-			continue // the workaround is already in place
-		}
-		o.warnf(codePGDATADatadir, "service %q won't start as written: a named volume mounted at %s "+
-			"makes Postgres initdb fail (the mount point isn't empty). To fix it, keep the "+
-			"data in a subdirectory — add `environment: PGDATA=%s/pgdata` to the service — "+
-			"then run `opossum up` again.\n", name, postgresDataDir, postgresDataDir)
+// initdbNotEmptyHint decodes Postgres refusing to initialise a data directory
+// that is not empty because it still holds `lost+found`.
+//
+// This used to be a prediction: any named volume at the data directory earned a
+// warning before anything ran. That was right while every volume arrived with
+// `lost+found` in it. Now that opossum removes it from volumes it creates, the
+// prediction would be wrong for the ordinary case — a volume opossum prepared and
+// Postgres initialised counts as "already exists" on every later `up`, so the
+// warning would fire on stacks that work, every time. A warning that is wrong
+// half the time is worse than none: it teaches the reader to skip the paragraph
+// that also holds the true ones.
+//
+// So it reads what initdb said instead. Two gates, both from the message the
+// image itself prints: `initdb:` and `lost+found`. What is left is the real case —
+// a volume opossum did not prepare (an older opossum made it, or `container
+// volume create`, or another project) — and it arrives with its own evidence.
+func (o *Orchestrator) initdbNotEmptyHint(svcName string, svc *compose.Service, logs string) string {
+	if !strings.Contains(logs, "initdb:") || !strings.Contains(logs, "lost+found") {
+		return ""
 	}
+	// The mount is resolved the same way the rest of `up` resolves it, so the name
+	// in the message is the name `container volume ls` shows — and so a volume
+	// opossum does not own (a bind mount, an `external: true` volume) comes back
+	// with an empty Volume and is never named here.
+	vol := ""
+	for _, m := range o.serviceMounts(svcName, svc.Volumes) {
+		if m.Volume != "" && strings.TrimRight(m.Target, "/") == postgresDataDir {
+			vol = m.Volume
+		}
+	}
+	const why = "Postgres will not initialise a data directory that isn't empty, and it still holds " +
+		"`lost+found` — the directory ext4 puts in every filesystem it makes. opossum removes it from " +
+		"volumes it creates, so this one was made before that or made elsewhere. "
+	pgdata := fmt.Sprintf("keep the data below the mount point by adding `environment: PGDATA=%s/pgdata` "+
+		"to the service.", postgresDataDir)
+	if vol == "" {
+		// Nothing opossum manages sits there, so the volume is the user's to
+		// recreate or not — and `down -v`, which does not touch an external volume,
+		// would be advice that cannot work.
+		return fmt.Sprintf("\n  → [%s] %sThis one is not opossum's to replace, so: %s",
+			codePGDATADatadir, why, pgdata)
+	}
+	// `down -v` is offered as a choice, not a step, and with what it costs said out
+	// loud: initdb refusing means Postgres never wrote here, but opossum cannot see
+	// what else may have.
+	return fmt.Sprintf("\n  → [%s] %sThe volume is %q. Two ways out: let opossum make it "+
+		"(`opossum down -v` removes this project's volumes, then `opossum up` — initdb refusing means "+
+		"Postgres never wrote here, but check nothing else did), or %s",
+		codePGDATADatadir, why, vol, pgdata)
 }
 
 // warnDockerSocket warns when a service mounts the Docker daemon socket. Apple
@@ -1910,15 +1949,38 @@ func indentLines(s string) string {
 }
 
 // crashHint decodes a crashed container's last log lines into an actionable hint
-// for a known Apple-`container` gotcha, appended to the crash report. Currently it
-// recognizes a chown-permission failure on a bind mount: Apple `container` bind
-// mounts are host-owned (virtiofs) and can't be chowned from inside the container,
-// so a DB image (mysql/postgres/…) that chowns its data directory fails with
-// "chown: … Operation not permitted". A named volume IS chownable, so it's the fix.
-// Returns "" when nothing matches (so callers can append unconditionally).
-func crashHint(logs string, svc *compose.Service) string {
-	if svc == nil || !strings.Contains(logs, "chown") || !strings.Contains(logs, "Operation not permitted") {
+// for a known Apple-`container` gotcha, appended to the crash report. It knows two
+// signatures: a chown-permission failure on a bind mount (Apple `container` bind
+// mounts are host-owned via virtiofs and can't be chowned from inside, so a DB
+// image that chowns its data directory fails with "chown: … Operation not
+// permitted" — a named volume IS chownable, so that's the fix), and Postgres
+// refusing a data directory that still holds `lost+found`.
+//
+// Both are decoders, not predictions: they answer a failure that has already
+// happened, in the words of the program that failed. Returns "" when nothing
+// matches (so callers can append unconditionally).
+func (o *Orchestrator) crashHint(name, logs string) string {
+	svc := o.Project.Services[name]
+	if svc == nil {
 		return ""
+	}
+	if h := o.chownCrashHint(name, svc, logs); h != "" {
+		return h
+	}
+	return o.initdbNotEmptyHint(name, svc, logs)
+}
+
+// chownCrashHint decodes a container that died chowning a bind mount, and records
+// which mount it was so a later `up --from-docker-compose` can propose a fix for
+// that mount and no other.
+func (o *Orchestrator) chownCrashHint(name string, svc *compose.Service, logs string) string {
+	if !strings.Contains(logs, "chown") || !strings.Contains(logs, "Operation not permitted") {
+		return ""
+	}
+	// The same double gate decides whether to remember it. What is written down is
+	// the one thing a suggestion needs and guessing cannot supply: which mount died.
+	if src, target, ok := blamedMount(svc, logs); ok {
+		o.recordChownFailure(chownFailure{Service: name, Target: target, Source: src})
 	}
 	for _, v := range svc.Volumes {
 		if isHostPath(strings.SplitN(v, ":", 2)[0]) {
@@ -1931,20 +1993,6 @@ func crashHint(logs string, svc *compose.Service) string {
 		}
 	}
 	return ""
-}
-
-// hasPGDATASubdir reports whether the service sets PGDATA to a path below the
-// Postgres data directory (the recommended workaround).
-func hasPGDATASubdir(svc *compose.Service) bool {
-	for _, e := range svc.Environment {
-		if v, ok := strings.CutPrefix(e, "PGDATA="); ok {
-			// Must be a real subdirectory under the datadir: `.../data/<name>`,
-			// not the datadir itself (`.../data` or a bare `.../data/`).
-			sub, ok := strings.CutPrefix(v, postgresDataDir+"/")
-			return ok && strings.Trim(sub, "/") != ""
-		}
-	}
-	return false
 }
 
 // isExternalVolume reports whether a named volume is declared `external: true`
@@ -2327,7 +2375,7 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 	o.rt.Delete(cname) // clear a stale one-off of the same name
 
 	o.ensureBindDirs(service, svc.Volumes)
-	o.seedVolumes(service, image, svc.Volumes)
+	o.seedVolumes(service, svc, image)
 	// Pre-flight the exclusive-attach conflict for the one-off too (as `up` does):
 	// if a running container — including this service's own `up` container — already
 	// holds a volume the one-off needs, it will fail to attach. Exclude only our
@@ -2629,16 +2677,156 @@ func (o *Orchestrator) anonVolumeName(svcName, target string) string {
 	return fmt.Sprintf("%s_%s_%s_%08x", o.Project.Name, svcName, san, h.Sum32())
 }
 
+// warnForeignPostgresDataVolume warns, before a Postgres service starts, that its
+// data directory is a volume opossum did not prepare and that still holds
+// `lost+found` — which is exactly what initdb refuses to initialise into.
+//
+// opossum clears `lost+found` out of the volumes it creates, so this cannot be
+// predicted from the shape of the mount any more: the same compose line is the
+// working case on a fresh volume and the failing case on an old one. The
+// difference is inside the volume, so that is where this looks. Nothing is said
+// unless the two facts are seen — the directory is there, and no cluster is
+// (`PG_VERSION`), so initdb has yet to run and will refuse when it does.
+//
+// It reads and never writes. Clearing an existing volume would be opossum
+// reaching into data it did not create, on a guess about what the user wants
+// there; the two remedies are the user's to choose between.
+func (o *Orchestrator) warnForeignPostgresDataVolume(svcName string, svc *compose.Service, image string) {
+	if svc == nil || hasPGDATASubdir(svc) {
+		return
+	}
+	for _, m := range o.serviceMounts(svcName, svc.Volumes) {
+		// m.Volume is empty for bind mounts and for `external: true` volumes — the
+		// ones opossum does not manage, and does not tell the user what to do with.
+		// Today that half is belt and braces: classifyVolume leaves Target empty for
+		// those too, so the data-directory test already excludes them. It is kept
+		// because the reason they are excluded is ownership, not a gap in another
+		// field, and the day Target is filled in for them this line is what still
+		// says so.
+		if m.Volume == "" || strings.TrimRight(m.Target, "/") != postgresDataDir {
+			continue
+		}
+		if !o.rt.VolumeExists(m.Volume) {
+			continue // opossum is about to create this one, and creates it empty
+		}
+		if o.up.dryRun && !o.rt.ImageExists(image) {
+			// The look runs the image, and running an image that is not here yet
+			// fetches it. A dry-run that pulls gigabytes to answer a question is not
+			// a dry run, so it goes without the answer — not knowing reads the same
+			// as not being able to look.
+			//
+			// Only under dry-run. A real `up` builds a `build:` service before this
+			// point but does not pre-pull a plain `image:` one — the run itself does
+			// that — so refusing to look at a missing image would go quiet on exactly
+			// the first up after an image was pruned, which is a case where the
+			// volume is old and this warning is most likely to be true. There the
+			// pull is not a cost the look imposed: the container start seconds later
+			// would have done it anyway.
+			continue
+		}
+		entries, err := o.rt.VolumeEntries(m.Volume, image)
+		if err != nil {
+			// Could not look: an image with no shell, a volume another container
+			// holds. Saying nothing is the only honest option — and if it does fail,
+			// initdb's own refusal is decoded then (crashHint).
+			continue
+		}
+		lostFound, initialised := false, false
+		for _, e := range entries {
+			switch e {
+			case "lost+found":
+				lostFound = true
+			case "PG_VERSION":
+				initialised = true // a cluster is already here; initdb won't run again
+			}
+		}
+		if !lostFound || initialised {
+			continue
+		}
+		o.warnf(codePGDATADatadir, "service %q won't start as written: the volume %q was not created by this "+
+			"opossum and still holds `lost+found`, the directory ext4 puts in every filesystem it makes — "+
+			"Postgres refuses to initialise a data directory that isn't empty. Volumes opossum creates are "+
+			"cleared of it, so either let it make this one (`opossum down -v` removes this project's volumes, "+
+			"then `opossum up` — nothing has initialised here, but check nothing else put anything in it), or "+
+			"keep the data below the mount point by adding `environment: PGDATA=%s/pgdata` to the service. "+
+			"opossum does not clear a volume it did not create.\n", svcName, m.Volume, postgresDataDir)
+	}
+}
+
+// hasPGDATASubdir reports whether the service sets PGDATA to a path below the
+// Postgres data directory — the arrangement that sidesteps the empty-directory
+// requirement altogether, and so has nothing to be warned about.
+func hasPGDATASubdir(svc *compose.Service) bool {
+	for _, e := range svc.Environment {
+		if v, ok := strings.CutPrefix(e, "PGDATA="); ok {
+			// Must be a real subdirectory under the datadir: `.../data/<name>`,
+			// not the datadir itself (`.../data` or a bare `.../data/`).
+			sub, ok := strings.CutPrefix(v, postgresDataDir+"/")
+			return ok && strings.Trim(sub, "/") != ""
+		}
+	}
+	return false
+}
+
 // seedVolumes fills each of a service's project-owned volumes from the image's
 // contents at the mount path the FIRST time that volume is created, mirroring
 // Docker (Apple `container` mounts a fresh volume empty). Existing volumes are
 // left untouched, so user data and prior state are preserved.
-func (o *Orchestrator) seedVolumes(svcName, image string, vols []string) {
+func (o *Orchestrator) seedVolumes(svcName string, svc *compose.Service, image string) {
+	if svc == nil {
+		return
+	}
+	// `volume: {nocopy: true}` is the compose file saying "mount this empty" —
+	// typically because the image's copy is stale or huge and the real content
+	// arrives another way. Seeding it anyway would override an explicit
+	// instruction, which docker does not do.
+	//
+	// The service is passed in rather than looked up: the mounts and the option
+	// that switches them off have to come from the same place, or a caller could
+	// hand over one service's volumes while this read another's.
+	vols := svc.Volumes
+	skip := map[string]bool{}
+	for _, t := range svc.NoCopy {
+		skip[strings.TrimRight(t, "/")] = true
+	}
 	for _, m := range o.serviceMounts(svcName, vols) {
+		// m.Volume is empty for bind mounts and `external: true` volumes: the ones
+		// opossum does not own. Neither is ever created here, so neither is ever
+		// touched by what follows.
 		if m.Volume == "" || o.rt.VolumeExists(m.Volume) {
 			continue
 		}
-		o.rt.SeedVolume(m.Volume, image, m.Target)
+		if skip[strings.TrimRight(m.Target, "/")] {
+			// Asked to be mounted empty. That is still a volume opossum is creating,
+			// and "empty" has to mean the same thing it means everywhere else — so it
+			// gets the same clearing, and only the copy is skipped. Leaving it alone
+			// would make `nocopy` the one way to end up with ext4's `lost+found` in a
+			// fresh volume, which is the opposite of what it asks for.
+			if err := o.rt.PrepareVolume(m.Volume, image); err != nil {
+				o.warnf(codeVolumeNotSeeded, "couldn't prepare the new volume %q with %s: %v\n"+
+					"         nothing was copied into it (the compose file asked for that), but it also\n"+
+					"         keeps `lost+found`, the directory ext4 puts in every filesystem it makes.\n"+
+					"         opossum clears that with `sh` inside the image, so the usual cause is an\n"+
+					"         image without one (distroless and scratch builds). A program that checks\n"+
+					"         whether its data directory is empty — Postgres's initdb — will refuse it.\n",
+					m.Volume, image, err)
+			}
+			continue
+		}
+		if err := o.rt.SeedVolume(m.Volume, image, m.Target); err != nil {
+			// The volume mounts empty, which looks exactly like a service that lost its
+			// data — and nothing later can tell the two apart, so this is the only
+			// place to say it. The runtime's own words lead, verbatim: the usual cause
+			// is an image with no `sh` to run the copy with, but a failed pull or a
+			// full disk land here too, and only the runtime knows which.
+			o.warnf(codeVolumeNotSeeded, "couldn't fill the new volume %q from %s at %s: %v\n"+
+				"         it will mount empty. opossum copies with `cp -a` run by `sh` inside the image,\n"+
+				"         so the usual cause is an image without one (distroless and scratch builds) —\n"+
+				"         but the reason above is the runtime's own, so read that first.\n"+
+				"         Put the content there another way (an init container, or a bind mount), or\n"+
+				"         add `volume: {nocopy: true}` to record that an empty mount is intended.\n",
+				m.Volume, image, m.Target, err)
+		}
 	}
 }
 

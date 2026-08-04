@@ -966,79 +966,6 @@ func planForIn(t *testing.T, dir, body string) (string, []Adaptation) {
 	return New(p, nil, "opossum", io.Discard).PlanOverlay()
 }
 
-// An application that writes into a bind-mounted directory hits the same
-// host-owned wall a database does, but opossum can't be sure it needs to own that
-// directory — so a named volume is proposed, not applied. It's only proposed when
-// the host directory exists and is EMPTY, which is the one shape where switching
-// loses nothing.
-func TestPlanOverlaySuggestsNamedVolumeForEmptyAppDataDir(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, "content"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	body, changes := planForIn(t, dir, `
-name: demo
-services:
-  blog:
-    image: ghost:6-alpine
-    volumes:
-      - ./content:/var/lib/ghost/content
-`)
-	if len(changes) != 1 || changes[0].Kind != "suggestion" {
-		t.Fatalf("an empty app data dir should get one suggestion, got %+v", changes)
-	}
-	if !strings.Contains(body, suggestionMarker) {
-		t.Errorf("expected a suggestion marker in:\n%s", body)
-	}
-	// It must not take effect on its own.
-	p := mergeOverlay(t, "name: demo\nservices:\n  blog:\n    image: ghost:6-alpine\n    volumes:\n      - ./content:/var/lib/ghost/content\n", body)
-	if v := p.Services["blog"].Volumes; len(v) != 1 || !strings.HasPrefix(v[0], "./content:") {
-		t.Errorf("a suggestion must stay inert, got %v", v)
-	}
-}
-
-// A host directory with files in it is SUPPLYING content — a config directory, a
-// site, data from a previous Docker run. Suggesting a named volume there is advice
-// to hide it, which is worse than the failure being diagnosed.
-func TestPlanOverlayNoSuggestionWhenHostSuppliesContent(t *testing.T) {
-	dir := t.TempDir()
-	conf := filepath.Join(dir, "conf")
-	if err := os.MkdirAll(conf, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	writeFile(t, conf, "default.conf", "server {}\n")
-
-	body, changes := planForIn(t, dir, `
-name: demo
-services:
-  web:
-    image: nginx
-    volumes:
-      - ./conf:/etc/nginx/conf.d
-`)
-	if body != "" || len(changes) != 0 {
-		t.Errorf("a host directory with content must not be suggested away, got %d:\n%s", len(changes), body)
-	}
-}
-
-// An absent host directory is not evidence either way: `./conf:/etc/nginx/conf.d`
-// on a machine that hasn't created ./conf looks exactly like an empty data dir
-// from the compose file alone.
-func TestPlanOverlayNoSuggestionForAbsentHostDir(t *testing.T) {
-	dir := t.TempDir()
-	body, changes := planForIn(t, dir, `
-name: demo
-services:
-  web:
-    image: nginx
-    volumes:
-      - ./conf:/etc/nginx/conf.d
-`)
-	if body != "" || len(changes) != 0 {
-		t.Errorf("an absent host directory must not be suggested away, got %d:\n%s", len(changes), body)
-	}
-}
-
 // A directory two services share is class C, not this: swapping it for a named
 // volume would break the sharing outright (OPSM-102), so it must not be suggested
 // as an app data dir.
@@ -1105,7 +1032,13 @@ volumes:
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, changes := New(p0, nil, "opossum", io.Discard).PlanOverlay()
+	o := New(p0, nil, "opossum", io.Discard)
+	// Two services that actually died chowning their mount, plus the pair sharing a
+	// named volume: enough suggestions from two different sources to catch a render
+	// that only makes the first one uncommentable.
+	o.crashHint("blog", "chown: changing ownership of '/var/lib/ghost/content': Operation not permitted")
+	o.crashHint("wiki", "chown: /var/wiki/data: Operation not permitted")
+	body, changes := o.PlanOverlay()
 	if len(changes) < 4 {
 		t.Fatalf("expected suggestions for all four services, got %+v", changes)
 	}
@@ -1254,44 +1187,6 @@ func TestPlanOverlayNoNoteForHonouredPolicies(t *testing.T) {
 	}
 }
 
-// A bind source that does not exist is created as a directory whatever it was
-// meant to be, so a file the user was told to supply becomes an empty directory —
-// and by the time the suggestion looks, it is indistinguishable from a data
-// directory. Measured over 156 real-world projects this was the only wrong
-// suggestion: overleaf mounts `./mongodb-init-replica-set.js`, which its README
-// says to download before the first start, and the suggestion offered to replace
-// it with a named volume — advice to hide the file you are about to put there.
-func TestPlanOverlayDoesNotSuggestAVolumeForAFileHandedThrough(t *testing.T) {
-	dir := t.TempDir()
-	// Empty, exactly as `up` leaves a bind source it had to create.
-	if err := os.MkdirAll(filepath.Join(dir, "mongodb-init-replica-set.js"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(dir, "appdata"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	_, changes := planForIn(t, dir, `
-name: demo
-services:
-  app:
-    image: someapp:1
-    volumes:
-      - ./mongodb-init-replica-set.js:/docker-entrypoint-initdb.d/mongodb-init-replica-set.js
-      - ./appdata:/opt/app/data
-`)
-	// The directory mount beside it still gets its suggestion, so this is a test of
-	// the file rule and not of the suggestion being switched off.
-	var targets []string
-	for _, c := range changes {
-		if c.Code == "OPSM-105" {
-			targets = append(targets, c.Summary)
-		}
-	}
-	if len(targets) != 1 || !strings.Contains(targets[0], "/opt/app/data") {
-		t.Errorf("expected the directory mount to be suggested and the file mount left alone, got %v", targets)
-	}
-}
-
 func TestHandsThroughAFile(t *testing.T) {
 	for _, tc := range []struct {
 		src, target string
@@ -1311,5 +1206,363 @@ func TestHandsThroughAFile(t *testing.T) {
 		if got := handsThroughAFile(tc.src, tc.target); got != tc.want {
 			t.Errorf("handsThroughAFile(%q, %q) = %v, want %v", tc.src, tc.target, got, tc.want)
 		}
+	}
+}
+
+// The predicate this replaced proposed a named volume for any empty read-write
+// bind directory. Measured over 156 real projects it made 193 proposals and about
+// half were wrong: `/config` files people edit, `/downloads` and `/media` they
+// open, `/logs` they read. These are those exact shapes, taken from the ledger at
+// ~/opossum-dogfood/results/df321-mounts.tsv, and none of them may draw a
+// suggestion now — the only thing that earns one is a crash.
+func TestPlanOverlayProposesNothingForBindDirsThatNeverFailed(t *testing.T) {
+	dir := t.TempDir()
+	for _, d := range []string{"config", "downloads", "media", "logs", "uploads", "data"} {
+		if err := os.MkdirAll(filepath.Join(dir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Empty on purpose: emptiness is what used to be read as "the app will fill it".
+	writeFile(t, dir, "compose.yaml", `
+name: demo
+services:
+  jellyfin:
+    image: lscr.io/linuxserver/jellyfin
+    volumes:
+      - ./config:/config
+      - ./media:/media
+  transmission:
+    image: lscr.io/linuxserver/transmission
+    volumes:
+      - ./downloads:/downloads
+  nginx:
+    image: nginx
+    volumes:
+      - ./logs:/var/log/nginx
+  app:
+    image: someapp
+    volumes:
+      - ./uploads:/uploads
+      - ./data:/app/data
+`)
+	p0, err := compose.Load(filepath.Join(dir, "compose.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, changes := New(p0, nil, "opossum", io.Discard).PlanOverlay()
+	for _, c := range changes {
+		if c.Kind == "suggestion" {
+			t.Errorf("nothing here has failed, so nothing should be proposed — got %+v", c)
+		}
+	}
+	if strings.Contains(body, suggestionMarker) {
+		t.Errorf("the overlay should carry no suggestion, got:\n%s", body)
+	}
+}
+
+// What does earn one: the container started, tried to take ownership of a bind
+// mount, and exited. The suggestion then names that mount and only that mount —
+// the service's other bind mounts are working and detaching them would be the
+// mis-proposal this design exists to stop making.
+func TestPlanOverlayProposesTheMountThatActuallyDied(t *testing.T) {
+	dir := t.TempDir()
+	for _, d := range []string{"db", "config", "backups"} {
+		if err := os.MkdirAll(filepath.Join(dir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFile(t, dir, "compose.yaml", `
+name: demo
+services:
+  ghost:
+    image: ghost:6-alpine
+    volumes:
+      # The failing mount is deliberately NOT first: an implementation that
+      # blames whichever bind mount it happens to see first would pass with it
+      # at the top and be wrong about every project that lists them otherwise.
+      - ./config:/etc/ghost
+      - ./backups:/backups
+      - ./db:/var/lib/ghost/content
+`)
+	p0, err := compose.Load(filepath.Join(dir, "compose.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := New(p0, nil, "opossum", io.Discard)
+
+	// Nothing has failed yet.
+	if _, changes := o.PlanOverlay(); len(changes) != 0 {
+		t.Fatalf("before any crash there is nothing to propose, got %+v", changes)
+	}
+
+	// The crash decode runs on the real log shape and records what it saw.
+	logs := "[entrypoint] starting\nchown: changing ownership of '/var/lib/ghost/content': Operation not permitted"
+	if h := o.crashHint("ghost", logs); h == "" {
+		t.Fatal("the chown signature should still produce the crash hint")
+	}
+
+	body, changes := o.PlanOverlay()
+	var suggested []string
+	for _, c := range changes {
+		if c.Kind == "suggestion" {
+			suggested = append(suggested, c.Summary)
+		}
+	}
+	if len(suggested) != 1 || !strings.Contains(suggested[0], "/var/lib/ghost/content") {
+		t.Fatalf("exactly the mount that died should be proposed, got %v", suggested)
+	}
+	// The other two mounts of the same service never failed and are not touched.
+	for _, safe := range []string{"/etc/ghost", "/backups"} {
+		if strings.Contains(body, safe) {
+			t.Errorf("%s did not fail, so it must not appear in the overlay:\n%s", safe, body)
+		}
+	}
+	if !strings.Contains(body, suggestionMarker) {
+		t.Errorf("the entry should be a suggestion, not applied:\n%s", body)
+	}
+}
+
+// A log that names no usable path (redis reports `chown: .:`) still identifies the
+// mount when the service has only one. With more than one it does not, and
+// guessing between them is what this design refuses to do.
+func TestChownFailureIsOnlyRecordedWhenTheMountIsCertain(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		volumes []string
+		logs    string
+		want    string // "" = nothing recorded
+	}{
+		{"path names one of several", []string{"./a:/data", "./b:/config"},
+			"chown: /data: Operation not permitted", "/data"},
+		{"unusable path, single mount", []string{"./a:/data"},
+			"chown: .: Operation not permitted", "/data"},
+		{"unusable path, several mounts", []string{"./a:/data", "./b:/config"},
+			"chown: .: Operation not permitted", ""},
+		{"read-only mounts are not candidates", []string{"./a:/data:ro"},
+			"chown: /data: Operation not permitted", ""},
+		// The log names a directory inside the image that this service does not
+		// mount at all — an entrypoint running as a non-root user chowning its own
+		// install. Falling back to "there is only one bind mount" would name a
+		// directory that is working and tell the reader it is the one that died.
+		{"path names something that is not mounted", []string{"./a:/config"},
+			"chown: /usr/local/lib/app: Operation not permitted", ""},
+		// A log naming a parent of the mount is not evidence about the mount: the
+		// parent's own chown was refused, which a named volume for a child does not
+		// fix. A recursive chown that dies on a mounted child names that child.
+		{"log names a parent of the mount", []string{"./a:/data/db", "./b:/config"},
+			"chown: /data: Operation not permitted", ""},
+		// The shape that made an earlier version of this fire on everything.
+		{"log names the filesystem root", []string{"./a:/config"},
+			"chown: /: Operation not permitted", ""},
+		{"log names a parent, single mount", []string{"./a:/var/lib/mysql"},
+			"chown: /var: Operation not permitted", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &compose.Project{Name: "demo", BaseDir: t.TempDir(),
+				Services: map[string]*compose.Service{"s": {Image: "x", Volumes: tc.volumes}}}
+			o := New(p, nil, "opossum", io.Discard)
+			o.crashHint("s", tc.logs)
+			got := o.recordedChownFailures()
+			if tc.want == "" {
+				if len(got) != 0 {
+					t.Errorf("the mount is not certain, so nothing should be recorded, got %+v", got)
+				}
+				return
+			}
+			if len(got) != 1 || got[0].Target != tc.want {
+				t.Errorf("recorded %+v, want the mount at %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// The record says what happened once, not what to keep proposing. When the
+// project moves on — the suggestion was taken, the mount was renamed, the service
+// was deleted — the entry has to stop appearing, or the overlay accumulates
+// proposals about mounts that no longer exist.
+func TestPlanOverlayDropsRecordsTheProjectHasMovedPast(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "db"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const before = `
+name: demo
+services:
+  ghost:
+    image: ghost:6-alpine
+    volumes:
+      - ./db:/var/lib/ghost/content
+`
+	writeFile(t, dir, "compose.yaml", before)
+	p0, err := compose.Load(filepath.Join(dir, "compose.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := New(p0, nil, "opossum", io.Discard)
+	o.crashHint("ghost", "chown: /var/lib/ghost/content: Operation not permitted")
+	if _, changes := o.PlanOverlay(); len(changes) != 1 {
+		t.Fatalf("the crash should leave exactly one suggestion, got %+v", changes)
+	}
+
+	// The suggestion is taken: that mount is now a named volume.
+	writeFile(t, dir, "compose.yaml", `
+name: demo
+services:
+  ghost:
+    image: ghost:6-alpine
+    volumes:
+      - ghost-content:/var/lib/ghost/content
+volumes:
+  ghost-content: {}
+`)
+	p1, err := compose.Load(filepath.Join(dir, "compose.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Same directory, so the record from the first crash is still on disk.
+	if got := New(p1, nil, "opossum", io.Discard).recordedChownFailures(); len(got) != 1 {
+		t.Fatalf("the record should still be there, got %+v", got)
+	}
+	body, changes := New(p1, nil, "opossum", io.Discard).PlanOverlay()
+	for _, c := range changes {
+		if c.Kind == "suggestion" {
+			t.Errorf("the mount is already a named volume, so nothing is left to propose: %+v", c)
+		}
+	}
+	if strings.Contains(body, suggestionMarker) {
+		t.Errorf("no suggestion should survive the fix being applied:\n%s", body)
+	}
+}
+
+// Detaching a directory another service is reading ends the sharing, silently.
+// The applied path refuses outright for that reason. Here the crash is real, so
+// the entry stays — but it has to say who else is looking, or the reader
+// uncomments it and finds out afterwards.
+func TestPlanOverlayNamesTheServicesSharingTheDirectory(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "content"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, dir, "compose.yaml", `
+name: demo
+services:
+  blog:
+    image: ghost:6-alpine
+    volumes:
+      - ./content:/var/lib/ghost/content
+  backup:
+    image: alpine
+    volumes:
+      - ./content:/backup-src
+`)
+	p0, err := compose.Load(filepath.Join(dir, "compose.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := New(p0, nil, "opossum", io.Discard)
+	o.crashHint("blog", "chown: /var/lib/ghost/content: Operation not permitted")
+	body, _ := o.PlanOverlay()
+	if !strings.Contains(body, "backup") {
+		t.Errorf("the suggestion detaches a directory %q also reads, and must say so:\n%s", "backup", body)
+	}
+}
+
+// The overlay must not carry two blocks for one mount, and must not go silent
+// about a crash it has no applied fix for. Both directions run through
+// appliedSameMount, and neither was guarded until this test.
+func TestPlanOverlaySuppressesOnlyWhenItReallyAppliedTheSameMount(t *testing.T) {
+	for _, tc := range []struct {
+		name, compose string
+		wantSuggested bool
+	}{
+		{
+			// Postgres from the known-image list: the swap is applied, so a suggestion
+			// for the same mount would be a second block saying the same thing.
+			name: "applied covers it",
+			compose: `
+name: demo
+services:
+  db:
+    image: postgres:16
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
+`,
+			wantSuggested: false,
+		},
+		{
+			// Same image and mount, but the entrypoint is overridden, so it no longer
+			// runs the server that chowns — the applied path declines. Asking
+			// `ownsDataDir` instead of "did we apply it" silenced this case too, and a
+			// crash that really happened left no trace in the overlay at all.
+			name: "applied declined, so the crash still has to be reported",
+			compose: `
+name: demo
+services:
+  db:
+    image: postgres:16
+    entrypoint: ["/usr/local/bin/custom-init"]
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
+`,
+			wantSuggested: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(dir, "pgdata"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, dir, "compose.yaml", tc.compose)
+			p0, err := compose.Load(filepath.Join(dir, "compose.yaml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			o := New(p0, nil, "opossum", io.Discard)
+			o.crashHint("db", "chown: /var/lib/postgresql/data: Operation not permitted")
+			_, changes := o.PlanOverlay()
+			var suggested int
+			for _, c := range changes {
+				if c.Kind == "suggestion" {
+					suggested++
+				}
+			}
+			if got := suggested > 0; got != tc.wantSuggested {
+				t.Errorf("suggested=%v want %v; entries were %+v", got, tc.wantSuggested, changes)
+			}
+		})
+	}
+}
+
+// A half-written record parses as nothing, and reading nothing is
+// indistinguishable from never having failed — the whole history would vanish on
+// one bad moment. The write goes through a temporary file for that reason.
+//
+// So the test has to interrupt one. Blocking the temporary path is the only way
+// to make the write fail after the record already has something in it: with the
+// rename, the existing record is untouched; with a direct write, the second
+// record lands and the point of the temporary file is lost. An earlier version of
+// this test asserted only that the file parses and no .tmp is left over — both
+// true of a direct write, so it guarded nothing.
+func TestChownRecordSurvivesAnInterruptedWrite(t *testing.T) {
+	dir := t.TempDir()
+	p := &compose.Project{Name: "demo", BaseDir: dir, Services: map[string]*compose.Service{
+		"a": {Image: "x", Volumes: []string{"./a:/data"}},
+		"b": {Image: "y", Volumes: []string{"./b:/other"}},
+	}}
+	o := New(p, nil, "opossum", io.Discard)
+	o.crashHint("a", "chown: /data: Operation not permitted")
+	if got := o.recordedChownFailures(); len(got) != 1 {
+		t.Fatalf("the first failure should have been recorded, got %+v", got)
+	}
+
+	// Make the temporary path unusable, so the write cannot complete.
+	if err := os.MkdirAll(o.chownFailurePath()+".tmp", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	o.crashHint("b", "chown: /other: Operation not permitted")
+
+	got := o.recordedChownFailures()
+	if len(got) != 1 || got[0].Service != "a" {
+		t.Errorf("a write that could not complete must leave the record as it was, got %+v", got)
 	}
 }
