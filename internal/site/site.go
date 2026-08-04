@@ -336,7 +336,8 @@ var FaviconAssets = []string{"favicon.png", "favicon-512.png", "apple-touch-icon
 // headCustomHTML rides the primer layout's `{% include head-custom.html %}` —
 // the only <head> hook the theme offers. relative_url keeps the links correct
 // under the /opossum/ project path.
-const headCustomHTML = `<link rel="icon" type="image/png" sizes="32x32" href="{{ '/assets/favicon.png' | relative_url }}">
+const headCustomHTML = `<meta name="google-site-verification" content="SOXvRzYu5fsvbfH2MeOduqkVWNuiI7MV37ok1jnkLCY">
+<link rel="icon" type="image/png" sizes="32x32" href="{{ '/assets/favicon.png' | relative_url }}">
 <link rel="icon" type="image/png" sizes="512x512" href="{{ '/assets/favicon-512.png' | relative_url }}">
 <link rel="apple-touch-icon" href="{{ '/assets/apple-touch-icon.png' | relative_url }}">
 `

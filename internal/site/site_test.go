@@ -360,6 +360,11 @@ func TestBuildShipsTheFavicon(t *testing.T) {
 	if err != nil {
 		t.Fatalf("head-custom.html: %v (without it the theme renders no icon links at all)", err)
 	}
+	// Search Console proves ownership by fetching this tag from the live site;
+	// silently losing it revokes the property and, with it, the sitemap ping.
+	if !strings.Contains(string(headHTML), `name="google-site-verification"`) {
+		t.Errorf("head-custom.html lost the Search Console verification tag")
+	}
 	for _, name := range []string{"favicon.png", "favicon-512.png", "apple-touch-icon.png"} {
 		if !strings.Contains(string(headHTML), "/assets/"+name) {
 			t.Errorf("head-custom.html does not reference %s", name)
