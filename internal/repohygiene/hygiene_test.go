@@ -54,6 +54,14 @@ func TestOffenseFlagsBuildArtifacts(t *testing.T) {
 		{"a temp copy", "internal/compose/tmp_load.go", 900, []byte("package compose\n"), "throwaway"},
 		{"a debug script", "scripts/dbg_sweep.sh", 400, []byte("#!/bin/bash\n"), "throwaway"},
 		{"a real file whose name merely contains those letters", "internal/compose/probes.go", 900, []byte("package compose\n"), ""},
+		// The release sync lived here and shipped with every public release, which is
+		// how internal process ends up in a distribution.
+		{"maintainer-only release tooling", "scripts/sync-public.sh", 4_000, []byte("#!/bin/bash\n"), "maintainer-only"},
+		{"anything else that lands there", "scripts/lib/helpers.sh", 900, []byte("#!/bin/sh\n"), "maintainer-only"},
+		// The rule is about that directory, not about the word: a script a user runs
+		// is fine wherever users would look for it.
+		{"a script users are meant to run", "examples/run-demo.sh", 900, []byte("#!/bin/sh\n"), ""},
+		{"a directory that merely starts the same way", "scripts-for-users/x.sh", 900, []byte("#!/bin/sh\n"), ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

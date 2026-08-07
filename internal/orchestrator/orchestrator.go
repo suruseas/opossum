@@ -39,6 +39,9 @@ type Orchestrator struct {
 	ctx       context.Context     // cancelled on Ctrl-C so a partial `up` rolls back
 	profiles  map[string]bool     // active compose profiles (--profile / COMPOSE_PROFILES)
 	up        upOptions           // per-invocation `up` flags
+	// crashGrace is how long verifyStarted watches a just-started service before
+	// concluding it started. Per-Orchestrator so an eval can set its own.
+	crashGrace time.Duration
 	// HostFP supplies per-service host memory footprints for `stats --host`. Left
 	// nil in production (the real macOS introspector is used); tests inject a fake.
 	HostFP HostFootprinter
@@ -90,7 +93,8 @@ func (o *Orchestrator) removeOrphans(orphans []string) {
 
 // New builds an Orchestrator writing user-facing output to w.
 func New(p *compose.Project, rt *runtime.Runtime, dnsDomain string, w interface{ Write([]byte) (int, error) }) *Orchestrator {
-	return &Orchestrator{Project: p, DNSDomain: dnsDomain, rt: rt, out: w, sleep: time.Sleep, ctx: context.Background()}
+	return &Orchestrator{Project: p, DNSDomain: dnsDomain, rt: rt, out: w, sleep: time.Sleep,
+		ctx: context.Background(), crashGrace: graceFromEnv()}
 }
 
 // OnSignal sets the cancellation scope for `up`: when ctx is cancelled (e.g. the
@@ -463,11 +467,11 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 	}
 
 	o.reportIgnoredFields(order, true)
+	// No Postgres data-directory warning here any more: opossum clears
+	// `lost+found` out of the volumes it creates, so the mount that used to be
+	// predicted to fail is now the one that works. What is left is decoded from
+	// initdb's own refusal when it happens (crashHint).
 	for _, name := range order {
-		// No Postgres data-directory warning here any more: opossum clears
-		// `lost+found` out of the volumes it creates, so the mount that used to be
-		// predicted to fail is now the one that works. What is left is decoded from
-		// initdb's own refusal when it happens (crashHint).
 		o.warnDockerSocket(name, o.Project.Services[name])
 	}
 	o.warnSharedNamedVolumes(order)
@@ -730,7 +734,9 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 		if !o.up.dryRun {
 			// Create any missing bind-mount host directories (docker compose does; the
 			// runtime errors on a missing bind source).
-			o.ensureBindDirs(name, svc.Volumes)
+			if err := o.ensureBindDirs(name, svc.Volumes); err != nil {
+				return err
+			}
 		}
 		// Seed fresh named/anonymous volumes from the image before the container
 		// mounts them (Apple `container` mounts them empty, unlike Docker). This runs
@@ -799,35 +805,126 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 	return nil
 }
 
+// crashGrace is how long verifyStarted gives a service to fall over before `up`
+// calls it started. It looks once immediately and once at the end of this.
+//
+// The second comes from measurement, not from taste. `container run -d` returns
+// while the container is still deciding whether it can start, and four real
+// misconfigurations — postgres refusing a data directory holding `lost+found`,
+// postgres and mysql with no password set, redis pointed at a config file that
+// isn't there — all inspected as "running" at that moment and were gone
+// 0.08–0.44s later. A correct postgres was still up thirty seconds on. So the
+// window has to be wider than half a second, and a second leaves room for a
+// slower machine without waiting on anything a person would notice.
+//
+// Two looks rather than a poll: sampling more often would report a failure a
+// fraction sooner but cannot catch anything the final look misses, and each look
+// is a `container inspect` per service (~18ms measured) — real work that scales
+// with the size of the project, bought for nothing.
+//
+// The cost lands on every successful detached `up`, flat: a healthy three-service
+// up measured 4.0s and a single-service one 1.0s, so this is a quarter again on
+// the first and double the second. That is the price of `up` not reporting
+// success over a dead service.
+//
+// A var, not a const, so the suite can turn the wait off: nearly every `up` eval
+// would otherwise pay it for nothing. The evals that are about this window set
+// their own — see TestUpWaitsBeforeConcludingAServiceStarted.
+var defaultCrashGrace = time.Second
+
+// graceFromEnv reads OPOSSUM_CRASH_GRACE, a duration (`0`, `250ms`, `2s`) saying
+// how long `up` watches a service before calling it started. It exists in the
+// same spirit as OPOSSUM_CONTAINER_BIN: it is what lets an eval that drives the
+// whole CLI reach this setting, and having ~40 of them each sleep a second to
+// prove something none of them are about is a waste of everyone's time. Someone
+// who wants `up` back to its old, faster, less truthful behaviour can also set it
+// to 0. A value that doesn't parse is ignored rather than fatal — this is not
+// worth failing an `up` over.
+//
+// Read per Orchestrator rather than once at startup, so setting it takes effect
+// for whatever is constructed afterwards.
+func graceFromEnv() time.Duration {
+	if v := os.Getenv("OPOSSUM_CRASH_GRACE"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d >= 0 {
+			return d
+		}
+	}
+	return defaultCrashGrace
+}
+
 // verifyStarted checks that each long-running service just brought up is still
-// running, reporting any that exited immediately (with its last log lines) and
-// failing the up. One-shots (completed-targets) are expected to exit, so they're
-// skipped. It's a snapshot right after start, so it catches an immediate crash
-// (bad config, failed initdb, missing mount) — not one that dies minutes later.
+// running, reporting any that exited (with its last log lines) and failing the
+// up. One-shots (completed-targets) are expected to exit, so they're skipped.
+//
+// It looks twice, a grace apart, rather than taking one snapshot. A snapshot
+// right after start only catches a container that is already gone, and a service
+// dying from bad config is typically still "running" at that instant — which is
+// how a postgres refusing to initialise reported a successful `up` and turned up
+// `stopped` in `ps` afterwards. It is still a bounded look: something that dies
+// minutes later belongs to a healthcheck, not to `up`.
+//
+// The first look is not merely an optimisation for the report: a project whose
+// services are all already gone fails without waiting out the grace at all.
 func (o *Orchestrator) verifyStarted(order []string, oneShot map[string]bool) error {
+	watching := make([]string, 0, len(order))
+	for _, name := range order {
+		if !oneShot[name] {
+			watching = append(watching, name)
+		}
+	}
+	exited := map[string]string{} // service -> the state it was found in
+	for look := 0; ; look++ {
+		var still []string
+		for _, name := range watching {
+			info := o.rt.Inspect(o.containerName(name))
+			// `container run -d` returns after the container is running, so a healthy
+			// service inspects as "running" here (the OPSM-401 fail-fast keys off the
+			// same predicate). Treat a missing/empty state as "keep watching" — only a
+			// concrete non-running state (stopped/exited) is a crash. If Apple
+			// `container` ever surfaces a transient "created"/"starting" state
+			// post-run, revisit.
+			if info.Exists && info.State != "" && info.State != "running" {
+				exited[name] = info.State
+				continue
+			}
+			still = append(still, name)
+		}
+		watching = still
+		if len(watching) == 0 || look > 0 {
+			break
+		}
+		// Ctrl-C during the grace, like every other wait in `up`. Nothing is rolled
+		// back from here — the services are up — but the second between a person
+		// pressing it and the prompt coming back is a second this change added.
+		//
+		// Unlike the waits before this point, an interrupt here is not an error: it
+		// only means the second look never happened, and "we did not finish looking"
+		// is not "a service crashed". Anything already found dead is still reported
+		// below. Those earlier waits return one because there is a bring-up left to
+		// undo; by here there is nothing to undo, and the return value is only the
+		// exit status.
+		if o.interrupted() != nil {
+			break
+		}
+		o.sleep(o.crashGrace)
+	}
+	if len(exited) == 0 {
+		return nil
+	}
+	// Report in compose order rather than in the order they happened to be caught,
+	// so the same failing project reads the same way every time.
 	var crashed []string
 	for _, name := range order {
-		if oneShot[name] {
-			continue
-		}
-		info := o.rt.Inspect(o.containerName(name))
-		// `container run -d` returns after the container is running, so a healthy
-		// service inspects as "running" here (the OPSM-401 fail-fast keys off the
-		// same predicate). Treat a missing/empty state as "don't flag" — only a
-		// concrete non-running state (stopped/exited) is a crash. If Apple `container`
-		// ever surfaces a transient "created"/"starting" state post-run, revisit.
-		if !info.Exists || info.State == "" || info.State == "running" {
+		state, ok := exited[name]
+		if !ok {
 			continue
 		}
 		if logs := o.rt.CaptureLogs(o.containerName(name), 15); logs != "" {
-			o.warnf(codeServiceExited, "service %q exited right after starting (state %q); its last log lines:\n%s%s\n", name, info.State, indentLines(logs), o.crashHint(name, logs))
+			o.warnf(codeServiceExited, "service %q exited right after starting (state %q); its last log lines:\n%s%s\n", name, state, indentLines(logs), o.crashHint(name, logs))
 		} else {
-			o.warnf(codeServiceExited, "service %q exited right after starting (state %q) — check its command, image, and mounts\n", name, info.State)
+			o.warnf(codeServiceExited, "service %q exited right after starting (state %q) — check its command, image, and mounts\n", name, state)
 		}
 		crashed = append(crashed, name)
-	}
-	if len(crashed) == 0 {
-		return nil
 	}
 	sort.Strings(crashed)
 	return fmt.Errorf("[%s] %d service(s) exited right after starting: %s — see the logs above, fix the cause, and run `opossum up` again",
@@ -2374,7 +2471,9 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 	cname := o.containerName(service + "-run")
 	o.rt.Delete(cname) // clear a stale one-off of the same name
 
-	o.ensureBindDirs(service, svc.Volumes)
+	if err := o.ensureBindDirs(service, svc.Volumes); err != nil {
+		return err
+	}
 	o.seedVolumes(service, svc, image)
 	// Pre-flight the exclusive-attach conflict for the one-off too (as `up` does):
 	// if a running container — including this service's own `up` container — already
@@ -2855,7 +2954,7 @@ func (o *Orchestrator) resolvePath(p string) string {
 // doesn't exist yet, matching docker compose (Apple `container` errors on a
 // missing bind source instead of creating it). Only bind mounts are touched;
 // named/anonymous volumes and external volumes are left to the runtime.
-func (o *Orchestrator) ensureBindDirs(service string, vols []string) {
+func (o *Orchestrator) ensureBindDirs(service string, vols []string) error {
 	for _, v := range vols {
 		mount, target, _, ok := splitMount(v)
 		if !ok || !isHostPath(mount) {
@@ -2866,13 +2965,39 @@ func (o *Orchestrator) ensureBindDirs(service string, vols []string) {
 			continue
 		}
 		if mkErr := os.MkdirAll(src, 0o755); mkErr != nil {
-			// Don't fail silently: a missing bind source makes the container fail
-			// to start later with an opaque runtime error, so say what couldn't be
-			// created and how to unblock it.
-			o.warnf(codeBindDirCreate, "couldn't create host directory %s for a bind mount: %v — "+
-				"create it yourself (`mkdir -p %s`) or fix the parent directory's permissions, then run `opossum up` again\n",
-				src, mkErr, src)
-			continue
+			// Only a source that was already missing reaches here — the stat above
+			// lets an existing file or directory through untouched, which is what
+			// makes a `./nginx.conf:/etc/nginx/nginx.conf` mount work. So nothing is
+			// there and opossum could not put it there, and the runtime
+			// will refuse the mount — measured: `path '…' does not exist`. Saying so
+			// here and stopping is the whole point; the previous version warned and
+			// started the service anyway, and the user got this warning followed by
+			// an unrelated-looking runtime error a second later.
+			//
+			// Two `up`s racing could in principle create the directory between the
+			// stat and the mkdir, and this would then refuse an up that would have
+			// worked. Re-checking would cover it, but nothing could drive that
+			// branch in an eval — it needs the race — and an unguarded branch is
+			// worth less than the honest note that running again succeeds.
+			// A symlink whose target is gone is its own case: `stat` says the path
+			// is not there (it follows the link), `mkdir` says it is (it does not),
+			// and telling someone to `mkdir -p` it sends them to the same
+			// contradiction — the command fails with `file exists` on a path
+			// nothing can see.
+			if fi, lerr := os.Lstat(src); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
+				target, _ := os.Readlink(src)
+				return fmt.Errorf("[%s] service %q needs %s for a bind mount, but it is a symlink to "+
+					"%q, and there is nothing there\n"+
+					"  the container cannot start without it — point the link at something that "+
+					"exists, or remove the link and let opossum create the directory, then run "+
+					"`opossum up` again",
+					codeBindDirCreate, service, src, target)
+			}
+			return fmt.Errorf("[%s] service %q needs the host directory %s for a bind mount, and it "+
+				"could not be created: %v\n"+
+				"  the container cannot start without it — create it yourself (`mkdir -p %s`) or fix "+
+				"the parent directory's permissions, then run `opossum up` again",
+				codeBindDirCreate, service, src, mkErr, src)
 		}
 		o.logf("Created host directory %s for a bind mount\n", src)
 		// A directory is all this can create, and for a mount that names a file
@@ -2901,6 +3026,7 @@ func (o *Orchestrator) ensureBindDirs(service string, vols []string) {
 				service, src, target, src)
 		}
 	}
+	return nil
 }
 
 // Started returns the services this project had up when the last Up finished —

@@ -12,6 +12,15 @@ about it — plus the limits worth knowing before you hit them.
 3. **Host port already in use** → `up` names the port and service; on macOS a taken 5000/7000 is often the **AirPlay Receiver** (turn it off in System Settings › General › AirDrop & Handoff, or remap the host port).
 4. **Building from a temp/scratch dir** → Apple's builder can't read a context under `/private/tmp` or a symlink. Build from a real path under your home directory (or use `--from-docker-compose`).
 
+`up` gives each service a second to fall over before it reports the project
+started, because `container run -d` returns while a container is still deciding
+whether it can start: measured against real misconfigurations, every one of them
+still looked like it was running at that instant and was gone within half a
+second. A service that exits in that window is reported with its logs and fails
+the `up`. `OPOSSUM_CRASH_GRACE` sets the window — `OPOSSUM_CRASH_GRACE=0` gives
+you the second back, at the price of `up` only noticing services that are already
+gone the moment they are started.
+
 ## Troubleshooting builds
 
 Builds run in Apple's shared `container` builder VM, which starts with modest

@@ -1424,6 +1424,36 @@ func TestExternalVolumeNotNamespacedOrRemoved(t *testing.T) {
 	}
 }
 
+// The seed copies from the path the compose file mounts the volume at, so the
+// mount target reaches the runtime as the source to copy from. That one wire is
+// the whole reason a target beginning with `-` mattered — it becomes an operand
+// of `cp` inside the image — and nothing else pins it: the seed's argv carries
+// the volume and the image, and the source only shows up inside the script.
+func TestTheMountTargetIsWhatTheSeedCopiesFrom(t *testing.T) {
+	rt, log := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"web": {Image: "web:latest", Volumes: []string{"data:/opt/a-distinctive-path"}},
+	})
+	if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	var seed string
+	for _, line := range log() {
+		if strings.Contains(line, "demo_data:/__opossum_seed__") {
+			seed = line
+		}
+	}
+	if seed == "" {
+		t.Fatalf("no seed ran: %v", log())
+	}
+	// The copy's source, not merely somewhere in the script: the target also
+	// appears in the `[ -d … ]` that guards the copy, so looking for it anywhere
+	// would pass for a version that tested one path and copied another.
+	if !strings.Contains(seed, "cp -a -- '/opt/a-distinctive-path'/.") {
+		t.Errorf("the seed should copy from the mount target, got: %q", seed)
+	}
+}
+
 func TestUpSeedsFreshVolumesFromImage(t *testing.T) {
 	// A fresh named or anonymous volume is seeded from the image's contents at the
 	// mount path (a throwaway `run --rm --user 0 -v <vol>:/__opossum_seed__`), mirroring
@@ -1452,9 +1482,87 @@ func TestUpSeedsFreshVolumesFromImage(t *testing.T) {
 	}
 }
 
+// Recreating the containers must not touch the data. `up --force-recreate` is
+// what someone runs to get a clean container — after changing an environment
+// variable, or because something is wedged — and a database's contents are not
+// what they are asking to lose.
+//
+// The two halves of that used to be tested apart: the shim was told a volume
+// already existed, which says nothing about whether an `up` creates one, and
+// nothing anywhere connected them. It has to be --force-recreate rather than a
+// plain second `up`, or the run never reaches the volumes at all: an unchanged
+// service is "up to date" and skipped several steps earlier, so the eval would
+// pass on container idempotency while saying nothing about seeding. (Measured —
+// written as a plain second `up` first, and a mutation that re-seeds every
+// existing volume did not fail it.)
+func TestRecreatingContainersLeavesTheVolumeTheFirstUpMade(t *testing.T) {
+	rt, log := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"web": {Image: "web:latest", Volumes: []string{"data:/var/data"}},
+	})
+	if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true); err != nil {
+		t.Fatalf("first Up: %v", err)
+	}
+	if indexOf(log(), "demo_data:/__opossum_seed__") < 0 {
+		t.Fatalf("the first up should have seeded a fresh volume, got %v", log())
+	}
+	first := len(log())
+
+	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
+	o.SetUpOptions(true, false, false, false, false) // --force-recreate
+	if err := o.Up(true); err != nil {
+		t.Fatalf("second Up: %v", err)
+	}
+	recreated := false
+	for _, line := range log()[first:] {
+		if strings.Contains(line, "--name web.demo.opossum") {
+			recreated = true
+		}
+		if strings.Contains(line, "demo_data:/__opossum_seed__") {
+			t.Errorf("recreating the container re-seeded the volume, wiping what was in it: %q", line)
+		}
+	}
+	// Without this, an `up` that did nothing at all would pass the assertion above.
+	if !recreated {
+		t.Errorf("the second up did not recreate the container, so it never reached the volumes: %v", log()[first:])
+	}
+}
+
+// `down -v` says to throw the data away, so the next `up` has to start over. The
+// pair with the eval above: one says opossum keeps a volume it made, this says it
+// stops keeping it when told to, and neither passes for a shim that simply always
+// answers the same way.
+func TestUpSeedsAgainAfterDownTookTheVolumeAway(t *testing.T) {
+	rt, log := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"web": {Image: "web:latest", Volumes: []string{"data:/var/data"}},
+	})
+	if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true); err != nil {
+		t.Fatalf("first Up: %v", err)
+	}
+	if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Down(true, "", false); err != nil {
+		t.Fatalf("Down -v: %v", err)
+	}
+	mark := len(log())
+
+	if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true); err != nil {
+		t.Fatalf("second Up: %v", err)
+	}
+	seeded := false
+	for _, line := range log()[mark:] {
+		if strings.Contains(line, "demo_data:/__opossum_seed__") {
+			seeded = true
+		}
+	}
+	if !seeded {
+		t.Errorf("the volume was deleted, so the next up must seed a fresh one; got %v", log()[mark:])
+	}
+}
+
 func TestUpSkipsSeedingWhenVolumeExists(t *testing.T) {
-	// An already-existing volume is left untouched — no re-seed — so user data and
-	// prior state are preserved across re-ups.
+	// A volume that was already there — made by hand, or by another tool — is left
+	// untouched. (That opossum also leaves alone the ones it made itself is
+	// TestASecondUpLeavesTheVolumeTheFirstOneMade, which drives two real ups.)
 	rt, log := fakeShim(t)
 	setShimEnv(rt, "VOLUME_LS=demo_data") // pretend this volume already exists
 	p := project("demo", map[string]*compose.Service{
@@ -2976,6 +3084,80 @@ func TestUpWarnsOnDockerSocketMount(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "[OPSM-204]") || !strings.Contains(out.String(), "docker.sock") || !strings.Contains(out.String(), "no Docker daemon socket") {
 		t.Errorf("mounting the Docker socket should warn with code OPSM-204, got:\n%s", out.String())
+	}
+}
+
+// Where it stops matters, and the documentation now says so: this is not a
+// pre-flight. Services earlier in the order are already running when the bad
+// mount is reached, and the rollback takes them away again. AGENTS.md used to
+// claim the up stopped "before starting anything", which measurement showed was
+// false — so the true shape needs a test, or the next person will write the
+// comfortable sentence again.
+func TestABadMountStopsAtItsOwnServiceAndRollsBackTheRest(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can write to a read-only directory")
+	}
+	parent := filepath.Join(t.TempDir(), "ro")
+	if err := os.Mkdir(parent, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(parent, 0o700) })
+
+	rt, log := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"aaa": {Image: "a:1"},
+		"zzz": {Image: "z:1", Volumes: []string{filepath.Join(parent, "data") + ":/data"},
+			DependsOn: []compose.Dependency{{Name: "aaa"}}},
+	})
+	if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true); err == nil {
+		t.Fatal("the bad mount must fail the up")
+	}
+
+	lines := log()
+	started := indexOf(lines, "run -d --name aaa.demo.opossum")
+	if started < 0 {
+		t.Fatalf("the service before it should have started — that is what makes this not a pre-flight: %v", lines)
+	}
+	// And it does not stay up: the failure is a bring-up failure, so the rollback
+	// removes what this up created.
+	if stopped := indexOf(lines, "stop aaa.demo.opossum"); stopped < started {
+		t.Errorf("the service started before the failure must be rolled back, got: %v", lines)
+	}
+	// The one with the bad mount never ran at all.
+	if indexOf(lines, "run -d --name zzz.demo.opossum") >= 0 {
+		t.Errorf("the service whose mount cannot work must not be started: %v", lines)
+	}
+}
+
+// The helper refusing is not the same as the up refusing: nothing here used to
+// check that `Up` passes it on, which is the half that actually protects a user.
+// (The same shape as the seeding helper that was guarded while its caller was
+// not.) The up must stop before it starts anything.
+func TestUpStopsWhenABindSourceCannotBeCreated(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can write to a read-only directory")
+	}
+	parent := filepath.Join(t.TempDir(), "ro")
+	if err := os.Mkdir(parent, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(parent, 0o700) })
+
+	rt, log := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"web": {Image: "web:latest", Volumes: []string{filepath.Join(parent, "data") + ":/data"}},
+	})
+	err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true)
+	if err == nil {
+		t.Fatal("a bind source that cannot be created must fail the up")
+	}
+	if !strings.Contains(err.Error(), "[OPSM-104]") {
+		t.Errorf("the error should carry the code, got: %v", err)
+	}
+	for _, line := range log() {
+		if strings.HasPrefix(line, "run -d") {
+			t.Errorf("the service was started even though its mount could not work: %q", line)
+		}
 	}
 }
 

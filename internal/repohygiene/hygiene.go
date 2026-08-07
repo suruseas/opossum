@@ -73,6 +73,24 @@ func looksLikeScratch(p string) bool {
 	return false
 }
 
+// maintainerDirs hold tooling that runs the project rather than being part of it
+// — the release sync, and whatever joins it. What reaches the public repository
+// should be the product and what someone using it needs; a script that pushes
+// releases is neither, and shipping it puts internal process into the
+// distribution. They stay on the maintainer's disk, ignored rather than tracked,
+// so this catches the one that gets `git add -f`'d back in by habit.
+var maintainerDirs = []string{"scripts"}
+
+// underMaintainerDir reports whether p lives in one of them.
+func underMaintainerDir(p string) bool {
+	for _, d := range maintainerDirs {
+		if p == d || strings.HasPrefix(p, d+"/") {
+			return true
+		}
+	}
+	return false
+}
+
 // Offense returns a human-readable reason the file should not be tracked, or ""
 // if it's fine. head is the first SniffBytes of the file (or all of it, if
 // shorter); size is the full size, which is why a large file is caught even
@@ -98,6 +116,14 @@ func Offense(p string, size int64, head []byte) string {
 			"compiles, asserts nothing, and passes CI indefinitely.\n"+
 			"  Remove it (`git rm --cached %s`). If the name is a false alarm, rename the file "+
 			"to say what it is, or widen the allow-list in internal/repohygiene with a reason.", p, p)
+	}
+	if underMaintainerDir(p) {
+		return fmt.Sprintf("%s is maintainer-only tooling, and maintainer-only tooling is not tracked.\n"+
+			"  %s holds what runs the project — the release sync and its like — rather than what the "+
+			"project is. Tracking it publishes internal process alongside the product.\n"+
+			"  Remove it from the index (`git rm --cached %s`); it stays on disk, ignored. If this is "+
+			"something a user of opossum runs, it belongs somewhere they would look for it, not here.",
+			p, strings.Join(maintainerDirs, ", "), p)
 	}
 	if size > MaxTrackedBytes {
 		return fmt.Sprintf("%s is %d bytes, over the %d-byte limit for a tracked file.\n"+

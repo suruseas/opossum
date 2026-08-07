@@ -1,6 +1,12 @@
 # External post drafts — kept here untracked; published on their own platforms
 /articles/
 
+# Maintainer-only tooling. What lands in the public repository is the product and
+# what a user of it needs; the scripts that run the release are neither, and
+# publishing them puts internal process into the distribution. Kept here so the
+# maintainer still has them, untracked so nobody else receives them.
+/scripts/
+
 # Build output
 /opossum
 /dist/

@@ -6,6 +6,42 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.19.1] - 2026-08-07
+
+### Changed
+
+- `up` now stops when a bind mount's host directory could not be created, instead
+  of warning and starting the service anyway. It used to report the problem and
+  then attempt the mount, so the warning was followed a moment later by the
+  runtime's own `path '…' does not exist` with nothing tying the two together.
+  Nothing is lost by stopping: the start was going to fail, and a failed start
+  rolls the project back regardless.
+- A bind mount whose host source is a symlink pointing at nothing now says so,
+  rather than reporting that the directory could not be created and suggesting a
+  `mkdir -p` that fails the same way.
+
+### Fixed
+
+- A volume whose mount target contains a `$`, a backtick, or a tab or newline —
+  `data:/app/$(id)` — is now seeded as the path it is. The script opossum runs to fill a new volume
+  quoted those paths the way Go does, which a shell reads as its own quoting: the
+  copy would look somewhere other than the path you wrote and silently leave the
+  volume empty, or run what was written in it.
+- `up` no longer reports success over a service that died a moment after
+  starting. It used to look once, the instant the container was launched, which is
+  before a service with a bad config has finished failing — a postgres with no
+  password set, or refusing a data directory it cannot initialise, was still
+  "running" at that instant, so `up` exited 0 and the failure only showed up as
+  `stopped` in `opossum ps`. It now looks again a second later and reports the
+  exit with the service's logs. `OPOSSUM_CRASH_GRACE` sets that window;
+  `OPOSSUM_CRASH_GRACE=0` gives the second back and, with it, gives up catching
+  anything that doesn't die instantly.
+- A new volume whose mount target begins with `-` — `data:-rf` — is filled from
+  the image again. opossum copies the image's contents at that path into the fresh
+  volume, and the copy read the target as options rather than as a path, so it
+  failed and the volume came up empty behind a "couldn't fill the new volume"
+  warning.
+
 ## [0.19.0] - 2026-08-05
 
 ### Added
@@ -694,7 +730,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.19.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.19.1...HEAD
+[0.19.1]: https://github.com/suruseas/opossum/compare/v0.19.0...v0.19.1
 [0.19.0]: https://github.com/suruseas/opossum/compare/v0.18.2...v0.19.0
 [0.18.2]: https://github.com/suruseas/opossum/compare/v0.18.1...v0.18.2
 [0.18.1]: https://github.com/suruseas/opossum/compare/v0.18.0...v0.18.1

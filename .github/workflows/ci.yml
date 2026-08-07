@@ -54,7 +54,15 @@ jobs:
           # fragments — so the check would pass for a branch that added none.
           changed="$(git diff --name-only "$BASE...$HEAD")"
           added="$(git diff --name-only --diff-filter=A "$BASE...$HEAD")"
-          shipped="$(echo "$changed" | grep -E '^(cmd|internal)/' | grep -v '_test\.go$' | grep -v '^cmd/changelog/' | grep -v '^internal/changelog/' || true)"
+          # The exclusions are the two things a release note cannot be about.
+          # `testdata/` by name: the Go toolchain never compiles a directory called
+          # that, so nothing under it can reach a user — the fake `container` shims
+          # live there and are not `_test.go` files. And the repo's own tooling,
+          # named package by package: the changelog assembler and the tracked-file
+          # ratchet run over this repository rather than shipping in the binary
+          # (nothing under cmd/opossum imports repohygiene at all). Add to this list
+          # only after checking the same way — that no product code imports it.
+          shipped="$(echo "$changed" | grep -E '^(cmd|internal)/' | grep -v '_test\.go$' | grep -v '/testdata/' | grep -v '^cmd/changelog/' | grep -v '^internal/changelog/' | grep -v '^internal/repohygiene/' | grep -v '^cmd/mutate/' | grep -v '^internal/mutate/' || true)"
           if [ -z "$shipped" ]; then
             echo "No shipped code changed — no fragment needed."; exit 0
           fi

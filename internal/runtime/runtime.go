@@ -535,7 +535,7 @@ func (r *Runtime) VolumeEntries(volume, image string) ([]string, error) {
 	// plan is a list of what a real `up` would change. Listing it would put a
 	// command in the plan that changes nothing, and skipping it would leave a
 	// dry-run unable to say the one thing it is for.
-	out, errOut, err := r.captureSplitQuery("run", "--rm", "--user", "0", "-v", volume+":"+at+":ro", image, "sh", "-c", "ls -a "+at)
+	out, errOut, err := r.captureSplitQuery("run", "--rm", "--user", "0", "-v", volume+":"+at+":ro", image, "sh", "-c", lookScript(at))
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s", err, lastNonEmptyLine(errOut))
 	}
@@ -583,15 +583,58 @@ func (r *Runtime) VolumeEntries(volume, image string) ([]string, error) {
 // Written as a function so a test can run it under a real `sh` — the interpreter
 // that matters is the one inside the image, but what the script does is opossum's
 // own and can be pinned here.
+// `--` ends the options, so a path is read as a path even when it begins with a
+// `-`. A compose file can say `data:-rf`, and nothing upstream stops it: docker's
+// parser passes that target through unchanged, and Apple `container` mounts it
+// and runs the container. The target arrives here as srcPath, and without `--`
+// `cp` read it as flags and exited 64, so the volume came up empty. Measured
+// before adding: BSD, busybox and GNU `cp` all accept `--`, and all three fail on
+// such a path without it.
+//
+// Not on `[ -d ]`, deliberately: `test` has no `--`, and adding one turns a
+// one-operand test into a malformed three-argument one (`[: --: binary operator
+// expected`). It does not need one — POSIX `test` with two arguments treats the
+// second as the operand of the unary primary, whatever it starts with.
 func seedScript(srcPath, dst string) string {
-	return fmt.Sprintf("%s; if [ -d %q ]; then cp -a %q/. %q/; fi",
-		prepareScript(dst), srcPath, srcPath, dst)
+	src := shellQuote(srcPath)
+	return fmt.Sprintf("%s; if [ -d %s ]; then cp -a -- %s/. %s/; fi",
+		prepareScript(dst), src, src, shellQuote(dst))
+}
+
+// lookScript lists what a mounted volume holds. Its argument is opossum's own
+// constant mount point, which is exactly why it is quoted here: a guard that only
+// holds while a constant stays boring is not a guard, and this is the third of
+// three places that hand a path to a shell.
+//
+// The `--` is the same bet, and today it wins nothing: no compose file can reach
+// this argument, so there is no `-`-leading path for it to rescue. It is here so
+// that the day this stops being a constant is not the day it breaks.
+func lookScript(at string) string {
+	return "ls -a -- " + shellQuote(at)
 }
 
 // prepareScript is the first half of seedScript on its own: make the volume look
 // like a directory that was just created, and copy nothing into it.
 func prepareScript(dst string) string {
-	return fmt.Sprintf("rmdir %q 2>/dev/null || true", dst+"/lost+found")
+	return fmt.Sprintf("rmdir -- %s 2>/dev/null || true", shellQuote(dst+"/lost+found"))
+}
+
+// shellQuote wraps s so a POSIX shell reads it as exactly those characters. The
+// paths going into these scripts come from the compose file, and the shell that
+// runs them is inside a container — a path is a path, never a program.
+//
+// Single quotes are what makes that true: inside them a shell interprets nothing
+// at all, not `$`, not a backtick, not a backslash. The one character that cannot
+// appear is the closing quote itself, so each `'` leaves the quoted run, adds an
+// escaped one, and opens a new run: `it's` becomes `'it'\”s'`.
+//
+// This exists because `%q` looks like it does this job and does not. `%q` writes a
+// Go string literal — double-quoted, which is a form the shell also accepts and
+// reads quite differently: `$(…)`, backticks and `\` all still act. A mount target
+// of `data:/app/$(id)` had the substitution run inside opossum's own throwaway
+// container.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // lastNonEmptyLine is the final non-empty line of s. A runtime error says what

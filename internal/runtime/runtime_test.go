@@ -448,6 +448,74 @@ func TestSeedVolumeArgv(t *testing.T) {
 	// the shim can act on it (TestSeedsWithRootSoANonRootImageCanFillTheVolume).
 }
 
+// What these pin is the wiring, not the quoting: that the entry points still hand
+// the shell what the helpers build.
+//
+// The helpers themselves are pinned by the tests below, which run them under a
+// real `sh` — but every one of those keeps passing when a caller stops calling
+// them. Inlining the old, vulnerable script straight back into SeedVolume left
+// the entire suite green, which is the same shape of hole this change was written
+// to close: a guard that only holds while the caller keeps calling.
+func TestTheEntryPointsHandTheShellWhatTheHelpersBuild(t *testing.T) {
+	// VolumeEntries keeps its mount point as a local constant, so the want side
+	// repeats it here rather than importing it.
+	const lookAt = "/__opossum_look__"
+	for _, c := range []struct {
+		name string
+		call func(*Runtime)
+		want string
+	}{
+		{"SeedVolume", func(r *Runtime) { r.SeedVolume("demo_data", "img:1", "/src") }, seedScript("/src", seedMountPoint)},
+		{"PrepareVolume", func(r *Runtime) { r.PrepareVolume("demo_data", "img:1") }, prepareScript(seedMountPoint)},
+		{"VolumeEntries", func(r *Runtime) { r.VolumeEntries("demo_pgdata", "img:1") }, lookScript(lookAt)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			rt, read := loggingShim(t)
+			c.call(rt)
+			lines := read()
+			if len(lines) == 0 {
+				t.Fatal("no command was issued at all")
+			}
+			if got := scriptOf(t, lines[len(lines)-1]); got != c.want {
+				t.Errorf("the shell was handed\n  %q\nbut the helper builds\n  %q", got, c.want)
+			}
+		})
+	}
+}
+
+// The same guard in its strongest form: take what SeedVolume actually handed the
+// shell and run it. A caller that stops quoting doesn't merely differ from the
+// helper — it executes the path, which is the thing being prevented.
+func TestWhatSeedVolumeHandsTheShellDoesNotRunThePath(t *testing.T) {
+	root := t.TempDir()
+	rt, read := loggingShim(t)
+	rt.SeedVolume("demo_data", "img:1", "/app/$(touch ran)")
+	lines := read()
+	if len(lines) == 0 {
+		t.Fatal("SeedVolume issued no command")
+	}
+	cmd := exec.Command("/bin/sh", "-c", scriptOf(t, lines[len(lines)-1]))
+	cmd.Dir = root
+	// The seed can't do anything here — there is no such source path — so only the
+	// substitution is under test; the script's own exit status is not.
+	cmd.Run()
+	if _, err := os.Stat(filepath.Join(root, "ran")); err == nil {
+		t.Error("the path SeedVolume passed was executed, not read")
+	}
+}
+
+// scriptOf is the `sh -c` argument out of a logged argv line. The script is the
+// last argument, so everything after the flag is it, spaces and all.
+func scriptOf(t *testing.T, line string) string {
+	t.Helper()
+	const sep = " sh -c "
+	i := strings.Index(line, sep)
+	if i < 0 {
+		t.Fatalf("no `sh -c` in the logged command: %q", line)
+	}
+	return line[i+len(sep):]
+}
+
 // The seed script is opossum's own program, so run it under a real `sh` rather
 // than only reading it. (The interpreter that matters at runtime is the image's;
 // what is pinned here is the error handling opossum wrote around the copy.)
@@ -609,6 +677,266 @@ func TestSeedScriptReportsACopyItCannotMake(t *testing.T) {
 	}
 	if len(out) == 0 {
 		t.Error("the failure was silent; the caller has nothing to report")
+	}
+}
+
+// The paths in these scripts come from the compose file, and they are pasted into
+// a program a shell will run. `shellQuote` is the whole of what stands between the
+// two, so it is checked against a real shell rather than by reading it: whatever
+// goes in must come back out byte for byte.
+func TestShellQuoteSurvivesARoundTripThroughARealShell(t *testing.T) {
+	for _, s := range []string{
+		"/app/node_modules",
+		"", // an empty argument still has to stay one argument
+		"it's",
+		`'`,
+		`''`,
+		"$(id)",
+		"`id`",
+		"$HOME",
+		`a"b`,
+		`back\slash`,
+		"two words",
+		"semi;colon",
+		"pipe|and&more",
+		"glob*?[a-z]",
+		"~root",
+		"new\nline",
+		"tab\there",
+		"日本語",
+	} {
+		t.Run(fmt.Sprintf("%q", s), func(t *testing.T) {
+			// printf %s, not echo: echo mangles backslashes on some shells, which
+			// would make this test about echo.
+			out, err := exec.Command("/bin/sh", "-c", "printf %s "+shellQuote(s)).Output()
+			if err != nil {
+				t.Fatalf("sh could not run the quoted string: %v", err)
+			}
+			if string(out) != s {
+				t.Errorf("round trip changed the string: %q came back as %q", s, out)
+			}
+		})
+	}
+}
+
+// A path is a path. A mount target the compose file spells `data:/app/$(id)` used
+// to reach the seeding script through `%q`, which quotes the way Go does — with
+// double quotes, where a shell still runs command substitutions. This is the
+// direct evidence that it no longer executes: the substitution would leave a file
+// behind, and there must be no file.
+func TestSeedScriptDoesNotRunWhatIsWrittenInThePath(t *testing.T) {
+	root := t.TempDir()
+	// Relative, so the whole payload fits in a single path component; the script
+	// runs with root as its working directory, which is where the file would land.
+	for i, name := range []string{"$(touch ran0)", "`touch ran1`", "$(touch ran2)'; touch ran3; :'"} {
+		t.Run(name, func(t *testing.T) {
+			marker := filepath.Join(root, fmt.Sprintf("ran%d", i))
+			src := filepath.Join(root, name)
+			if err := os.Mkdir(src, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			// An inert destination, named rather than taken from t.TempDir(): Go
+			// builds that name out of the subtest's, which leaves `$(` and `)`
+			// intact — so the destination would silently carry a payload of its
+			// own, and a failure here would name the source as the culprit while
+			// the real one was the other end. The destination is covered
+			// deliberately in TestSeedScriptCopiesFromAPathWithShellCharactersInIt.
+			dst := filepath.Join(root, fmt.Sprintf("dst%d", i))
+			if err := os.Mkdir(dst, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command("/bin/sh", "-c", seedScript(src, dst))
+			cmd.Dir = root
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Errorf("seeding from %q failed: %v (%s)", name, err, out)
+			}
+			if _, err := os.Stat(marker); err == nil {
+				t.Errorf("the path %q was executed, not read: it created %s", name, marker)
+			}
+		})
+	}
+	// The third case also tries to break out of the quoting and run a second
+	// command; that one names its own marker.
+	if _, err := os.Stat(filepath.Join(root, "ran3")); err == nil {
+		t.Error("a path closing the quote ran a command of its own")
+	}
+}
+
+// Not executing the path is half of it; the other half is that seeding still
+// works for such a path. A quote that escaped everything into oblivion would pass
+// the test above and copy nothing — the failure mode seeding already had once,
+// where a volume silently came up empty.
+func TestSeedScriptCopiesFromAPathWithShellCharactersInIt(t *testing.T) {
+	for _, name := range []string{"$(id)", "it's", "a b", `a"b`, "semi;colon", "star*"} {
+		t.Run(name, func(t *testing.T) {
+			// Both ends carry a payload. The destination is opossum's own constant
+			// mount point today, so nothing else in these evals would notice it going
+			// unquoted — and a guard that only holds while a constant stays boring is
+			// not a guard.
+			//
+			// It carries a substitution as well as a space, because the two ways this
+			// can be got wrong fail on different characters: no quoting at all breaks
+			// on the space, while Go's quoting keeps spaces perfectly and only lets
+			// `$` and backticks through. A destination with a space alone would miss
+			// the second — which is the shape that was actually here.
+			src := filepath.Join(t.TempDir(), name)
+			dst := filepath.Join(t.TempDir(), "to $(id) "+name)
+			if err := os.Mkdir(src, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(dst, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(src, "f"), []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			out, err := exec.Command("/bin/sh", "-c", seedScript(src, dst)).CombinedOutput()
+			if err != nil {
+				t.Fatalf("seeding from %q failed: %v (%s)", name, err, out)
+			}
+			if _, err := os.Stat(filepath.Join(dst, "f")); err != nil {
+				// `[ -d ]` saw a different string than the one on disk, so opossum
+				// decided the image doesn't ship the path and stayed quiet.
+				t.Errorf("nothing was copied out of %q: %v", name, err)
+			}
+		})
+	}
+}
+
+// The look is the third place a path reaches a shell, and the one that decides
+// whether opossum warns about someone's existing data.
+//
+// What this pins is that the listing comes back from the path it was given. It is
+// not a demonstration of the worse failure — a look that exits 0 while listing
+// something else, which VolumeEntries would read as the volume's contents — and
+// it cannot be: the path is a constant inside VolumeEntries, so no test can hand
+// it one that misaddresses. Broken quoting reaches here as a failed `ls`, which
+// VolumeEntries reports as unknown rather than as empty.
+func TestLookScriptListsAPathWithShellCharactersInIt(t *testing.T) {
+	root := t.TempDir()
+	at := filepath.Join(root, "look $(touch ran) 'x'")
+	if err := os.Mkdir(at, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(at, "PG_VERSION"), []byte("16\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("/bin/sh", "-c", lookScript(at))
+	cmd.Dir = root
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("the look failed: %v", err)
+	}
+	if !strings.Contains(string(out), "PG_VERSION") {
+		t.Errorf("the look read a different path than the one it was given: %q", out)
+	}
+	if _, err := os.Stat(filepath.Join(root, "ran")); err == nil {
+		t.Error("the mount point was executed, not read")
+	}
+}
+
+// A mount target that starts with `-` is a path, not an option — and nothing
+// upstream disagrees: docker's parser passes `data:-rf` through with the target
+// intact, and Apple `container` mounts it and runs the container. It reaches
+// opossum as the seed's source, and `cp` read it as flags: exit 64, nothing
+// copied, and the volume came up empty behind a warning.
+//
+// Relative names, run from a working directory, because that is the shape the
+// path actually has: a target of `-rf` is what reaches the script, not a
+// `/…/-rf`. An absolute path can never start with a `-`, so an eval built on
+// t.TempDir() would be testing something that cannot happen.
+func TestSeedCopiesFromAPathThatLooksLikeAnOption(t *testing.T) {
+	for _, name := range []string{"-rf", "-a", "--help", "-"} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.Mkdir(filepath.Join(root, name), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, name, "f"), []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			// An ordinary destination: this is the volume's mount point, which opossum
+			// names itself and which no compose file can influence.
+			dst := filepath.Join(root, "seed")
+			if err := os.Mkdir(dst, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command("/bin/sh", "-c", seedScript(name, dst))
+			cmd.Dir = root
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Errorf("seeding from %q failed: %v (%s)", name, err, out)
+			}
+			if _, err := os.Stat(filepath.Join(dst, "f")); err != nil {
+				t.Errorf("nothing was copied out of %q: %v", name, err)
+			}
+		})
+	}
+}
+
+// The other two scripts take opossum's own mount point, so no compose file can
+// hand them a `-`-leading path and there is no bug here to fix today. What this
+// pins is the contract for the day that argument stops being a constant — the
+// same reason they are shell-quoted, which is also worth nothing while the
+// argument is `/__opossum_seed__`.
+//
+// Kept separate from the eval above, and named for what it is, so that the two
+// are not read as equal evidence: only that one covers something a compose file
+// can actually cause.
+func TestPrepareAndLookWouldSurviveAnOptionLikeMountPoint(t *testing.T) {
+	for _, at := range []string{"-rf", "-a", "--help", "-"} {
+		t.Run(at, func(t *testing.T) {
+			root := t.TempDir()
+			// lost+found belongs to the volume being prepared — the destination —
+			// which is what `at` stands for here.
+			if err := os.MkdirAll(filepath.Join(root, at, "lost+found"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, at, "PG_VERSION"), []byte("16\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			run := func(script string) (string, error) {
+				cmd := exec.Command("/bin/sh", "-c", script)
+				cmd.Dir = root
+				out, err := cmd.CombinedOutput()
+				return string(out), err
+			}
+
+			if out, err := run(prepareScript(at)); err != nil {
+				t.Errorf("prepare failed on %q: %v (%s)", at, err, out)
+			}
+			if _, err := os.Stat(filepath.Join(root, at, "lost+found")); err == nil {
+				t.Errorf("lost+found survived: the mount point %q was read as an option", at)
+			}
+			out, err := run(lookScript(at))
+			if err != nil {
+				t.Errorf("the look failed on %q: %v (%s)", at, err, out)
+			}
+			if !strings.Contains(out, "PG_VERSION") {
+				t.Errorf("the look read a different path than %q: %q", at, out)
+			}
+		})
+	}
+}
+
+// prepareScript builds the same kind of path and is the one that runs against
+// every nocopy volume, so it gets the same treatment. Its argument is a constant
+// today; the quoting is what keeps that from being the reason it is safe.
+func TestPrepareScriptQuotesTheDirectoryItRemoves(t *testing.T) {
+	root := t.TempDir()
+	dst := filepath.Join(root, "$(touch ran)")
+	if err := os.MkdirAll(filepath.Join(dst, "lost+found"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("/bin/sh", "-c", prepareScript(dst))
+	cmd.Dir = root
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("prepare failed: %v (%s)", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(root, "ran")); err == nil {
+		t.Error("the mount point was executed, not read")
+	}
+	if _, err := os.Stat(filepath.Join(dst, "lost+found")); err == nil {
+		t.Error("lost+found was left behind: the quoted path never matched the real one")
 	}
 }
 

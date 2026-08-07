@@ -105,6 +105,12 @@ func fakeShim(t *testing.T) func() []string {
 	logPath := filepath.Join(dir, "invocations.log")
 	t.Setenv("OPOSSUM_CONTAINER_BIN", fakeShimBin)
 	t.Setenv("FAKE_LOG", logPath)
+	// `up` watches each service for a second before calling it started. These evals
+	// drive the real binary, so the only way to reach that setting is the
+	// environment — and paying it in ~40 of them added 43s of pure sleep to a suite
+	// where none of them are about the window. It is exercised where it belongs, in
+	// the orchestrator's own evals.
+	t.Setenv("OPOSSUM_CRASH_GRACE", "0")
 	return func() []string {
 		b, err := os.ReadFile(logPath)
 		if err != nil {
@@ -1255,6 +1261,13 @@ func TestFromDockerComposeUnwritableDirStillStarts(t *testing.T) {
 		"name: demo\nservices:\n  db:\n    image: postgres:16\n    volumes:\n      - ./pgdata:/var/lib/postgresql/data\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// The bind source has to exist before the directory is sealed: without it the
+	// up fails for an unrelated reason (opossum cannot create a bind source, so
+	// the container cannot start), and this eval would pass or fail on something
+	// other than the overlay.
+	if err := os.Mkdir(filepath.Join(dir, "pgdata"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	t.Chdir(dir)
 	if err := os.Chmod(dir, 0o555); err != nil {
 		t.Fatal(err)
@@ -1350,7 +1363,7 @@ func TestFromDockerComposeNotesOnlyWritesNoOverlay(t *testing.T) {
 	fakeShim(t)
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte(
-		"name: demo\nservices:\n  ci:\n    image: someci\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n"), 0o644); err != nil {
+		"name: demo\nservices:\n  ci:\n    image: someci\n    volumes:\n      - ./sockdir:/var/run/docker.sock\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(dir)

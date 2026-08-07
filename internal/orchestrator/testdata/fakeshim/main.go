@@ -150,6 +150,24 @@ func run(args []string) int {
 				}
 			}
 		}
+		// A `-v name:/path` mount brings the volume into being — the real runtime
+		// creates it here, which is why opossum never issues a `volume create`.
+		// Recording it is what lets `volume ls` answer for what opossum has made,
+		// so a second `up` can be asked whether it left the first one's volume alone.
+		if dir := os.Getenv("STATE_DIR"); dir != "" {
+			for k, a := range args {
+				if k == 0 || args[k-1] != "-v" {
+					continue
+				}
+				// name:/target[:opts]. A bind mount's source is a path, not a volume,
+				// and the runtime does not create anything for it.
+				name, _, ok := strings.Cut(a, ":")
+				if !ok || name == "" || strings.HasPrefix(name, "/") || strings.HasPrefix(name, ".") {
+					continue
+				}
+				_ = os.WriteFile(volumePath(dir, name), []byte(name), 0o644)
+			}
+		}
 		// Record the config-hash (from -l opossum.config-hash=…) keyed by --name,
 		// so a later inspect reports it and up-idempotency evals can detect it.
 		if dir := os.Getenv("STATE_DIR"); dir != "" {
@@ -297,13 +315,34 @@ func run(args []string) int {
 		if os.Getenv("VOLUME_LS_FAIL") != "" {
 			return 1
 		}
-		if arg(1) == "ls" {
+		switch arg(1) {
+		case "ls":
 			// One name per line, as the real `container volume ls` prints them. A
 			// single line holding several names would answer "exists" only for the
 			// first — the parser reads the first field of each line — and a test that
 			// listed three volumes would silently be testing one.
-			for _, v := range strings.Fields(os.Getenv("VOLUME_LS")) {
+			//
+			// $VOLUME_LS is what existed before this test started; on top of it come
+			// the volumes opossum has made since, which the real runtime would list
+			// too. Without that half, "a volume opossum created last time is still
+			// there this time" can only be asserted by a test asserting its own
+			// setup — which says nothing about whether opossum created anything.
+			seen := map[string]bool{}
+			for _, v := range append(strings.Fields(os.Getenv("VOLUME_LS")), madeVolumes()...) {
+				if seen[v] {
+					continue
+				}
+				seen[v] = true
 				fmt.Println(v)
+			}
+		case "delete", "rm":
+			// `down -v` removes them, and then they are gone: the next `up` finds no
+			// volume and seeds a fresh one. A shim that kept them forever would make
+			// that sequence untestable.
+			if dir := os.Getenv("STATE_DIR"); dir != "" {
+				for _, v := range args[2:] {
+					os.Remove(volumePath(dir, v))
+				}
 			}
 		}
 
@@ -364,6 +403,33 @@ func run(args []string) int {
 // same way the shim in cmd/opossum/testdata does it, so a name carrying `/` or
 // `:` — an image ref, if this ever covers more than containers — can't escape the
 // state directory.
+// volumePath is where a volume opossum created is remembered. The real runtime
+// creates a volume as a side effect of running a container that mounts one, so
+// the record is written from the `run` case rather than from any `volume create`
+// — opossum never issues one.
+func volumePath(dir, name string) string {
+	return filepath.Join(dir, "volume-"+strings.NewReplacer("/", "_", ":", "_", ".", "_").Replace(name))
+}
+
+// madeVolumes lists the volumes recorded so far, in the order they were made.
+func madeVolumes() []string {
+	dir := os.Getenv("STATE_DIR")
+	if dir == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if b, err := os.ReadFile(filepath.Join(dir, e.Name())); err == nil && strings.HasPrefix(e.Name(), "volume-") {
+			out = append(out, strings.TrimSpace(string(b)))
+		}
+	}
+	return out
+}
+
 func gonePath(dir, name string) string {
 	return filepath.Join(dir, "gone-"+strings.NewReplacer("/", "_", ":", "_", ".", "_").Replace(name))
 }

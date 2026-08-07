@@ -179,6 +179,11 @@ list; codes are add-only and never change meaning.
   log lines and exits non-zero (so success never masks a dead service), but leaves
   the containers up for inspection. Read the embedded logs, fix the cause, and
   `up` again. (A dependency crash caught by a health gate is `[OPSM-401]` instead.)
+  `up` looks once when the container starts and again a second later, because a
+  service failing on its config is typically still `running` at the first look —
+  which is the whole second every successful `up` now spends. `OPOSSUM_CRASH_GRACE`
+  sets that window (`0` disables it, and with it the check for anything that
+  doesn't die instantly).
 - **`[OPSM-404]` … `the container CLI was not found on PATH`** → Apple's `container`
   isn't installed. Every runtime command (`up`, `ps`, `images`, `logs`, `stats`, …)
   fails this way with a non-zero exit — an empty `ps` table would be a lie. Install
@@ -205,11 +210,17 @@ list; codes are add-only and never change meaning.
   this service its own volume / a bind mount. Emitted both as a pre-flight warning
   (holder already running at `up`) and as the decoded failure if the run hits the
   raw `VZErrorDomain Code=2 "The storage device attachment is invalid"`.
-- **`[OPSM-104]` … `couldn't create host directory <path> for a bind mount`** → the
-  bind mount's host source doesn't exist and opossum couldn't create it (e.g. a
-  parent directory is read-only). Create it yourself (`mkdir -p <path>`) or fix the
-  parent's permissions, then `up` again — otherwise the container fails to start on
-  a missing bind source.
+- **`[OPSM-104]` … `needs the host directory <path> for a bind mount, and it could
+  not be created`** → the bind mount's host source doesn't exist and opossum
+  couldn't create it (e.g. a parent directory is read-only, or the path is a symlink
+  whose target is gone). **Fatal: the up stops at that service instead of starting
+  it, and rolls back whatever it had already started** — not a pre-flight, so
+  services earlier in the order do come up first and are then removed. It stops
+  because the container cannot start on a missing bind source, and the runtime's own
+  words for that (`path '…' does not exist`) arrive detached from the reason. Create
+  it yourself (`mkdir -p <path>`) or, for a broken symlink, point it somewhere that
+  exists; then `up` again. A source that already exists — including a config *file* —
+  is left alone: opossum neither creates nor replaces it.
 - **`[OPSM-105]` … a data directory is a bind mount** → Apple `container` bind mounts
   are host-owned and cannot be chowned from inside, so an image that takes ownership
   of its data directory at startup dies there. Two paths reach this code, and they
@@ -320,7 +331,7 @@ Every `[OPSM-NNN]` opossum can emit (add-only; grouped 1xx storage / 2xx network
 - `OPSM-101` — Postgres refused a data directory that still holds `lost+found` (a volume opossum didn't create).
 - `OPSM-102` — a named volume shared by two running services (exclusive attach).
 - `OPSM-103` — a named volume is already attached to another running container (cross-project VZError).
-- `OPSM-104` — couldn't create a bind mount's host source directory (permissions).
+- `OPSM-104` — couldn't create a bind mount's host source (permissions, or a symlink whose target is gone); fatal.
 - `OPSM-105` — a database data directory is a bind mount (host-owned, can't be chowned).
 - `OPSM-106` — a host device or session socket is mounted (a per-container VM can't reach it).
 - `OPSM-107` — a bind mount names a file that doesn't exist, so a directory stands in its place.
