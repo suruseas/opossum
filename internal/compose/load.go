@@ -328,7 +328,7 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 
 	// Expand ${VAR} references before parsing, using a `.env` file next to the
 	// first compose file (or the given --env-file paths) overlaid by the process env.
-	lookup, err := loadEnv(baseDir, envFiles)
+	scope, err := loadEnv(baseDir, envFiles)
 	if err != nil {
 		return nil, err
 	}
@@ -340,7 +340,7 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 		if err != nil {
 			return nil, fmt.Errorf("reading compose file: %w", err)
 		}
-		if data, err = interpolate(raw, lookup); err != nil {
+		if data, err = interpolate(raw, scope.lookup()); err != nil {
 			return nil, fmt.Errorf("interpolating %s: %w", paths[0], err)
 		}
 	} else {
@@ -351,7 +351,7 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 			if err != nil {
 				return nil, fmt.Errorf("reading compose file: %w", err)
 			}
-			if raw, err = interpolate(raw, lookup); err != nil {
+			if raw, err = interpolate(raw, scope.lookup()); err != nil {
 				return nil, fmt.Errorf("interpolating %s: %w", path, err)
 			}
 			var m map[string]any
@@ -477,7 +477,7 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 			svc.Volumes = collapseMountsByTarget(svc.Volumes)
 		}
 		// Fold env_file values into the environment (explicit `environment` wins).
-		env, err := resolveEnvFiles(baseDir, svc.EnvFile, svc.Environment)
+		env, err := resolveEnvFiles(baseDir, svc.EnvFile, svc.Environment, scope)
 		if err != nil {
 			return nil, fmt.Errorf("service %q: %w", name, err)
 		}

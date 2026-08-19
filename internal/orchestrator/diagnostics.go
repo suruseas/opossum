@@ -35,7 +35,7 @@ const (
 	codeVolumeAttachBusy      diagCode = "OPSM-103" // a named volume is already attached to another running container
 	codeBindDirCreate         diagCode = "OPSM-104" // couldn't create a bind mount's host source directory
 	codeBindDataDirChown      diagCode = "OPSM-105" // a database data directory is a bind mount (can't be chowned)
-	codeHostPortInUse         diagCode = "OPSM-201" // a published host port is already taken (pre-flight)
+	codeHostPortInUse         diagCode = "OPSM-201" // a published host port is already taken
 	codeDNSDomainAbsent       diagCode = "OPSM-202" // the DNS domain isn't registered (no bare-name discovery)
 	codeInternalEgress        diagCode = "OPSM-203" // an internal network: no internet egress / no name resolution
 	codeDockerSocket          diagCode = "OPSM-204" // a service mounts docker.sock (Apple container has none)
@@ -43,6 +43,7 @@ const (
 	codeHostDeviceMount       diagCode = "OPSM-106" // a host device or session socket is mounted (a per-container VM can't reach it)
 	codeBindFilePlaceholder   diagCode = "OPSM-107" // a bind mount names a file that doesn't exist, so a directory stands in its place
 	codeVolumeNotSeeded       diagCode = "OPSM-108" // a fresh volume could not be filled or cleared using the image (no shell to run it with)
+	codeSymlinkedSocket       diagCode = "OPSM-109" // a bind source is a symlink to a socket, which the runtime refuses to mount
 	codeHostPortRemapped      diagCode = "OPSM-206" // a container-only port's mirrored host port was taken, so opossum picked a free one
 	codeBuildTmpContext       diagCode = "OPSM-301" // build context under /private/tmp (builder can't read it)
 	codeBuildSymlink          diagCode = "OPSM-302" // build context is a symlink (builder may reject it)
@@ -56,6 +57,7 @@ const (
 	codeSupervisorAction      diagCode = "OPSM-409" // the supervisor restarted a service, or gave up on one
 	codeSupervisorLogTrimmed  diagCode = "OPSM-410" // the supervisor's log hit its size cap and lost its older half
 	codeSupervisorLogUncapped diagCode = "OPSM-411" // the supervisor could not open a size-capped log and is writing without a bound
+	codeImageNoArm64          diagCode = "OPSM-412" // the image has no arm64 build, so the container cannot start here
 	codeServiceExited         diagCode = "OPSM-407" // a service's container exited right after starting (no health gate)
 	codeIgnoredTopField       diagCode = "OPSM-501" // unsupported top-level compose field(s), ignored
 	codeIgnoredField          diagCode = "OPSM-502" // unsupported service compose field(s), ignored
@@ -70,11 +72,11 @@ const (
 // AGENTS.md, so adding a code forces documenting it.
 var allDiagCodes = []diagCode{
 	codePGDATADatadir, codeSharedVolume, codeVolumeAttachBusy, codeBindDirCreate, codeBindDataDirChown, codeHostDeviceMount,
-	codeBindFilePlaceholder, codeVolumeNotSeeded,
+	codeBindFilePlaceholder, codeVolumeNotSeeded, codeSymlinkedSocket,
 	codeHostPortInUse, codeDNSDomainAbsent, codeInternalEgress, codeDockerSocket, codeExternalNetAbsent, codeHostPortRemapped,
 	codeBuildTmpContext, codeBuildSymlink,
 	codeDepNotRunning, codeOrphans, codeDepNoHealth,
-	codeIgnoredTopField, codeIgnoredField, codeRuntimeAbsent, codeRuntimeStopped, codeRuntimeAutoStart, codeServiceExited, codeSupervisorStarted, codeSupervisorAction,
+	codeIgnoredTopField, codeIgnoredField, codeRuntimeAbsent, codeRuntimeStopped, codeRuntimeAutoStart, codeServiceExited, codeSupervisorStarted, codeSupervisorAction, codeImageNoArm64,
 	codeSupervisorLogTrimmed, codeSupervisorLogUncapped,
 	codeWatchRebuild, codeWatchRestart, codeWatchSync, codeWatchSetup, codeWatchError,
 }

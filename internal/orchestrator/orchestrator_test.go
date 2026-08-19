@@ -3076,7 +3076,12 @@ func TestStatsHostAllUnmapped(t *testing.T) {
 func TestUpWarnsOnDockerSocketMount(t *testing.T) {
 	rt, _ := fakeShim(t)
 	p := project("demo", map[string]*compose.Service{
-		"portainer": {Image: "portainer/portainer-ce", Volumes: []string{"/var/run/docker.sock:/var/run/docker.sock"}},
+		// A path that is not on this machine: the warning is about what the compose
+		// file says, and has to read the same whether or not Docker is installed on
+		// the host running the eval. (When the path really is a symlink to a socket,
+		// the up is refused outright — TestUpRefusesASymlinkedSocketMount.)
+		"portainer": {Image: "portainer/portainer-ce",
+			Volumes: []string{filepath.Join(t.TempDir(), "absent", "docker.sock") + ":/var/run/docker.sock"}},
 	})
 	var out bytes.Buffer
 	if err := orchestrator.New(p, rt, "opossum", &out).Up(true); err != nil {
@@ -3158,6 +3163,239 @@ func TestUpStopsWhenABindSourceCannotBeCreated(t *testing.T) {
 		if strings.HasPrefix(line, "run -d") {
 			t.Errorf("the service was started even though its mount could not work: %q", line)
 		}
+	}
+}
+
+// socketAt makes a real unix socket, outside t.TempDir() because a socket path is
+// capped near 104 bytes and the name this package's tests generate blows past it —
+// a listen that fails turns the eval into a skip, and a skipped eval guards
+// nothing.
+func socketAt(t *testing.T) (path string, dir string) {
+	t.Helper()
+	d, err := os.MkdirTemp("", "sk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(d) })
+	p := filepath.Join(d, "s.sock")
+	l, err := net.Listen("unix", p)
+	if err != nil {
+		t.Fatalf("could not make a unix socket at %s (%d bytes): %v", p, len(p), err)
+	}
+	t.Cleanup(func() { l.Close() })
+	return p, d
+}
+
+// A symlink whose target is a socket cannot be mounted here, and that exact
+// combination is the whole of it: measured against `container` 1.1.0, a socket by
+// its own path mounts fine, a symlink to a file or a directory mounts fine, and
+// only the two together fail with `mount failed with errno 95`.
+//
+// Where Docker Desktop is installed it links `/var/run/docker.sock` to a socket,
+// which is how an earlier version of this read the failure as "a socket cannot be
+// a bind source" and refused mounts that work.
+func TestUpRefusesASymlinkedSocketMount(t *testing.T) {
+	sock, dir := socketAt(t)
+	link := filepath.Join(dir, "docker.sock")
+	if err := os.Symlink(sock, link); err != nil {
+		t.Fatal(err)
+	}
+
+	rt, log := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"ci": {Image: "someci", Volumes: []string{link + ":/var/run/docker.sock"}},
+	})
+	var out bytes.Buffer
+	err := orchestrator.New(p, rt, "opossum", &out).Up(true)
+	if err == nil {
+		t.Fatal("a mount that cannot work must fail the up rather than be attempted")
+	}
+	if !strings.Contains(err.Error(), "[OPSM-109]") || !strings.Contains(err.Error(), "errno 95") {
+		t.Errorf("the error should name the code and what the runtime does, got: %v", err)
+	}
+	// The way out is in the message: the thing the link points at does mount.
+	if !strings.Contains(err.Error(), sock) {
+		t.Errorf("the error should name what the link resolves to, got: %v", err)
+	}
+	for _, line := range log() {
+		if strings.HasPrefix(line, "run ") || strings.HasPrefix(line, "network create") {
+			t.Errorf("the up should have stopped before touching the runtime, got: %q", line)
+		}
+	}
+}
+
+// The three shapes that DO work must keep working — this is where the previous
+// attempt went wrong, refusing every socket and so breaking ups that were fine.
+func TestUpDoesNotRefuseTheMountsThatWork(t *testing.T) {
+	sock, dir := socketAt(t)
+	fileLink := filepath.Join(dir, "to-file")
+	dirLink := filepath.Join(dir, "to-dir")
+	sub := filepath.Join(dir, "sub")
+	plain := filepath.Join(dir, "plain.txt")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(plain, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(plain, fileLink); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(sub, dirLink); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, src := range map[string]string{
+		"a socket by its own path": sock,
+		"a symlink to a file":      fileLink,
+		"a symlink to a directory": dirLink,
+	} {
+		t.Run(name, func(t *testing.T) {
+			rt, _ := fakeShim(t)
+			p := project("demo", map[string]*compose.Service{
+				"app": {Image: "app:1", Volumes: []string{src + ":/x"}},
+			})
+			if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true); err != nil {
+				t.Errorf("this mount works on the real runtime, so the up must not refuse it: %v", err)
+			}
+		})
+	}
+}
+
+// Refusing the first volume of the first service is the easy half. These are the
+// positions a check written as one nested loop quietly stops looking at, and each
+// row is a mutation that survived the first version of this eval: examining only
+// order[0], examining only Volumes[0], and reading the mount as written instead of
+// resolving it. The last one is the least academic — a compose bind source is
+// usually relative, so an unresolved path simply never matches anything on disk.
+func TestUpFindsTheSymlinkedSocketWhereverItSits(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		place func(link string) (svcs map[string]*compose.Service, mount string)
+	}{
+		{"not the first service", func(link string) (map[string]*compose.Service, string) {
+			return map[string]*compose.Service{
+				"aaa": {Image: "a:1"},
+				"zzz": {Image: "z:1", Volumes: []string{link + ":/var/run/docker.sock"},
+					DependsOn: compose.DependsOn{{Name: "aaa"}}},
+			}, link
+		}},
+		{"not the first volume", func(link string) (map[string]*compose.Service, string) {
+			return map[string]*compose.Service{
+				"ci": {Image: "ci:1", Volumes: []string{
+					"data:/data",
+					link + ":/var/run/docker.sock",
+				}},
+			}, link
+		}},
+		{"written relative to the compose file", func(link string) (map[string]*compose.Service, string) {
+			return map[string]*compose.Service{
+				"ci": {Image: "ci:1", Volumes: []string{"./" + filepath.Base(link) + ":/var/run/docker.sock"}},
+			}, link
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sock, dir := socketAt(t)
+			link := filepath.Join(dir, "docker.sock")
+			if err := os.Symlink(sock, link); err != nil {
+				t.Fatal(err)
+			}
+			svcs, _ := tc.place(link)
+
+			rt, log := fakeShim(t)
+			p := project("demo", svcs)
+			// The relative row needs the compose file to sit beside the link;
+			// harmless for the others.
+			p.BaseDir = dir
+			err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true)
+			if err == nil {
+				t.Fatal("a mount that cannot work must fail the up wherever it appears")
+			}
+			if !strings.Contains(err.Error(), "[OPSM-109]") {
+				t.Errorf("want the symlinked-socket refusal, got: %v", err)
+			}
+			// And it is still a pre-flight: nothing started, so there is nothing
+			// to roll back.
+			for _, line := range log() {
+				if strings.HasPrefix(line, "run ") || strings.HasPrefix(line, "network create") {
+					t.Errorf("the up should have stopped before touching the runtime, got: %q", line)
+				}
+			}
+		})
+	}
+}
+
+// A bind source that is a symlink pointing at nothing is a different problem with
+// different words (OPSM-104), and it reaches the socket check first: Stat fails
+// there rather than reporting a mode. Without this, dropping the error guard on
+// that Stat leaves every eval green while `up` panics on the nil result.
+func TestUpDoesNotReadADanglingSymlinkAsASocket(t *testing.T) {
+	_, dir := socketAt(t)
+	link := filepath.Join(dir, "docker.sock")
+	if err := os.Symlink(filepath.Join(dir, "nothing-here"), link); err != nil {
+		t.Fatal(err)
+	}
+
+	rt, _ := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"ci": {Image: "ci:1", Volumes: []string{link + ":/var/run/docker.sock"}},
+	})
+	err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true)
+	if err == nil {
+		t.Fatal("a bind source that points at nothing must fail the up")
+	}
+	if strings.Contains(err.Error(), "[OPSM-109]") || strings.Contains(err.Error(), "errno 95") {
+		t.Errorf("a dangling link is not a socket mount; the message should say what it is, got: %v", err)
+	}
+}
+
+// `opossum run` reaches the runtime by its own path, and a check wired into `up`
+// alone is a hole — this is the second time a mount check has had to be carried
+// across to the one-off, so it gets an eval of its own rather than a promise.
+func TestRunRefusesASymlinkedSocketMount(t *testing.T) {
+	sock, dir := socketAt(t)
+	link := filepath.Join(dir, "docker.sock")
+	if err := os.Symlink(sock, link); err != nil {
+		t.Fatal(err)
+	}
+
+	rt, log := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"ci": {Image: "ci:1", Volumes: []string{link + ":/var/run/docker.sock"}},
+	})
+	err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).
+		RunOneOff("ci", []string{"true"}, orchestrator.RunOneOffOptions{NoDeps: true})
+	if err == nil {
+		t.Fatal("`run` must refuse the mount `up` refuses, not hand it to the runtime")
+	}
+	if !strings.Contains(err.Error(), "[OPSM-109]") {
+		t.Errorf("want the symlinked-socket refusal, got: %v", err)
+	}
+	for _, line := range log() {
+		if strings.HasPrefix(line, "run ") {
+			t.Errorf("the one-off should have stopped before the mount was issued, got: %q", line)
+		}
+	}
+}
+
+// A dry run is exactly where you want to hear that the real one cannot work, so
+// the refusal is not skipped there. It only reads the host — the checks skipped
+// under --dry-run are the ones that create directories.
+func TestUpDryRunStillRefusesASymlinkedSocketMount(t *testing.T) {
+	sock, dir := socketAt(t)
+	link := filepath.Join(dir, "docker.sock")
+	if err := os.Symlink(sock, link); err != nil {
+		t.Fatal(err)
+	}
+
+	rt, _ := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"ci": {Image: "ci:1", Volumes: []string{link + ":/var/run/docker.sock"}},
+	})
+	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
+	o.SetDryRun(true)
+	if err := o.Up(true); err == nil || !strings.Contains(err.Error(), "[OPSM-109]") {
+		t.Errorf("a dry run should report the mount that cannot work, got: %v", err)
 	}
 }
 

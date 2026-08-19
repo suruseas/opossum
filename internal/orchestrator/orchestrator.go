@@ -471,8 +471,19 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 	// `lost+found` out of the volumes it creates, so the mount that used to be
 	// predicted to fail is now the one that works. What is left is decoded from
 	// initdb's own refusal when it happens (crashHint).
+	// Before the warning: when opossum can see on the host that the mount is
+	// impossible, the refusal says everything the warning would and stops. Printing
+	// both would be the same sentence twice, once as advice and once as the reason
+	// the up ended.
 	for _, name := range order {
-		o.warnDockerSocket(name, o.Project.Services[name])
+		svc := o.Project.Services[name]
+		if svc == nil {
+			continue
+		}
+		if err := o.refuseSymlinkedSocketMounts(name, svc.Volumes); err != nil {
+			return err
+		}
+		o.warnDockerSocket(name, svc)
 	}
 	o.warnSharedNamedVolumes(order)
 	o.warnBusyNamedVolumes(order)
@@ -1428,7 +1439,8 @@ func (o *Orchestrator) waitHealthy(name string, hc *compose.Healthcheck) error {
 			// container — otherwise the usual "check `opossum logs`" hint points at a
 			// container that's already gone.
 			if logs := o.rt.CaptureLogs(cname, 15); logs != "" {
-				return fmt.Errorf("[OPSM-401] container is not running (state %q); its last log lines:\n%s%s",
+				return fmt.Errorf("[%s] container is not running (state %q); its last log lines:\n%s%s",
+					codeDepNotRunning,
 					info.State, indentLines(logs), o.crashHint(name, logs))
 			}
 			return fmt.Errorf("[%s] container is not running (state %q)", codeDepNotRunning, info.State)
@@ -1788,6 +1800,23 @@ func (o *Orchestrator) decodeStartError(name string, err error) error {
 // FILE whose host source is missing. Returns "" when no signature matches (so
 // callers fall back to the generic start-failed message). The raw stderr was
 // already streamed live; this only adds the fix.
+//
+// Each hint carries a code, because prose is what a person reads and a code is
+// what a program branches on. Anything sorting failures into diagnosed and
+// undiagnosed has only the code to sort on, so an accurate hint without one gets
+// filed as undiagnosed — the wording is unmatchable and changes freely.
+//
+// Two of the three reuse a code rather than minting one. A code indexes a fix, not
+// a place in the source: the port conflict is the one OPSM-201's pre-flight names
+// and sometimes cannot see, and the unresolvable bind mount is the placeholder
+// directory OPSM-107 warns about, arriving as a failure instead of a warning. Same
+// cause, same way out, so a reader who looks up either code should land on one
+// entry rather than two that agree.
+//
+// The generic startFailed stays uncoded on purpose. It is the case where opossum
+// has nothing specific to say, so there is no fix for a code to index — and coding
+// it would make every start failure look diagnosed, which is exactly the
+// distinction this decoding exists to draw.
 func runErrorHint(svc *compose.Service, err error) string {
 	var re *runtime.RunError
 	if !errors.As(err, &re) {
@@ -1796,11 +1825,12 @@ func runErrorHint(svc *compose.Service, err error) string {
 	s := re.Stderr
 	switch {
 	case strings.Contains(s, "does not support required platforms"):
-		return "\n  → this image has no build for Apple silicon (arm64). Add `platform: linux/amd64` to the service — " +
-			"opossum runs an amd64 image through Rosetta."
+		return "\n  → [" + string(codeImageNoArm64) + "] this image has no build for Apple silicon (arm64). " +
+			"Add `platform: linux/amd64` to the service — opossum runs an amd64 image through Rosetta."
 	case strings.Contains(s, "Address already in use"):
-		hint := "\n  → a published host port is already in use, which opossum's pre-flight can't always see (a port held " +
-			"by the runtime itself, like its built-in DNS on 53). Remap the port in the compose file"
+		hint := "\n  → [" + string(codeHostPortInUse) + "] a published host port is already in use, which opossum's " +
+			"pre-flight can't always see (a port held by the runtime itself, like its built-in DNS on 53). " +
+			"Remap the port in the compose file"
 		if svc != nil {
 			if addrs := hostPublishAddrs(svc.Ports); len(addrs) > 0 {
 				hint += " (this service publishes " + strings.Join(addrs, ", ") + ")"
@@ -1833,8 +1863,9 @@ func runErrorHint(svc *compose.Service, err error) string {
 		if path != "" {
 			where = "the bind mount for " + path
 		}
-		return "\n  → " + where + " couldn't be resolved. If it's a config FILE, create it on the host first — opossum " +
-			"creates a missing bind source as a directory, which can't mount onto a file path."
+		return "\n  → [" + string(codeBindFilePlaceholder) + "] " + where + " couldn't be resolved. If it's a config " +
+			"FILE, create it on the host first — opossum creates a missing bind source as a directory, which can't " +
+			"mount onto a file path."
 	}
 	return ""
 }
@@ -2037,6 +2068,69 @@ func (o *Orchestrator) warnDockerSocket(name string, svc *compose.Service) {
 			return
 		}
 	}
+}
+
+// refuseSymlinkedSocketMounts fails the up when a bind source is a symlink whose
+// target is a socket, before anything starts.
+//
+// That combination, and only that combination, cannot be mounted here. Measured
+// against `container` 1.1.0, separating the three things that a single earlier
+// measurement had confounded:
+//
+//	socket, by its real path            works
+//	symlink → regular file              works
+//	symlink → directory                 works
+//	symlink → socket                    mount failed with errno 95
+//
+// Location has nothing to do with it: a regular file in /var/run mounts, and the
+// failure reproduces for a socket and a symlink made side by side in a temp
+// directory. Where Docker Desktop is installed it links /var/run/docker.sock to
+// a socket, which is why an earlier version of this read the failure as "a socket
+// cannot be a bind source" and refused mounts that work.
+//
+// This only reads the host, so it runs under --dry-run too: a dry run is where
+// you want to hear that the real one cannot work. The bind-directory check below
+// is skipped there instead, because that one creates directories.
+//
+// Refusing rather than warning, for the same reason as the bind directory above:
+// the start was going to fail, a failed start rolls the project back anyway, and
+// the runtime's own words for it are four levels of nested `internalError`.
+// Takes the same (service, vols) shape as ensureBindDirs so that both callers of
+// one are callers of the other: `up` and `run` reach the runtime by different
+// paths, and a check wired into only one of them is a hole that shows up as the
+// runtime's own error the first time somebody uses the other verb.
+func (o *Orchestrator) refuseSymlinkedSocketMounts(service string, vols []string) error {
+	for _, v := range vols {
+		mount, target, _, ok := splitMount(v)
+		if !ok || !isHostPath(mount) {
+			continue
+		}
+		src := o.resolvePath(mount)
+		// Lstat sees the link itself; Stat follows it. Both halves are the
+		// finding: the link alone is fine, and the socket alone is fine. Stat
+		// also fails outright on a dangling link, which is not this problem —
+		// ensureBindDirs has words for that one.
+		li, lerr := os.Lstat(src)
+		if lerr != nil || li.Mode()&os.ModeSymlink == 0 {
+			continue
+		}
+		fi, serr := os.Stat(src)
+		if serr != nil || fi.Mode()&os.ModeSocket == 0 {
+			continue
+		}
+		resolved, _ := filepath.EvalSymlinks(src)
+		hint := ""
+		if resolved != "" {
+			hint = fmt.Sprintf("\n  mounting %s — what the link points at — works, so that is the way out "+
+				"if the service really needs this socket", resolved)
+		}
+		return fmt.Errorf("[%s] service %q mounts %s at %s, and that cannot be done here: the path is a "+
+			"symlink to a socket, which this runtime refuses (`mount failed with errno 95`)\n"+
+			"  a socket reached by its own path mounts fine, and so does a symlink to a file or a "+
+			"directory — it is the combination that fails%s",
+			codeSymlinkedSocket, service, src, target, hint)
+	}
+	return nil
 }
 
 // indentLines prefixes each line of s with two spaces, for embedding a captured
@@ -2471,6 +2565,9 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 	cname := o.containerName(service + "-run")
 	o.rt.Delete(cname) // clear a stale one-off of the same name
 
+	if err := o.refuseSymlinkedSocketMounts(service, svc.Volumes); err != nil {
+		return err
+	}
 	if err := o.ensureBindDirs(service, svc.Volumes); err != nil {
 		return err
 	}

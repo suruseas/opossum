@@ -41,12 +41,14 @@ var (
 var codesWithRecoveryProse = []diagCode{
 	codePGDATADatadir, codeSharedVolume, codeVolumeAttachBusy, codeBindDirCreate,
 	codeBindDataDirChown, codeHostDeviceMount, codeBindFilePlaceholder, codeVolumeNotSeeded,
+	codeSymlinkedSocket,
 	codeHostPortInUse, codeDNSDomainAbsent, codeInternalEgress, codeDockerSocket,
 	codeExternalNetAbsent, codeHostPortRemapped,
 	codeBuildTmpContext, codeBuildSymlink,
 	codeOrphans,
 	codeDepNotRunning, codeRuntimeAbsent, codeRuntimeStopped, codeRuntimeAutoStart,
 	codeServiceExited, codeSupervisorStarted, codeSupervisorAction,
+	codeImageNoArm64,
 }
 
 // The index is what an agent scans to turn a code it just saw into a fix, so it
@@ -215,5 +217,56 @@ func TestRuntimeMessagesExplainWhy(t *testing.T) {
 		if !strings.Contains(msg, "OPSM-40") {
 			t.Errorf("%s must carry an OPSM code, got: %s", name, msg)
 		}
+	}
+}
+
+// A code written as a literal is a code the ledger does not own: retiring or
+// renaming the constant leaves it behind, and nothing here would notice. One had
+// already drifted that way, so the constants are made the only spelling.
+//
+// The declarations hold bare "OPSM-NNN" values; what this bans is the emitted
+// form, the bracketed code baked into a message instead of formatted from a
+// constant.
+//
+// Scope is this package, which today is the only one that emits codes at all. The
+// day another package does, this has to grow to reach it.
+func TestCodesAreEmittedFromConstantsNotLiterals(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no sources found — this test would pass by looking at nothing")
+	}
+	var sources []string
+	for _, f := range files {
+		if !strings.HasSuffix(f, "_test.go") {
+			sources = append(sources, f)
+		}
+	}
+	if len(sources) == 0 {
+		t.Fatal("every source was skipped — this test would pass by looking at nothing")
+	}
+	literalCode := regexp.MustCompile(`"[^"]*\[OPSM-\d+\]`)
+	var scanned int
+	for _, f := range sources {
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		scanned++
+		for i, line := range strings.Split(string(src), "\n") {
+			if literalCode.MatchString(line) {
+				t.Errorf("%s:%d writes a code as a literal; format it from its constant instead:\n  %s",
+					f, i+1, strings.TrimSpace(line))
+			}
+		}
+	}
+	// Counted against the whole list, not against zero. A loop that stops early
+	// leaves most of the package unread while every "did it look at anything"
+	// guard still passes, so the guard has to be "did it look at all of it".
+	if scanned != len(sources) {
+		t.Fatalf("scanned %d of %d sources — the loop is stopping early, so most of the "+
+			"package is unchecked", scanned, len(sources))
 	}
 }

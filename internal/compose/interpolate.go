@@ -55,49 +55,126 @@ func defaultHostGateway() string {
 	return hostGWAddr
 }
 
-// loadEnv builds the variable lookup used for interpolation: values from a
-// `.env` file in dir, overlaid by the process environment (the shell wins, as in
-// docker-compose). A missing .env file is not an error.
-func loadEnv(dir string, envFiles []string) (varLookup, error) {
-	var fromFile map[string]string
-	if len(envFiles) > 0 {
-		// Explicit --env-file(s) replace the default .env; later files win, and a
-		// named file that's missing is an error (unlike the optional default .env).
-		fromFile = map[string]string{}
-		for _, f := range envFiles {
-			if _, err := os.Stat(f); err != nil {
-				return nil, fmt.Errorf("env file %q: %w", f, err)
-			}
-			m, err := parseDotEnv(f)
-			if err != nil {
-				return nil, err
-			}
-			for k, v := range m {
-				fromFile[k] = v
-			}
-		}
-	} else {
-		m, err := parseDotEnv(filepath.Join(dir, ".env"))
-		if err != nil {
-			return nil, err
-		}
-		fromFile = m
+// envScope is the layered scope an env-file value expands against.
+//
+// The layers exist because "which definition wins" has two different answers
+// depending on whether the other definition is at the same level. Measured
+// against docker compose v5.3.1:
+//
+//   - A strictly outer level always wins. The shell beats any env file, and the
+//     project's `.env` beats a key defined on the line above in a service's
+//     `env_file:`.
+//   - Within one level, the files behave as a single map filled top to bottom:
+//     the LAST assignment wins, and a file's own line beats a file read before
+//     it. `one.env` setting `A=first` then `two.env` setting `A=second` and
+//     reading `B=${A}` gives `B=second`, not `B=first`.
+//
+// The second rule is why level is a map rather than another lookup: a file's own
+// entries and the entries of files already read at that level are the same
+// thing, so they cannot be ranked against each other at all.
+type envScope struct {
+	// outer is everything defined at a strictly outer level. It wins.
+	outer varLookup
+	// level accumulates this level's entries as each file is read. It is written
+	// through while a file is being parsed, so a value sees the keys above it —
+	// including one a previous file at this level defined and this file has since
+	// overwritten.
+	level map[string]string
+	// builtin is opossum's own OPOSSUM_HOST_GATEWAY, ranked last so that both the
+	// shell and any env file can override it — the contract this package and
+	// docs/compatibility.md both state.
+	builtin varLookup
+}
+
+// lookup is the scope as it stands: outer, then this level, then the built-in.
+// It serves both the compose file and a value being expanded mid-file — level is
+// a live map, so a value sees the keys above it and not the ones below simply
+// because they are not in the map yet. There is no second, "finished" variant:
+// two identical implementations would be two places to edit.
+func (s envScope) lookup() varLookup {
+	return chainLookup(s.outer, mapLookup(s.level), s.builtin)
+}
+
+// inner returns the scope for files read at a level underneath this one — a
+// service's `env_file:`. This scope's outer and level become strictly outer, and
+// the new level starts empty.
+//
+// between is the service's own `environment:` block, which docker compose ranks
+// under the project's `.env` and over the `env_file:` chain. It is a real level
+// and not a detail: an `env_file:` value may reference a key that exists only in
+// `environment:`, and where both define a key, `environment:` is what the file's
+// values see.
+//
+// The built-in is NOT folded into the outer chain, even though lookup() would
+// put it there. Folding it made it outrank the inner level, so an `env_file:`
+// that set OPOSSUM_HOST_GATEWAY could not use its own value on the next line —
+// one file holding two values for one variable, which is the exact defect this
+// package fixed one level up. It stays ranked last at every level.
+func (s envScope) inner(between map[string]string) envScope {
+	return envScope{
+		outer:   chainLookup(s.outer, mapLookup(s.level), mapLookup(between)),
+		level:   map[string]string{},
+		builtin: s.builtin,
 	}
+}
+
+// loadEnv builds the scope used for interpolation: values from a `.env` file in
+// dir (or the given --env-file paths), the process environment, and the built-in.
+// A missing default .env file is not an error.
+func loadEnv(dir string, envFiles []string) (envScope, error) {
+	scope := envScope{
+		outer: func(name string) (string, bool) { return os.LookupEnv(name) },
+		level: map[string]string{},
+		// Resolved lazily so it costs nothing unless referenced.
+		builtin: func(name string) (string, bool) {
+			if name == hostGatewayVar {
+				if addr := hostGatewayFunc(); addr != "" {
+					return addr, true
+				}
+			}
+			return "", false
+		},
+	}
+
+	files := envFiles
+	if len(files) == 0 {
+		files = []string{filepath.Join(dir, ".env")}
+	}
+	// Explicit --env-file(s) replace the default .env; later files win, and a
+	// named file that's missing is an error (unlike the optional default .env).
+	named := len(envFiles) > 0
+	for _, f := range files {
+		if named {
+			if _, err := os.Stat(f); err != nil {
+				return envScope{}, fmt.Errorf("env file %q: %w", f, err)
+			}
+		}
+		if _, err := parseDotEnv(f, scope); err != nil {
+			return envScope{}, err
+		}
+	}
+	return scope, nil
+}
+
+// mapLookup adapts a map to a varLookup. The map is captured by reference, so a
+// lookup built from one that is still being filled sees each entry as it lands.
+func mapLookup(m map[string]string) varLookup {
 	return func(name string) (string, bool) {
-		if v, ok := os.LookupEnv(name); ok {
-			return v, true
-		}
-		if v, ok := fromFile[name]; ok {
-			return v, true
-		}
-		// Built-in fallback, resolved lazily so it costs nothing unless referenced.
-		if name == hostGatewayVar {
-			if addr := hostGatewayFunc(); addr != "" {
-				return addr, true
+		v, ok := m[name]
+		return v, ok
+	}
+}
+
+// chainLookup tries each scope in turn, first match winning.
+func chainLookup(scopes ...varLookup) varLookup {
+	return func(name string) (string, bool) {
+		for _, s := range scopes {
+			if v, ok := s(name); ok {
+				return v, true
 			}
 		}
 		return "", false
-	}, nil
+	}
 }
 
 // parseDotEnv reads a KEY=VALUE (or KEY: VALUE) file, matching docker compose's
@@ -105,8 +182,27 @@ func loadEnv(dir string, envFiles []string) (varLookup, error) {
 // is dropped, and surrounding single/double quotes are stripped. A value whose
 // opening quote isn't closed on the same line continues across lines — e.g. a
 // multi-line PEM key — keeping the embedded newlines. A missing file yields an
-// empty map (no error). Values are taken literally (no nested interpolation).
-func parseDotEnv(path string) (map[string]string, error) {
+// empty map (no error).
+//
+// Values are expanded against scope plus the entries already read from this file,
+// so `B=${A}/b` after `A=/a` gives `/a/b`. The rules were measured against docker
+// compose v5.3.1 rather than assumed, and two of them are not what a reader would
+// guess:
+//
+//   - Only what is defined ABOVE the line is visible. A reference to a key defined
+//     further down expands to empty, not to that key's value.
+//   - A single-quoted value is NOT expanded, the way a shell treats single quotes.
+//     Double-quoted and unquoted values are.
+//
+// An undefined reference with no default expands to empty (interpolate's rule),
+// which is also what compose does here.
+func parseDotEnv(path string, scope envScope) (map[string]string, error) {
+	if scope.level == nil {
+		// Writing through to a nil map panics several branches later, which is a
+		// poor way to learn that a scope was built by hand instead of by loadEnv
+		// or inner.
+		return nil, fmt.Errorf("reading %s: the scope has no level map", path)
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -139,6 +235,7 @@ func parseDotEnv(path string) (map[string]string, error) {
 		// matching docker compose.
 		if len(val) > 1 && (val[0] == '"' || val[0] == '\'') && strings.IndexByte(val[1:], val[0]) < 0 {
 			q := val[0]
+			literal := q == '\''
 			start := i + 1
 			var sb strings.Builder
 			sb.WriteString(val[1:]) // content after the opening quote
@@ -156,10 +253,22 @@ func parseDotEnv(path string) (map[string]string, error) {
 			if !closed {
 				return nil, fmt.Errorf("%s:%d: unterminated quoted value for %q", path, start, key)
 			}
-			out[key] = sb.String()
+			v, err := expandEnvValue(sb.String(), literal, scope, path, start)
+			if err != nil {
+				return nil, err
+			}
+			out[key] = v
+			scope.level[key] = v
 			continue
 		}
-		out[key] = unquote(val)
+		v, err := expandEnvValue(unquote(val), singleQuoted(val), scope, path, i+1)
+		if err != nil {
+			return nil, err
+		}
+		out[key] = v
+		// Written through as we go: the next line sees this key, and so does the
+		// next file at this level.
+		scope.level[key] = v
 	}
 	return out, nil
 }
@@ -184,6 +293,25 @@ func unquote(s string) string {
 		}
 	}
 	return s
+}
+
+// singleQuoted reports whether s is wrapped in a matching pair of single quotes,
+// which is what suppresses expansion of its contents.
+func singleQuoted(s string) bool {
+	return len(s) >= 2 && s[0] == '\'' && s[len(s)-1] == '\''
+}
+
+// expandEnvValue expands one env-file value against the scope as it stands right
+// now — see envScope for which definition wins.
+func expandEnvValue(val string, literal bool, scope envScope, path string, line int) (string, error) {
+	if literal || !strings.ContainsRune(val, '$') {
+		return val, nil
+	}
+	b, err := interpolate([]byte(val), scope.lookup())
+	if err != nil {
+		return "", fmt.Errorf("%s:%d: %w", path, line, err)
+	}
+	return string(b), nil
 }
 
 // interpolate expands variable references in the raw compose bytes before YAML

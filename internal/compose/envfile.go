@@ -13,11 +13,22 @@ import (
 // `environment`) taking precedence — matching docker-compose. Later env_file
 // files override earlier ones. A missing env_file is an error unless the entry
 // is marked `required: false`, in which case it is skipped (#85).
-func resolveEnvFiles(dir string, files EnvFiles, env []string) ([]string, error) {
+//
+// scope is the project scope (the shell and the project's `.env`), which the
+// files' own values expand against — docker compose expands these the same way it
+// expands the compose file itself, so a value here can be `${SOME_VAR}/path`.
+// Files accumulate as they are read, so a later env_file sees an earlier one's
+// keys, the same way a later --env-file does.
+//
+// The service's own `environment:` sits between those two: a file's value can
+// reference a key defined only there, and where both define one, `environment:`
+// wins. That is docker compose's order, measured against v5.3.1.
+func resolveEnvFiles(dir string, files EnvFiles, env []string, scope envScope) ([]string, error) {
 	if len(files) == 0 {
 		return env, nil
 	}
 	var fromFiles []string
+	inner := scope.inner(explicitEnv(env))
 	for _, f := range files {
 		p := filepath.Join(dir, f.Path)
 		if _, err := os.Stat(p); err != nil {
@@ -26,7 +37,7 @@ func resolveEnvFiles(dir string, files EnvFiles, env []string) ([]string, error)
 			}
 			return nil, fmt.Errorf("env_file %q not found", f.Path)
 		}
-		m, err := parseDotEnv(p)
+		m, err := parseDotEnv(p, inner)
 		if err != nil {
 			return nil, err
 		}
@@ -40,6 +51,27 @@ func resolveEnvFiles(dir string, files EnvFiles, env []string) ([]string, error)
 		}
 	}
 	return mergeEnv(fromFiles, env), nil
+}
+
+// explicitEnv turns a service's `environment:` list into a lookup map. A bare
+// `KEY` (no `=`) means "take it from the host", so it defines nothing here — the
+// shell is already ranked above this level and will answer for it.
+//
+// It has to UNDO an earlier value for the same key rather than merely skip it.
+// A list holding `K=value` and then a bare `K` sends nothing for K to the
+// container, so leaving `value` in this map would let an env file expand `${K}`
+// to a value the service does not actually have — the same key reading two ways
+// in one service.
+func explicitEnv(env []string) map[string]string {
+	m := make(map[string]string, len(env))
+	for _, e := range env {
+		if k, v, ok := strings.Cut(e, "="); ok {
+			m[k] = v
+		} else {
+			delete(m, e)
+		}
+	}
+	return m
 }
 
 // mergeEnv concatenates two KEY=VALUE (or bare KEY) lists, de-duplicating by key

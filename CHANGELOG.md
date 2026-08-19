@@ -6,6 +6,50 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-08-19
+
+### Changed
+
+- The hints opossum decodes out of a failed start now carry a diagnostic code, so
+  they can be looked up in `AGENTS.md` rather than only read: an image with no
+  arm64 build is `OPSM-412` (new), while a host port the pre-flight could not see
+  reuses `OPSM-201` and an unresolvable file bind mount reuses `OPSM-107` — same
+  cause and same fix as the pre-flight checks that name them, just caught later. A
+  start failure opossum cannot decode stays uncoded, so a diagnosed failure and an
+  undiagnosed one still look different.
+- `up` and `run` now stop when a bind mount's host source is a symlink pointing at
+  a socket, naming the path the link resolves to — mounting that instead is the way
+  through, because a socket reached by its own path mounts fine, and so does a
+  symlink to a file or a directory. It is the combination that Apple `container`
+  1.1.0 refuses, and until now opossum attempted it and passed on four levels of
+  nested `internalError` about `errno 95`. The common way to meet this is
+  `/var/run/docker.sock` on a machine where Docker Desktop has linked it. The check
+  only reads the host, so `--dry-run` reports it too.
+
+### Fixed
+
+- `.env` values that reference other variables are now expanded, matching Docker
+  Compose (measured against v5.3.1). A line like
+  `DATA_PATH=${DATA_ROOT:-/mnt/data}/psql` used to reach the compose file verbatim,
+  so a mount written as `${DATA_PATH}:/var/lib/postgresql/data` split at the colon
+  inside the default and the runtime was handed `${DATA_ROOT` as a volume name. The
+  rules follow Compose: only keys defined above the line are in scope, an unresolved
+  reference expands to empty, a single-quoted value is left alone, and the shell
+  still wins over the file. Values in a service's `env_file:` are expanded the same
+  way. Where several env files apply, they fill one map top to bottom — a later file
+  overrides an earlier one, and a file's own line wins over a file read before it —
+  while an outer level always wins. The levels, outermost first: the shell, the
+  project's `.env` (or `--env-file`), a service's own `environment:` block, then that
+  service's `env_file:` files.
+
+  Two kinds of env-file line that used to load now fail — in a `.env`, an
+  `--env-file`, or a service's `env_file:` alike, in both cases the way Compose
+  already fails on them: a value holding a required reference (`${VAR:?message}`)
+  when that variable is unset, and a value holding an unterminated `${`. A value can
+  also change meaning wherever env files are read — `$` now starts a reference, so
+  `PASSWORD=s3cr3t$pass` reads `$pass` as a variable. Write `$$` for a literal `$`,
+  or single-quote the value.
+
 ## [0.19.1] - 2026-08-07
 
 ### Changed
@@ -730,7 +774,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.19.1...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.20.0...HEAD
+[0.20.0]: https://github.com/suruseas/opossum/compare/v0.19.1...v0.20.0
 [0.19.1]: https://github.com/suruseas/opossum/compare/v0.19.0...v0.19.1
 [0.19.0]: https://github.com/suruseas/opossum/compare/v0.18.2...v0.19.0
 [0.18.2]: https://github.com/suruseas/opossum/compare/v0.18.1...v0.18.2

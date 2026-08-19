@@ -3,9 +3,44 @@ package compose
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
+
+// withoutHostVar removes name from the environment for the duration of the test
+// and puts it back afterwards. Tests about "which level wins" are meaningless if
+// the host happens to define the key: the shell outranks every level under test,
+// so a name as ordinary as K turns the whole assertion into a check of the
+// developer's own environment.
+func withoutHostVar(t *testing.T, name string) {
+	t.Helper()
+	// Go has no t.Unsetenv, so the removal is by hand — but t.Setenv first, for
+	// two things it brings. It records the value and restores it at the end of
+	// the test, including when the removal below leaves the variable unset
+	// (measured, not assumed). And it panics if the test has called t.Parallel:
+	// touching the process environment from a parallel test is the bug that guard
+	// exists to catch, and doing this entirely by hand would have dropped it.
+	t.Setenv(name, "")
+	os.Unsetenv(name)
+}
+
+// unsetHostVars is withoutHostVar for the several names a fixture resolves. Most
+// of these tests turn on a name as ordinary as A or URL, so "is this name set on
+// the machine running the suite" decides whether they measure anything.
+func unsetHostVars(t *testing.T, names ...string) {
+	t.Helper()
+	for _, n := range names {
+		withoutHostVar(t, n)
+	}
+}
+
+// noScope is an empty outer scope and no built-in: nothing is set anywhere but
+// the file itself.
+func noScope() envScope {
+	empty := func(string) (string, bool) { return "", false }
+	return envScope{outer: empty, level: map[string]string{}, builtin: empty}
+}
 
 // lk builds a varLookup from a map; a key present with an empty string counts as
 // "set" (matching an env var exported as empty).
@@ -105,7 +140,7 @@ func TestParseDotEnv(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	m, err := parseDotEnv(filepath.Join(dir, ".env"))
+	m, err := parseDotEnv(filepath.Join(dir, ".env"), noScope())
 	if err != nil {
 		t.Fatalf("parseDotEnv: %v", err)
 	}
@@ -129,8 +164,13 @@ func TestParseDotEnv(t *testing.T) {
 // covers the `KEY: value` (colon) separator docker compose accepts.
 func TestParseDotEnvMultiline(t *testing.T) {
 	dir := t.TempDir()
-	pem := "-----BEGIN PUBLIC KEY-----\nMIIBLine1\nMIIBLine2\n-----END PUBLIC KEY-----"
+	// A `${…}` sits inside the key so the quoting rule is checked here too, not
+	// only on single-line values: single quotes suppress expansion, double quotes
+	// do not, and a multi-line value goes down a separate branch that would
+	// otherwise be unguarded.
+	pem := "-----BEGIN PUBLIC KEY-----\nMIIB${WHO}\nMIIBLine2\n-----END PUBLIC KEY-----"
 	body := "" +
+		"WHO=alice\n" +
 		"DQUOTE=\"" + pem + "\"\n" + // double-quoted, `=` separator
 		"SQUOTE: '" + pem + "'\n" + // single-quoted, `:` separator (the reported case)
 		"COLON: plain\n" + // `:` separator, single line
@@ -138,12 +178,13 @@ func TestParseDotEnvMultiline(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	m, err := parseDotEnv(filepath.Join(dir, ".env"))
+	m, err := parseDotEnv(filepath.Join(dir, ".env"), noScope())
 	if err != nil {
 		t.Fatalf("parseDotEnv: %v", err)
 	}
 	want := map[string]string{
-		"DQUOTE": pem,
+		"WHO":    "alice",
+		"DQUOTE": strings.Replace(pem, "${WHO}", "alice", 1),
 		"SQUOTE": pem,
 		"COLON":  "plain",
 		"AFTER":  "tail",
@@ -163,13 +204,13 @@ func TestParseDotEnvUnterminatedQuoteErrors(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := parseDotEnv(filepath.Join(dir, ".env")); err == nil {
+	if _, err := parseDotEnv(filepath.Join(dir, ".env"), noScope()); err == nil {
 		t.Fatal("expected an error for an unterminated quoted value")
 	}
 }
 
 func TestParseDotEnvMissingIsEmpty(t *testing.T) {
-	m, err := parseDotEnv(filepath.Join(t.TempDir(), "nope.env"))
+	m, err := parseDotEnv(filepath.Join(t.TempDir(), "nope.env"), noScope())
 	if err != nil || len(m) != 0 {
 		t.Errorf("missing .env should yield empty map, no error; got %v, %v", m, err)
 	}
@@ -193,6 +234,7 @@ func writeProject(t *testing.T, compose, dotenv string) string {
 }
 
 func TestLoadInterpolatesFromDotEnv(t *testing.T) {
+	unsetHostVars(t, "FOO", "BAR", "BAZ", "DB_IMAGE", "DB_PORT", "REDIS_TAG")
 	p := writeProject(t, `
 services:
   db:
@@ -218,6 +260,7 @@ services:
 }
 
 func TestLoadShellEnvOverridesDotEnv(t *testing.T) {
+	unsetHostVars(t, "BAR")
 	t.Setenv("DB_IMAGE", "postgres:17") // shell wins over .env
 	p := writeProject(t, `
 services:
@@ -243,6 +286,7 @@ func mustWriteFile(t *testing.T, path, content string) {
 // An explicit --env-file replaces the default .env (docker compose): values from
 // .env that the env-file doesn't set are gone.
 func TestLoadEnvFileReplacesDotEnv(t *testing.T) {
+	unsetHostVars(t, "FOO", "BAR", "BAZ")
 	dir := t.TempDir()
 	cfile := filepath.Join(dir, "compose.yaml")
 	mustWriteFile(t, cfile, "services:\n  web:\n    image: \"i-${FOO:-none}-${BAR:-none}\"\n")
@@ -260,6 +304,7 @@ func TestLoadEnvFileReplacesDotEnv(t *testing.T) {
 }
 
 func TestLoadEnvFilesLaterWins(t *testing.T) {
+	unsetHostVars(t, "FOO", "BAR", "BAZ")
 	dir := t.TempDir()
 	cfile := filepath.Join(dir, "compose.yaml")
 	mustWriteFile(t, cfile, "services:\n  web:\n    image: \"i-${FOO:-none}-${BAZ:-none}\"\n")
@@ -278,6 +323,7 @@ func TestLoadEnvFilesLaterWins(t *testing.T) {
 }
 
 func TestLoadEnvFileShellStillOverrides(t *testing.T) {
+	unsetHostVars(t, "FOO")
 	t.Setenv("FOO", "shell")
 	dir := t.TempDir()
 	cfile := filepath.Join(dir, "compose.yaml")
@@ -304,6 +350,9 @@ func TestLoadEnvFileFlagMissingErrors(t *testing.T) {
 }
 
 func TestLoadRequiredVarUnsetFails(t *testing.T) {
+	// The whole point is that it is unset; a host that exports it makes this pass
+	// while testing nothing.
+	unsetHostVars(t, "DB_IMAGE")
 	p := writeProject(t, `
 services:
   db:
@@ -327,6 +376,10 @@ func envValue(env []string, key string) string {
 // stubHostGateway overrides the built-in host-gateway resolver for a test.
 func stubHostGateway(t *testing.T, addr string) {
 	t.Helper()
+	// The shell outranks the built-in by design, so a host that exports this name
+	// makes the stub invisible and every test below reads the developer's own
+	// value instead. Seven tests depended on that not being the case.
+	withoutHostVar(t, hostGatewayVar)
 	prev := hostGatewayFunc
 	hostGatewayFunc = func() string { return addr }
 	t.Cleanup(func() { hostGatewayFunc = prev })
@@ -409,5 +462,718 @@ services:
 	}
 	if got := envValue(proj.Services["app"].Environment, "OLLAMA_HOST"); got != "http://host.example:11434" {
 		t.Errorf("OLLAMA_HOST = %q, want default applied when gateway unknown", got)
+	}
+}
+
+// A `.env` value that references another variable is expanded, which is what
+// docker compose does and what opossum did not. Measured against compose v5.3.1
+// case by case, because several of these rules are not the obvious ones and
+// guessing them wrong is how the bug got written in the first place.
+//
+// The corpus case that surfaced it: Compose-Examples' mattermost writes
+// `POSTGRES_DATA_PATH=${DOCKER_VOLUME_STORAGE:-/mnt/docker-volumes}/mattermost/psql`
+// in `.env`. Left unexpanded, the `:` inside the default split the mount spec, so
+// `${DOCKER_VOLUME_STORAGE` reached the runtime as a volume NAME and `up` died on
+// `invalid volume name`. That is why the expected values here are written out
+// rather than derived — each line pins one rule, and a rule that quietly changes
+// has to break a named subtest.
+func TestDotEnvValuesExpandTheWayComposeDoes(t *testing.T) {
+	// Both the keys the fixture defines and the keys those keys resolve from: the
+	// shell outranks `.env`, so a host copy of either side silently replaces what
+	// this table is reading. Derived mechanically from the fixture, not listed by
+	// hand — a hand list of these missed seven of them.
+	unsetHostVars(t, "BASE", "LATER", "NOPE", "SELFREF", "SQ", "VOLROOT",
+		"FORWARD", "BACKWARD", "UNSET_NODEF", "FROM_SHELL", "DQ", "MOUNT", "VIA_SQ")
+	withoutHostVar(t, "SHELLVAR")
+	cases := []struct {
+		name string
+		key  string
+		want string
+	}{
+		{"a key defined above is visible", "FORWARD", "/base/fwd"},
+		// Not "/later/bwd": only what is above the line is in scope. A file that
+		// resolved both ways would be order-independent, and compose's is not.
+		{"a key defined below is not", "BACKWARD", "/bwd"},
+		{"a self-reference resolves to empty, not a loop", "SELFREF", "x"},
+		{"an undefined reference with no default is empty", "UNSET_NODEF", "/tail"},
+		{"a default applies when the shell has not set it", "FROM_SHELL", "fallback"},
+		// Single quotes suppress expansion the way a shell's do; double quotes and
+		// no quotes do not. Getting this backwards would silently expand values a
+		// user wrote to be literal.
+		{"a single-quoted value is left alone", "SQ", "${BASE}/sq"},
+		{"a double-quoted value is expanded", "DQ", "/base/dq"},
+		// The corpus shape, whole: a `:` inside a default must not split the mount.
+		{"a default containing a colon survives as one path", "MOUNT", "/mnt/vol/psql"},
+		// Expansion is a single pass: what SQ produced is not expanded again when
+		// another value references it. Expanding twice would quietly resolve text
+		// the single quotes were there to protect.
+		{"the result of an expansion is not expanded again", "VIA_SQ", "<${BASE}/sq>"},
+	}
+	// A table that runs nothing passes every assertion in it. Pinning the count
+	// means a case lost to a bad edit is a failure, not a quieter suite.
+	if len(cases) != 9 {
+		t.Fatalf("the table has %d cases, want 9 — add the count here when you add a rule", len(cases))
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := writeProject(t, `
+services:
+  app:
+    image: app
+    environment:
+      OUT: ${`+tc.key+`}
+`, "BASE=/base\n"+
+				"FORWARD=${BASE}/fwd\n"+
+				"BACKWARD=${LATER}/bwd\n"+
+				"LATER=/later\n"+
+				"SELFREF=${SELFREF}x\n"+
+				"UNSET_NODEF=${NOPE}/tail\n"+
+				"FROM_SHELL=${SHELLVAR:-fallback}\n"+
+				"SQ='${BASE}/sq'\n"+
+				`DQ="${BASE}/dq"`+"\n"+
+				"MOUNT=${VOLROOT:-/mnt/vol}/psql\n"+
+				"VIA_SQ=<${SQ}>\n")
+			proj, err := Load(p)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if got := envValue(proj.Services["app"].Environment, "OUT"); got != tc.want {
+				t.Errorf("%s = %q, want %q", tc.key, got, tc.want)
+			}
+		})
+	}
+}
+
+// The shell still wins over `.env`, and a later `.env` line that references the
+// same key sees the shell's value — so the override reaches derived values too,
+// not just direct references. Pinning this separately because the expansion above
+// is exactly where an "outer scope wins" rule is easy to lose.
+func TestShellOverrideReachesDerivedDotEnvValues(t *testing.T) {
+	unsetHostVars(t, "DERIVED")
+	t.Setenv("BASE", "/from-shell")
+	p := writeProject(t, `
+services:
+  app:
+    image: app
+    environment:
+      DIRECT: ${BASE}
+      DERIVED: ${DERIVED}
+`, "BASE=/from-env\nDERIVED=${BASE}/x\n")
+	proj, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	env := proj.Services["app"].Environment
+	if got := envValue(env, "DIRECT"); got != "/from-shell" {
+		t.Errorf("DIRECT = %q, want the shell to win", got)
+	}
+	if got := envValue(env, "DERIVED"); got != "/from-shell/x" {
+		t.Errorf("DERIVED = %q, want the shell's value to reach the derived entry too", got)
+	}
+}
+
+// A service's `env_file:` values are expanded the same way — compose treats them
+// as interpolated too. The precedence here is the surprising one and is measured:
+// the project `.env` beats a key defined on the line ABOVE in the same env_file,
+// because the project scope is the outer one.
+func TestEnvFileValuesExpandAgainstTheProjectScope(t *testing.T) {
+	unsetHostVars(t, "A", "OVER")
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "svc.env"),
+		[]byte("A=/a\nSAME_FILE=${A}/b\nOVER=from-svcfile\nOUTER_WINS=${OVER}/z\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".env"),
+		[]byte("OVER=from-dotenv\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "compose.yaml")
+	if err := os.WriteFile(p, []byte(`
+services:
+  app:
+    image: app
+    env_file: svc.env
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	proj, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	env := proj.Services["app"].Environment
+	if got := envValue(env, "SAME_FILE"); got != "/a/b" {
+		t.Errorf("SAME_FILE = %q, want a key from the same file to be visible", got)
+	}
+	if got := envValue(env, "OUTER_WINS"); got != "from-dotenv/z" {
+		t.Errorf("OUTER_WINS = %q, want the project `.env` to beat the same file's own line", got)
+	}
+}
+
+// A later --env-file sees an earlier one, so the files compose rather than each
+// starting from the shell alone.
+func TestLaterEnvFileSeesTheEarlierOne(t *testing.T) {
+	unsetHostVars(t, "A", "B")
+	dir := t.TempDir()
+	for name, body := range map[string]string{"one.env": "A=/a\n", "two.env": "B=${A}/b\n"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := filepath.Join(dir, "compose.yaml")
+	if err := os.WriteFile(p, []byte(`
+services:
+  app:
+    image: app
+    environment:
+      OUT: ${B}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	proj, err := LoadFiles([]string{p}, []string{filepath.Join(dir, "one.env"), filepath.Join(dir, "two.env")})
+	if err != nil {
+		t.Fatalf("LoadFiles: %v", err)
+	}
+	if got := envValue(proj.Services["app"].Environment, "OUT"); got != "/a/b" {
+		t.Errorf("OUT = %q, want the second env file to see the first", got)
+	}
+}
+
+// A required-variable reference inside a `.env` value fails the load, naming the
+// file and line — the only place that context is attached. docker compose fails
+// here too. Without this the error path can be swallowed and nothing notices.
+func TestDotEnvRequiredVariableFailsWithFileAndLine(t *testing.T) {
+	// A host copy makes the required variable satisfied, so the load succeeds and
+	// this test asserts nothing.
+	unsetHostVars(t, "MISSING_ON_PURPOSE", "OK", "BAD")
+	p := writeProject(t, `
+services:
+  app:
+    image: app
+`, "OK=fine\nBAD=${MISSING_ON_PURPOSE:?boom}\n")
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("a required variable that is unset must fail the load")
+	}
+	for _, want := range []string{".env:2", "MISSING_ON_PURPOSE", "boom"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should say %q so the line can be found, got: %v", want, err)
+		}
+	}
+}
+
+// The built-in host-gateway ranks below a `.env` entry — and that has to hold for
+// values DERIVED from it inside the same file, not just for a direct reference.
+// Ranking the built-in above the file's own entries made one file give the same
+// variable two different values, which is what this pins.
+func TestDotEnvOverrideOfTheBuiltInReachesDerivedValues(t *testing.T) {
+	unsetHostVars(t, "URL")
+	stubHostGateway(t, "192.168.11.22")
+	p := writeProject(t, `
+services:
+  app:
+    image: app
+    environment:
+      DIRECT: ${OPOSSUM_HOST_GATEWAY}
+      DERIVED: ${URL}
+`, "OPOSSUM_HOST_GATEWAY=1.2.3.4\nURL=http://${OPOSSUM_HOST_GATEWAY}:11434\n")
+	proj, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	env := proj.Services["app"].Environment
+	if got := envValue(env, "DIRECT"); got != "1.2.3.4" {
+		t.Errorf("DIRECT = %q, want the .env entry to override the built-in", got)
+	}
+	if got := envValue(env, "DERIVED"); got != "http://1.2.3.4:11434" {
+		t.Errorf("DERIVED = %q, want the same override to reach a value derived from it "+
+			"in the same file (got the auto-detected address instead)", got)
+	}
+}
+
+// A service with two env_file entries: the second sees the first, the same way a
+// second --env-file does. Two paths read env files and they have to agree; the
+// rule was implemented on one of them only.
+func TestLaterServiceEnvFileSeesTheEarlierOne(t *testing.T) {
+	unsetHostVars(t, "A", "B")
+	dir := t.TempDir()
+	for name, body := range map[string]string{"one.env": "A=/a\n", "two.env": "B=${A}/b\n"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := filepath.Join(dir, "compose.yaml")
+	if err := os.WriteFile(p, []byte(`
+services:
+  app:
+    image: app
+    env_file:
+      - one.env
+      - two.env
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	proj, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := envValue(proj.Services["app"].Environment, "B"); got != "/a/b" {
+		t.Errorf("B = %q, want the second env_file to see the first", got)
+	}
+}
+
+// Which definition wins depends on whether the other one is at the same level,
+// and the two answers are opposite. A strictly outer level always wins; within
+// one level the files are a single map filled top to bottom, so the LAST
+// assignment wins and a file's own line beats a file read before it.
+//
+// Collapsing those two into "outer wins" is a mistake that reads as correct —
+// the first attempt at this made an earlier file beat the current file's own
+// line, so splitting a `.env` into a base plus an override quietly kept the base
+// value. Each case here was measured against docker compose v5.3.1.
+func TestWhichEnvFileDefinitionWins(t *testing.T) {
+	unsetHostVars(t, "A", "B")
+	write := func(t *testing.T, dir, name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("a later env_file overrides an earlier one, and sees its own value", func(t *testing.T) {
+		dir := t.TempDir()
+		write(t, dir, "one.env", "A=first\n")
+		write(t, dir, "two.env", "A=second\nB=${A}\n")
+		write(t, dir, "compose.yaml", "services:\n  app:\n    image: app\n    env_file: [one.env, two.env]\n")
+		proj, err := Load(filepath.Join(dir, "compose.yaml"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		env := proj.Services["app"].Environment
+		if got := envValue(env, "A"); got != "second" {
+			t.Errorf("A = %q, want the later file to win", got)
+		}
+		if got := envValue(env, "B"); got != "second" {
+			t.Errorf("B = %q, want the file's own line to beat the earlier file "+
+				"(it is one map, not two ranked scopes)", got)
+		}
+	})
+
+	t.Run("the same holds for --env-file", func(t *testing.T) {
+		dir := t.TempDir()
+		write(t, dir, "e1.env", "A=first\n")
+		write(t, dir, "e2.env", "A=second\nB=${A}\n")
+		write(t, dir, "compose.yaml",
+			"services:\n  app:\n    image: app\n    environment:\n      OUT: ${B}\n")
+		proj, err := LoadFiles([]string{filepath.Join(dir, "compose.yaml")},
+			[]string{filepath.Join(dir, "e1.env"), filepath.Join(dir, "e2.env")})
+		if err != nil {
+			t.Fatalf("LoadFiles: %v", err)
+		}
+		if got := envValue(proj.Services["app"].Environment, "OUT"); got != "second" {
+			t.Errorf("OUT = %q, want the same rule on the --env-file path", got)
+		}
+	})
+
+	// The other direction, which is what makes this two rules and not one: a
+	// value read BEFORE the override still holds the old value.
+	t.Run("a value read before the override keeps the old one", func(t *testing.T) {
+		dir := t.TempDir()
+		write(t, dir, "e1.env", "A=first\nB=${A}\n")
+		write(t, dir, "e2.env", "A=second\n")
+		write(t, dir, "compose.yaml",
+			"services:\n  app:\n    image: app\n    environment:\n      OUT_A: ${A}\n      OUT_B: ${B}\n")
+		proj, err := LoadFiles([]string{filepath.Join(dir, "compose.yaml")},
+			[]string{filepath.Join(dir, "e1.env"), filepath.Join(dir, "e2.env")})
+		if err != nil {
+			t.Fatalf("LoadFiles: %v", err)
+		}
+		env := proj.Services["app"].Environment
+		if got := envValue(env, "OUT_A"); got != "second" {
+			t.Errorf("OUT_A = %q, want the later assignment", got)
+		}
+		if got := envValue(env, "OUT_B"); got != "first" {
+			t.Errorf("OUT_B = %q, want the value as it stood when that line was read", got)
+		}
+	})
+
+	// The outer level, by contrast, is not part of that map at all: the project's
+	// `.env` wins over the whole env_file chain, however late the redefinition.
+	t.Run("the project .env beats the whole env_file chain", func(t *testing.T) {
+		dir := t.TempDir()
+		write(t, dir, ".env", "A=dot\n")
+		write(t, dir, "f1.env", "A=one\n")
+		write(t, dir, "f2.env", "A=two\nB=${A}\n")
+		write(t, dir, "compose.yaml", "services:\n  app:\n    image: app\n    env_file: [f1.env, f2.env]\n")
+		proj, err := Load(filepath.Join(dir, "compose.yaml"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		env := proj.Services["app"].Environment
+		if got := envValue(env, "A"); got != "two" {
+			t.Errorf("A = %q, want the env_file value to reach the container", got)
+		}
+		if got := envValue(env, "B"); got != "dot" {
+			t.Errorf("B = %q, want the project `.env` to win while expanding, "+
+				"even against a redefinition on the line above", got)
+		}
+	})
+}
+
+// A multi-line value is visible to the lines after it, the same as a single-line
+// one. It goes down its own branch of the parser, so "the level is written
+// through" has to be asserted on that branch too — one side being wired is no
+// evidence about the other.
+func TestAMultiLineValueIsVisibleToLaterLines(t *testing.T) {
+	dir := t.TempDir()
+	// The value carries a `${…}` of its own, so this pins WHAT becomes visible and
+	// not merely that something does: writing the raw text through instead of the
+	// expanded one reads the same to a check with no variable in it.
+	if err := os.WriteFile(filepath.Join(dir, ".env"),
+		[]byte("A=x\nPEM=\"p${A}\nq\"\nUSES=[${PEM}]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := parseDotEnv(filepath.Join(dir, ".env"), noScope())
+	if err != nil {
+		t.Fatalf("parseDotEnv: %v", err)
+	}
+	if got, want := m["USES"], "[px\nq]"; got != want {
+		t.Errorf("USES = %q, want %q — a multi-line value must reach the lines below it, expanded", got, want)
+	}
+}
+
+// The built-in is reachable FROM an env-file value, not just from the compose
+// file. The existing tests all override it, so the plain path — nobody set it,
+// a `.env` value refers to it — was guarded by nothing.
+func TestEnvFileValueCanUseTheBuiltIn(t *testing.T) {
+	unsetHostVars(t, "OLLAMA", "URL")
+	stubHostGateway(t, "10.9.8.7")
+	p := writeProject(t, `
+services:
+  app:
+    image: app
+    environment:
+      URL: ${OLLAMA}
+`, "OLLAMA=http://${OPOSSUM_HOST_GATEWAY}:11434\n")
+	proj, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := envValue(proj.Services["app"].Environment, "URL"); got != "http://10.9.8.7:11434" {
+		t.Errorf("URL = %q, want the built-in to be visible from a `.env` value", got)
+	}
+}
+
+// The built-in ranks last at EVERY level, not just the project's. A service's
+// `env_file:` that sets OPOSSUM_HOST_GATEWAY must be able to use its own value on
+// the next line.
+//
+// This is the same defect as TestDotEnvOverrideOfTheBuiltInReachesDerivedValues,
+// one level down: it was fixed for `.env` and then reintroduced for `env_file:`
+// by a later refactor, because the scope handed to the inner level had folded the
+// built-in into it. Both levels are asserted so neither can be fixed alone.
+func TestEnvFileOverrideOfTheBuiltInReachesDerivedValues(t *testing.T) {
+	unsetHostVars(t, "URL")
+	stubHostGateway(t, "192.168.11.22")
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "svc.env"),
+		[]byte("OPOSSUM_HOST_GATEWAY=1.2.3.4\nURL=http://${OPOSSUM_HOST_GATEWAY}:11434\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "compose.yaml")
+	if err := os.WriteFile(p, []byte(`
+services:
+  app:
+    image: app
+    env_file: svc.env
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	proj, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := envValue(proj.Services["app"].Environment, "URL"); got != "http://1.2.3.4:11434" {
+		t.Errorf("URL = %q, want the env_file's own override to reach a value derived from "+
+			"it in the same file (got the auto-detected address instead)", got)
+	}
+}
+
+// A scope built by hand, without going through loadEnv or inner, has no level
+// map — and parseDotEnv writes through to it. Failing with a sentence beats
+// panicking with `assignment to entry in nil map` from inside the parse loop.
+func TestParseDotEnvRejectsAScopeWithNoLevel(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("A=1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := parseDotEnv(filepath.Join(dir, ".env"), envScope{})
+	if err == nil {
+		t.Fatal("a scope with no level map must be refused, not written to")
+	}
+	if !strings.Contains(err.Error(), "level") {
+		t.Errorf("the error should say what is missing, got: %v", err)
+	}
+}
+
+// A service's `environment:` is a level of its own, between the project's `.env`
+// and the `env_file:` chain. Missing it is not a detail: an env file's value can
+// name a key that exists only in `environment:`, and where both define one, the
+// file's values see `environment:`, not their own.
+//
+// The whole level was absent until it was measured — the rules had been written
+// up as a complete set with a level missing from them. Each case here is one
+// boundary of the order, measured against docker compose v5.3.1.
+func TestServiceEnvironmentIsALevelBetween(t *testing.T) {
+	unsetHostVars(t, "ONLY", "OTHER")
+	// Every case below turns on K resolving from the level under test, so the
+	// host must not answer for it. Done here rather than per case: doing it in one
+	// subtest and not its neighbours is how two of these came to pass only on a
+	// machine where K happened to be unset. A case that brings its own name says
+	// so at its own top.
+	withoutHostVar(t, "K")
+	load := func(t *testing.T, dotenv, envfile, environment string) []string {
+		t.Helper()
+		dir := t.TempDir()
+		if dotenv != "" {
+			if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(dotenv), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(dir, "f.env"), []byte(envfile), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		p := filepath.Join(dir, "compose.yaml")
+		if err := os.WriteFile(p, []byte("services:\n  app:\n    image: app\n"+
+			"    env_file: [f.env]\n    environment:\n      "+environment+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		proj, err := Load(p)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		return proj.Services["app"].Environment
+	}
+
+	t.Run("an env_file value can name a key only environment: has", func(t *testing.T) {
+		env := load(t, "", "OTHER=[${ONLY}]\n", "ONLY: yes-it-is")
+		if got := envValue(env, "OTHER"); got != "[yes-it-is]" {
+			t.Errorf("OTHER = %q, want the `environment:` key to be in scope", got)
+		}
+	})
+
+	t.Run("environment: beats the env_file's own line", func(t *testing.T) {
+		env := load(t, "", "K=from-file\nOTHER=[${K}]\n", "K: from-environment")
+		if got := envValue(env, "OTHER"); got != "[from-environment]" {
+			t.Errorf("OTHER = %q, want `environment:` to win over the file's own key", got)
+		}
+		// The value that reaches the container is still `environment:`'s, which is
+		// a separate rule (mergeEnv) and would hide a broken expansion if the two
+		// were checked together.
+		if got := envValue(env, "K"); got != "from-environment" {
+			t.Errorf("K = %q, want the explicit `environment:` value", got)
+		}
+	})
+
+	t.Run("the project .env beats environment:", func(t *testing.T) {
+		env := load(t, "K=dot\n", "K=from-file\nOTHER=[${K}]\n", "K: from-environment")
+		if got := envValue(env, "OTHER"); got != "[dot]" {
+			t.Errorf("OTHER = %q, want the outer level to win", got)
+		}
+	})
+
+	t.Run("the shell beats all of them", func(t *testing.T) {
+		t.Setenv("K", "shell")
+		env := load(t, "K=dot\n", "K=from-file\nOTHER=[${K}]\n", "K: from-environment")
+		if got := envValue(env, "OTHER"); got != "[shell]" {
+			t.Errorf("OTHER = %q, want the shell to win", got)
+		}
+	})
+
+	// The twin of the bare-key case: two VALUES for one key. Last wins, and the
+	// env file's expansion has to see the same winner the container gets. Only
+	// the bare-key half was pinned, so `explicitEnv` could be made first-wins
+	// with nothing going red.
+	t.Run("the last value for a key at this level wins", func(t *testing.T) {
+		env := load(t, "", "OTHER=[${K}]\n", "- K=first\n      - K=second")
+		if got := envValue(env, "OTHER"); got != "[second]" {
+			t.Errorf("OTHER = %q, want the last value to win while expanding", got)
+		}
+		if got := envValue(env, "K"); got != "second" {
+			t.Errorf("K = %q, want the container to get the same winner", got)
+		}
+	})
+
+	// A bare key must undo its own key and nothing else. Wiping the level would
+	// pass every case above, since each of those has only the one key in play.
+	t.Run("a bare key leaves the other keys at its level alone", func(t *testing.T) {
+		withoutHostVar(t, "KEEP")
+		env := load(t, "", "KEEP=from-file\nOTHER=[${KEEP}]\n", "- KEEP=kept\n      - K")
+		if got := envValue(env, "OTHER"); got != "[kept]" {
+			t.Errorf("OTHER = %q, want the bare K to leave KEEP standing", got)
+		}
+	})
+
+	// A bare `- KEY` under environment: means "take it from the host", so it
+	// defines nothing at this level. Reading it as a key set to the empty string
+	// would put an empty value where the file's own is meant to show through.
+	//
+	// The host must NOT have the key for this to test anything: with it set, the
+	// shell answers from a level above and an empty entry here is never reached —
+	// which is how the first version of this case passed against both behaviours.
+	t.Run("a bare key under environment: defines nothing", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "f.env"),
+			[]byte("K=file-value\nOTHER=[${K}]\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		p := filepath.Join(dir, "compose.yaml")
+		if err := os.WriteFile(p, []byte("services:\n  app:\n    image: app\n"+
+			"    env_file: [f.env]\n    environment:\n      - K\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		proj, err := Load(p)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if got := envValue(proj.Services["app"].Environment, "OTHER"); got != "[file-value]" {
+			t.Errorf("OTHER = %q, want the bare key to define nothing, leaving the "+
+				"env_file's own value visible", got)
+		}
+	})
+}
+
+// The other half of the built-in contract at the env_file level: it can be READ
+// from there, not only overridden. The override case was pinned first, so the
+// line that keeps the built-in reachable from an inner level had nothing holding
+// it — and it reads like an unused field.
+func TestServiceEnvFileValueCanReadTheBuiltIn(t *testing.T) {
+	unsetHostVars(t, "URL")
+	stubHostGateway(t, "172.16.0.1")
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "svc.env"),
+		[]byte("URL=http://${OPOSSUM_HOST_GATEWAY}:11434\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "compose.yaml")
+	if err := os.WriteFile(p, []byte("services:\n  app:\n    image: app\n    env_file: svc.env\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	proj, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := envValue(proj.Services["app"].Environment, "URL"); got != "http://172.16.0.1:11434" {
+		t.Errorf("URL = %q, want the built-in to be reachable from an `env_file:` value", got)
+	}
+}
+
+// A bare `KEY` after `KEY=value` in the same `environment:` list undoes the
+// value: the container is sent nothing for it, so an env file expanding ${KEY}
+// must not see the value either. Skipping the bare entry instead of undoing it
+// left one key reading two ways inside one service — the container's view and
+// the expansion's view disagreeing.
+func TestABareKeyUndoesAnEarlierValueInTheSameList(t *testing.T) {
+	unsetHostVars(t, "OTHER")
+	withoutHostVar(t, "K")
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "f.env"),
+		[]byte("K=file-value\nOTHER=[${K}]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "compose.yaml")
+	if err := os.WriteFile(p, []byte("services:\n  app:\n    image: app\n"+
+		"    env_file: [f.env]\n    environment:\n      - K=value\n      - K\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	proj, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	env := proj.Services["app"].Environment
+	if got := envValue(env, "OTHER"); got != "[file-value]" {
+		t.Errorf("OTHER = %q, want the bare key to undo `K=value`, leaving the env "+
+			"file's own value visible", got)
+	}
+	// The container's view, which is what makes the two disagree if only one side
+	// is fixed. Asserted as "the bare key is present" rather than "K=value is
+	// absent": `-e K` inherits the host's value and `-e K=` sends an empty one
+	// (runtime.go passes each entry through verbatim), so a check that only
+	// rejects the old value cannot tell those two apart.
+	if !slices.Contains(env, "K") {
+		t.Errorf("the container should get a bare K, got %v — a bare key and K= are "+
+			"different arguments to the runtime", env)
+	}
+}
+
+// withoutHostVar is what keeps the level tests from silently becoming checks of
+// the developer's own shell, so it gets its own guard. Nothing else can provide
+// one: on a clean machine a helper that does nothing looks exactly like a helper
+// that works.
+func TestWithoutHostVarRemovesAndRestores(t *testing.T) {
+	const name = "OPOSSUM_TEST_HOST_VAR"
+	t.Setenv(name, "outer-value")
+
+	t.Run("removed inside", func(t *testing.T) {
+		withoutHostVar(t, name)
+		if v, ok := os.LookupEnv(name); ok {
+			t.Errorf("%s is still set to %q — the level tests would be reading the host", name, v)
+		}
+	})
+
+	// The subtest's cleanup has run by now, so the outer value must be back.
+	// Without this, one test's protection would leak into every test after it.
+	if v, ok := os.LookupEnv(name); !ok || v != "outer-value" {
+		t.Errorf("%s = %q (set=%v), want it restored after the subtest", name, v, ok)
+	}
+
+	// The plural form is what 13 of these names actually go through, and a loop
+	// body that does nothing is invisible on a clean machine for the same reason
+	// the singular one is.
+	t.Run("the plural form removes every name", func(t *testing.T) {
+		const a, b = "OPOSSUM_TEST_MULTI_A", "OPOSSUM_TEST_MULTI_B"
+		t.Setenv(a, "one")
+		t.Setenv(b, "two")
+		unsetHostVars(t, a, b)
+		for _, n := range []string{a, b} {
+			if v, ok := os.LookupEnv(n); ok {
+				t.Errorf("%s is still set to %q", n, v)
+			}
+		}
+	})
+
+	t.Run("absent stays absent", func(t *testing.T) {
+		const gone = "OPOSSUM_TEST_HOST_VAR_UNSET"
+		os.Unsetenv(gone)
+		withoutHostVar(t, gone)
+		if _, ok := os.LookupEnv(gone); ok {
+			t.Errorf("%s should still be unset", gone)
+		}
+	})
+}
+
+// stubHostGateway has to clear the host's own OPOSSUM_HOST_GATEWAY as well as
+// swap the resolver. The shell outranks the built-in by design, so on a machine
+// that exports it the stub is simply never consulted and every built-in test
+// silently reads the developer's value instead.
+//
+// Nothing else can catch that: on a clean machine, a stub that clears the host
+// variable and one that does not behave identically. So the host variable is set
+// here on purpose.
+func TestStubHostGatewayBeatsAHostValue(t *testing.T) {
+	t.Setenv(hostGatewayVar, "203.0.113.9")
+	stubHostGateway(t, "10.0.0.1")
+	p := writeProject(t, `
+services:
+  app:
+    image: app
+    environment:
+      GW: ${OPOSSUM_HOST_GATEWAY}
+`, "")
+	proj, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := envValue(proj.Services["app"].Environment, "GW"); got != "10.0.0.1" {
+		t.Errorf("GW = %q, want the stub — the host's own value must not show through", got)
 	}
 }

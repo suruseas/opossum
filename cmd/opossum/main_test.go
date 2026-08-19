@@ -681,6 +681,10 @@ func TestDownRmiCLI(t *testing.T) {
 }
 
 func TestConfigCLI(t *testing.T) {
+	// ${PG_TAG:-16} in the fixture below resolves from the host if it is set,
+	// which changes the image this asserts on.
+	t.Setenv("PG_TAG", "") // records and restores the host's value, if any
+	os.Unsetenv("PG_TAG")
 	fakeShim(t)
 	compose := writeCompose(t, `
 name: demo

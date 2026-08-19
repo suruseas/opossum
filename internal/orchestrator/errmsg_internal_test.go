@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/suruseas/opossum/internal/compose"
@@ -107,6 +108,48 @@ func TestRunOneOffStopsWhenABindSourceCannotBeCreated(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "[OPSM-104]") {
 		t.Errorf("the error should carry the code, got: %v", err)
+	}
+}
+
+// The permissions matter because the directory is mounted into a container that
+// may not run as the host user: an image declaring `USER app` cannot enter a 0700
+// directory, and the failure then arrives from inside the container as a
+// permission error with nothing pointing back at who made the path.
+//
+// Measured against docker before pinning it (Docker Desktop 29.6.2, macOS, umask
+// 022): a missing bind source comes out 0755, owned by the host user. So 0755 is
+// not a number someone typed, it is what docker produces —
+// ~/opossum-dogfood/results/df397-bind-mode.md.
+//
+// The umask is cleared for the duration so the mode opossum *asks for* is what
+// lands on disk. Comparing against a reference directory instead looked tidier
+// and was weaker: at umask 022 a request for 0777 also arrives as 0755, so the
+// world-writable version of this bug was invisible (measured — that mutation
+// survived). Restoring the umask matters more than it looks: it is process-wide,
+// and this package's evals run sequentially, which is the only reason this is
+// safe here.
+func TestEnsureBindDirsCreatesTheSourceDockerWould(t *testing.T) {
+	// A tripwire, not a setting: t.Setenv makes the standard library panic if
+	// t.Parallel is ever added to this test, which is the one change that would
+	// make the umask below unsafe without anything else noticing.
+	t.Setenv("OPOSSUM_UMASK_EVAL", "1")
+	old := syscall.Umask(0)
+	defer syscall.Umask(old)
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "made", "by", "opossum")
+	p := &compose.Project{Name: "demo", BaseDir: t.TempDir(), Services: map[string]*compose.Service{}}
+	if err := New(p, &rt.Runtime{}, "", &bytes.Buffer{}).ensureBindDirs("web", []string{src + ":/data"}); err != nil {
+		t.Fatalf("ensureBindDirs: %v", err)
+	}
+
+	made, err := os.Stat(src)
+	if err != nil {
+		t.Fatalf("the bind source should have been created: %v", err)
+	}
+	if got := made.Mode().Perm(); got != 0o755 {
+		t.Errorf("the bind source came out %04o, want 0755 — what docker creates, and what a "+
+			"container running as a non-root user can enter without being world-writable", got)
 	}
 }
 

@@ -81,27 +81,8 @@ func TestRebuildsAPublishedSectionByteForByte(t *testing.T) {
 	start, next := heads[0], heads[1]
 	section := full[start.at:next.at]
 
-	dir := t.TempDir()
-	n := 0
-	var typ string
-	for _, line := range strings.Split(section, "\n") {
-		switch {
-		case strings.HasPrefix(line, "### "):
-			typ = strings.ToLower(strings.TrimSpace(line[4:]))
-		case strings.HasPrefix(line, "- ") && typ != "":
-			n++
-			write(t, dir, fmt.Sprintf("%03d-e.%s.md", n, typ), line+"\n")
-		case typ != "" && n > 0 && strings.HasPrefix(line, "  ") && strings.TrimSpace(line) != "":
-			p := filepath.Join(dir, fmt.Sprintf("%03d-e.%s.md", n, typ))
-			f, err := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o644)
-			if err != nil {
-				t.Fatal(err)
-			}
-			fmt.Fprintln(f, line)
-			f.Close()
-		}
-	}
-	if n == 0 {
+	dir := explode(t, section)
+	if len(mustReadDir(t, dir)) == 0 {
 		t.Skip("the latest release section has no entries to rebuild")
 	}
 	frags, err := changelog.Load(dir)
@@ -134,4 +115,141 @@ func releaseHeadings(s string) []headingRef {
 		out = append(out, headingRef{at: m[0], version: s[m[2]:m[3]], date: s[m[4]:m[5]]})
 	}
 	return out
+}
+
+// explode turns a published section back into the fragments it was assembled
+// from, writing them into a fresh directory and returning it.
+//
+// Being the exact inverse of the assembler is the whole point: this is what lets
+// a round trip prove the assembler's formatting, so a lossy step here shows up as
+// "the assembler is broken" when it is not. A blank line inside an entry — the
+// break between two paragraphs — used to be dropped here, and the first fragment
+// written with two paragraphs turned that into a failure blaming the assembler.
+//
+// A blank line is ambiguous while reading it: it separates paragraphs of one
+// entry, and it also ends the last entry of a section. Which one it is only
+// becomes clear at the next line, so blanks are held back and kept if a
+// continuation follows, discarded otherwise.
+func explode(t *testing.T, section string) string {
+	t.Helper()
+	dir := t.TempDir()
+	n := 0
+	var typ string
+	var held []string
+	appendTo := func(lines ...string) {
+		t.Helper()
+		p := filepath.Join(dir, fmt.Sprintf("%03d-e.%s.md", n, typ))
+		f, err := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, l := range lines {
+			fmt.Fprintln(f, l)
+		}
+		f.Close()
+	}
+	for _, line := range strings.Split(section, "\n") {
+		switch {
+		case strings.HasPrefix(line, "### "):
+			typ, held = strings.ToLower(strings.TrimSpace(line[4:])), nil
+		case strings.HasPrefix(line, "- ") && typ != "":
+			n++
+			held = nil
+			write(t, dir, fmt.Sprintf("%03d-e.%s.md", n, typ), line+"\n")
+		case typ != "" && n > 0 && strings.TrimSpace(line) == "":
+			held = append(held, line)
+		case typ != "" && n > 0 && strings.HasPrefix(line, "  "):
+			appendTo(append(held, line)...)
+			held = nil
+		default:
+			held = nil
+		}
+	}
+	return dir
+}
+
+func mustReadDir(t *testing.T, dir string) []os.DirEntry {
+	t.Helper()
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ents
+}
+
+// The round trip above only ever looks at whatever the newest published section
+// happens to contain, so a shape nobody has shipped yet is unguarded. That is how
+// a two-paragraph entry got through: the check existed from the start, and the
+// first fragment written with a paragraph break made it fail — pointing at the
+// assembler, which was fine.
+//
+// These shapes are written out instead of found, so each is covered whether or
+// not a release happens to hold one.
+func TestRebuildsEveryEntryShapeByteForByte(t *testing.T) {
+	// Each case is one fragment unless it names two. A release with two type
+	// sections is what puts a blank line between one entry and the NEXT entry
+	// rather than at the end of everything, which is where dropping the held-back
+	// blank actually matters: an entry that keeps it would grow a trailing blank
+	// belonging to its neighbour.
+	for _, tc := range []struct {
+		name  string
+		body  string
+		other string // an entry of a second type, when the case needs one
+	}{
+		{name: "one line", body: "- A single-line entry.\n"},
+		{name: "wrapped over lines", body: "- An entry that runs on and\n  wraps onto a second line.\n"},
+		{name: "two paragraphs", body: "- The first paragraph of an entry.\n\n" +
+			"  The second paragraph, which the exploder used to drop the break before.\n"},
+		{name: "three paragraphs", body: "- One.\n\n  Two.\n\n  Three.\n"},
+		{name: "a paragraph after a wrapped one", body: "- An entry that wraps onto\n  a second line.\n\n" +
+			"  Then a new paragraph.\n"},
+		// Two blank lines in a row inside an entry stay two: holding only the first
+		// of a run would render the same in Markdown but is not what was shipped.
+		{name: "a run of blank lines is kept whole", body: "- One.\n\n\n  Two.\n"},
+		{
+			name:  "two type sections, the earlier one ending in a paragraph",
+			body:  "- One paragraph.\n\n  And another, right before the next heading.\n",
+			other: "- An entry of a different type.\n",
+		},
+		{
+			name:  "two type sections, plain entries",
+			body:  "- One.\n",
+			other: "- Two.\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			write(t, dir, "001-e.fixed.md", tc.body)
+			if tc.other != "" {
+				write(t, dir, "002-e.added.md", tc.other)
+			}
+			frags, err := changelog.Load(dir)
+			if err != nil {
+				t.Fatalf("loading the fragment: %v", err)
+			}
+			// Assemble it into a changelog, then explode that section and assemble
+			// again. The two assemblies must be identical: whatever explode drops,
+			// the second one is missing.
+			const empty = "# Changelog\n\n## [Unreleased]\n\n## [0.0.1] - 2020-01-01\n\n### Fixed\n\n- Older.\n"
+			once, err := changelog.Release(empty, frags, "9.9.9", "2026-01-01")
+			if err != nil {
+				t.Fatal(err)
+			}
+			heads := releaseHeadings(once)
+			section := once[heads[0].at:heads[1].at]
+
+			refrags, err := changelog.Load(explode(t, section))
+			if err != nil {
+				t.Fatalf("reloading the exploded section: %v", err)
+			}
+			twice, err := changelog.Release(empty, refrags, "9.9.9", "2026-01-01")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if twice != once {
+				t.Errorf("the round trip changed the section.\n--- first ---\n%s\n--- second ---\n%s",
+					section, twice[heads[0].at:heads[1].at])
+			}
+		})
+	}
 }

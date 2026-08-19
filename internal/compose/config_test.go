@@ -10,6 +10,9 @@ import (
 )
 
 func TestRenderConfigResolvesAndListsIgnored(t *testing.T) {
+	// The fixture leans on ${PG_TAG:-16}, so a host that exports PG_TAG changes
+	// what this renders.
+	unsetHostVars(t, "PG_TAG")
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "db.env"), []byte("DBPASS=fromfile\n"), 0o644); err != nil {
 		t.Fatal(err)

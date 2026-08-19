@@ -167,8 +167,23 @@ list; codes are add-only and never change meaning.
 - **`[OPSM-204]` … `mounts the Docker socket … Apple container has no Docker daemon
   socket`** → the service needs Docker (e.g. Portainer); it can't work here. Remove
   the `docker.sock` mount or run that tool differently.
-- **`[OPSM-201]` … `host port already in use: <port>`** (pre-flight) → free the host
-  port or remap it in the compose file. On macOS, port 53 is taken by mDNSResponder.
+- **`[OPSM-109]` … `symlink to a socket, which this runtime refuses`** (pre-flight) →
+  mount what the link points at instead: the error names the resolved path, and a
+  socket reached by its own path mounts fine. A symlink to a file or a directory is
+  fine too — it is the combination that fails. Where Docker Desktop is installed,
+  `/var/run/docker.sock` has exactly this shape, but so do agent sockets like
+  `~/.gnupg/S.gpg-agent`; the mount is the problem, not who owns the socket.
+- **`[OPSM-201]` … `host port already in use: <port>`** → free the host port or remap
+  it in the compose file. On macOS, port 53 is taken by mDNSResponder. Usually a pre-flight
+  refusal, but the same code arrives on a `→` line under a failed start when the port is
+  held by something the host probe cannot see — the runtime's own DNS on 53, say. Same
+  port, same fix, whichever moment it is caught at.
+- **`[OPSM-412]` … `this image has no build for Apple silicon (arm64)`** → decoded from a
+  failed start under `up` (`does not support required platforms`); a one-off `run` reports
+  the runtime's own wording instead. Add `platform: linux/amd64` to the
+  service and start again: opossum runs an amd64 image under Rosetta. Check first that the
+  image really has no arm64 tag — many publish one under a different tag, and a native
+  image is faster than an emulated one.
 - **`[OPSM-401]` … `container is not running (state "stopped"); its last log
   lines:`** → the dependency crashed at startup; the embedded logs show why (e.g.
   the Postgres `initdb` message above). Fix the dependency, not the dependent.
@@ -251,9 +266,12 @@ list; codes are add-only and never change meaning.
   directory where it expects a file and **carries on without it** — the init script
   doesn't run, the config isn't read — so the failure shows up later as something else.
   If that path was meant to be a file, `rmdir` the placeholder, create the file, and start
-  again. The name is all opossum has to go on, so a directory legitimately named like a
-  file (`conf.d`, `.ssh`) draws the same line — the message says so, and for that case
-  there is nothing to do.
+  again. The same code arrives on a `→` line under a failed start (`failed to resolve … in
+  rootfs`) when the placeholder directory reaches the runtime and the mount is refused
+  outright rather than quietly standing in; that one is fatal, and the fix is the same.
+  The name is all opossum has to go on, so a directory legitimately named like a file
+  (`conf.d`, `.ssh`) draws the same line — the message says so, and for that case there is
+  nothing to do.
 - **`[OPSM-108]` … `couldn't prepare the new volume … keeps lost+found`** → the same
   shell-less image, on a volume the compose file asked to mount empty
   (`volume: {nocopy: true}`). Nothing was copied into it, as asked, but ext4's
@@ -336,7 +354,9 @@ Every `[OPSM-NNN]` opossum can emit (add-only; grouped 1xx storage / 2xx network
 - `OPSM-106` — a host device or session socket is mounted (a per-container VM can't reach it).
 - `OPSM-107` — a bind mount names a file that doesn't exist, so a directory stands in its place.
 - `OPSM-108` — a fresh volume couldn't be filled from the image, or cleared of ext4's `lost+found` (no shell in it to run either with).
-- `OPSM-201` — a published host port is already taken (pre-flight).
+- `OPSM-109` — a bind source is a symlink to a socket, which the runtime refuses to mount.
+- `OPSM-201` — a published host port is already taken, whether the pre-flight saw it or
+  the start failed on it.
 - `OPSM-202` — the DNS domain isn't registered (no bare-name discovery).
 - `OPSM-203` — an internal network: no internet egress and no name resolution.
 - `OPSM-204` — a service mounts `docker.sock` (Apple container has no Docker socket).
@@ -357,6 +377,7 @@ Every `[OPSM-NNN]` opossum can emit (add-only; grouped 1xx storage / 2xx network
 - `OPSM-410` — the supervisor's log reached its 1MB cap and its older half was dropped. Housekeeping, not a fault: the newest lines are the ones that explain a service being down. Appears as the first line of `supervisor.log`.
 - `OPSM-411` — the supervisor could not open a size-capped log and is writing without a bound. The file can then grow without limit; remove it if it gets large, or restart the project.
 - `OPSM-407` — a service's container exited right after starting, with no health gate to catch it (`up` reports its logs and fails).
+- `OPSM-412` — the image has no arm64 build, so the container cannot start on Apple silicon.
 - `OPSM-501` — unsupported top-level compose field(s), ignored.
 - `OPSM-502` — unsupported service compose field(s), ignored (e.g. `network_mode: host`).
 - `OPSM-601` — a `watch` rebuild action failed.

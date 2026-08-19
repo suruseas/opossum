@@ -219,9 +219,36 @@ harmless (the comment is dropped anyway), but a `${VAR:?required}` in a comment 
 **fail the load**. Keep interpolation syntax out of comments, or write the `$` as
 `$$` to keep it literal.
 
+The values in an env file are themselves expanded, as docker compose does. This
+was measured against Compose v5.3.1 case by case, because two of the rules are not
+the ones a reader would guess:
+
+- **Only keys defined above the line are in scope.** `B=${A}/b` after `A=/a` gives
+  `/a/b`, but a reference to a key defined further down the file expands to empty.
+- **A single-quoted value is left alone**, the way a shell treats single quotes.
+  Double-quoted and unquoted values are expanded.
+
+When the same key is defined twice, which one wins depends on whether the other
+definition is at the same level, and the two answers are opposite:
+
+- **A strictly outer level always wins.** The levels, outermost first, are: the
+  shell, then the project's `.env` (or `--env-file`), then a service's own
+  `environment:` block, then that service's `env_file:` files. So a value in an
+  `env_file:` can reference a key that only `environment:` defines, and where
+  both define one, `environment:` is what that value sees.
+- **Within one level the files are a single map filled top to bottom**, so the
+  last assignment wins and a file's own line beats a file read before it. Given
+  `one.env` with `A=first` and `two.env` with `A=second` then `B=${A}`, `B` is
+  `second`. A value read *before* the override still holds the old one.
+
+Expansion is a single pass: what one value expands to is not expanded again when
+another value references it.
+
 opossum also provides one built-in: **`${OPOSSUM_HOST_GATEWAY}`** — the address a
-container can use to reach a service running on the host (see below). A shell env
-var or `.env` entry of the same name overrides it.
+container can use to reach a service running on the host (see below). It ranks
+below every level above, so a same-named entry in the shell, in `.env`, in a
+service's `environment:`, or in its `env_file:` overrides it — including for
+values derived from it in the same file.
 
 ## Commands
 

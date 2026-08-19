@@ -86,3 +86,54 @@ func TestDecodeStartErrorAppendsHint(t *testing.T) {
 		t.Errorf("an unrecognized failure should fall back to startFailed, got: %s", s)
 	}
 }
+
+// Every decoded hint carries a code, and it is the code that indexes its fix —
+// this is the half the prose cannot do. Anything splitting "diagnosed" from
+// "undiagnosed" has only the code to split on, so an accurate hint without one is
+// counted as undiagnosed.
+//
+// The expected codes are written out rather than derived, so that pointing two
+// signatures at one code — or at the wrong one — is a failure and not a rename.
+func TestEachDecodedHintCarriesItsCode(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		svc    *compose.Service
+		stderr string
+		want   diagCode
+	}{
+		{"an amd64-only image", &compose.Service{},
+			"Error: image sha256:abc does not support required platforms", codeImageNoArm64},
+		// Reused, not minted: the pre-flight names this same conflict, and the
+		// only difference here is that it could not see it in advance.
+		{"a port the pre-flight could not see", &compose.Service{Ports: []string{"53:53/udp"}},
+			"Error: bind(descriptor:ptr:bytes:): Address already in use", codeHostPortInUse},
+		// Likewise: this is the placeholder directory OPSM-107 warns about,
+		// arriving as a refusal instead of a warning.
+		{"a bind mount that will not resolve", &compose.Service{},
+			"Error: mount failed with errno 20: failed to resolve '/etc/caddy/Caddyfile' in rootfs", codeBindFilePlaceholder},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := runErrorHint(tc.svc, runErr(tc.stderr))
+			if h == "" {
+				t.Fatalf("this signature should still decode at all, got no hint")
+			}
+			if want := "[" + string(tc.want) + "]"; !strings.Contains(h, want) {
+				t.Errorf("the hint should carry %s so it can be looked up, got: %q", want, h)
+			}
+		})
+	}
+}
+
+// The generic start failure stays uncoded, and that is a decision rather than an
+// omission: opossum has nothing specific to say there, so there is no fix for a
+// code to index. Coding it would make every start failure look diagnosed and
+// erase the distinction the decoding above exists to draw.
+func TestAnUndecodedStartFailureCarriesNoCode(t *testing.T) {
+	err := startFailed("web", runErr("Error: something nobody has decoded yet"))
+	if strings.Contains(err.Error(), "OPSM-") {
+		t.Errorf("an undiagnosed failure must not look diagnosed, got: %v", err)
+	}
+	if runErrorHint(&compose.Service{}, runErr("Error: something nobody has decoded yet")) != "" {
+		t.Error("an unknown signature should decode to nothing at all")
+	}
+}
