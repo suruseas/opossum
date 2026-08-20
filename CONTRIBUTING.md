@@ -53,6 +53,17 @@ sections: prose outside bullets, and headings other than the six Keep a Changelo
 types. Entries are bullets under those six sections; anything else belongs in the
 release notes or the docs.
 
+What an entry may hold follows from that. It starts with `- `, and every line
+after the first is indented by at least two spaces — spaces, not a tab — or is
+blank; a blank line is a paragraph break inside the entry. The left margin is
+where the changelog's own structure lives, so the only thing that may go there is
+`- `, starting the next entry — a fragment written with two of them is published,
+and read back, as two. Anything else at the margin is refused, a `### ` heading
+above all: published as written, it would open a section of its own in the
+release. Whatever else Markdown allows is fine as long as it is indented: nested
+lists, quotes, tables, and fenced code all survive a release unchanged. Entries
+are written in English, inside a code fence as much as outside one.
+
 ## Before pushing
 
 ```sh

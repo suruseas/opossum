@@ -340,7 +340,7 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 		if err != nil {
 			return nil, fmt.Errorf("reading compose file: %w", err)
 		}
-		if data, err = interpolate(raw, scope.lookup()); err != nil {
+		if data, err = interpolateDocument(raw, scope.lookup()); err != nil {
 			return nil, fmt.Errorf("interpolating %s: %w", paths[0], err)
 		}
 	} else {
@@ -351,7 +351,7 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 			if err != nil {
 				return nil, fmt.Errorf("reading compose file: %w", err)
 			}
-			if raw, err = interpolate(raw, scope.lookup()); err != nil {
+			if raw, err = interpolateDocument(raw, scope.lookup()); err != nil {
 				return nil, fmt.Errorf("interpolating %s: %w", path, err)
 			}
 			var m map[string]any

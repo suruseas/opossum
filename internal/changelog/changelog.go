@@ -71,7 +71,14 @@ func Load(dir string) ([]Fragment, error) {
 		// file verbatim, and leading blank lines would turn the section into a loose
 		// list. The ratchet can't catch either — both sides derive from the same
 		// fragment, so a corrupted entry round-trips cleanly.
-		body := strings.TrimSpace(strings.ReplaceAll(string(b), "\r\n", "\n"))
+		//
+		// A lone CR is a line ending too, and every check below counts lines. One
+		// that went unconverted made a whole fragment look like a single line, which
+		// let a `### ` heading through the check on the left margin and into the
+		// release — where a Markdown reader, which does treat it as a line ending,
+		// sees the heading.
+		normal := strings.ReplaceAll(strings.ReplaceAll(string(b), "\r\n", "\n"), "\r", "\n")
+		body := strings.TrimSpace(normal)
 		if strings.TrimSpace(body) == "" {
 			return nil, fmt.Errorf("%s: the fragment is empty", e.Name())
 		}
@@ -85,6 +92,19 @@ func Load(dir string) ([]Fragment, error) {
 		if versionHeadingRe.MatchString(body) {
 			return nil, fmt.Errorf("%s: the body has a line starting with \"## [<version>\", which would be read as a "+
 				"release heading — indent it or reword it", e.Name())
+		}
+		// Every other line at the left margin is refused. A fragment is published into the
+		// changelog verbatim, and at the margin the file's own structure lives:
+		// `### Fixed` there opens a type section, so a fragment carrying one puts a
+		// section into the release that no fragment asked for — and it round-trips
+		// byte for byte, so the ratchet cannot see it either. Only a new entry
+		// belongs at the margin.
+		if line, at := marginLine(body); at > 0 {
+			at += strings.Count(normal[:strings.Index(normal, body)], "\n") // the blank lines trimmed off the top
+			return nil, fmt.Errorf("%s: line %d is at the left margin: %q\n"+
+				"a fragment is one entry: after the first line, a line is indented by two "+
+				"spaces, is blank, or starts the next entry with \"- \". At the margin it is "+
+				"read as the changelog's own structure once the fragment is published", e.Name(), at, line)
 		}
 		// The changelog is written in English, and a fragment is published into it
 		// verbatim. Everything else about a change is discussed in Japanese, so
@@ -105,6 +125,22 @@ func Load(dir string) ([]Fragment, error) {
 		return out[i].Slug < out[j].Slug
 	})
 	return out, nil
+}
+
+// marginLine returns the first line of a body that sits at the left margin where
+// it may not, with its 1-based number within the body, or ("", 0) if there is
+// none. The entry's own first line is at the margin and stays there: it begins
+// with `- `, which is what the margin is for.
+func marginLine(body string) (string, int) {
+	for i, line := range strings.Split(body, "\n") {
+		// Whitespace alone counts as blank: inside an entry such a line is a
+		// paragraph break the changelog carries through unchanged.
+		if strings.TrimSpace(line) == "" || strings.HasPrefix(line, "  ") || strings.HasPrefix(line, "- ") {
+			continue
+		}
+		return line, i + 1
+	}
+	return "", 0
 }
 
 // firstCJK returns the first Han, Hiragana, or Katakana character in s, or "" if

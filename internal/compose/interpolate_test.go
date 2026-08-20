@@ -6,6 +6,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // withoutHostVar removes name from the environment for the duration of the test
@@ -51,6 +53,10 @@ func lk(m map[string]string) varLookup {
 	}
 }
 
+// interpolate is the plain expander, used on text that is not a YAML document:
+// env-file values and `${VAR:-default}` arguments. It leaves `x: ` alone — the
+// repair that turns that into `x: ""` belongs to the document path only, because
+// a value like `LIB=${PREFIX}/lib:` is not a mapping and must not be "repaired".
 func TestInterpolateForms(t *testing.T) {
 	env := lk(map[string]string{
 		"IMAGE": "postgres:16",
@@ -1175,5 +1181,521 @@ services:
 	}
 	if got := envValue(proj.Services["app"].Environment, "GW"); got != "10.0.0.1" {
 		t.Errorf("GW = %q, want the stub — the host's own value must not show through", got)
+	}
+}
+
+// A value that expands to nothing must reach the parser as an empty string, not
+// as null. For `environment:` the two are opposites: null is a bare key, which
+// tells the runtime to take the variable FROM THE HOST — so a compose file asking
+// for an empty value handed the container whatever the developer happened to have
+// exported.
+//
+// Each expectation was measured against docker compose v5.3.1. The pairs matter
+// more than the individual values: a fix that empties everything would also break
+// the hand-written null, and one that touches nothing keeps the leak.
+func TestAValueEmptiedByExpansionIsAnEmptyString(t *testing.T) {
+	unsetHostVars(t, "NOSUCHVAR", "A", "B", "LEAKY", "INHERITS")
+	p := writeProject(t, `
+services:
+  app:
+    image: app
+    environment:
+      FROM_UNSET: ${NOSUCHVAR}
+      BRACELESS: $NOSUCHVAR
+      FROM_DEFAULT: ${NOSUCHVAR:-}
+      TWO_ADJACENT: ${A}${B}
+      QUOTED: "${A}"
+      PREFIXED: x${A}
+      SUFFIXED: ${A}x
+      HAND_WRITTEN_NULL:
+      HAND_WRITTEN_EMPTY: ""
+`, "")
+	proj, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	env := proj.Services["app"].Environment
+	for _, tc := range []struct{ key, want string }{
+		{"FROM_UNSET", "FROM_UNSET="},
+		// `$NAME` goes down its own branch of the expander, so it needs its own case:
+		// wiring one form and not the other leaves half the leak open.
+		{"BRACELESS", "BRACELESS="},
+		{"FROM_DEFAULT", "FROM_DEFAULT="},
+		{"TWO_ADJACENT", "TWO_ADJACENT="},
+		{"QUOTED", "QUOTED="},
+		{"PREFIXED", "PREFIXED=x"},
+		{"SUFFIXED", "SUFFIXED=x"},
+		// The one shape that must stay a bare key: nobody wrote a reference here,
+		// so "inherit from the host" is what the file actually says.
+		{"HAND_WRITTEN_NULL", "HAND_WRITTEN_NULL"},
+		{"HAND_WRITTEN_EMPTY", "HAND_WRITTEN_EMPTY="},
+	} {
+		if !slices.Contains(env, tc.want) {
+			t.Errorf("%s: want %q in the environment, got %v", tc.key, tc.want, env)
+		}
+	}
+}
+
+// The leak itself, end to end: with the host exporting the same name, the value
+// the service gets must come from the compose file. Asserting on the environment
+// list alone would pass on a build that reads the host, because the list would
+// still name the key.
+func TestAnEmptiedValueDoesNotInheritFromTheHost(t *testing.T) {
+	unsetHostVars(t, "NOSUCHVAR")
+	t.Setenv("LEAKY", "secret-from-host")
+	p := writeProject(t, `
+services:
+  app:
+    image: app
+    environment:
+      LEAKY: ${NOSUCHVAR}
+`, "")
+	proj, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	env := proj.Services["app"].Environment
+	if slices.Contains(env, "LEAKY") {
+		t.Errorf("LEAKY arrives as a bare key, which makes the runtime pass the host's "+
+			"value through: %v", env)
+	}
+	if !slices.Contains(env, "LEAKY=") {
+		t.Errorf("LEAKY should be set to nothing, got %v", env)
+	}
+}
+
+// The document repair must not reach an env-file value. Those are expanded by the
+// same code but are not YAML, and plenty of ordinary ones end in a colon: a PATH
+// being extended, a namespace prefix. Repairing `LIB=/usr/local/lib:` into
+// `/usr/local/lib: ""` broke compose files that had always worked — silently when
+// the value came from `env_file:`, and as a YAML parse error when it was
+// referenced from the document.
+func TestTheDocumentRepairDoesNotReachEnvFileValues(t *testing.T) {
+	unsetHostVars(t, "PREFIX", "LIB", "TENANT", "NS")
+
+	t.Run("through env_file", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "app.env"),
+			[]byte("PREFIX=/usr/local\nLIB=${PREFIX}/lib:\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		p := filepath.Join(dir, "compose.yaml")
+		if err := os.WriteFile(p, []byte("services:\n  app:\n    image: app\n    env_file: app.env\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		proj, err := Load(p)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if got := envValue(proj.Services["app"].Environment, "LIB"); got != "/usr/local/lib:" {
+			t.Errorf("LIB = %q, want the trailing colon left alone", got)
+		}
+	})
+
+	// Referenced from the document, the same value used to produce
+	// `LIB: "/usr/local/lib: """ — not valid YAML, so the project stopped loading.
+	t.Run("referenced from the document", func(t *testing.T) {
+		p := writeProject(t, `
+services:
+  app:
+    image: app
+    environment:
+      LIB: "${LIB}"
+`, "PREFIX=/usr/local\nLIB=${PREFIX}/lib:\n")
+		proj, err := Load(p)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if got := envValue(proj.Services["app"].Environment, "LIB"); got != "/usr/local/lib:" {
+			t.Errorf("LIB = %q, want the trailing colon left alone", got)
+		}
+	})
+
+	// The other fragment path: the default inside `${VAR:-default}` goes through
+	// the same expander. Checked at the expander rather than through Load, because
+	// a document that expands to `NS: acme:` is not valid YAML — that is the
+	// separate, older consequence of expanding before parsing (#411), and it fails
+	// the same way on the commit before this change.
+	t.Run("inside a default argument", func(t *testing.T) {
+		got, err := interpolateStr("${NOPE:-${TENANT}:}", lk(map[string]string{"TENANT": "acme"}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "acme:" {
+			t.Errorf("got %q, want the default's trailing colon left alone", got)
+		}
+	})
+}
+
+// What the repair must and must not touch, decided by the parser rather than by
+// reading the text. Each case is a whole document through Load, because the
+// question — "is this a value that vanished, or the inside of a string?" — only
+// has an answer once the document is parsed.
+//
+// The shapes below are the ones a text-level rule got wrong, one per review
+// round: block scalars, then anchors and tags before the indicator, then
+// multi-line quoted scalars. Flow style and sequence items are here too; those
+// the text rule never reached at all.
+func TestOnlyAVanishedValueBecomesAnEmptyString(t *testing.T) {
+	unsetHostVars(t, "NOPE", "ONCALL", "HOSTONLY")
+	for _, tc := range []struct {
+		name    string
+		compose string
+		key     string
+		want    string
+	}{
+		{
+			name:    "a value that is only a reference",
+			compose: "    environment:\n      K: ${NOPE}\n",
+			key:     "K", want: "K=",
+		},
+		{
+			name:    "a value the author left empty",
+			compose: "    environment:\n      K:\n",
+			key:     "K", want: "K", // a bare key: inherit from the host, as written
+		},
+		{
+			name:    "a value with text around the reference",
+			compose: "    environment:\n      K: x${NOPE}\n",
+			key:     "K", want: "K=x",
+		},
+		{
+			name:    "flow style",
+			compose: "    environment: {K: ${NOPE}}\n",
+			key:     "K", want: "K=",
+		},
+		{
+			name:    "a braceless reference in flow style",
+			compose: "    environment: {K: $NOPE}\n",
+			key:     "K", want: "K=",
+		},
+		{
+			// The reference expands — opossum expands the text, comments included —
+			// but the value beside it is the author's own bare key. Matching on the
+			// line alone read this as a vanished value and rewrote it.
+			name:    "a reference in a comment, beside a key the author left empty",
+			compose: "    environment:\n      K:  # ${NOPE}\n",
+			key:     "K", want: "K", // still: inherit from the host
+		},
+		{
+			name:    "a reference in a comment, beside one that did vanish",
+			compose: "    environment:\n      K: ${NOPE}  # ${NOPE}\n",
+			key:     "K", want: "K=",
+		},
+		{
+			// The parser reports a null carrying an anchor at the `&`, so the anchor
+			// itself stands between the position it gives and the value's place.
+			name:    "an anchor on a value that vanished",
+			compose: "    environment:\n      K: &anc ${NOPE}\n      J: *anc\n",
+			key:     "K", want: "K=",
+		},
+		{
+			name:    "an alias to a value that vanished",
+			compose: "    environment:\n      J: &anc ${NOPE}\n      K: *anc\n",
+			key:     "K", want: "K=",
+		},
+		{
+			name:    "an anchor in flow style",
+			compose: "    environment: {K: &anc ${NOPE}, J: one}\n",
+			key:     "K", want: "K=",
+		},
+		{
+			// The document is written back out only because J needed repairing. K
+			// must survive that round trip as the null the author wrote, which it
+			// does not in flow style: the marshaller renders a flow null as `''`.
+			name:    "a key the author left empty, beside one that vanished, in flow style",
+			compose: "    environment: {K: , J: ${NOPE}}\n",
+			key:     "K", want: "K", // still: inherit from the host
+		},
+		{
+			// A control: the document is written back out, and a value that was not
+			// repaired has to come back as itself. It does — the marshaller re-quotes
+			// whatever the tag requires — so this pins the round trip rather than any
+			// choice made here.
+			name:    "a quoted value beside one that vanished",
+			compose: "    environment: {K: \"yes\", J: ${NOPE}}\n",
+			key:     "K", want: "K=yes",
+		},
+		{
+			// A tab is separation space after a colon, so the parser accepts this and
+			// the gap between the value's place and the reference is not a space.
+			name:    "a tab between the colon and the reference",
+			compose: "    environment:\n      K:\t${NOPE}\n",
+			key:     "K", want: "K=",
+		},
+		{
+			// The reference before it writes two characters, so the second reference
+			// does not start where it would have on an untouched line. A cursor that
+			// does not move over what it wrote points back into `K:` and the value is
+			// left as the author's own null.
+			name:    "a second reference on a line another one already widened",
+			compose: "    environment: {A: ${NOPE:-xy}, K: ${NOPE}}\n",
+			key:     "K", want: "K=",
+		},
+		{
+			// The parser reports this null at the comma, which is PAST where the
+			// reference was: the value's place and the reference that emptied it
+			// have to be recognised as adjacent from either side.
+			name:    "flow style with a space before the comma",
+			compose: "    environment: {K: ${NOPE} , J: one}\n",
+			key:     "K", want: "K=",
+		},
+		// Inside a string, a `key:` is text. The parser knows that; a line-based
+		// rule cannot, and got each of these wrong in turn.
+		{
+			name:    "a literal block holding what looks like a key",
+			compose: "    environment:\n      K: |\n        listen: ${NOPE}\n",
+			key:     "K", want: "K=listen: \n",
+		},
+		{
+			name:    "an anchor before the block indicator",
+			compose: "    environment:\n      K: &k |\n        listen: ${NOPE}\n",
+			key:     "K", want: "K=listen: \n",
+		},
+		// Folding joins the lines with a space, so the value here reads
+		// `oncall:  end` for Compose and `oncall: end` for opossum: expanding
+		// before the parser folds means the space the reference left behind is at
+		// the end of a line, where folding eats it. That difference is on main too
+		// — it belongs to expanding raw text (#419), not to this change. What
+		// matters here is that no `""` is injected into the middle of the string,
+		// which is what a line-based repair did.
+		{
+			name:    "a multi-line single-quoted scalar",
+			compose: "    environment:\n      K: 'runbook\n        oncall: ${NOPE}\n        end'\n",
+			key:     "K", want: "K=runbook oncall: end",
+		},
+		{
+			name:    "a multi-line double-quoted scalar",
+			compose: "    environment:\n      K: \"runbook\n        oncall: ${NOPE}\n        end\"\n",
+			key:     "K", want: "K=runbook oncall: end",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := writeProject(t, "services:\n  app:\n    image: app\n"+tc.compose, "")
+			proj, err := Load(p)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			env := proj.Services["app"].Environment
+			if !slices.Contains(env, tc.want) {
+				t.Errorf("want %q in the environment, got %v", tc.want, env)
+			}
+		})
+	}
+}
+
+// A sequence item that vanishes is an empty string too — the parser reports a
+// null scalar there just as it does for a mapping value, so the repair reaches it
+// without knowing anything about sequences.
+func TestAVanishedSequenceItemBecomesAnEmptyString(t *testing.T) {
+	unsetHostVars(t, "NOPE")
+	p := writeProject(t, `
+services:
+  app:
+    image: app
+    command:
+      - echo
+      - ${NOPE}
+`, "")
+	proj, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got := proj.Services["app"].Command
+	if len(got) != 2 || got[1] != "" {
+		t.Errorf("command = %#v, want [echo \"\"] rather than a null second item", got)
+	}
+}
+
+// A value written under its key rather than beside it is one mapping entry, and
+// its reference is a line below the null the parser reports. It is not repaired.
+//
+// This records a limit, and the second case is the reason for it. Matching across
+// the line would fix the first — and would break the second, because the next
+// line's own indent is whitespace too, so a key that begins with a reference
+// (Compose interpolates keys) reads as adjacent to the null above it. Rewriting a
+// null the author wrote is the one thing this repair must never do, so the shape
+// that is merely unrepaired is the better side to be wrong on.
+func TestAValueOnTheLineBelowItsKeyIsNotRepaired(t *testing.T) {
+	unsetHostVars(t, "NOPE", "PREFIX")
+	for _, tc := range []struct {
+		name    string
+		compose string
+		want    string
+	}{
+		{
+			name:    "the value is a line below its key",
+			compose: "    environment:\n      K:\n        ${NOPE}\n",
+			want:    "K", // not "K=" — the shape this does not reach
+		},
+		{
+			name:    "the line below begins with a reference of its own",
+			compose: "    environment:\n      K:\n      ${PREFIX}FOO: 1\n",
+			want:    "K", // K is the author's own null and must stay one
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := writeProject(t, "services:\n  app:\n    image: app\n"+tc.compose, "")
+			proj, err := Load(p)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			env := proj.Services["app"].Environment
+			if !slices.Contains(env, tc.want) {
+				t.Errorf("want %q in the environment, got %v", tc.want, env)
+			}
+		})
+	}
+}
+
+// Expansion can leave text that is no longer YAML — a value ending in a colon
+// swallows the next line's key. The repair cannot run on that, and what it does
+// instead is a decision with a user-visible consequence: it hands the bytes back
+// so the loader reports the syntax error in its own words, naming the file and
+// pointing at the line, rather than reporting "interpolating <file>" for
+// something interpolation did not fail at.
+func TestTextThatExpansionBrokeIsReportedAsASyntaxError(t *testing.T) {
+	unsetHostVars(t, "TENANT")
+	p := writeProject(t, "services:\n  app:\n    image: app\n    environment:\n      NS: ${TENANT}:\n", "TENANT=acme\n")
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("Load succeeded on a document expansion had broken")
+	}
+	for _, want := range []string{"is not valid YAML", "check the indentation and quoting"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should carry %q, got: %v", want, err)
+		}
+	}
+}
+
+// The repair compares a position it works out itself against one the parser
+// reports, so the two have to count the same way. They did not: columns were
+// counted in bytes and the parser counts runes, and only `\n` started a line
+// where the parser starts one at six different characters. Every case below
+// leaked a value the compose file never mentions — a service was handed the
+// host's variable of that name — and did it silently.
+//
+// Written as a matrix of what the parser can be asked to count, rather than as
+// the four bugs that were found, because the failure is one disagreement wearing
+// several faces.
+func TestPositionsAreCountedTheWayTheParserCountsThem(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		doc  string
+	}{
+		{"plain ASCII", "a: 1\nK: ${NOPE}\n"},
+		// The reference is the last thing in the file: it wrote at the end of the
+		// output, past every character there is to walk over.
+		{"no trailing newline", "a: 1\nK: ${NOPE}"},
+		// Columns restart at each line, so a rune on an EARLIER line cannot move a
+		// later one — kept as the control that says so, and not as evidence about
+		// counting bytes, which it is not.
+		{"a multi-byte value on an earlier line", "a: 日本語\nK: ${NOPE}\n"},
+		// These two are the ones a byte count gets wrong.
+		{"a multi-byte key on the same line", "{日本語: 1, K: ${NOPE}}\n"},
+		{"a two-byte rune on the same line", "{caf\u00e9: 1, K: ${NOPE}}\n"},
+		// Each of these starts a line as far as the parser is concerned, so a
+		// reference below one of them is on a line the repair has to agree about.
+		{"CRLF line endings", "a: 1\r\nK: ${NOPE}\r\n"},
+		{"CR line endings", "a: 1\rK: ${NOPE}\r"},
+		{"a NEL line ending", "a: 1\u0085K: ${NOPE}\n"},
+		{"an LS line ending", "a: 1\u2028K: ${NOPE}\n"},
+		{"a PS line ending", "a: 1\u2029K: ${NOPE}\n"},
+		// The parser skips a byte-order mark; counting it as a column shifts the
+		// whole of the first line.
+		{"a byte-order mark", "\ufeffK: ${NOPE}\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := interpolateDocument([]byte(tc.doc), lk(nil))
+			if err != nil {
+				t.Fatalf("interpolateDocument: %v", err)
+			}
+			var got map[string]any
+			if err := yaml.Unmarshal(out, &got); err != nil {
+				t.Fatalf("the repaired document does not parse: %v\n%s", err, out)
+			}
+			v, ok := got["K"]
+			if !ok {
+				t.Fatalf("K is missing from %v (output %q)", got, out)
+			}
+			if v != "" {
+				t.Errorf("K = %#v, want the empty string — nil is YAML null, which under `environment:` means inherit from the host", v)
+			}
+		})
+	}
+}
+
+// marksOf expands src and returns where each reference wrote, as the parser would
+// count the position. It is the pair the repair actually runs on.
+func marksOf(src string, env map[string]string) ([]refMark, error) {
+	out, offsets, err := expand([]byte(src), lk(env))
+	if err != nil {
+		return nil, err
+	}
+	_, marks := locate(out, offsets)
+	return marks, nil
+}
+
+// A value that expands to several lines pushes everything below it down. The
+// repair matches on position, so the newlines a value writes have to be counted —
+// otherwise the first multi-line value in a file silently moves every reference
+// below it out of alignment, and the repair stops finding them.
+//
+// Asserted on expand's own bookkeeping rather than through Load: a multi-line
+// value expanded into a document breaks the YAML anyway (#411), so a document
+// fixture would fail for that reason and prove nothing about the counting.
+func TestExpandRecordsWhereItWrote(t *testing.T) {
+	// Both spellings of a reference write the value, so both have to count it.
+	for _, src := range []string{"a: ${MULTI}\nb: ${NOPE}\n", "a: $MULTI\nb: $NOPE\n"} {
+		checkExpandMarks(t, src)
+	}
+}
+
+func checkExpandMarks(t *testing.T, src string) {
+	t.Helper()
+	marks, err := marksOf(src, map[string]string{"MULTI": "one\ntwo\nthree"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The output is:
+	//
+	//	1  a: one
+	//	2  two
+	//	3  three
+	//	4  b:
+	//
+	// so the first reference starts at line 1 column 4, and the second — the
+	// second line of the SOURCE — is on line 4, not line 2: the three lines the
+	// first value wrote are the middle of a value, with no reference on them.
+	want := []refMark{{1, 4}, {4, 4}}
+	if len(marks) != len(want) {
+		t.Fatalf("marks = %v, want %v", marks, want)
+	}
+	for i, w := range want {
+		if marks[i] != w {
+			t.Errorf("mark %d = %v, want %v (all: %v)", i, marks[i], w, marks)
+		}
+	}
+}
+
+// A position also has to come back to the left margin. A value carrying newlines
+// ends wherever its last line ends, so a reference that follows it ON THAT LINE
+// starts near the margin and not far along the line the value began on.
+func TestAReferenceAfterAMultiLineValueStartsWhereThatValueEnded(t *testing.T) {
+	marks, err := marksOf("a: ${MULTI} b: ${NOPE}\n", map[string]string{"MULTI": "one\ntwo\nthree"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The output is one line short of the source:
+	//
+	//	1  a: one
+	//	2  two
+	//	3  three b:
+	//
+	// `three` ends at column 5, ` b: ` takes four more, so the second reference
+	// starts at line 3 column 10.
+	want := []refMark{{1, 4}, {3, 10}}
+	if len(marks) != len(want) || marks[0] != want[0] || marks[1] != want[1] {
+		t.Errorf("marks = %v, want %v", marks, want)
 	}
 }

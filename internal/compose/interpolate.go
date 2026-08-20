@@ -8,6 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"unicode/utf8"
+
+	"gopkg.in/yaml.v3"
 )
 
 // varLookup resolves a variable name to its value and whether it was set at all.
@@ -314,14 +317,268 @@ func expandEnvValue(val string, literal bool, scope envScope, path string, line 
 	return string(b), nil
 }
 
-// interpolate expands variable references in the raw compose bytes before YAML
-// parsing. It supports `$VAR`, `${VAR}`, defaults `${VAR:-d}` (d when unset or
-// empty) and `${VAR-d}` (d only when unset), required `${VAR:?msg}` / `${VAR?msg}`
-// (error when unset/empty or unset), and `$$` as a literal `$`. An undefined
-// variable with no default expands to empty.
+// interpolateDocument expands a compose FILE and repairs the one thing expanding
+// raw text before parsing can break: a value that was a reference and is now
+// nothing, which YAML then reads as null. Under `environment:` null is not
+// "empty", it is "inherit this one from the host", so the container is handed a
+// value the compose file never mentions.
+//
+// The repair is made on the parsed document rather than on the text. Deciding
+// "is this line a mapping entry whose value vanished" from the bytes means
+// knowing where YAML is and is not: block scalars, multi-line quoted scalars,
+// flow collections, sequence items. Three rounds of review each found one more
+// shape the text-level rule got wrong. The parser already knows all of them, so
+// the rule here is the one it can answer exactly — a null scalar, on a line an
+// expansion wrote into, becomes an empty string.
+//
+// interpolate, which expands `.env` values and `${VAR:-default}` arguments, gets
+// no repair: those are not YAML. A value like `LIB=${PREFIX}/lib:` ends in a
+// colon and is not a mapping entry.
+//
+// Two things follow from handing the document back through the marshaller, which
+// only happens when there was something to repair. Formatting is the
+// marshaller's rather than the author's, so a line number in a later parse error
+// can differ from the line in the file (a `>` scalar, for instance, comes back
+// on one line). And a stream of several `---` documents comes back as its first
+// document alone — which is what the caller reads in either case, so nothing is
+// lost that was being used.
+func interpolateDocument(raw []byte, lookup varLookup) ([]byte, error) {
+	out, offsets, err := expand(raw, lookup)
+	if err != nil {
+		return nil, err
+	}
+	if len(offsets) == 0 {
+		return out, nil
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(out, &doc); err != nil {
+		// Not parseable: hand back the bytes so the caller reports the syntax error
+		// in its own words, with the file name it knows and this one does not.
+		return out, nil
+	}
+	if !emptyOutNulls(&doc, wroteAt(locate(out, offsets))) {
+		return out, nil // nothing to repair; keep the bytes exactly as expanded
+	}
+	unflow(&doc)
+	fixed, err := yaml.Marshal(&doc)
+	if err != nil {
+		return out, nil
+	}
+	return fixed, nil
+}
+
+// refMark is a place in the expanded output where a reference was written — the
+// value it produced starts here, and may be empty. Line and column are counted
+// the way the parser counts them, so a mark and a node position can be compared.
+type refMark struct{ line, col int }
+
+// locate walks the expanded output once and returns it as lines of runes, along
+// with the position of each byte offset an expansion wrote at.
+//
+// It is the only place that knows how the parser counts, and it is a single walk
+// rather than bookkeeping kept during expansion, because the two would be two
+// implementations of the same rule. What it has to agree with, measured against
+// gopkg.in/yaml.v3:
+//
+//   - a column is a rune, not a byte: `{A: 日本語, K: }` reports K's null at
+//     column 13, and a byte count says 19
+//   - LF, CRLF, CR, NEL (U+0085), LS (U+2028) and PS (U+2029) each start a line
+//   - a byte-order mark at the start of the stream occupies no column
+//
+// Offsets must be ascending, which they are: expansion writes left to right.
+func locate(out []byte, offsets []int) ([][]rune, []refMark) {
+	s := string(out)
+	var lines [][]rune
+	var marks []refMark
+	var cur []rune
+	line, col, next := 1, 1, 0
+	for i := 0; i < len(s); {
+		for next < len(offsets) && offsets[next] <= i {
+			marks = append(marks, refMark{line, col})
+			next++
+		}
+		if n := lineBreak(s[i:]); n > 0 {
+			lines = append(lines, cur)
+			cur, line, col = nil, line+1, 1
+			i += n
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if i == 0 && r == '\ufeff' {
+			i += size // the parser skips it, so it takes up no column here either
+			continue
+		}
+		cur = append(cur, r)
+		col++
+		i += size
+	}
+	for next < len(offsets) { // a reference that expanded at the very end
+		marks = append(marks, refMark{line, col})
+		next++
+	}
+	return append(lines, cur), marks
+}
+
+// lineBreak returns the length in bytes of the line break at the start of s, or
+// zero. CRLF is one break rather than two.
+func lineBreak(s string) int {
+	switch {
+	case strings.HasPrefix(s, "\r\n"):
+		return 2
+	case s[0] == '\n' || s[0] == '\r':
+		return 1
+	case strings.HasPrefix(s, "\u0085"):
+		return 2
+	case strings.HasPrefix(s, "\u2028"), strings.HasPrefix(s, "\u2029"):
+		return 3
+	}
+	return 0
+}
+
+// wroteAt reports, for a position in the expanded output, whether an expansion
+// wrote there: whether some mark on that line is separated from the position by
+// whitespace alone.
+//
+// A line is too coarse a unit on its own. `KEY:  # ${VAR}` expands in the comment,
+// which leaves the author's own `KEY:` — "inherit this one from the host" — on a
+// line an expansion touched. Reading that as a vanished value would rewrite a null
+// the file states outright.
+//
+// The two positions are compared in either direction because the parser does not
+// always put a null exactly where its text would have been: in `{k: ${VAR}, j: 1}`
+// it reports the comma, which is past the mark rather than before it. What both
+// directions mean is the same thing — nothing but space stands between the
+// value's place and the reference that emptied it.
+//
+// The line is also the limit, and deliberately so. A value written under its key
+// rather than beside it is one mapping entry whose null the parser reports up on
+// the key's line, so it is not repaired; the test named for that shape says so.
+// Letting a match cross the line is not the fix: the next line's own
+// indent is whitespace too, so `K:` followed by `${PREFIX}FOO: 1` — a key Compose
+// lets you interpolate — reads as adjacent, and the author's null is rewritten.
+// That is the one thing this must never do.
+func wroteAt(lines [][]rune, marks []refMark) func(line, col int) bool {
+	byLine := map[int][]int{}
+	for _, m := range marks {
+		byLine[m.line] = append(byLine[m.line], m.col)
+	}
+	return func(line, col int) bool {
+		if line < 1 || line > len(lines) {
+			return false
+		}
+		src := lines[line-1]
+		for _, c := range byLine[line] {
+			lo, hi := col, c
+			if lo > hi {
+				lo, hi = hi, lo
+			}
+			if lo < 1 || hi-1 > len(src) {
+				continue
+			}
+			if blank(src[lo-1 : hi-1]) {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+// unflow asks for block style on every collection, because writing the document
+// back out in flow style does not survive a null.
+//
+// `{K: , J: 1}` is a mapping whose K is null — under `environment:` that means
+// "inherit K from the host" — and the marshaller renders that null as an empty
+// string. The value the author wrote would come back meaning something else, in
+// the one direction this whole repair exists to prevent. In block style the same
+// null comes back as `K:`.
+//
+// Collections only, because that is all this needs: a scalar's style is the
+// quoting the author chose, and there is no reason to restyle it. Doing so would
+// in fact be harmless — the marshaller re-quotes whatever the tag requires, so
+// ` x `, `123`, `null` and a `|` block all read back the same either way — but a
+// narrower change is a narrower thing to be wrong about.
+func unflow(n *yaml.Node) {
+	if n.Kind == yaml.MappingNode || n.Kind == yaml.SequenceNode {
+		n.Style &^= yaml.FlowStyle
+	}
+	for _, c := range n.Content {
+		unflow(c)
+	}
+}
+
+// valueColumn is the column just past a node's anchor.
+//
+// A null carrying an anchor is reported at the `&`, not at the value: in
+// `A: &anc ${VAR}` the report is five columns left of the value, with the anchor
+// name in between, and reading that as "something else is in the way" left the
+// value as null — the host leak this whole repair exists to stop. The node names
+// its own anchor, so stepping over it needs nothing the parser has not already
+// said.
+//
+// What comes back is the column after the name and not the value's own column:
+// only whitespace separates them, and blankBetween already crosses whitespace, so
+// there is nothing to be gained by guessing how much of it there is.
+func valueColumn(n *yaml.Node) int {
+	if n.Anchor == "" {
+		return n.Column
+	}
+	// Counted in runes to match every other column here, though the parser only
+	// accepts letters, digits, `-` and `_` in an anchor name, so the two agree.
+	return n.Column + utf8.RuneCountInString(n.Anchor) + 1 // + the `&`
+}
+
+func blank(rs []rune) bool {
+	for _, r := range rs {
+		if r != ' ' && r != '\t' {
+			return false
+		}
+	}
+	return true
+}
+
+// emptyOutNulls turns every null scalar standing where an expansion wrote into an
+// empty string, and reports whether it changed anything.
+//
+// A null that the author typed is left alone: it still means what it says. The
+// parser has already decided what is a value and what is the inside of a string,
+// so the only question left is whether this particular value is the one that
+// vanished — which wrote asks.
+func emptyOutNulls(n *yaml.Node, wrote func(line, col int) bool) bool {
+	changed := false
+	if n.Kind == yaml.ScalarNode && n.Tag == "!!null" && wrote(n.Line, valueColumn(n)) {
+		n.Tag = "!!str"
+		n.Value = ""
+		changed = true
+	}
+	for _, c := range n.Content {
+		if emptyOutNulls(c, wrote) {
+			changed = true
+		}
+	}
+	return changed
+}
+
+// interpolate expands references in text that is not a YAML document: an env-file
+// value, or a default argument.
 func interpolate(raw []byte, lookup varLookup) ([]byte, error) {
+	out, _, err := expand(raw, lookup)
+	return out, err
+}
+
+// expand rewrites `$VAR`, `${VAR}`, defaults `${VAR:-d}` (d when unset or empty)
+// and `${VAR-d}` (d only when unset), required `${VAR:?msg}` / `${VAR?msg}` (error
+// when unset/empty or unset), and `$$` as a literal `$`. An undefined variable
+// with no default expands to empty.
+//
+// It also reports the byte offset in the OUTPUT of every value it wrote, which is
+// what lets interpolateDocument tell a null the author typed from one an
+// expansion left behind. Offsets rather than line and column: turning them into
+// positions needs the parser's own counting rules, and those belong in one place
+// (locate) rather than in a cursor carried through this loop.
+func expand(raw []byte, lookup varLookup) ([]byte, []int, error) {
 	var out bytes.Buffer
 	s := string(raw)
+	var offsets []int
 	for i := 0; i < len(s); {
 		c := s[i]
 		if c != '$' {
@@ -344,13 +601,14 @@ func interpolate(raw []byte, lookup varLookup) ([]byte, error) {
 			// than truncated at the first inner `}`.
 			end := matchBrace(s[i+2:])
 			if end < 0 {
-				return nil, fmt.Errorf("unterminated variable reference: %q", s[i:])
+				return nil, nil, fmt.Errorf("unterminated variable reference: %q", s[i:])
 			}
 			expr := s[i+2 : i+2+end]
 			val, err := expandBraced(expr, lookup)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
+			offsets = append(offsets, out.Len())
 			out.WriteString(val)
 			i += 2 + end + 1
 		case isNameStart(next):
@@ -359,6 +617,7 @@ func interpolate(raw []byte, lookup varLookup) ([]byte, error) {
 				j++
 			}
 			val, _ := lookup(s[i+1 : j])
+			offsets = append(offsets, out.Len())
 			out.WriteString(val)
 			i = j
 		default: // a lone $ (e.g. before a space) is literal
@@ -366,7 +625,7 @@ func interpolate(raw []byte, lookup varLookup) ([]byte, error) {
 			i++
 		}
 	}
-	return out.Bytes(), nil
+	return out.Bytes(), offsets, nil
 }
 
 // matchBrace returns the index in s of the `}` that closes a `${` reference whose

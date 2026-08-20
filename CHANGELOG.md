@@ -6,6 +6,31 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-08-21
+
+### Fixed
+
+- A compose value that is nothing but a variable reference, where that variable is
+  unset, now reaches the container as an empty value instead of being inherited
+  from the host. `MOUNT: ${NOSUCHVAR}` under `environment:` used to arrive at the
+  parser as `MOUNT:` — YAML null, which means "take this one from the host" — so a
+  service could be handed a value the compose file never mentions. Writing `KEY:`
+  yourself still means exactly that, because the file says so — including when the
+  comment beside it happens to mention a variable; what changed is that an emptied
+  reference no longer looks the same. Measured against Docker Compose v5.3.1,
+  which reads such a value as the empty string. A value that is a reference with
+  something after it — `x${VAR}`, or a `.env` entry ending in a colon — is not
+  touched, and neither is text the parser reads as a string, such as the inside
+  of a `|` block.
+
+  Two consequences beyond `environment:`. A mapping entry under `volumes:`,
+  `networks:` or `depends_on:` whose value is an unset reference is now a load
+  error rather than being read as an empty declaration — Compose rejects those
+  too. And a `healthcheck.test:` that empties out becomes a check that always
+  passes, so a `service_healthy` dependency waiting on it no longer waits for
+  anything; give the variable a value, or drop the healthcheck, if that gate
+  matters.
+
 ## [0.20.0] - 2026-08-19
 
 ### Changed
@@ -774,7 +799,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.20.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.21.0...HEAD
+[0.21.0]: https://github.com/suruseas/opossum/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/suruseas/opossum/compare/v0.19.1...v0.20.0
 [0.19.1]: https://github.com/suruseas/opossum/compare/v0.19.0...v0.19.1
 [0.19.0]: https://github.com/suruseas/opossum/compare/v0.18.2...v0.19.0

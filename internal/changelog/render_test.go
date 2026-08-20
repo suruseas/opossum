@@ -211,6 +211,76 @@ func TestLoadRejectsBodyThatLooksLikeAReleaseHeading(t *testing.T) {
 	}
 }
 
+// A fragment is published into the changelog verbatim, and the changelog's own
+// structure lives at the left margin. A fragment carrying a `### ` line there puts
+// a whole type section into the release that no fragment asked for — and it costs
+// nothing to notice, because the round trip cannot: the section comes back byte
+// for byte, so the ratchet stays green. It goes red only when a real fragment of
+// that type happens to share the release, which makes it somebody else's problem
+// to discover.
+func TestLoadRejectsALineAtTheLeftMargin(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want bool // want it refused
+	}{
+		{"a heading of another type", "- One.\n\n### Fixed\n\n- Smuggled.\n", true},
+		{"a heading of no type at all", "- One.\n\n### Notes\n\n  Two.\n", true},
+		{"a deeper heading", "- One.\n\n#### Notes\n\n  Two.\n", true},
+		{"prose", "- One.\n\nTwo, at the margin.\n", true},
+		{"one space of indent", "- One.\n Two.\n", true},
+		{"a tab of indent", "- One.\n\tTwo.\n", true},
+		// A lone CR ends a line for a Markdown reader, so a fragment written with
+		// them holds these same shapes — and looked like one long line to a check
+		// that split on newlines alone.
+		{"a heading after a lone CR", "- One.\r\r### Fixed\r\r- Smuggled.\r", true},
+		{"prose after a lone CR", "- One.\rTwo, at the margin.\r", true},
+		// What the margin is for, and what it costs nothing to allow.
+		{"the next entry", "- One.\n- Two.\n", false},
+		{"an indented continuation", "- One.\n  Two.\n", false},
+		{"a blank line", "- One.\n\n  Two.\n", false},
+		{"a line of spaces", "- One.\n \n  Two.\n", false},
+		{"an indented heading", "- One.\n\n  ### Notes\n\n  Two.\n", false},
+		// Written entirely with lone CRs, and holding nothing that does not belong:
+		// normalising them must not turn a fragment away, only stop one hiding
+		// behind them.
+		{"a whole fragment written with lone CRs", "- One.\r  Two.\r", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			write(t, dir, "1-x.added.md", tc.body)
+			_, err := changelog.Load(dir)
+			if tc.want && err == nil {
+				t.Errorf("a fragment holding this was accepted, and it would reach the release:\n%q", tc.body)
+			}
+			// Which rule refused it, not merely that one did: the checks around this
+			// one — for Japanese, for a release heading — would turn some of these
+			// away too, and this would stay green while saying nothing.
+			if tc.want && err != nil && !strings.Contains(err.Error(), "left margin") {
+				t.Errorf("refused for some other reason than the margin:\n%v", err)
+			}
+			if !tc.want && err != nil {
+				t.Errorf("a fragment holding this was refused, and it is a shape that survives a release:\n%q\n%v", tc.body, err)
+			}
+		})
+	}
+}
+
+// The line it names is the line of the file, which is what someone opening the
+// file has to find. Blank lines at the top are trimmed before the body is read,
+// and counting within the trimmed text pointed above the line it meant.
+func TestTheRefusedLineIsNumberedAsTheFileHasIt(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "1-x.added.md", "\n\n- One.\n  ok\nBad.\n")
+	_, err := changelog.Load(dir)
+	if err == nil {
+		t.Fatal("a line at the margin was accepted")
+	}
+	if !strings.Contains(err.Error(), "line 5") {
+		t.Errorf("want the file's line 5, got:\n%v", err)
+	}
+}
+
 // CRLF and stray blank lines must not reach the published file. The ratchet can't
 // catch either — both sides derive from the same fragment, so corruption
 // round-trips cleanly.
