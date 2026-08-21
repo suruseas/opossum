@@ -1,13 +1,12 @@
 package compose
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
-
-	"gopkg.in/yaml.v3"
 )
 
 // withoutHostVar removes name from the environment for the duration of the test
@@ -1204,6 +1203,8 @@ services:
       BRACELESS: $NOSUCHVAR
       FROM_DEFAULT: ${NOSUCHVAR:-}
       TWO_ADJACENT: ${A}${B}
+      TWO_SPACED: ${A} ${B}
+      HASH_AFTER: ${A}#tail
       QUOTED: "${A}"
       PREFIXED: x${A}
       SUFFIXED: ${A}x
@@ -1222,6 +1223,17 @@ services:
 		{"BRACELESS", "BRACELESS="},
 		{"FROM_DEFAULT", "FROM_DEFAULT="},
 		{"TWO_ADJACENT", "TWO_ADJACENT="},
+		// The space between two references is text the author wrote, so it stays —
+		// the value is one space, not nothing. It comes out right because the mark
+		// holds each reference's place while the parser reads the line; with the
+		// references simply gone, the space sat at the end of `TWO_SPACED:` and was
+		// stripped as indentation.
+		{"TWO_SPACED", "TWO_SPACED= "},
+		// `#` starts a comment only after a space, and here it follows a reference.
+		// The mark keeps it that way: with the reference gone the `#` would follow
+		// the space after the colon, and everything from it would be thrown away as
+		// a comment — which is how this used to lose the whole value.
+		{"HASH_AFTER", "HASH_AFTER=#tail"},
 		{"QUOTED", "QUOTED="},
 		{"PREFIXED", "PREFIXED=x"},
 		{"SUFFIXED", "SUFFIXED=x"},
@@ -1452,22 +1464,20 @@ func TestOnlyAVanishedValueBecomesAnEmptyString(t *testing.T) {
 			compose: "    environment:\n      K: &k |\n        listen: ${NOPE}\n",
 			key:     "K", want: "K=listen: \n",
 		},
-		// Folding joins the lines with a space, so the value here reads
-		// `oncall:  end` for Compose and `oncall: end` for opossum: expanding
-		// before the parser folds means the space the reference left behind is at
-		// the end of a line, where folding eats it. That difference is on main too
-		// — it belongs to expanding raw text (#419), not to this change. What
-		// matters here is that no `""` is injected into the middle of the string,
-		// which is what a line-based repair did.
+		// Folding joins the lines with a space. The mark stands where the reference
+		// was, so the space before it is not at the end of a line and folding does
+		// not eat it — `oncall:  end`, with two spaces, which is what Docker
+		// Compose reads it as (measured against v5.3.1). Expanding raw text used to
+		// lose that space; it no longer does.
 		{
 			name:    "a multi-line single-quoted scalar",
 			compose: "    environment:\n      K: 'runbook\n        oncall: ${NOPE}\n        end'\n",
-			key:     "K", want: "K=runbook oncall: end",
+			key:     "K", want: "K=runbook oncall:  end",
 		},
 		{
 			name:    "a multi-line double-quoted scalar",
 			compose: "    environment:\n      K: \"runbook\n        oncall: ${NOPE}\n        end\"\n",
-			key:     "K", want: "K=runbook oncall: end",
+			key:     "K", want: "K=runbook oncall:  end",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1507,16 +1517,581 @@ services:
 	}
 }
 
-// A value written under its key rather than beside it is one mapping entry, and
-// its reference is a line below the null the parser reports. It is not repaired.
+// A value carrying an explicit tag. Emptying it has to leave a string behind:
+// `!!int` with nothing under it is not a number, and the document would come back
+// out unreadable.
+func TestAnEmptiedValueWithAnExplicitTagBecomesAString(t *testing.T) {
+	unsetHostVars(t, "NOPE")
+	for _, tag := range []string{"!!str", "!!int"} {
+		t.Run(tag, func(t *testing.T) {
+			p := writeProject(t, "services:\n  app:\n    image: app\n    environment:\n      K: "+tag+" ${NOPE}\n", "")
+			proj, err := Load(p)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if env := proj.Services["app"].Environment; !slices.Contains(env, "K=") {
+				t.Errorf("want K= in the environment, got %v", env)
+			}
+		})
+	}
+}
+
+// The mark is a character, and a compose file could contain it. Reading such a
+// file would conflate what the author wrote with what expansion produced, so it is
+// refused rather than guessed at.
+func TestAComposeFileHoldingTheMarkIsRefused(t *testing.T) {
+	unsetHostVars(t, "NOPE")
+	p := writeProject(t, "services:\n  app:\n    image: app\n    environment:\n      K: \"a\ue000b\"\n", "")
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("a file carrying the mark was read as if it were ordinary text")
+	}
+	if !strings.Contains(err.Error(), "U+E000") {
+		t.Errorf("the error should name the character, got: %v", err)
+	}
+}
+
+// A reference that expands to nothing where the result is no longer YAML.
 //
-// This records a limit, and the second case is the reason for it. Matching across
-// the line would fix the first — and would break the second, because the next
-// line's own indent is whitespace too, so a key that begins with a reference
-// (Compose interpolates keys) reads as adjacent to the null above it. Rewriting a
-// null the author wrote is the one thing this repair must never do, so the shape
-// that is merely unrepaired is the better side to be wrong on.
-func TestAValueOnTheLineBelowItsKeyIsNotRepaired(t *testing.T) {
+// The mark stands between what was on either side of it, so taking it back out of
+// the text JOINS them: `c: *x${NOPE}y` would become `c: *xy`, which is valid YAML,
+// points at a different anchor, and loads without a word. The bytes go back
+// untouched instead, so they fail to parse for the caller exactly as they failed
+// here — and the caller says so in its own words rather than this blaming a
+// variable for what may be an indentation mistake.
+func TestTextExpansionBrokeIsNotQuietlyRepaired(t *testing.T) {
+	unsetHostVars(t, "NOPE")
+	// The alias case: `*x<mark>y` is not a name, so nothing parses it — and nothing
+	// silently turns it into `*xy` either.
+	raw := "a: &x 1\nxy: &xy 2\nc: *x${NOPE}y\n"
+	out, err := interpolateDocument([]byte(raw), lk(nil))
+	if err != nil {
+		t.Fatalf("interpolateDocument: %v", err)
+	}
+	var got map[string]any
+	if out.into(&got) == nil {
+		t.Errorf("the alias was quietly repointed instead of left broken: %v", got)
+	}
+
+	// An emptied value followed by a colon stops being a value at all: `NS: :` is
+	// a mapping where a scalar belongs, which is a different YAML failure from the
+	// one below and goes through the same door. (It is not the next line being
+	// swallowed — there is no next line here; the line breaks on its own.)
+	brokenLine := writeProject(t, "services:\n  app:\n    image: app\n    environment:\n      NS: ${NOPE}:\n", "")
+	if _, err := Load(brokenLine); err == nil {
+		t.Error("a document with a mapping where a value belongs was loaded")
+	} else if !strings.Contains(err.Error(), "is not valid YAML") {
+		t.Errorf("want the loader's own message, got: %v", err)
+	}
+
+	// And with more than one file, where a different piece of code does the
+	// reporting: the failure has to name the file it is actually in.
+	dir := t.TempDir()
+	good := filepath.Join(dir, "compose.yaml")
+	bad := filepath.Join(dir, "override.yaml")
+	if err := os.WriteFile(good, []byte("services:\n  app:\n    image: app\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bad, []byte("services:\n  app:\n    environment:\n      NS: ${NOPE}:\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadFiles([]string{good, bad}, nil); err == nil {
+		t.Error("a broken override was merged in anyway")
+	} else {
+		if !strings.Contains(err.Error(), "override.yaml") {
+			t.Errorf("the failure should name the file it is in, got: %v", err)
+		}
+		// Naming the right file only means something if it is not naming both:
+		// "compose.yaml and override.yaml" would contain the string above and
+		// still send the reader to the wrong file.
+		if strings.Contains(err.Error(), "compose.yaml") {
+			t.Errorf("the failure names a file the problem is not in, got: %v", err)
+		}
+		// And the same message as the single-file road, so the two do not drift.
+		if !strings.Contains(err.Error(), "is not valid YAML") {
+			t.Errorf("want the loader's own message, got: %v", err)
+		}
+		if strings.Contains(err.Error(), "\ue000") {
+			t.Errorf("the mark reached the message: %v", err)
+		}
+	}
+
+	// And through Load, where the message matters: a file whose own indentation is
+	// wrong must be told about its indentation, not about its variables.
+	p := writeProject(t, "services:\n  app:\n    image: ${NOPE}\n   bad: 1\n", "")
+	_, err = Load(p)
+	if err == nil {
+		t.Fatal("a file that is not YAML was loaded")
+	}
+	if !strings.Contains(err.Error(), "is not valid YAML") ||
+		!strings.Contains(err.Error(), "check the indentation") {
+		t.Errorf("the loader's own message should survive, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "expanded to nothing") {
+		t.Errorf("an indentation mistake was blamed on a variable: %v", err)
+	}
+	if strings.Contains(err.Error(), "\ue000") {
+		t.Errorf("the mark reached the message: %v", err)
+	}
+}
+
+// The mark is this package's bookkeeping and must not ride out into the document
+// opossum hands on — including through a comment, which is not a scalar and is not
+// where anyone would think to look for one.
+func TestTheMarkNeverLeavesThisPackage(t *testing.T) {
+	unsetHostVars(t, "NOPE")
+	for _, raw := range []string{
+		"a: 1 # ${NOPE}\n",
+		"# head ${NOPE}\na: 1\n",
+		"a: 1\n# foot ${NOPE}\n",
+		"a: ${NOPE}  # and here ${NOPE}\n",
+	} {
+		out, err := interpolateDocument([]byte(raw), lk(nil))
+		if err != nil {
+			t.Fatalf("%q: %v", raw, err)
+		}
+		var got map[string]any
+		if err := out.into(&got); err != nil {
+			t.Fatalf("%q: %v", raw, err)
+		}
+		if v := fmt.Sprint(got); strings.Contains(v, "\ue000") {
+			t.Errorf("%q came out still carrying the mark: %s", raw, v)
+		}
+	}
+}
+
+// The space in front of a reference belongs to the author, and stays whether or
+// not the variable was set. Losing it only when the variable is unset would make
+// the value depend on the environment — which is the whole of what this exists to
+// stop, arriving through the door marked "tidy up the comments".
+func TestWhitespaceAroundAnEmptiedReferenceIsKept(t *testing.T) {
+	unsetHostVars(t, "NOPE")
+	for _, tc := range []struct{ name, raw, want string }{
+		{"a space before it", "a: \"one ${NOPE}\"\n", "one "},
+		{"spaces after it too", "a: \"hello ${NOPE}  \"\n", "hello   "},
+		{"a tab on each side", "a: \"tab\\t${NOPE}\\t\"\n", "tab\t\t"},
+		{"folded over two lines", "a: \"one\n  ${NOPE} two \"\n", "one  two "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := interpolateDocument([]byte(tc.raw), lk(nil))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got map[string]any
+			if err := out.into(&got); err != nil {
+				t.Fatal(err)
+			}
+			if got["a"] != tc.want {
+				t.Errorf("a = %q, want %q", got["a"], tc.want)
+			}
+		})
+	}
+	// The comments this used to check are gone from here on purpose. They were
+	// about the document being written back out, and it no longer is — the tree is
+	// handed on, and nothing that reads it can see a comment. Two rounds of review
+	// went on where a comment's trailing whitespace should be trimmed; that whole
+	// question stopped existing when the rebuild did.
+
+	// And the same value with the variable SET, which is the comparison that makes
+	// the point: these two must not differ except in what the variable held.
+	set, err := interpolateDocument([]byte("a: \"one ${V}\"\n"), lk(map[string]string{"V": "x"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := set.into(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got["a"] != "one x" {
+		t.Errorf("a = %q, want %q", got["a"], "one x")
+	}
+}
+
+// A byte-order mark at the start of an env file belongs to the file, not to the
+// first key. Editors on Windows write one without being asked, and the failure it
+// used to cause is the quiet kind: the first key became `\ufeffA`, so `${A}` found
+// nothing and expanded to empty, with no error anywhere to say why.
+//
+// Anywhere else the mark lands inside a name, which has the same quiet ending, so
+// that is refused rather than carried. A mark inside a VALUE is a character
+// somebody put there and is kept.
+//
+// Every expectation below was measured against docker compose v5.3.1 on
+// 2026-08-21: it drops a leading mark, keeps one inside a value, and refuses one
+// in a name (its message quotes the whole line back, which this does not — the
+// line is in an env file).
+//
+// Both roads are here. The fix lives in the function both of them call, and a
+// version that only handled `.env` passed every case when this covered one road,
+// so the road is part of what is being checked.
+//
+// The two roads are read the same way but used differently, and the assertions
+// follow that rather than papering over it: the project `.env` supplies the
+// variables the compose file itself refers to, while an `env_file:` hands its
+// entries to the container and takes no part in expanding the compose file. So
+// one road is read through `${A}` and the other by looking for `A` in what the
+// service ends up with.
+func TestAByteOrderMarkAtTheStartOfAnEnvFileIsNotPartOfTheFirstKey(t *testing.T) {
+	unsetHostVars(t, "A", "B", "OUT_A", "OUT_B")
+	const bom = "\ufeff"
+	// Stands in for whatever is on a line an env file refuses: it is a file that
+	// holds secrets, so a refusal names the place and not the line.
+	const canary = "do-not-print-me"
+	const compose = "services:\n  app:\n    image: app\n    environment:\n" +
+		"      OUT_A: ${A}\n      OUT_B: ${B}\n"
+
+	for _, tc := range []struct {
+		name    string
+		envfile string
+		wantA   string
+		wantB   string
+		wantErr string
+	}{
+		{name: "no mark at all", envfile: "A=1\nB=${A}\n", wantA: "1", wantB: "1"},
+		// The shape from the report: the mark ate the first key, and the value that
+		// referred to it went empty in silence.
+		{name: "a mark before the first key", envfile: bom + "A=1\nB=${A}\n", wantA: "1", wantB: "1"},
+		// Windows writes the mark and Windows writes CRLF, so the two arrive
+		// together more often than either arrives alone. These two are here for
+		// the mark's sake, not CRLF's: dropping the CRLF normalisation entirely
+		// leaves every case here green, because the trailing `\r` is eaten when
+		// the value is trimmed. What they hold is that the mark is still found
+		// and removed when the file is written the Windows way.
+		{name: "a mark before the first key, CRLF", envfile: bom + "A=1\r\nB=${A}\r\n", wantA: "1", wantB: "1"},
+		{name: "CRLF with no mark", envfile: "A=1\r\nB=${A}\r\n", wantA: "1", wantB: "1"},
+		// The first line being a comment is the other way the mark reaches the
+		// front of the file.
+		{name: "a mark before a leading comment", envfile: bom + "# note\nA=1\nB=${A}\n", wantA: "1", wantB: "1"},
+		// The boundary. A mark inside a value is somebody's character and stays
+		// exactly where they put it.
+		{name: "a mark inside a value", envfile: "A=x" + bom + "y\nB=${A}\n", wantA: "x" + bom + "y", wantB: "x" + bom + "y"},
+		// And the refusals. Only the file's first mark is the file's; the rest are
+		// in names, where they cannot be typed and cannot be reported.
+		// The values here are recognisable ASCII so the check below can see a
+		// message that read the line back. Looking for the mark itself would not:
+		// `%q` writes it as the six characters `\ufeff`, so a message built that
+		// way contains the whole line and none of the character.
+		{name: "a mark on a later line", envfile: "A=1\n" + bom + "B=" + canary + "\n", wantErr: "byte-order mark"},
+		{name: "two marks at the start", envfile: bom + bom + "A=" + canary + "\nB=${A}\n", wantErr: "byte-order mark"},
+		{name: "a mark at the end of a name", envfile: "A" + bom + "=" + canary + "\n", wantErr: "byte-order mark"},
+		// No separator on the line, so there is no name to look inside — the whole
+		// line is the name. "no `=`" would be true and useless here: what has to go
+		// is a character the reader cannot see, so the message has to say so.
+		{name: "a mark in front of a comment", envfile: "A=1\n" + bom + "# " + canary + "\n", wantErr: "byte-order mark"},
+		{name: "a mark alone on a line", envfile: "A=1\n" + bom + "\n", wantErr: "byte-order mark"},
+	} {
+		for _, road := range []string{"the project .env", "a service env_file"} {
+			t.Run(tc.name+", through "+road, func(t *testing.T) {
+				dir := t.TempDir()
+				var composeText string
+				if road == "the project .env" {
+					composeText = compose
+					mustWriteFile(t, filepath.Join(dir, ".env"), tc.envfile)
+				} else {
+					composeText = strings.Replace(compose, "    image: app\n",
+						"    image: app\n    env_file: svc.env\n", 1)
+					mustWriteFile(t, filepath.Join(dir, "svc.env"), tc.envfile)
+				}
+				cf := filepath.Join(dir, "compose.yaml")
+				mustWriteFile(t, cf, composeText)
+
+				keyA, keyB := "OUT_A", "OUT_B"
+				if road != "the project .env" {
+					keyA, keyB = "A", "B"
+				}
+
+				proj, err := Load(cf)
+				if tc.wantErr != "" {
+					if err == nil {
+						t.Fatalf("want a failure saying %q, got none", tc.wantErr)
+					}
+					if !strings.Contains(err.Error(), tc.wantErr) {
+						t.Errorf("a different failure got there first: %v", err)
+					}
+					if strings.Contains(err.Error(), canary) {
+						t.Errorf("the message reads the line back: %v", err)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("Load: %v", err)
+				}
+				got := proj.Services["app"].Environment
+				for _, want := range []string{keyA + "=" + tc.wantA, keyB + "=" + tc.wantB} {
+					if !slices.Contains(got, want) {
+						t.Errorf("want %q in the environment, got %q", want, got)
+					}
+				}
+			})
+		}
+	}
+}
+
+// What an env file's errors about the SHAPE of a line are allowed to say. The
+// file is where passwords and tokens live, so: name the place, name what is
+// wrong with it, and leave the contents alone. The reader can open their own
+// file at the line named — they do not need it read back to them.
+//
+// The shape of the line is as far as this reaches. Expansion of a value can also
+// fail, and an unterminated `${` still quotes the rest of the value back — that
+// road is shared with the compose file, where the quoted text is the only clue
+// to where the problem is, so silencing it needs a decision rather than a patch.
+// Tracked separately; deliberately not covered here, because a sweep that
+// implied it did would be worse than one that says where it stops.
+//
+// The line with no separator is the one that used to break the rule: it quoted
+// the whole line, and a token pasted onto a line of its own is exactly the shape
+// that lands there.
+//
+// Each case says which failure it expects, so a change that makes some other
+// error come first cannot leave this passing on an error it never meant to look
+// at — an assertion about a message is worth nothing if it is a different
+// message.
+func TestAnEnvFileErrorNamesThePlaceNotTheContents(t *testing.T) {
+	// The host wins over an env file, so a `K` exported in the shell running the
+	// tests would replace what the file says and the second half of this would
+	// measure the host instead.
+	unsetHostVars(t, "K", "OUT")
+	const secret = "ghp-canary-do-not-print"
+	for _, tc := range []struct{ name, dotenv, wantIn string }{
+		{"a line with no separator", secret + "\n", "expected KEY=VALUE"},
+		{"a quoted value that never closes", "K=\"" + secret + "\n", "unterminated quoted value"},
+		{"no name in front of the separator", "=" + secret + "\n", "empty variable name"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := writeProject(t, "services:\n  app:\n    image: app\n", tc.dotenv)
+			_, err := Load(p)
+			if err == nil {
+				t.Fatal("the env file was accepted")
+			}
+			if !strings.Contains(err.Error(), tc.wantIn) {
+				t.Fatalf("a different failure got there first, so this checked nothing: %v", err)
+			}
+			if !strings.Contains(err.Error(), ".env:1") {
+				t.Errorf("the error should name the file and line to open: %v", err)
+			}
+			if strings.Contains(err.Error(), secret) {
+				t.Errorf("the error read the file's contents back:\n%v", err)
+			}
+		})
+	}
+
+	// The other direction. A rule that refuses more than it should would empty
+	// this whole surface and still pass everything above, because everything above
+	// is about failures.
+	for _, tc := range []struct{ name, dotenv, want string }{
+		{"an ordinary line", "K=" + secret + "\n", secret},
+		{"a colon instead of an equals", "K:" + secret + "\n", secret},
+		{"an exported line", "export K=" + secret + "\n", secret},
+		{"a comment that has no separator", "# " + secret + "\nK=v\n", "v"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := writeProject(t, "services:\n  app:\n    image: app\n    environment:\n      OUT: ${K}\n", tc.dotenv)
+			proj, err := Load(p)
+			if err != nil {
+				t.Fatalf("a line that is fine was refused: %v", err)
+			}
+			if got := proj.Services["app"].Environment; !slices.Contains(got, "OUT="+tc.want) {
+				t.Errorf("want OUT=%q in the environment, got %v", tc.want, got)
+			}
+		})
+	}
+}
+
+// A variable's value must not turn up in an error. Variables are where passwords
+// and tokens live, and an error goes to a terminal, a CI log, and an issue; what
+// the reader needs is which variable to go and fix, not what is in it.
+//
+// Text the FILE holds is a different matter and is not covered here: an
+// unterminated reference has to quote the file back, and the reader can already
+// read their own file.
+//
+// The premise is the whole test. The first version of this swept six shapes of
+// failure and expanded a secret-bearing variable in none of them, so the secret
+// could not have appeared whatever the code did: a refuseMark rewritten to print
+// `name + " = " + val` went through it green. What it asserted instead — that
+// four of the six still failed — was true and beside the point. So every case
+// here fails *with a value containing the secret in the code's hands*, and says
+// how it knows.
+//
+// Knowing it takes care, because two different refusals name U+E000 and only one
+// of them has ever held a value: a compose file that contains the mark itself is
+// refused up front, before a single variable is looked up. Recognising the
+// character alone would accept that one, and then a fixture with a stray mark in
+// it would sail through this whole sweep measuring nothing — the same shape of
+// hole in a new place. So the test recognises the wording only the refusal that
+// holds a value uses, and checks that the other one does not pass for it.
+//
+// Note the fixture is built with an escape rather than a literal character. A
+// stray mark pasted into a fixture is invisible in the source and turns "the
+// value was reached" into an accident — which is how this was measured the first
+// time.
+func TestAVariablesValueNeverAppearsInAnError(t *testing.T) {
+	unsetHostVars(t, "V", "NOSUCH")
+	const secret = "hunter2-canary-do-not-print"
+	// Carries the secret and is refused, so the refusal is raised with the whole
+	// value in hand — which is the only moment the value could leak.
+	held := secret + "\ue000"
+
+	// notHolding says why err is not the refusal that has a value in its hands, or
+	// "" if it is.
+	notHolding := func(err error) string {
+		switch {
+		case err == nil:
+			return "it did not fail at all"
+		case !strings.Contains(err.Error(), "the value of "):
+			return "a different failure got there first: " + err.Error()
+		}
+		return ""
+	}
+	reached := func(t *testing.T, err error) {
+		t.Helper()
+		if why := notHolding(err); why != "" {
+			t.Fatalf("nothing was measured about what a failure says — %s", why)
+		}
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("the error carries a variable's value:\n%v", err)
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		{"a reference to it", "a: ${V}\n"},
+		{"a reference to it, unbraced", "a: $V\n"},
+		{"a default it does not need", "a: ${V:-fallback}\n"},
+		{"a reference that requires it", "a: ${V:?set this first}\n"},
+		{"standing in as another variable's default", "a: ${NOSUCH:-${V}}\n"},
+		{"in a key", "${V}: 1\n"},
+		{"in a comment", "# note ${V}\na: 1\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := interpolateDocument([]byte(tc.raw), lk(map[string]string{"V": held}))
+			reached(t, err)
+		})
+	}
+
+	// The other refusal that names U+E000: the file itself holds the mark, and it
+	// is turned away before any variable is read. It must not pass for the one
+	// that holds a value — that is what keeps this sweep from going hollow if a
+	// mark ever gets into a fixture, which is exactly how it was measured wrong
+	// the first time.
+	t.Run("a file holding the mark is not mistaken for a value holding it", func(t *testing.T) {
+		_, err := interpolateDocument([]byte("a: \ue000\n"), lk(map[string]string{"V": held}))
+		if err == nil {
+			t.Fatal("a compose file holding the mark was accepted")
+		}
+		if !strings.Contains(err.Error(), "U+E000") {
+			t.Fatalf("the wrong failure got there: %v", err)
+		}
+		if notHolding(err) == "" {
+			t.Errorf("the up-front refusal passed as the one that holds a value: %v", err)
+		}
+	})
+
+	// And through Load, with the secret where secrets actually live: an `.env`
+	// file beside the compose file. A different set of code wraps the error on
+	// the way out, and wrapping is where a value gets picked up.
+	t.Run("through a .env file", func(t *testing.T) {
+		p := writeProject(t, "services:\n  app:\n    image: app\n    environment:\n      K: ${V}\n",
+			"V="+held+"\n")
+		_, err := Load(p)
+		reached(t, err)
+	})
+}
+
+// A value carrying the mark, arriving through the shell or an env file rather
+// than through the file itself. The file is checked before anything starts; this
+// is the same problem by another road, and letting it through would conflate what
+// somebody set with what expansion produced.
+func TestAValueCarryingTheMarkIsRefused(t *testing.T) {
+	// The recognisable part is plain ASCII on purpose. Asserting on a value that
+	// contains the mark misses a message built with %q, which escapes the mark and
+	// so never contains the value as written — the leak happens and the check
+	// passes.
+	const val = "canary" + "\ue000" + "canary"
+	// Both spellings of a reference write the value, so both have to check it, and
+	// each names itself as it was written rather than as the other one.
+	for _, tc := range []struct{ raw, wantRef string }{
+		{"a: ${V}\n", "${V}"},
+		{"a: $V\n", "$V"},
+	} {
+		_, err := interpolateDocument([]byte(tc.raw), lk(map[string]string{"V": val}))
+		if err == nil {
+			t.Fatalf("%q: a value carrying the mark was written into the document", tc.raw)
+		}
+		if !strings.Contains(err.Error(), "U+E000") {
+			t.Errorf("%q: the error should name the character, got: %v", tc.raw, err)
+		}
+		// The variable, so the reader knows which one to go and fix — and not the
+		// value, which is where a password lives.
+		if !strings.Contains(err.Error(), tc.wantRef) {
+			t.Errorf("%q: the error should name the reference %s, got: %v", tc.raw, tc.wantRef, err)
+		}
+		if strings.Contains(err.Error(), "canary") {
+			t.Errorf("%q: the error printed the value itself: %v", tc.raw, err)
+		}
+	}
+}
+
+// The two shapes a rule based on positions in the text could not reach, and what
+// they cost: an item of a flow sequence disappeared entirely, so a command lost an
+// argument without saying so; a value written under its key was left inheriting
+// from the host. Neither needed a rule of its own once the mark carried the answer
+// through the parser — which is the whole argument for doing it this way.
+func TestTheShapesPositionsCouldNotReach(t *testing.T) {
+	unsetHostVars(t, "NOPE", "PREFIX")
+	for _, tc := range []struct {
+		name    string
+		compose string
+		want    []string // every entry the service must end up with
+	}{
+		{
+			name:    "an item of a flow sequence, last",
+			compose: "    command: [echo, ${NOPE}]\n",
+			want:    []string{"echo", ""},
+		},
+		{
+			// First and middle used to fail the load outright: `[, a]` is not a list.
+			name:    "an item of a flow sequence, first",
+			compose: "    command: [${NOPE}, echo]\n",
+			want:    []string{"", "echo"},
+		},
+		{
+			name:    "an item of a flow sequence, middle",
+			compose: "    command: [echo, ${NOPE}, done]\n",
+			want:    []string{"echo", "", "done"},
+		},
+		{
+			name:    "a block sequence item",
+			compose: "    command:\n      - echo\n      - ${NOPE}\n",
+			want:    []string{"echo", ""},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := writeProject(t, "services:\n  app:\n    image: app\n"+tc.compose, "")
+			proj, err := Load(p)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			got := proj.Services["app"].Command
+			if len(got) != len(tc.want) {
+				t.Fatalf("command = %#v, want %#v", got, tc.want)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Errorf("command[%d] = %q, want %q (all: %#v)", i, got[i], tc.want[i], got)
+				}
+			}
+		})
+	}
+}
+
+// A value written under its key rather than beside it. The parser reports its
+// empty value up on the key's line, which is why a rule that compared positions
+// in the text could not reach it — and left the key inheriting from the host.
+func TestAValueOnTheLineBelowItsKeyIsEmptiedToo(t *testing.T) {
 	unsetHostVars(t, "NOPE", "PREFIX")
 	for _, tc := range []struct {
 		name    string
@@ -1526,12 +2101,16 @@ func TestAValueOnTheLineBelowItsKeyIsNotRepaired(t *testing.T) {
 		{
 			name:    "the value is a line below its key",
 			compose: "    environment:\n      K:\n        ${NOPE}\n",
-			want:    "K", // not "K=" — the shape this does not reach
+			want:    "K=",
 		},
 		{
+			// The line below begins with a reference of its own, and the key above it
+			// is the author's own null. Comparing positions could not tell these two
+			// apart — nothing but whitespace separates either — so this one had to be
+			// left alone by leaving both alone.
 			name:    "the line below begins with a reference of its own",
 			compose: "    environment:\n      K:\n      ${PREFIX}FOO: 1\n",
-			want:    "K", // K is the author's own null and must stay one
+			want:    "K", // still: inherit from the host
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1540,16 +2119,16 @@ func TestAValueOnTheLineBelowItsKeyIsNotRepaired(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Load: %v", err)
 			}
-			env := proj.Services["app"].Environment
-			if !slices.Contains(env, tc.want) {
+			if env := proj.Services["app"].Environment; !slices.Contains(env, tc.want) {
 				t.Errorf("want %q in the environment, got %v", tc.want, env)
 			}
 		})
 	}
 }
 
-// Expansion can leave text that is no longer YAML — a value ending in a colon
-// swallows the next line's key. The repair cannot run on that, and what it does
+// Expansion can leave text that is no longer YAML — a value that ends in a colon
+// reads as a mapping key, so the line is a mapping inside a mapping value. The
+// repair cannot run on that, and what it does
 // instead is a decision with a user-visible consequence: it hands the bytes back
 // so the loader reports the syntax error in its own words, naming the file and
 // pointing at the line, rather than reporting "interpolating <file>" for
@@ -1568,17 +2147,13 @@ func TestTextThatExpansionBrokeIsReportedAsASyntaxError(t *testing.T) {
 	}
 }
 
-// The repair compares a position it works out itself against one the parser
-// reports, so the two have to count the same way. They did not: columns were
-// counted in bytes and the parser counts runes, and only `\n` started a line
-// where the parser starts one at six different characters. Every case below
-// leaked a value the compose file never mentions — a service was handed the
-// host's variable of that name — and did it silently.
-//
-// Written as a matrix of what the parser can be asked to count, rather than as
-// the four bugs that were found, because the failure is one disagreement wearing
-// several faces.
-func TestPositionsAreCountedTheWayTheParserCountsThem(t *testing.T) {
+// A sweep of the shapes a line can take — the line endings YAML recognises, a
+// byte-order mark, multi-byte text, a file that does not end in a newline. It was
+// written when the repair worked out positions in the text itself and had to count
+// them exactly as the parser does; that machinery is gone, and this is kept as
+// what it always measured underneath: whatever the shape of the file, a value that
+// expanded to nothing arrives empty rather than inherited from the host.
+func TestTheShapeOfTheFileDoesNotChangeWhatAnEmptiedValueBecomes(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		doc  string
@@ -1611,12 +2186,12 @@ func TestPositionsAreCountedTheWayTheParserCountsThem(t *testing.T) {
 				t.Fatalf("interpolateDocument: %v", err)
 			}
 			var got map[string]any
-			if err := yaml.Unmarshal(out, &got); err != nil {
-				t.Fatalf("the repaired document does not parse: %v\n%s", err, out)
+			if err := out.into(&got); err != nil {
+				t.Fatalf("the repaired document does not decode: %v", err)
 			}
 			v, ok := got["K"]
 			if !ok {
-				t.Fatalf("K is missing from %v (output %q)", got, out)
+				t.Fatalf("K is missing from %v", got)
 			}
 			if v != "" {
 				t.Errorf("K = %#v, want the empty string — nil is YAML null, which under `environment:` means inherit from the host", v)
@@ -1625,77 +2200,72 @@ func TestPositionsAreCountedTheWayTheParserCountsThem(t *testing.T) {
 	}
 }
 
-// marksOf expands src and returns where each reference wrote, as the parser would
-// count the position. It is the pair the repair actually runs on.
-func marksOf(src string, env map[string]string) ([]refMark, error) {
-	out, offsets, err := expand([]byte(src), lk(env))
-	if err != nil {
-		return nil, err
-	}
-	_, marks := locate(out, offsets)
-	return marks, nil
-}
-
-// A value that expands to several lines pushes everything below it down. The
-// repair matches on position, so the newlines a value writes have to be counted —
-// otherwise the first multi-line value in a file silently moves every reference
-// below it out of alignment, and the repair stops finding them.
+// The same repair when the compose file has been split in two. Merging reads each
+// file on its own before combining them, which is a second road into the same
+// code, and the marks have to be gone on that one too.
 //
-// Asserted on expand's own bookkeeping rather than through Load: a multi-line
-// value expanded into a document breaks the YAML anyway (#411), so a document
-// fixture would fail for that reason and prove nothing about the counting.
-func TestExpandRecordsWhereItWrote(t *testing.T) {
-	// Both spellings of a reference write the value, so both have to count it.
-	for _, src := range []string{"a: ${MULTI}\nb: ${NOPE}\n", "a: $MULTI\nb: $NOPE\n"} {
-		checkExpandMarks(t, src)
-	}
-}
+// This is here because a mutation found it: reading the per-file bytes instead of
+// the per-file tree left every test green while a marker went into the merged
+// values. The single-file road was covered and this one was not — the same shape
+// of gap that let a byte-order mark through on one of two roads.
+func TestSplittingTheFileDoesNotBringTheMarkBack(t *testing.T) {
+	unsetHostVars(t, "NOPE", "X", "Y")
+	dir := t.TempDir()
+	base := filepath.Join(dir, "compose.yaml")
+	over := filepath.Join(dir, "override.yaml")
+	mustWriteFile(t, base, "services:\n  app:\n    image: app\n    environment:\n      X: ${NOPE}\n")
+	mustWriteFile(t, over, "services:\n  app:\n    environment:\n      Y: ${NOPE}\n")
 
-func checkExpandMarks(t *testing.T, src string) {
-	t.Helper()
-	marks, err := marksOf(src, map[string]string{"MULTI": "one\ntwo\nthree"})
+	proj, err := LoadFiles([]string{base, over}, nil)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("LoadFiles: %v", err)
 	}
-	// The output is:
-	//
-	//	1  a: one
-	//	2  two
-	//	3  three
-	//	4  b:
-	//
-	// so the first reference starts at line 1 column 4, and the second — the
-	// second line of the SOURCE — is on line 4, not line 2: the three lines the
-	// first value wrote are the middle of a value, with no reference on them.
-	want := []refMark{{1, 4}, {4, 4}}
-	if len(marks) != len(want) {
-		t.Fatalf("marks = %v, want %v", marks, want)
+	got := proj.Services["app"].Environment
+	for _, want := range []string{"X=", "Y="} {
+		if !slices.Contains(got, want) {
+			t.Errorf("want %q in the environment, got %q", want, got)
+		}
 	}
-	for i, w := range want {
-		if marks[i] != w {
-			t.Errorf("mark %d = %v, want %v (all: %v)", i, marks[i], w, marks)
+	// And explicitly: not the marker, and not a bare key either. A bare key is the
+	// defect this whole mechanism exists to stop, and it is what an emptied value
+	// becomes when nothing repairs it.
+	for _, e := range got {
+		if strings.Contains(e, "\ue000") {
+			t.Errorf("a marker reached the environment: %q", got)
+		}
+		if e == "X" || e == "Y" {
+			t.Errorf("%q came out as a bare key, which means inherit from the host: %q", e, got)
 		}
 	}
 }
 
-// A position also has to come back to the left margin. A value carrying newlines
-// ends wherever its last line ends, so a reference that follows it ON THAT LINE
-// starts near the margin and not far along the line the value began on.
-func TestAReferenceAfterAMultiLineValueStartsWhereThatValueEnded(t *testing.T) {
-	marks, err := marksOf("a: ${MULTI} b: ${NOPE}\n", map[string]string{"MULTI": "one\ntwo\nthree"})
+// When expansion leaves text that will not parse, what comes back has to be the
+// EXPANDED text, not the file as it was written.
+//
+// The difference only shows when the original parses and the expansion does not
+// — a variable whose value is itself broken YAML. Hand back the original and it
+// parses cleanly with `${V}` still in it, so the service is handed the reference
+// as a literal string and nothing anywhere says so. Hand back the expanded text
+// and it fails, which is the truth.
+//
+// A mutation returning the original survived the whole suite: the case that was
+// there (`c: *x${NOPE}y`) is broken before expansion too, so it could not tell
+// the two apart.
+func TestWhatComesBackFromAnUnparsableDocumentIsTheExpandedText(t *testing.T) {
+	unsetHostVars(t, "NOPE")
+	// The original parses: `a: ${V}` is an ordinary scalar. Expanded, V's value
+	// turns the line into an unterminated flow sequence.
+	raw := "a: ${V}\nb: ${NOPE}\n"
+	out, err := interpolateDocument([]byte(raw), lk(map[string]string{"V": "x: ["}))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("interpolateDocument: %v", err)
 	}
-	// The output is one line short of the source:
-	//
-	//	1  a: one
-	//	2  two
-	//	3  three b:
-	//
-	// `three` ends at column 5, ` b: ` takes four more, so the second reference
-	// starts at line 3 column 10.
-	want := []refMark{{1, 4}, {3, 10}}
-	if len(marks) != len(want) || marks[0] != want[0] || marks[1] != want[1] {
-		t.Errorf("marks = %v, want %v", marks, want)
+	if out.node != nil {
+		t.Fatal("the document parsed after expansion, so this case no longer measures anything")
+	}
+	var got map[string]any
+	if err := out.into(&got); err == nil {
+		t.Errorf("the broken expansion was accepted, and `a` came back as %#v — "+
+			"handing back the file as written would do exactly this", got["a"])
 	}
 }

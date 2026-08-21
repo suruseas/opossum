@@ -2074,8 +2074,9 @@ func (o *Orchestrator) warnDockerSocket(name string, svc *compose.Service) {
 // target is a socket, before anything starts.
 //
 // That combination, and only that combination, cannot be mounted here. Measured
-// against `container` 1.1.0, separating the three things that a single earlier
-// measurement had confounded:
+// against `container` 1.1.0 and again against 1.2.2 — the boundary is the same on
+// both — separating the three things that a single earlier measurement had
+// confounded:
 //
 //	socket, by its real path            works
 //	symlink → regular file              works

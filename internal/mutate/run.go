@@ -83,6 +83,18 @@ func NewRunner(root string) *Runner {
 // uncommitted change in the file. The point of running this is usually to test
 // work that is not committed yet.
 func (r *Runner) Sweep(ms []Mutation) ([]Result, error) {
+	// The whole sweep is checked before anything runs. A mutation that names no
+	// package, points outside the tree, or does not apply is a fault in the sweep
+	// rather than a finding — and finding that out after six mutations, or after
+	// a baseline run that takes minutes, wastes the time it was supposed to save.
+	for _, m := range ms {
+		if _, _, err := r.prepare(m); err != nil {
+			return nil, err
+		}
+	}
+	if err := r.baseline(ms); err != nil {
+		return nil, err
+	}
 	var out []Result
 	for _, m := range ms {
 		res, err := r.one(m)
@@ -95,6 +107,62 @@ func (r *Runner) Sweep(ms []Mutation) ([]Result, error) {
 		out = append(out, res)
 	}
 	return out, nil
+}
+
+// baseline runs the suite once, before anything is mutated, over every package
+// the sweep will test.
+//
+// A test that is already failing fails again under every mutation, and a failing
+// test is exactly what this tool reads as "the mutation was caught" — so one red
+// test makes a whole sweep report that everything is guarded while measuring
+// nothing at all. That is the failure the exit statuses promise not to produce,
+// and it is not hypothetical: a sweep once reported a mutation as caught by a
+// test that could not run, and the mutation it was supposed to be measuring was
+// never observed by anything.
+//
+// There is no way to say "yes, one is red, carry on". A sweep over a red tree
+// cannot distinguish the two answers this tool exists to keep apart.
+func (r *Runner) baseline(ms []Mutation) error {
+	pkgs := packagesOf(ms)
+	if len(pkgs) == 0 {
+		return errors.New("no packages to test")
+	}
+	if r.Log != nil {
+		r.Log("baseline: running the suite unmutated over " + strings.Join(pkgs, " "))
+	}
+	out, errOut, err := r.Go(append([]string{"test", "-count=1", "-json"}, pkgs...)...)
+	if failing := Failures(out); len(failing) > 0 {
+		return fmt.Errorf("the suite is already failing before any mutation is applied:\n  %s\n"+
+			"Every mutation would be reported as caught by these, so the sweep would measure "+
+			"nothing while reporting that everything is guarded. Make them pass first.",
+			strings.Join(failing, "\n  "))
+	}
+	if err != nil {
+		return fmt.Errorf("the suite could not be run before any mutation was applied, so nothing "+
+			"the sweep reported afterwards would mean anything: %s", oneLine(whyItDied(out, errOut)))
+	}
+	if r.Log != nil {
+		// Said out loud: the baseline is the longest single run here, and without
+		// this the first mutation's line arrives after minutes of silence.
+		r.Log("baseline: green — every failure from here belongs to a mutation")
+	}
+	return nil
+}
+
+// packagesOf is every package any mutation names, once each, in the order first
+// seen so a run is reproducible.
+func packagesOf(ms []Mutation) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, m := range ms {
+		for _, p := range m.Packages {
+			if !seen[p] {
+				seen[p] = true
+				out = append(out, p)
+			}
+		}
+	}
+	return out
 }
 
 func describe(r Result) string {
@@ -121,16 +189,20 @@ func describe(r Result) string {
 // nobody had touched yet, report success, and then watch the sweep write the
 // mutation anyway — "put it back" printed over a mutated tree, which is the worst
 // thing this could say.
-func (r *Runner) RestorePending() error {
+// The bool says whether there was anything to put back. With a baseline run in
+// front of the sweep, the likeliest moment to interrupt is one where no mutation
+// has been written yet — and a message saying a file was restored, when none was
+// touched, is the tool telling the author something that did not happen.
+func (r *Runner) RestorePending() (restored bool, err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.aborted = true
 	if !r.pending {
-		return nil
+		return false, nil
 	}
-	err := r.restoreLocked(r.pendPath, r.pendOrig)
+	err = r.restoreLocked(r.pendPath, r.pendOrig)
 	r.pending = false
-	return err
+	return true, err
 }
 
 // errAborted ends a sweep that was interrupted before it wrote its mutation.
@@ -152,25 +224,36 @@ func (r *Runner) armAndWrite(path string, original, mutated []byte) error {
 	return r.Write(path, mutated)
 }
 
-// one applies a single mutation and always restores the file before returning.
-func (r *Runner) one(m Mutation) (res Result, err error) {
+// prepare checks a mutation and works out what it would write, without writing
+// anything. Sweep runs it over every mutation before the first one is applied,
+// and one runs it again for the bytes.
+func (r *Runner) prepare(m Mutation) (original, mutated []byte, err error) {
 	if len(m.Packages) == 0 {
-		return Result{}, fmt.Errorf("%s: no packages to test — a mutation nothing runs against "+
+		return nil, nil, fmt.Errorf("%s: no packages to test — a mutation nothing runs against "+
 			"cannot be caught, and would be reported as survived", m.Name)
 	}
 	if err := r.inRoot(m.File); err != nil {
-		return Result{}, fmt.Errorf("%s: %w", m.Name, err)
+		return nil, nil, fmt.Errorf("%s: %w", m.Name, err)
 	}
-	original, err := r.Read(m.File)
+	original, err = r.Read(m.File)
 	if err != nil {
-		return Result{}, fmt.Errorf("%s: %w", m.Name, err)
+		return nil, nil, fmt.Errorf("%s: %w", m.Name, err)
 	}
-	mutated, err := Apply(string(original), m)
+	applied, err := Apply(string(original), m)
 	if err != nil {
-		return Result{}, fmt.Errorf("%s: %w", m.Name, err)
+		return nil, nil, fmt.Errorf("%s: %w", m.Name, err)
+	}
+	return original, []byte(applied), nil
+}
+
+// one applies a single mutation and always restores the file before returning.
+func (r *Runner) one(m Mutation) (res Result, err error) {
+	original, mutated, err := r.prepare(m)
+	if err != nil {
+		return Result{}, err
 	}
 
-	werr := r.armAndWrite(m.File, original, []byte(mutated))
+	werr := r.armAndWrite(m.File, original, mutated)
 	defer func() {
 		if rerr := r.disarmAndRestore(); rerr != nil {
 			err = errors.Join(err, rerr)

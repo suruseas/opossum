@@ -54,7 +54,7 @@ Docker Compose ファイル（`docker-compose.yml`）を読み、オープンな
 ## 必要環境
 
 - Apple silicon の macOS 26 以降
-- [`container`](https://github.com/apple/container) がインストール済みで起動済み（`container system start`）、かつ `PATH` 上にあること
+- [`container`](https://github.com/apple/container) がインストール済みで起動済み（`container system start`）、かつ `PATH` 上にあること — `container` 1.2.2 で検証済み
 - Go 1.25 以降（ソースからビルドする場合）
 
 ## インストール

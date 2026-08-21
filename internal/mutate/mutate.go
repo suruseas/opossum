@@ -161,6 +161,13 @@ type Result struct {
 // request. A mutation that survived says so in the table rather than being left
 // out, because that row is the reason to run this at all.
 func Report(rs []Result) string {
+	if len(rs) == 0 {
+		// No rows, no table. A run that stopped before it measured anything — a
+		// red baseline, a mutation that would not apply — would otherwise print
+		// the header on its own, which reads like a sweep that found nothing to
+		// say rather than one that never started.
+		return ""
+	}
 	var b strings.Builder
 	b.WriteString("| mutation | outcome | tests that caught it |\n|---|---|---|\n")
 	for _, r := range rs {

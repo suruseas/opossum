@@ -30,11 +30,18 @@
 // would be mixed into the next commit — and `git checkout` is not available as a
 // way out for exactly the same reason.
 //
+// Before the first mutation is applied, the suite is run once as it stands. A
+// test that is already failing fails again under every mutation, and a failing
+// test is what this reads as "caught" — so one red test would make a whole sweep
+// report that everything is guarded while measuring nothing. There is no way to
+// carry on past it.
+//
 // Exit status: 0 only when every mutation was caught, 1 when one survived (a
 // finding — the tool worked), 2 when the run did not measure something (a
 // mutation that would not compile, a test run that named nobody, a sweep that
-// could not be read). "It found something" and "it never ran" must not look
-// alike, and neither may look like "everything is guarded".
+// could not be read, a suite that was already failing). "It found something" and
+// "it never ran" must not look alike, and neither may look like "everything is
+// guarded".
 package main
 
 import (
@@ -70,6 +77,22 @@ func main() {
 // way out. `exit` is a parameter for the same reason the signal channel is: the
 // interrupt path is the one that was wrong, so it has to be reachable from a
 // test.
+// interruptMessage says what an interrupt actually did. Saying "the file has been
+// put back" when no file was ever written tells the author something that did not
+// happen — and with a baseline run in front of the sweep, the likeliest moment to
+// interrupt is one where nothing has been written yet.
+func interruptMessage(restored bool, err error) string {
+	switch {
+	case err != nil:
+		return "\nmutate: interrupted, AND THE FILE COULD NOT BE PUT BACK: " + err.Error() +
+			"\n  Check `git diff` before committing anything."
+	case restored:
+		return "\nmutate: interrupted — the file being mutated has been put back."
+	default:
+		return "\nmutate: interrupted with no mutation in flight — the tree is as you left it."
+	}
+}
+
 func run(args []string, stdout, stderr io.Writer, sigs <-chan os.Signal, exit func(int)) int {
 	if len(args) != 1 {
 		fmt.Fprintln(stderr, "usage: mutate <sweep.json>")
@@ -104,12 +127,8 @@ func run(args []string, stdout, stderr io.Writer, sigs <-chan os.Signal, exit fu
 			return
 		}
 		stopToolchain()
-		msg := "\nmutate: interrupted — the file being mutated has been put back."
-		if rerr := r.RestorePending(); rerr != nil {
-			msg = "\nmutate: interrupted, AND THE FILE COULD NOT BE PUT BACK: " + rerr.Error() +
-				"\n  Check `git diff` before committing anything."
-		}
-		fmt.Fprintln(stderr, msg)
+		restored, rerr := r.RestorePending()
+		fmt.Fprintln(stderr, interruptMessage(restored, rerr))
 		exit(exitInterrupted)
 	}()
 	defer close(done)

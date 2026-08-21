@@ -1,6 +1,7 @@
 package compose
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -72,9 +73,9 @@ func DiscoverOpossumOverlay(dir string) string {
 
 // ignoredTopLevel lists top-level compose keys opossum doesn't act on. `version`
 // (legacy no-op) and `x-` extension keys are intentionally not flagged.
-func ignoredTopLevel(data []byte) []string {
+func ignoredTopLevel(doc interpolated) []string {
 	var top map[string]yaml.Node
-	if err := yaml.Unmarshal(data, &top); err != nil {
+	if err := doc.into(&top); err != nil {
 		return nil
 	}
 	var out []string
@@ -333,14 +334,15 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 		return nil, err
 	}
 
-	var data []byte
+	var doc interpolated
 	if len(paths) == 1 {
-		// Single file: parse the interpolated bytes directly (no merge round-trip).
+		// Single file: read the interpolated document directly (no merge
+		// round-trip), so the positions a failure names are the ones in the file.
 		raw, err := os.ReadFile(paths[0])
 		if err != nil {
 			return nil, fmt.Errorf("reading compose file: %w", err)
 		}
-		if data, err = interpolateDocument(raw, scope.lookup()); err != nil {
+		if doc, err = interpolateDocument(raw, scope.lookup()); err != nil {
 			return nil, fmt.Errorf("interpolating %s: %w", paths[0], err)
 		}
 	} else {
@@ -351,12 +353,17 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 			if err != nil {
 				return nil, fmt.Errorf("reading compose file: %w", err)
 			}
-			if raw, err = interpolateDocument(raw, scope.lookup()); err != nil {
+			one, err := interpolateDocument(raw, scope.lookup())
+			if err != nil {
 				return nil, fmt.Errorf("interpolating %s: %w", path, err)
 			}
 			var m map[string]any
-			if err := yaml.Unmarshal(raw, &m); err != nil {
-				return nil, fmt.Errorf("compose file %s is not valid YAML: %w\n  check the indentation and quoting near the line the parser names above", path, err)
+			if err := one.into(&m); err != nil {
+				// The same words as the single-file road. A key set twice is found
+				// here rather than at the final decode, and saying "not valid YAML"
+				// for it was the same wrong advice by a different route — the one a
+				// reader hits precisely when they have split their file up.
+				return nil, decodeErr(path, err)
 			}
 			if merged == nil {
 				merged = m
@@ -364,21 +371,22 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 				merged = mergeMap(merged, m)
 			}
 		}
-		if data, err = yaml.Marshal(merged); err != nil {
+		// Merging builds a new tree, so there are no positions to keep: the files
+		// are one document by the time this is decoded, and a failure here names a
+		// line in THAT document while naming paths[0] as the file. Splitting a
+		// compose file therefore still gets the line numbers the single-file road
+		// used to get. The per-file pass above is the part that reads each file as
+		// the reader wrote it, and it only sees what a plain map can hold.
+		data, err := yaml.Marshal(merged)
+		if err != nil {
 			return nil, fmt.Errorf("merging compose files: %w", err)
 		}
+		doc = interpolated{raw: data}
 	}
 
 	var f composeFile
-	if err := yaml.Unmarshal(data, &f); err != nil {
-		// This decode runs the services' custom unmarshalers, so the error may be a
-		// real YAML syntax problem OR a semantic one (a bad duration/memory/cpus
-		// value, which already carries its own fix). Only frame the former as invalid
-		// YAML — the library prefixes those with "yaml:".
-		if strings.HasPrefix(err.Error(), "yaml:") {
-			return nil, fmt.Errorf("compose file %s is not valid YAML: %w\n  check the indentation and quoting near the line the parser names above", paths[0], err)
-		}
-		return nil, fmt.Errorf("compose file %s: %w", paths[0], err)
+	if err := doc.into(&f); err != nil {
+		return nil, decodeErr(paths[0], err)
 	}
 	if len(f.Services) == 0 {
 		return nil, fmt.Errorf("%s defines no services — add a top-level `services:` block with at least one service", paths[0])
@@ -391,7 +399,7 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 		Secrets:     f.Secrets,
 		Volumes:     f.Volumes,
 		Networks:    f.Networks,
-		Unsupported: ignoredTopLevel(data),
+		Unsupported: ignoredTopLevel(doc),
 	}
 	// A declared network can't be both host-only (internal) and external: an
 	// external network is used as-is, so `internal` would be silently dropped —
@@ -600,4 +608,98 @@ func normalizePort(spec string) (norm string, mirrored bool) {
 		}
 	}
 	return s + proto, mirrored
+}
+
+// decodeErr turns a failed YAML decode into words that send the reader to the
+// right place. Four different things arrive here and they need four different
+// sentences.
+//
+// Telling them apart by the "yaml:" prefix does not work, which is how this went
+// wrong: the library writes that prefix on syntax errors and on the errors it
+// collects during decoding alike. The collected ones come back as a
+// *yaml.TypeError — but that box holds two unrelated complaints, a value of the
+// wrong shape and a key set twice, so the box alone is not the answer either.
+//
+// It does not cover everything. Some fields read themselves and answer in their
+// own words, which fall through to the last case unchanged; which fields those
+// are is not a list worth writing down here, because it is a property of each
+// unmarshaler and it has already been got wrong twice by enumerating. What is
+// true is the shape of the rule: only what the decoder collected is classified,
+// and everything else keeps the words it arrived with.
+func decodeErr(path string, err error) error {
+	var collected *yaml.TypeError
+	switch {
+	case errors.As(err, &collected) && allDuplicateKeys(collected):
+		// The same key twice is not a shape problem and has nothing to do with
+		// variables. Saying either would send the reader looking for something
+		// that is not there — which is the whole reason this exists.
+		return fmt.Errorf("compose file %s sets the same key twice:\n  %w\n  "+
+			"remove one of them", path, err)
+	case errors.As(err, &collected):
+		err = withoutEchoedValues(collected)
+		// Saying "not valid YAML" here sends the reader to look for a syntax
+		// mistake in a file that has none, and "check the indentation and
+		// quoting" sends them to the wrong place twice over. The file parsed;
+		// what is wrong is what the value turned out to be.
+		return fmt.Errorf("compose file %s parsed, but a value is not the shape "+
+			"that field takes:\n  %w\n  check what that field is set to — if the value came "+
+			"from a `${...}` reference, a variable that is not set leaves it empty", path, err)
+	case strings.HasPrefix(err.Error(), "yaml:"):
+		return fmt.Errorf("compose file %s is not valid YAML: %w\n  check the indentation and quoting near the line the parser names above", path, err)
+	}
+	return fmt.Errorf("compose file %s: %w", path, err)
+}
+
+// allDuplicateKeys reports whether every complaint the decoder collected is about
+// the same key appearing twice. They arrive in the same box as values of the
+// wrong shape, and the two need opposite advice.
+//
+// The match is on the library's own wording, which a value cannot imitate: the
+// decoder truncates any scalar it echoes to seven characters and an ellipsis,
+// and this phrase is twenty-three. A file that sets a value to the phrase itself
+// is still read as a shape problem, which is what it is.
+func allDuplicateKeys(te *yaml.TypeError) bool {
+	for _, e := range te.Errors {
+		if !strings.Contains(e, "already defined at line") {
+			return false
+		}
+	}
+	return len(te.Errors) > 0
+}
+
+// withoutEchoedValues returns the same complaints with the value each one quotes
+// taken out.
+//
+// The decoder writes the value it could not use into its message — `cannot
+// unmarshal !!str `+"`sk-live...`"+` into compose.VolumeDecl` — and that value can have come
+// from a `${...}` reference, which is where passwords and tokens live. Anything
+// over ten characters is shortened to seven and an ellipsis — which is not much
+// comfort: a short password went out whole, and the first seven characters of a
+// long token still say what kind it is and which service it opens.
+//
+// What the reader needs is the line, the kind of thing they wrote, and the field
+// it did not fit, and all three stay. This is the same rule the expander and the
+// env-file reader follow: name the place, not the contents.
+func withoutEchoedValues(te *yaml.TypeError) *yaml.TypeError {
+	out := &yaml.TypeError{Errors: make([]string, len(te.Errors))}
+	for i, e := range te.Errors {
+		// Only the complaint that quotes a value. The other one names a key set
+		// twice, and a key is a name the reader has to be able to find — a key with
+		// two backticks in it would otherwise come out with its middle removed,
+		// sending them to look for something that is not in the file.
+		if !strings.Contains(e, "cannot unmarshal") {
+			out.Errors[i] = e
+			continue
+		}
+		// From the first backtick to the last: exactly the quoted value, even if
+		// the value itself held a backtick. A complaint about a sequence or a
+		// mapping quotes nothing and is left alone.
+		lo, hi := strings.Index(e, "`"), strings.LastIndex(e, "`")
+		if lo < 0 || hi <= lo {
+			out.Errors[i] = e
+			continue
+		}
+		out.Errors[i] = strings.Join(strings.Fields(e[:lo]+e[hi+1:]), " ")
+	}
+	return out
 }

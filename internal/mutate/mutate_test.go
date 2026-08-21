@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -123,6 +124,11 @@ type fakeRunner struct {
 	// timeout, a toolchain that could not start.
 	testDies map[string]bool
 	logged   []string
+	// goArgs is every toolchain invocation, in order. Without it the baseline's
+	// command line is unmeasured: a fake that only looks at args[0] answers the
+	// same whether or not the run asked for `-json`, and `Failures` reads nothing
+	// but JSON.
+	goArgs [][]string
 }
 
 func newFake(t *testing.T, files map[string]string) *fakeRunner {
@@ -141,6 +147,9 @@ func newFake(t *testing.T, files map[string]string) *fakeRunner {
 		},
 		Write: func(p string, b []byte) error { f.set(p, string(b)); return nil },
 		Go: func(args ...string) (string, string, error) {
+			f.mu.Lock()
+			f.goArgs = append(f.goArgs, append([]string(nil), args...))
+			f.mu.Unlock()
 			current, _ := f.get("x.go")
 			if args[0] == "vet" {
 				// vet writes plain text, as the real one does.
@@ -331,13 +340,29 @@ func TestAnInterruptedSweepCanPutTheFileBack(t *testing.T) {
 	f := newFake(t, map[string]string{"x.go": "call()"})
 	// Interrupt from inside the test run, which is where a long sweep spends its
 	// time and where Ctrl-C actually lands.
+	//
+	// The first test run is the baseline, and it has to see the tree as it was —
+	// a baseline taken over a mutated file would measure the mutation and call it
+	// the starting point.
+	runs := 0
 	f.Runner.Go = func(args ...string) (string, string, error) {
 		if args[0] == "test" {
+			runs++
+			if runs == 1 {
+				if got := mustGet(t, f, "x.go"); got != "call()" {
+					t.Errorf("the baseline ran over %q, not the tree as it was", got)
+				}
+				return passJSON, "", nil
+			}
 			if mustGet(t, f, "x.go") != "noop()" {
 				t.Errorf("the mutation should be in the tree while the tests run, found %q", mustGet(t, f, "x.go"))
 			}
-			if err := f.RestorePending(); err != nil {
+			restored, err := f.RestorePending()
+			if err != nil {
 				t.Errorf("RestorePending: %v", err)
+			}
+			if !restored {
+				t.Error("RestorePending said there was nothing to put back, mid-mutation")
 			}
 			if mustGet(t, f, "x.go") != "call()" {
 				t.Errorf("an interrupt left the file as %q", mustGet(t, f, "x.go"))
@@ -362,7 +387,12 @@ func TestAnInterruptedSweepCanPutTheFileBack(t *testing.T) {
 func TestAnInterruptWithNothingInFlightWritesNothingAndStopsTheSweep(t *testing.T) {
 	f := newFake(t, map[string]string{"x.go": "call()"})
 	f.testOut["noop()"] = passJSON
-	if err := f.RestorePending(); err != nil {
+	restored, err := f.RestorePending()
+	if restored {
+		t.Error("it said a file was put back, with nothing in flight — saying so when nothing " +
+			"was written tells the author something that did not happen")
+	}
+	if err != nil {
 		t.Errorf("RestorePending with nothing in flight: %v", err)
 	}
 	if mustGet(t, f, "x.go") != "call()" {
@@ -392,7 +422,7 @@ func TestAnInterruptCannotBeOvertakenByTheMutationItRestored(t *testing.T) {
 			handler.Add(1)
 			// Would deadlock if the write did not already hold the lock, which is
 			// itself the property being relied on.
-			go func() { defer handler.Done(); f.RestorePending() }()
+			go func() { defer handler.Done(); _, _ = f.RestorePending() }()
 		}
 		return inner(p, b)
 	}
@@ -460,6 +490,140 @@ func TestAMutationCannotReachOutsideTheTree(t *testing.T) {
 	}
 }
 
+// A test that is already failing fails again under every mutation, and a failing
+// test is what this reads as "caught". One red test therefore makes a whole sweep
+// report that everything is guarded while measuring nothing — the one thing the
+// exit statuses promise to keep apart, arriving through the front door.
+//
+// It happened: a sweep reported a mutation as caught by a test that could not
+// run at all, and the mutation it was measuring was never observed by anything.
+func TestASweepOverAlreadyFailingTestsRefusesToRun(t *testing.T) {
+	f := newFake(t, map[string]string{"x.go": "call()"})
+	// Keyed by the UNMUTATED content: this is the tree as the sweep finds it.
+	f.testOut["call()"] = failJSON("TestSomethingElseEntirely")
+	// And the mutation would look caught by it, which is the trap.
+	f.testOut["noop()"] = failJSON("TestSomethingElseEntirely")
+
+	res, err := f.Sweep([]Mutation{mut()})
+	if err == nil {
+		t.Fatal("a sweep over a red tree ran, and every mutation in it would read as caught")
+	}
+	if len(res) != 0 {
+		t.Errorf("it reported %d result(s); a sweep that never measured anything must report none", len(res))
+	}
+	if !strings.Contains(err.Error(), "TestSomethingElseEntirely") {
+		t.Errorf("the error should name what is already failing, got: %v", err)
+	}
+	// And nothing was written on the way to finding out.
+	if got := mustGet(t, f, "x.go"); got != "call()" {
+		t.Errorf("the tree was mutated before the baseline was taken: %q", got)
+	}
+}
+
+// The other half: a suite that cannot run at all is not a green baseline. A
+// toolchain that will not start, or a package that panics before any test is
+// named, leaves nobody to credit — and a sweep run on top of it would report
+// whatever it liked.
+func TestASweepRefusesToRunWhenTheSuiteCannotRunAtAll(t *testing.T) {
+	f := newFake(t, map[string]string{"x.go": "call()"})
+	f.testDies["call()"] = true
+	if _, err := f.Sweep([]Mutation{mut()}); err == nil {
+		t.Fatal("a sweep ran on top of a suite that could not run")
+	} else if !strings.Contains(err.Error(), "could not be run") {
+		t.Errorf("the error should say the suite could not be run, got: %v", err)
+	}
+}
+
+// A fault in the sweep itself is found before the baseline, which takes as long
+// as the suite does. Otherwise a typo in the seventh mutation costs a full test
+// run before it is reported.
+func TestTheWholeSweepIsCheckedBeforeAnythingRuns(t *testing.T) {
+	f := newFake(t, map[string]string{"x.go": "call()"})
+	ran := false
+	f.Runner.Go = func(args ...string) (string, string, error) { ran = true; return passJSON, "", nil }
+	good := mut()
+	bad := mut()
+	bad.Name, bad.From = "not there", "nothing matches this"
+	if _, err := f.Sweep([]Mutation{good, bad}); err == nil {
+		t.Fatal("a sweep holding a mutation that does not apply ran anyway")
+	}
+	if ran {
+		t.Error("the toolchain ran before the sweep was known to be well formed")
+	}
+}
+
+// The baseline reads failing test names out of `go test -json`, and asks for a
+// fresh run rather than the cache. Neither is visible in what it returns, so
+// dropping either leaves the baseline reporting a green tree it never looked at
+// — and the whole point of it is to be the one run that is believed.
+func TestTheBaselineAsksForTheOutputItReads(t *testing.T) {
+	f := newFake(t, map[string]string{"x.go": "call()"})
+	// Two mutations in the one package, so "once each" is a real question.
+	if _, err := f.Sweep([]Mutation{mut(), mut()}); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.goArgs) == 0 {
+		t.Fatal("the toolchain was never called")
+	}
+	first := f.goArgs[0]
+	if first[0] != "test" {
+		t.Fatalf("the first thing run was %q, want the baseline test run", first)
+	}
+	for _, want := range []string{"-count=1", "-json", "./p/"} {
+		if !slices.Contains(first, want) {
+			t.Errorf("the baseline ran %q, which is missing %q", first, want)
+		}
+	}
+	// Once each. Naming a package twice does not give a wrong answer — it makes
+	// the run and the error that comes out of it say everything twice.
+	if n := strings.Count(strings.Join(first, " "), "./p/"); n != 1 {
+		t.Errorf("the baseline named ./p/ %d times: %q", n, first)
+	}
+}
+
+// The baseline covers every package the sweep will touch, not just the first
+// one's. A red test in the second package would otherwise sit there catching
+// every mutation aimed at it, which is the failure this whole thing is for.
+func TestTheBaselineCoversEveryPackageTheSweepWillTouch(t *testing.T) {
+	f := newFake(t, map[string]string{"x.go": "call()"})
+	var asked [][]string
+	f.Runner.Go = func(args ...string) (string, string, error) {
+		asked = append(asked, args)
+		if slices.Contains(args, "./q/") && args[0] == "test" {
+			return failJSON("TestRedOverInQ"), "", errors.New("exit 1")
+		}
+		return passJSON, "", nil
+	}
+	inP, inQ := mut(), mut()
+	inQ.Name, inQ.Packages = "in q", []string{"./q/"}
+
+	_, err := f.Sweep([]Mutation{inP, inQ})
+	if err == nil {
+		t.Fatal("the sweep ran with a red test in the second package; every mutation aimed there " +
+			"would have been reported as caught by it")
+	}
+	if !strings.Contains(err.Error(), "TestRedOverInQ") {
+		t.Errorf("the error should name what is failing, got: %v", err)
+	}
+	if len(asked) != 1 || !slices.Contains(asked[0], "./p/") || !slices.Contains(asked[0], "./q/") {
+		t.Errorf("the baseline ran %q, want one run over both packages", asked)
+	}
+}
+
+// A run that stopped before it measured anything prints no table. The header row
+// on its own reads like a sweep that found nothing to say, which is the opposite
+// of what happened.
+func TestNothingMeasuredPrintsNoTable(t *testing.T) {
+	if got := Report(nil); got != "" {
+		t.Errorf("Report(nil) = %q, want nothing at all", got)
+	}
+	if got := Report([]Result{{Mutation: Mutation{Name: "x"}}}); got == "" {
+		t.Error("a result was reported as nothing")
+	}
+}
+
 // The progress line is what a long sweep shows while it works, and it names the
 // tests as they are found.
 func TestTheProgressLineSaysWhatHappened(t *testing.T) {
@@ -468,7 +632,13 @@ func TestTheProgressLineSaysWhatHappened(t *testing.T) {
 	if _, err := f.Sweep([]Mutation{mut()}); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.logged) != 1 || !strings.Contains(f.logged[0], "TestTheWireIsThere") {
+	// Two lines: the baseline says it is running before anything is mutated — a
+	// sweep that sat silent through it would look stuck — and then the mutation.
+	if len(f.logged) != 3 || !strings.Contains(f.logged[0], "baseline") ||
+		!strings.Contains(f.logged[1], "green") {
+		t.Fatalf("logged %q, want the baseline announced and then reported before any mutation", f.logged)
+	}
+	if !strings.Contains(f.logged[2], "TestTheWireIsThere") {
 		t.Errorf("logged %q, want the mutation and its killer named", f.logged)
 	}
 }

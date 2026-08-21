@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -111,6 +112,34 @@ func TestAMutationThatMeasuredNothingIsNotASuccess(t *testing.T) {
 // The handler runs on its own goroutine, so what it records has to be handed over
 // rather than shared — a test that reads a plain slice here is a data race, and
 // this one was.
+// What an interrupt says it did. The branch that matters most is the one where
+// nothing was in flight: with a baseline run in front of the sweep, that is the
+// likeliest moment to interrupt, and it is the one where "the file has been put
+// back" would be a lie.
+func TestTheInterruptMessageSaysWhatActuallyHappened(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		restored bool
+		err      error
+		wantIn   string
+		wantNot  string
+	}{
+		{"nothing in flight", false, nil, "no mutation in flight", "put back"},
+		{"a file was restored", true, nil, "has been put back", "no mutation in flight"},
+		{"the restore failed", true, errors.New("disk is full"), "COULD NOT BE PUT BACK", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := interruptMessage(tc.restored, tc.err)
+			if !strings.Contains(got, tc.wantIn) {
+				t.Errorf("message = %q, want it to say %q", got, tc.wantIn)
+			}
+			if tc.wantNot != "" && strings.Contains(got, tc.wantNot) {
+				t.Errorf("message = %q, and it must not say %q", got, tc.wantNot)
+			}
+		})
+	}
+}
+
 func TestAnInterruptRestoresTheFileAndExitsAsInterrupted(t *testing.T) {
 	mod := throwawayModule(t)
 	sigs := make(chan os.Signal, 1)
@@ -118,13 +147,40 @@ func TestAnInterruptRestoresTheFileAndExitsAsInterrupted(t *testing.T) {
 	var out bytes.Buffer
 	errOut := &lockedBuf{}
 
-	// Fire while the sweep is running: the test in the throwaway module sleeps.
+	// Fire once the mutation is actually on disk, not after a delay. A timer lands
+	// wherever the run happens to be, and when the baseline run was added in front
+	// of the sweep it started landing there instead — leaving this test green while
+	// no mutation had been written at all, which is the whole of what it is for.
+	// The tell was that it got eight times faster.
+	interrupted := make(chan bool, 1)
 	go func() {
-		time.Sleep(300 * time.Millisecond)
-		sigs <- os.Interrupt
+		for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); {
+			b, _ := os.ReadFile(filepath.Join(mod, "m.go"))
+			if strings.Contains(string(b), "return 43 }") {
+				interrupted <- true
+				sigs <- os.Interrupt
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		interrupted <- false
+		sigs <- os.Interrupt // so the run does not sit here waiting for one
 	}()
+	// The window the mutation is on disk for is seconds wide (write, vet, then a
+	// test that sleeps), and it takes a few seconds to get there, so twenty is
+	// slack rather than a race. If it ever runs out, that is worth telling apart
+	// from "the mutation was never written".
+
 	run([]string{spec(t, sweepFor("func Answer() int { return 43 }"))}, &out, errOut, sigs,
 		func(c int) { exited <- c })
+
+	if !<-interrupted {
+		b, _ := os.ReadFile(filepath.Join(mod, "m.go"))
+		t.Fatalf("the interrupt never landed on a mutated tree: nothing wrote the mutation within "+
+			"the deadline, so this test measured nothing. The file ended as %q — if that is the "+
+			"original, the sweep never got as far as writing; if it is mutated, the deadline was "+
+			"simply too short.", b)
+	}
 
 	select {
 	case code := <-exited:

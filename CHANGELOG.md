@@ -6,6 +6,43 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-08-21
+
+### Changed
+
+- Verified against Apple `container` 1.2.2. Everything opossum reads out of the runtime — `system status`, `inspect`, `ls`, mount modes, the conditions it refuses a mount under — was re-measured whole on 1.2.2, and none of the refusals turned into a false positive. The one difference found is cosmetic: `system start` now writes its progress to stderr instead of stdout. Requirements say which version the project is verified against; the numbers in the benchmark pages still name the version they were measured on, which is older, because a number is only true of the version it was taken from.
+
+### Fixed
+
+- A byte-order mark at the start of an env file is no longer read as part of the first key. Editors on Windows write one without being asked, and it used to turn the first `A=1` into a variable named `<BOM>A` — so `${A}` found nothing and expanded to empty, with no error anywhere to say why. A mark that ends up inside a variable name ends the same silent way, so that is now refused, naming the file and the line it is on; the message does not quote the line, because env files hold secrets. A mark inside a value, or inside a comment, is left exactly where you put it. This matches docker compose, which drops a leading mark, keeps one in a value, and refuses one in a name.
+- A variable that expands to nothing now leaves an empty value wherever it was
+  written, not only beside a key. An item of a sequence written in flow style —
+  `command: [server, --port, ${PORT}]` with `PORT` unset — used to vanish
+  entirely, so the container was handed `--port` with nothing after it and ran a
+  different command than the file describes; in any position but the last, the
+  file failed to load instead. A value written under its key rather than beside
+  it was left inheriting from the host, which is the thing an emptied value is
+  meant to stop. Both now arrive as the empty string, which is what Docker
+  Compose reads them as (measured against v5.3.1).
+
+  Two more differences with Compose close with them. A reference inside a quoted
+  string spanning several lines used to lose the space in front of it when the
+  lines were folded together. And a value like `image: alpine:${TAG}` with `TAG`
+  unset used to fail the load outright — the colon it left behind read as a
+  mapping — where it now arrives as `alpine:`, which is what Compose reads it as.
+
+  A compose file may not contain U+E000, a private-use character used to carry
+  "this expanded to nothing" through the parser. A file holding one is refused
+  rather than read.
+- A compose file that parses cleanly but holds a value of the wrong shape is no longer announced as invalid YAML. The common way to reach it is a `${...}` reference to a variable nobody set: `data: ${NOPE}` under `volumes:` leaves an empty string where a mapping belongs, and the error used to say the file was not valid YAML and to go check the indentation and quoting — sending you to hunt for a syntax mistake in a file that has none. It now says the file parsed and the value does not fit the field, and points at unset references as the usual cause.
+- The same key set twice now says so, and names the file it is in, instead of being reported as a value of the wrong shape or as invalid YAML.
+- A failure in a single compose file that also has a `${...}` reference expanding to nothing now names the line you would count to. Putting the emptiness back used to mean rebuilding the document, and the rebuild changed how many lines it had — blank lines went away, a `|` block collapsed, a `[a, b]` sequence opened out — so the line a later error named could be several off from the line in your file, in either direction, and further off the longer the file. The document is no longer rebuilt, and a `|` or `>` block, blank lines, and the order and style of what you wrote all survive the trip. This covers the errors the YAML parser positions itself, which is where the line numbers come from; a value that expands to something containing a newline still shifts the lines after it, because the text really does grow, and passing several files with `-f` still merges them into one document before the last check, so line numbers from that check are lines in the merged text.
+
+### Security
+
+- An error about a malformed line in an env file no longer prints the line itself. Env files are where passwords and tokens live, and a token pasted onto a line of its own is exactly the shape that triggers this error — so the message went to the terminal, the CI log, and any issue the output was pasted into. The error now names the file and the line number and says what is missing, which is what you need to fix it; open the file to see the line.
+- The decoder's own message about a value of the wrong shape no longer reads that value back. It used to quote the value it could not use, and that value can have come from a `${...}` reference — which is where passwords and tokens live. Anything over ten characters was shortened to seven and an ellipsis, which was little comfort: a short password went out whole, and the first seven characters of a long token still say what kind it is. The line, the kind of thing you wrote, and the field it did not fit are all still there, and a key reported as set twice is still named in full. Fields that check their own values — `mem_limit`, `cpus`, a healthcheck's `interval` — still quote what they were given.
+
 ## [0.21.0] - 2026-08-21
 
 ### Fixed
@@ -799,7 +836,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.21.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.22.0...HEAD
+[0.22.0]: https://github.com/suruseas/opossum/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/suruseas/opossum/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/suruseas/opossum/compare/v0.19.1...v0.20.0
 [0.19.1]: https://github.com/suruseas/opossum/compare/v0.19.0...v0.19.1

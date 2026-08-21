@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 )
@@ -213,7 +212,14 @@ func parseDotEnv(path string, scope envScope) (map[string]string, error) {
 		}
 		return nil, fmt.Errorf("reading %s: %w", path, err)
 	}
-	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
+	// A byte-order mark belongs to the file, not to the first line. Editors on
+	// Windows write one without being asked, and leaving it in makes the first
+	// key `\ufeffA` instead of `A` — so `${A}` finds nothing and expands to
+	// empty, with no error anywhere to say why. Only at the very start: a mark
+	// further in is a character somebody put there, and removing it would be
+	// inventing a rule about the contents.
+	text := strings.TrimPrefix(string(data), "\ufeff")
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
 
 	out := map[string]string{}
 	for i := 0; i < len(lines); i++ {
@@ -223,12 +229,27 @@ func parseDotEnv(path string, scope envScope) (map[string]string, error) {
 		}
 		raw = strings.TrimPrefix(raw, "export ")
 		key, val, ok := splitEnvLine(raw)
+		if !ok && strings.Contains(raw, "\ufeff") {
+			// A mark on a line with no separator lands in a name too — the whole
+			// line is the name, and there is nothing to assign. Saying "no `=`"
+			// would be true and useless: what the reader has to remove is a
+			// character they cannot see.
+			return nil, markInNameErr(path, i+1)
+		}
 		if !ok {
-			return nil, fmt.Errorf("%s:%d: expected KEY=VALUE, got %q", path, i+1, raw)
+			// Where, and what is missing — but not the line itself. An env file is
+			// where passwords and tokens live, and a token pasted onto a line of its
+			// own is exactly the shape that lands here; quoting it back would put it
+			// in the terminal, the CI log, and whatever issue the output gets pasted
+			// into. The reader can open their own file at the line named.
+			return nil, fmt.Errorf("%s:%d: expected KEY=VALUE, but the line has no `=`", path, i+1)
 		}
 		key = strings.TrimSpace(key)
 		if key == "" {
 			return nil, fmt.Errorf("%s:%d: empty variable name", path, i+1)
+		}
+		if strings.Contains(key, "\ufeff") {
+			return nil, markInNameErr(path, i+1)
 		}
 		val = strings.TrimSpace(val)
 
@@ -276,6 +297,21 @@ func parseDotEnv(path string, scope envScope) (map[string]string, error) {
 	return out, nil
 }
 
+// markInNameErr is what a byte-order mark outside the file's first position gets.
+//
+// One mark, at the very start, is the file saying how it is encoded and is
+// dropped when the file is read. Anywhere else it ends up in a name, and a name
+// nobody can type is the quiet kind of failure: the reference to it finds nothing
+// and expands to empty with nothing to say why. docker compose v5.3.1 refuses
+// this too (measured 2026-08-21). It quotes the whole line back in its message;
+// this names the place and the character instead, because the line is in an env
+// file.
+func markInNameErr(path string, line int) error {
+	return fmt.Errorf("%s:%d: a byte-order mark (U+FEFF) in a variable name; "+
+		"one at the very start of the file is the encoding and is ignored, "+
+		"but here it is part of the name", path, line)
+}
+
 // splitEnvLine splits an env_file line into key and value on the first `=` or `:`
 // (whichever appears first). `=` is the canonical separator; `:` is accepted for
 // docker compose compatibility.
@@ -317,252 +353,140 @@ func expandEnvValue(val string, literal bool, scope envScope, path string, line 
 	return string(b), nil
 }
 
-// interpolateDocument expands a compose FILE and repairs the one thing expanding
-// raw text before parsing can break: a value that was a reference and is now
-// nothing, which YAML then reads as null. Under `environment:` null is not
-// "empty", it is "inherit this one from the host", so the container is handed a
-// value the compose file never mentions.
+// emptied is what an expansion writes where a reference produced nothing.
 //
-// The repair is made on the parsed document rather than on the text. Deciding
-// "is this line a mapping entry whose value vanished" from the bytes means
-// knowing where YAML is and is not: block scalars, multi-line quoted scalars,
-// flow collections, sequence items. Three rounds of review each found one more
-// shape the text-level rule got wrong. The parser already knows all of them, so
-// the rule here is the one it can answer exactly — a null scalar, on a line an
-// expansion wrote into, becomes an empty string.
+// Expanding raw text before the parser loses a value that was only a reference:
+// `KEY: ${NOSUCHVAR}` becomes `KEY:`, which YAML reads as null, and under
+// `environment:` null is not "empty" but "inherit this one from the host" — so a
+// service is handed a value the compose file never mentions.
 //
-// interpolate, which expands `.env` values and `${VAR:-default}` arguments, gets
-// no repair: those are not YAML. A value like `LIB=${PREFIX}/lib:` ends in a
-// colon and is not a mapping entry.
+// A character that survives parsing says where the value went. The parser then
+// answers every question that reading positions in the text could not: an item of
+// a flow sequence still exists (`[a, ${X}]` is two items, not one), a value
+// written under its key is found, and the inside of a `|` block is text so the
+// character rides along in it. A comment is kept by the parser rather than
+// dropped, so the mark has to be taken out of one — but a mark in a comment is
+// never mistaken for the value beside it, which is what reading positions could
+// not manage.
 //
-// Two things follow from handing the document back through the marshaller, which
-// only happens when there was something to repair. Formatting is the
-// marshaller's rather than the author's, so a line number in a later parse error
-// can differ from the line in the file (a `>` scalar, for instance, comes back
-// on one line). And a stream of several `---` documents comes back as its first
-// document alone — which is what the caller reads in either case, so nothing is
-// lost that was being used.
-func interpolateDocument(raw []byte, lookup varLookup) ([]byte, error) {
-	out, offsets, err := expand(raw, lookup)
-	if err != nil {
-		return nil, err
+// U+E000 is in the private use area: it has no meaning of its own, so a compose
+// file holding one is either doing something this cannot support or is corrupt.
+// Either way it is refused rather than quietly conflated with an emptied value.
+const emptied = "\ue000"
+
+// interpolated is an expanded compose document, in whichever form survived.
+//
+// The tree is the better one and is used when there is one: it carries the
+// positions the parser found in the text as written, so a failure further on
+// names the line the reader would count to. Bytes are always there as the
+// fallback, and are what the caller parses when no tree could be handed over.
+//
+// One method reads it, rather than the caller choosing: every consumer that
+// picked the wrong one would silently get the old behaviour back, and a suite
+// with no assertion about line numbers would stay green through it.
+type interpolated struct {
+	// node is the document with the marks taken out, or nil when there is no tree
+	// to hand over. Nil has two causes and they are not the same: no mark was
+	// written at all (nothing needed repairing, and the bytes are already right),
+	// or the text did not parse (below).
+	node *yaml.Node
+	// raw is always set: the expanded document. When the text did not parse, the
+	// marks are still in it — on purpose.
+	raw []byte
+}
+
+// into decodes the document into v.
+func (d interpolated) into(v any) error {
+	if d.node != nil {
+		return d.node.Decode(v)
 	}
-	if len(offsets) == 0 {
-		return out, nil
+	return yaml.Unmarshal(d.raw, v)
+}
+
+// interpolateDocument expands a compose FILE and puts back the emptiness that
+// expanding raw text would otherwise turn into null.
+//
+// The document is parsed and every scalar carrying the mark has it removed. A
+// scalar that was nothing but the mark becomes an empty string, which is what
+// Docker Compose reads such a value as (measured against v5.3.1). A `KEY:`
+// written by hand still means what it says: nothing expanded there, so there is
+// no mark on it.
+//
+// The tree is handed on rather than written back out. Writing it out used to be
+// how the marks were removed, and it cost the reader their line numbers: blank
+// lines went, a literal block collapsed, a flow sequence opened out, and every
+// later failure named a line several off from the one in their file — in both
+// directions, growing with the document.
+//
+// interpolate, which expands `.env` values and `${VAR:-default}` arguments, marks
+// nothing: those are not YAML, and a value like `LIB=${PREFIX}/lib:` ends in a
+// colon without being a mapping entry.
+func interpolateDocument(raw []byte, lookup varLookup) (interpolated, error) {
+	if bytes.Contains(raw, []byte(emptied)) {
+		return interpolated{}, fmt.Errorf("the compose file contains U+E000, a private-use character this uses to " +
+			"track values that expand to nothing; remove it (it is not something a compose file needs)")
+	}
+	out, err := expand(raw, lookup, emptied)
+	if err != nil {
+		return interpolated{}, err
+	}
+	if !bytes.Contains(out, []byte(emptied)) {
+		// Nothing expanded to nothing, so there is nothing to repair and the bytes
+		// are already what the caller should read.
+		return interpolated{raw: out}, nil
 	}
 	var doc yaml.Node
 	if err := yaml.Unmarshal(out, &doc); err != nil {
-		// Not parseable: hand back the bytes so the caller reports the syntax error
-		// in its own words, with the file name it knows and this one does not.
-		return out, nil
+		// Hand the bytes back exactly as they are, and let the caller report the
+		// syntax error in its own words — with the file name it knows, and the hint
+		// about indentation and quoting that this has no business replacing. A file
+		// with its own mistake does not parse before expansion either, and blaming a
+		// variable for an indentation error sends the reader to the wrong place.
+		//
+		// Unchanged means the marks stay in. Taking them out is what would do harm:
+		// a mark stands between what was on either side of it, so removing it JOINS
+		// them — `c: *x${NOPE}y` becomes `c: *xy`, which is valid, points at a
+		// different anchor, and loads without a word. Left in, the bytes fail to
+		// parse for the caller exactly as they failed here, which is the truth.
+		return interpolated{raw: out}, nil
 	}
-	if !emptyOutNulls(&doc, wroteAt(locate(out, offsets))) {
-		return out, nil // nothing to repair; keep the bytes exactly as expanded
-	}
-	unflow(&doc)
-	fixed, err := yaml.Marshal(&doc)
-	if err != nil {
-		return out, nil
-	}
-	return fixed, nil
+	unmark(&doc)
+	return interpolated{node: &doc, raw: out}, nil
 }
 
-// refMark is a place in the expanded output where a reference was written — the
-// value it produced starts here, and may be empty. Line and column are counted
-// the way the parser counts them, so a mark and a node position can be compared.
-type refMark struct{ line, col int }
-
-// locate walks the expanded output once and returns it as lines of runes, along
-// with the position of each byte offset an expansion wrote at.
+// unmark takes the mark out of every scalar that carries one, in keys as well as
+// values, and out of comments — where a reference may also have been written, and
+// where a mark left behind would ride out into the file opossum hands on.
 //
-// It is the only place that knows how the parser counts, and it is a single walk
-// rather than bookkeeping kept during expansion, because the two would be two
-// implementations of the same rule. What it has to agree with, measured against
-// gopkg.in/yaml.v3:
-//
-//   - a column is a rune, not a byte: `{A: 日本語, K: }` reports K's null at
-//     column 13, and a byte count says 19
-//   - LF, CRLF, CR, NEL (U+0085), LS (U+2028) and PS (U+2029) each start a line
-//   - a byte-order mark at the start of the stream occupies no column
-//
-// Offsets must be ascending, which they are: expansion writes left to right.
-func locate(out []byte, offsets []int) ([][]rune, []refMark) {
-	s := string(out)
-	var lines [][]rune
-	var marks []refMark
-	var cur []rune
-	line, col, next := 1, 1, 0
-	for i := 0; i < len(s); {
-		for next < len(offsets) && offsets[next] <= i {
-			marks = append(marks, refMark{line, col})
-			next++
-		}
-		if n := lineBreak(s[i:]); n > 0 {
-			lines = append(lines, cur)
-			cur, line, col = nil, line+1, 1
-			i += n
-			continue
-		}
-		r, size := utf8.DecodeRuneInString(s[i:])
-		if i == 0 && r == '\ufeff' {
-			i += size // the parser skips it, so it takes up no column here either
-			continue
-		}
-		cur = append(cur, r)
-		col++
-		i += size
-	}
-	for next < len(offsets) { // a reference that expanded at the very end
-		marks = append(marks, refMark{line, col})
-		next++
-	}
-	return append(lines, cur), marks
-}
-
-// lineBreak returns the length in bytes of the line break at the start of s, or
-// zero. CRLF is one break rather than two.
-func lineBreak(s string) int {
-	switch {
-	case strings.HasPrefix(s, "\r\n"):
-		return 2
-	case s[0] == '\n' || s[0] == '\r':
-		return 1
-	case strings.HasPrefix(s, "\u0085"):
-		return 2
-	case strings.HasPrefix(s, "\u2028"), strings.HasPrefix(s, "\u2029"):
-		return 3
-	}
-	return 0
-}
-
-// wroteAt reports, for a position in the expanded output, whether an expansion
-// wrote there: whether some mark on that line is separated from the position by
-// whitespace alone.
-//
-// A line is too coarse a unit on its own. `KEY:  # ${VAR}` expands in the comment,
-// which leaves the author's own `KEY:` — "inherit this one from the host" — on a
-// line an expansion touched. Reading that as a vanished value would rewrite a null
-// the file states outright.
-//
-// The two positions are compared in either direction because the parser does not
-// always put a null exactly where its text would have been: in `{k: ${VAR}, j: 1}`
-// it reports the comma, which is past the mark rather than before it. What both
-// directions mean is the same thing — nothing but space stands between the
-// value's place and the reference that emptied it.
-//
-// The line is also the limit, and deliberately so. A value written under its key
-// rather than beside it is one mapping entry whose null the parser reports up on
-// the key's line, so it is not repaired; the test named for that shape says so.
-// Letting a match cross the line is not the fix: the next line's own
-// indent is whitespace too, so `K:` followed by `${PREFIX}FOO: 1` — a key Compose
-// lets you interpolate — reads as adjacent, and the author's null is rewritten.
-// That is the one thing this must never do.
-func wroteAt(lines [][]rune, marks []refMark) func(line, col int) bool {
-	byLine := map[int][]int{}
-	for _, m := range marks {
-		byLine[m.line] = append(byLine[m.line], m.col)
-	}
-	return func(line, col int) bool {
-		if line < 1 || line > len(lines) {
-			return false
-		}
-		src := lines[line-1]
-		for _, c := range byLine[line] {
-			lo, hi := col, c
-			if lo > hi {
-				lo, hi = hi, lo
-			}
-			if lo < 1 || hi-1 > len(src) {
-				continue
-			}
-			if blank(src[lo-1 : hi-1]) {
-				return true
-			}
-		}
-		return false
-	}
-}
-
-// unflow asks for block style on every collection, because writing the document
-// back out in flow style does not survive a null.
-//
-// `{K: , J: 1}` is a mapping whose K is null — under `environment:` that means
-// "inherit K from the host" — and the marshaller renders that null as an empty
-// string. The value the author wrote would come back meaning something else, in
-// the one direction this whole repair exists to prevent. In block style the same
-// null comes back as `K:`.
-//
-// Collections only, because that is all this needs: a scalar's style is the
-// quoting the author chose, and there is no reason to restyle it. Doing so would
-// in fact be harmless — the marshaller re-quotes whatever the tag requires, so
-// ` x `, `123`, `null` and a `|` block all read back the same either way — but a
-// narrower change is a narrower thing to be wrong about.
-func unflow(n *yaml.Node) {
-	if n.Kind == yaml.MappingNode || n.Kind == yaml.SequenceNode {
-		n.Style &^= yaml.FlowStyle
-	}
-	for _, c := range n.Content {
-		unflow(c)
-	}
-}
-
-// valueColumn is the column just past a node's anchor.
-//
-// A null carrying an anchor is reported at the `&`, not at the value: in
-// `A: &anc ${VAR}` the report is five columns left of the value, with the anchor
-// name in between, and reading that as "something else is in the way" left the
-// value as null — the host leak this whole repair exists to stop. The node names
-// its own anchor, so stepping over it needs nothing the parser has not already
-// said.
-//
-// What comes back is the column after the name and not the value's own column:
-// only whitespace separates them, and blankBetween already crosses whitespace, so
-// there is nothing to be gained by guessing how much of it there is.
-func valueColumn(n *yaml.Node) int {
-	if n.Anchor == "" {
-		return n.Column
-	}
-	// Counted in runes to match every other column here, though the parser only
-	// accepts letters, digits, `-` and `_` in an anchor name, so the two agree.
-	return n.Column + utf8.RuneCountInString(n.Anchor) + 1 // + the `&`
-}
-
-func blank(rs []rune) bool {
-	for _, r := range rs {
-		if r != ' ' && r != '\t' {
-			return false
-		}
-	}
-	return true
-}
-
-// emptyOutNulls turns every null scalar standing where an expansion wrote into an
-// empty string, and reports whether it changed anything.
-//
-// A null that the author typed is left alone: it still means what it says. The
-// parser has already decided what is a value and what is the inside of a string,
-// so the only question left is whether this particular value is the one that
-// vanished — which wrote asks.
-func emptyOutNulls(n *yaml.Node, wrote func(line, col int) bool) bool {
-	changed := false
-	if n.Kind == yaml.ScalarNode && n.Tag == "!!null" && wrote(n.Line, valueColumn(n)) {
+// A scalar that was nothing else is left as an empty string rather than the null
+// it would otherwise be read as. Its tag becomes `!!str`: `!!int` with nothing
+// under it is not a number, and the document would come back unreadable. A tag the
+// author wrote themselves goes the same way, which costs nothing here — compose
+// has no use for one.
+func unmark(n *yaml.Node) {
+	// Values and keys, and nothing else. The space in front of a reference is part
+	// of what the author wrote — `"one ${NOPE}"` is `"one "` — and taking it would
+	// make the value depend on whether the variable happened to be set, which is
+	// the whole defect this exists to remove.
+	//
+	// Comments are not touched, because nothing downstream can see one: the tree is
+	// decoded, not written back out, and decoding ignores comments. A mark left in
+	// a comment reaches no one.
+	if n.Kind == yaml.ScalarNode && strings.Contains(n.Value, emptied) {
+		n.Value = strings.ReplaceAll(n.Value, emptied, "")
+		// The tag has to be set or a value that was only the mark comes back as
+		// null, and null under `environment:` means "inherit from the host".
 		n.Tag = "!!str"
-		n.Value = ""
-		changed = true
 	}
 	for _, c := range n.Content {
-		if emptyOutNulls(c, wrote) {
-			changed = true
-		}
+		unmark(c)
 	}
-	return changed
 }
 
 // interpolate expands references in text that is not a YAML document: an env-file
 // value, or a default argument.
 func interpolate(raw []byte, lookup varLookup) ([]byte, error) {
-	out, _, err := expand(raw, lookup)
-	return out, err
+	return expand(raw, lookup, "")
 }
 
 // expand rewrites `$VAR`, `${VAR}`, defaults `${VAR:-d}` (d when unset or empty)
@@ -570,15 +494,12 @@ func interpolate(raw []byte, lookup varLookup) ([]byte, error) {
 // when unset/empty or unset), and `$$` as a literal `$`. An undefined variable
 // with no default expands to empty.
 //
-// It also reports the byte offset in the OUTPUT of every value it wrote, which is
-// what lets interpolateDocument tell a null the author typed from one an
-// expansion left behind. Offsets rather than line and column: turning them into
-// positions needs the parser's own counting rules, and those belong in one place
-// (locate) rather than in a cursor carried through this loop.
-func expand(raw []byte, lookup varLookup) ([]byte, []int, error) {
+// emptyAs is written in place of a reference that produced nothing. A document
+// passes the mark, so the parser can be asked afterwards where the value went; a
+// `.env` value passes "" and simply loses the text, which is what it means.
+func expand(raw []byte, lookup varLookup, emptyAs string) ([]byte, error) {
 	var out bytes.Buffer
 	s := string(raw)
-	var offsets []int
 	for i := 0; i < len(s); {
 		c := s[i]
 		if c != '$' {
@@ -601,31 +522,60 @@ func expand(raw []byte, lookup varLookup) ([]byte, []int, error) {
 			// than truncated at the first inner `}`.
 			end := matchBrace(s[i+2:])
 			if end < 0 {
-				return nil, nil, fmt.Errorf("unterminated variable reference: %q", s[i:])
+				return nil, fmt.Errorf("unterminated variable reference: %q", s[i:])
 			}
 			expr := s[i+2 : i+2+end]
 			val, err := expandBraced(expr, lookup)
 			if err != nil {
-				return nil, nil, err
+				return nil, err
 			}
-			offsets = append(offsets, out.Len())
-			out.WriteString(val)
+			if err := refuseMark("${"+expr+"}", val, emptyAs); err != nil {
+				return nil, err
+			}
+			out.WriteString(orMark(val, emptyAs))
 			i += 2 + end + 1
 		case isNameStart(next):
 			j := i + 1
 			for j < len(s) && isNameChar(s[j]) {
 				j++
 			}
-			val, _ := lookup(s[i+1 : j])
-			offsets = append(offsets, out.Len())
-			out.WriteString(val)
+			name := s[i+1 : j]
+			val, _ := lookup(name)
+			if err := refuseMark("$"+name, val, emptyAs); err != nil {
+				return nil, err
+			}
+			out.WriteString(orMark(val, emptyAs))
 			i = j
 		default: // a lone $ (e.g. before a space) is literal
 			out.WriteByte('$')
 			i++
 		}
 	}
-	return out.Bytes(), offsets, nil
+	return out.Bytes(), nil
+}
+
+// refuseMark stops a value that carries the mark from being written into a
+// document. The file itself is checked before any of this starts; a value reaching
+// it through the shell or an env file is the same problem arriving by another
+// road, and letting it through would conflate what somebody set with what
+// expansion produced.
+func refuseMark(name, val, emptyAs string) error {
+	if emptyAs == "" || !strings.Contains(val, emptyAs) {
+		return nil
+	}
+	// The reference as it was written — `${V}`, or `${V:-fallback}` — and not what
+	// it resolved to: a variable is where a password or a token lives, and the
+	// reader needs to know which one to go and fix, not what is in it.
+	return fmt.Errorf("the value of %s contains U+E000, a private-use character opossum uses to "+
+		"track values that expand to nothing; remove it from that value", name)
+}
+
+// orMark is the expanded value, or the mark when there is nothing to write.
+func orMark(val, emptyAs string) string {
+	if val == "" {
+		return emptyAs
+	}
+	return val
 }
 
 // matchBrace returns the index in s of the `}` that closes a `${` reference whose

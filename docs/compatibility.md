@@ -250,31 +250,20 @@ otherwise arrive as a bare `key:` and read as YAML null — and under
 `environment:` null is not "empty", it is "inherit this one from the host". A
 `KEY:` you write yourself still means that: the repair is applied to the parsed
 document, to a null the expansion left behind and not to one you typed. It
-therefore follows the parser — mapping values in both block and flow style,
-block sequence items (`- ${VAR}`), and values carrying an anchor (`&name ${VAR}`)
-— and leaves alone anything the parser reads as text, such as the inside of a `|`
-block or of a quoted string spanning several lines. Nor does a reference in a
-comment make the value beside it empty — `KEY:  # ${VAR}` still inherits `KEY`
-from the host. The values of `.env` and `env_file:` entries are not YAML at all,
-so a `PATH`-style value ending in a colon is untouched.
+therefore follows the parser wherever the parser goes: mapping values in block or
+flow style, whether written beside the key or under it; items of a sequence in
+either style; values carrying an anchor. It leaves alone anything the parser reads
+as text: a reference inside a `|` block, or inside a quoted string spanning
+several lines, empties in place and the text around it is kept as written — which
+in a folded string means the space in front of the reference stays, as Compose
+keeps it. A reference in a comment does not make the value beside it empty:
+`KEY:  # ${VAR}` still inherits `KEY` from the host. The values of `.env` and
+`env_file:` entries are not YAML at all, so a `PATH`-style value ending in a colon
+is untouched.
 
-Two shapes are not covered. A value written under its key rather than beside it —
-
-```yaml
-KEY:
-  ${VAR}
-```
-
-— is one mapping entry, but the parser reports its empty value up on the `KEY:`
-line, a line away from where the reference was, so `KEY` is left inheriting from
-the host. Write the reference beside the key.
-
-Items of a **flow** sequence are the other, because expanding before the parser
-removes them rather than emptying them. `[a, ${VAR}]` becomes `[a, ]`,
-which is a one-item list — the item is gone, not empty. In any position but the
-last it is not a list at all: `[${VAR}, a]` becomes `[, a]`, and the file fails to
-load. Quote the reference — `[a, "${VAR}"]` — and the item arrives as the empty
-string.
+A compose file may not contain U+E000, a private-use character opossum writes
+where a reference expanded to nothing so that the parser can be asked afterwards
+where the value went. A file holding one is refused rather than read.
 
 opossum also provides one built-in: **`${OPOSSUM_HOST_GATEWAY}`** — the address a
 container can use to reach a service running on the host (see below). It ranks

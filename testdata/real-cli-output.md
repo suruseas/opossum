@@ -1,11 +1,18 @@
 # 実 `container` CLI 出力リファレンス（fake シム同期用）
 
-opossum が出力を**パースする**コマンドについて、実 `container` 1.0.0 / macOS 26 で
-採取した stdout+stderr と exit code の golden。`testdata/fake-container.sh` はこれに
-合わせて出力を返し、`internal/runtime/runtime_test.go` の忠実性 eval はこの文字列を
-各パーサに流して整合を確認する。CLI 更新時はここを再採取して同期すること。
+opossum が出力を**パースする**コマンドについて、実 `container` / macOS 26 で採取した
+stdout+stderr と exit code の golden。`testdata/fake-container.sh` はこれに合わせて出力を
+返し、`internal/runtime/runtime_test.go` の忠実性 eval はこの文字列を各パーサに流して
+整合を確認する。**CLI 更新時はここを再採取して同期すること。**
 
-採取日: 2026-07-02 / `container CLI version 1.0.0`
+**最終検証: 2026-08-21 / `container CLI version 1.2.2`（Homebrew formula `1.2.2_1`）。**
+下記のすべての節を実機で採り直し、**引用している文字列・exit code・出力形式に変化が
+無いことを確認した**（生出力は `~/opossum-dogfood/results/df421-after/`）。各節に付いて
+いる古い採取日は、その記述が**最初に**確かめられた日。
+
+以前は 1.0.0 採取のまま2節だけが 1.1.0 で更新されており、版が混在していた。混在した
+ゴールデンは「差分が出たとき、どの版で変わったのか」を答えられない——fake が現実と
+一致していることの根拠がここ1枚にかかっている以上、更新のたびに**全節**を採り直す。
 
 ## `container system dns list`  (exit 0)
 ```
@@ -102,7 +109,7 @@ Error: container not found: <name>
 USAGE: container volume delete [--all] [--debug] [<names> ...]
   <names>   Volume names        （`delete` は `rm` エイリアスあり）
 ```
-実機ラウンドトリップ（`container CLI version 1.0.0`）:
+実機ラウンドトリップ（初出時は `container CLI version 1.0.0`）:
 ```
 $ container volume create opossum-review-vol   # 作成
 $ container volume ls                           # -> named / local として一覧
@@ -145,7 +152,7 @@ $ container exec <name> redis-cli ping   # -> PONG（Rosetta で稼働）
 → `runtime.Run` は `RunOptions.Platform` があれば `--platform <p>` を発行し、`p` に `amd64`/`x86_64` を含めば
 `--rosetta` も付与。`orchestrator` は compose `platform:`（`Service.Platform`）を配線。
 
-## `container ls -a --format json` (2026-07-15, v1.1.0)
+## `container ls -a --format json` (初出 2026-07-15)
 
 Array of objects; opossum's `List` reads only `configuration.id` (the container
 name), `status.state`, and `configuration.labels` — the rest is ignored.
@@ -154,7 +161,7 @@ name), `status.state`, and `configuration.labels` — the rest is ignored.
 [{"configuration":{"id":"probe.hgtest-sst9.opossum","labels":{},"image":{"reference":"docker.io/library/alpine:3.20"},"dns":{"domain":"opossum","searchDomains":["hgtest-sst9.opossum"]}},"status":{"state":"running"}}]
 ```
 
-## `container volume ls` (2026-07-15, v1.1.0)
+## `container volume ls` (初出 2026-07-15)
 
 A table with a header row and NAME/TYPE/DRIVER/OPTIONS columns (not JSON).
 `VolumeExists` matches the first column of each line.
