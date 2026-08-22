@@ -40,11 +40,14 @@ func ParseRestart(v string) (RestartPolicy, error) {
 	if rest, ok := strings.CutPrefix(v, RestartOnFailure+":"); ok {
 		n, err := strconv.Atoi(strings.TrimSpace(rest))
 		if err != nil || n < 0 {
-			return RestartPolicy{}, fmt.Errorf("restart: %q has an unreadable retry count (want on-failure:N)", v)
+			// The count, not the whole value: what was written can have come from a
+			// `${...}` reference, and naming the four policies is the whole of what
+			// the reader needs to know about it.
+			return RestartPolicy{}, fmt.Errorf("restart: the retry count after `on-failure:` is not a number")
 		}
 		return RestartPolicy{Mode: RestartOnFailure, MaxRetry: n}, nil
 	}
-	return RestartPolicy{}, fmt.Errorf("restart: %q is not a policy (want no, always, unless-stopped, or on-failure[:N])", v)
+	return RestartPolicy{}, fmt.Errorf("restart: not a policy — use no, always, unless-stopped, or on-failure[:N]")
 }
 
 // RestartPolicy parses the service's `restart:`; callers that already validated

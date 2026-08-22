@@ -6,6 +6,21 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.22.1] - 2026-08-22
+
+### Fixed
+
+- `ports`, a service's `volumes`, and a service's `secrets` now say what they found in words when it is not a list. They answered with the YAML tag — "must be a list, got !!str" — which is the spec's own notation and no more use than the decoder's numbering was to the fields that have already stopped using it.
+- When more than one compose file goes into a project, a failure at the final check no longer names the first file as though the problem were in it. More than one is easier to end up with than it sounds: several passed with `-f`, or any override file found next to your `compose.yaml` — including the one `opossum adapt` writes for you. They are merged into a single document before that check, so the line the parser reports counts in the merged text, and no record survives of which file a value came from. Naming the first one sent you to a file that need not contain the problem, at a line you could not find. All the files are named now, and the line is marked as belonging to the merged document. A single file still names itself and a line you can count to.
+
+### Security
+
+- A `${` with no closing `}` now says where it is instead of quoting what came after it. What came after it is the rest of whatever was being expanded: in a compose file that is the tail of the file, and in an env file it is the value — where a password or a token can be. In a compose file the message now names the line the reference starts on, counting lines where YAML breaks them rather than only at a newline, so a file written with the old Mac line ending is counted the same way the parser counts it. In an env file the file and line were already there, so the message adds nothing to them.
+- The fields with a small, fixed set of accepted values no longer read the value back when they reject it — the memory and CPU limits, a healthcheck's durations, a mount's type, `restart`, and a `depends_on` condition. What they are given comes out of the compose file, where a `${...}` reference can put a password or a token, and the error goes to the terminal, the CI log, and whatever issue the output is pasted into; unlike the parser's own message, these printed the value in full. Each of these messages already lists what the field accepts, so the value it was given added nothing it needed to say. Fields whose value is free text — a `command`, an env file's path — still quote what they were given, because there the text is the only way to see what is wrong with it.
+- What is wrong and where to find it are still there, and there is more of it than before. A rejected memory or CPU limit now says which of the two keys it read, a rejected mount type names the mount, and a healthcheck that rejects one of its durations now names the service it belongs to instead of leaving you to guess which of them it meant.
+- An error about a `command:` or `entrypoint:` no longer reads the command back. A command is free text and can hold a token — `sh -c 'curl -H "Bearer ${TOKEN}"'` is an ordinary thing to write — and quoting the whole of it into an error put that in the terminal, the CI log, and any issue the output was pasted into. It now names the service and says which quote never closes, which is what you need to find it. Docker Compose quotes nothing here either, and names the exact field where this says `command or entrypoint`: the two are read by the same code, which is not told which one it is reading, so naming both is as close as this can get for now. It used to say `command` whichever it was, which sent anyone with a bad entrypoint to the wrong line.
+- A field given the wrong shape now says what it found in words. `networks`, `env_file`, `environment`, `depends_on`, a healthcheck's `test`, and `command` all answered with the number the YAML decoder uses internally — "got yaml kind 4" — which is nothing anyone can act on. They say "a mapping", "a list", "a single value".
+
 ## [0.22.0] - 2026-08-21
 
 ### Changed
@@ -836,7 +851,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.22.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.22.1...HEAD
+[0.22.1]: https://github.com/suruseas/opossum/compare/v0.22.0...v0.22.1
 [0.22.0]: https://github.com/suruseas/opossum/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/suruseas/opossum/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/suruseas/opossum/compare/v0.19.1...v0.20.0

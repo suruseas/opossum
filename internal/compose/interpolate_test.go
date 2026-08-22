@@ -1833,11 +1833,8 @@ func TestAByteOrderMarkAtTheStartOfAnEnvFileIsNotPartOfTheFirstKey(t *testing.T)
 // file at the line named — they do not need it read back to them.
 //
 // The shape of the line is as far as this reaches. Expansion of a value can also
-// fail, and an unterminated `${` still quotes the rest of the value back — that
-// road is shared with the compose file, where the quoted text is the only clue
-// to where the problem is, so silencing it needs a decision rather than a patch.
-// Tracked separately; deliberately not covered here, because a sweep that
-// implied it did would be worse than one that says where it stops.
+// fail, and that is covered by its own sweep now — it used to quote the rest of
+// the value back, and says where the reference is instead.
 //
 // The line with no separator is the one that used to break the rule: it quoted
 // the whole line, and a token pasted onto a line of its own is exactly the shape
@@ -1902,9 +1899,9 @@ func TestAnEnvFileErrorNamesThePlaceNotTheContents(t *testing.T) {
 // and tokens live, and an error goes to a terminal, a CI log, and an issue; what
 // the reader needs is which variable to go and fix, not what is in it.
 //
-// Text the FILE holds is a different matter and is not covered here: an
-// unterminated reference has to quote the file back, and the reader can already
-// read their own file.
+// Text the FILE holds is a different matter and is not covered here — though the
+// one case that used to quote a file back, an unterminated reference, now names
+// the line it is on instead.
 //
 // The premise is the whole test. The first version of this swept six shapes of
 // failure and expanded a secret-bearing variable in none of them, so the secret
@@ -2267,5 +2264,133 @@ func TestWhatComesBackFromAnUnparsableDocumentIsTheExpandedText(t *testing.T) {
 	if err := out.into(&got); err == nil {
 		t.Errorf("the broken expansion was accepted, and `a` came back as %#v — "+
 			"handing back the file as written would do exactly this", got["a"])
+	}
+}
+
+// A `${` with no `}` says where it is, not what came after it.
+//
+// What came after it used to be quoted back, and that is whatever was being
+// expanded — the tail of the compose file on one road, and the value itself on
+// the other, where a password lives. The two roads need different words: the
+// document has lines to count, and a value arrives with the file and line it came
+// from already attached, so repeating a position there would be noise.
+//
+// Both are here because the fix is one mechanism serving two callers, and a
+// mechanism that only works for the caller it was written against is the shape of
+// gap this repository keeps finding.
+func TestAnUnterminatedReferenceSaysWhereNotWhat(t *testing.T) {
+	const secret = "ghp-canary-do-not-print"
+	leaks := func(t *testing.T, got string) {
+		t.Helper()
+		for lo := 0; lo < len(secret); lo++ {
+			for hi := len(secret); hi-lo >= 8; hi-- {
+				if strings.Contains(got, secret[lo:hi]) {
+					t.Errorf("the message reads back %q:\n%s", secret[lo:hi], got)
+					return
+				}
+			}
+		}
+	}
+
+	t.Run("in the compose file", func(t *testing.T) {
+		// The reference is on line 5, and nothing before it is on the same line.
+		p := writeProject(t, "services:\n  app:\n    image: app\n    environment:\n      K: ${"+secret+"\n", "")
+		_, err := Load(p)
+		if err == nil {
+			t.Fatal("an unterminated reference was loaded")
+		}
+		got := err.Error()
+		if !strings.Contains(got, "unterminated variable reference") {
+			t.Fatalf("a different failure got there first, so this checked nothing:\n%s", got)
+		}
+		if !strings.Contains(got, "line 5") {
+			t.Errorf("the message should say which line the reference starts on:\n%s", got)
+		}
+		leaks(t, got)
+	})
+
+	t.Run("in an env file value", func(t *testing.T) {
+		// Here the file and line are already attached by the reader, so the message
+		// itself carries no position — and must not carry the value either.
+		p := writeProject(t, "services:\n  app:\n    image: app\n", "GOOD=1\nK=pre${"+secret+"\n")
+		_, err := Load(p)
+		if err == nil {
+			t.Fatal("an unterminated reference was loaded")
+		}
+		got := err.Error()
+		if !strings.Contains(got, "unterminated variable reference") {
+			t.Fatalf("a different failure got there first, so this checked nothing:\n%s", got)
+		}
+		if !strings.Contains(got, ".env:2") {
+			t.Errorf("the message should name the file and line the value is on:\n%s", got)
+		}
+		// And no position of its own. Counting inside a value gives a number that
+		// means nothing to the reader — the line they can act on is the one the
+		// reader of the file attached, and a second number beside it is noise at
+		// best and contradiction at worst.
+		for _, noise := range []string{"on line", "offset", "at index"} {
+			if strings.Contains(got, noise) {
+				t.Errorf("the message carries a position of its own (%q), which counts inside the value:\n%s", noise, got)
+			}
+		}
+		leaks(t, got)
+	})
+
+	// The line is counted, not guessed: a reference further down has to move the
+	// number with it, and one on a line with other text still names its own line.
+	for _, tc := range []struct {
+		name, doc string
+		want      string
+	}{
+		{"the first line", "K: ${" + secret + "\n", "line 1"},
+		{"after several lines", strings.Repeat("# note\n", 9) + "K: ${" + secret + "\n", "line 10"},
+		{"after text on the same line", "a: 1\nK: xx ${" + secret + "\n", "line 2"},
+		// The lines are counted where YAML breaks them, not where Go's newline
+		// does. A file separated by CR alone is read as five lines by the parser,
+		// so saying "line 1" here while its own complaints say five is worse than
+		// saying nothing.
+		{"CR alone", "a: 1\rb: 2\rc: 3\rd: 4\rK: ${" + secret + "\r", "line 5"},
+		{"CRLF, which is one break", "a: 1\r\nb: 2\r\nc: 3\r\nd: 4\r\nK: ${" + secret + "\r\n", "line 5"},
+		{"NEL", "a: 1\u0085b: 2\u0085c: 3\u0085d: 4\u0085K: ${" + secret + "\n", "line 5"},
+		{"LINE SEPARATOR", "a: 1\u2028b: 2\u2028c: 3\u2028d: 4\u2028K: ${" + secret + "\n", "line 5"},
+		{"PARAGRAPH SEPARATOR", "a: 1\u2029b: 2\u2029c: 3\u2029d: 4\u2029K: ${" + secret + "\n", "line 5"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := interpolateDocument([]byte(tc.doc), lk(nil))
+			if err == nil {
+				t.Fatal("an unterminated reference was accepted")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("want %s, got: %v", tc.want, err)
+			}
+			leaks(t, err.Error())
+		})
+	}
+}
+
+// A position taken in one string is never read against another.
+//
+// Expansion goes down into a default — `${A:-${B}}` — and a failure found down
+// there was found at an offset in that argument, not in the file. Carrying it up
+// names a line at random, and reads past the end of the file the moment the
+// argument is the longer of the two.
+//
+// Reaching it takes a line continuation inside the default, because a plain
+// nested `${` is caught by the outer scan first. The case is exotic; the rule is
+// not, and this is the second time in one day that a position from one text was
+// read against another.
+func TestAPositionFromInsideADefaultIsNotReadAgainstTheFile(t *testing.T) {
+	// The outer `${` is on line 4. Without the rule, the offset comes from the
+	// default's own text and names line 1.
+	doc := "a: 1\nz: 2\ny: 3\nb: \"${A:-$\\\n  {B}\"\n"
+	_, err := interpolateDocument([]byte(doc), lk(nil))
+	if err == nil {
+		t.Fatal("an unterminated reference was accepted")
+	}
+	if !strings.Contains(err.Error(), "unterminated variable reference") {
+		t.Fatalf("a different failure got there first, so this checked nothing: %v", err)
+	}
+	if !strings.Contains(err.Error(), "line 4") {
+		t.Errorf("want the line the outer reference is on, got: %v", err)
 	}
 }

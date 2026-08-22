@@ -2,6 +2,7 @@ package compose
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -428,6 +429,10 @@ func interpolateDocument(raw []byte, lookup varLookup) (interpolated, error) {
 	}
 	out, err := expand(raw, lookup, emptied)
 	if err != nil {
+		var u unterminatedRef
+		if errors.As(err, &u) {
+			return interpolated{}, u.onLine(raw)
+		}
 		return interpolated{}, err
 	}
 	if !bytes.Contains(out, []byte(emptied)) {
@@ -522,11 +527,17 @@ func expand(raw []byte, lookup varLookup, emptyAs string) ([]byte, error) {
 			// than truncated at the first inner `}`.
 			end := matchBrace(s[i+2:])
 			if end < 0 {
-				return nil, fmt.Errorf("unterminated variable reference: %q", s[i:])
+				return nil, unterminatedRef{at: i}
 			}
 			expr := s[i+2 : i+2+end]
 			val, err := expandBraced(expr, lookup)
 			if err != nil {
+				// A failure from inside a default was found in a different string,
+				// so whatever position it carries counts there and not here.
+				var nested unterminatedRef
+				if errors.As(err, &nested) {
+					return nil, unterminatedRef{at: i}
+				}
 				return nil, err
 			}
 			if err := refuseMark("${"+expr+"}", val, emptyAs); err != nil {
@@ -702,4 +713,64 @@ func isNameStart(b byte) bool {
 
 func isNameChar(b byte) bool {
 	return isNameStart(b) || (b >= '0' && b <= '9')
+}
+
+// unterminatedRef is a `${` with no `}`, carrying where it started rather than
+// what followed it.
+//
+// What followed it used to be quoted back, and it is the rest of whatever was
+// being expanded: on the document road that is the tail of the compose file, and
+// on the value road it is the value — where a password lives. The two roads want
+// different words for the same fault, so the position travels and each frames it.
+type unterminatedRef struct{ at int }
+
+func (unterminatedRef) Error() string { return "unterminated variable reference" }
+
+// onLine names the line the reference started on, counting in the text expand was
+// given. Only the document road has anything to count: a value is handed over
+// with the file and line it came from already attached.
+//
+// The position has to have been taken in this same text. It is dropped rather
+// than carried when expansion goes down into a value, so an offset from one
+// string is never read against another — but the guard is here as well, because
+// being wrong about that would name a line at random, or read past the end.
+func (u unterminatedRef) onLine(in []byte) error {
+	if u.at < 0 || u.at > len(in) {
+		return u
+	}
+	return fmt.Errorf("%w on line %d", u, countLines(in[:u.at]))
+}
+
+// countLines counts the line the offset is on, breaking lines where YAML breaks
+// them rather than where Go's newline does.
+//
+// A file written on an old Mac separates its lines with CR alone, and the parser
+// reads those as lines: saying "line 1" for something on the fifth of them, while
+// the parser's own complaints about the same file count to five, is worse than
+// saying nothing. NEL, LINE SEPARATOR and PARAGRAPH SEPARATOR are breaks to YAML
+// too — rare, but the file that has one is exactly the file nobody can debug.
+func countLines(in []byte) int {
+	n := 1
+	for i := 0; i < len(in); i++ {
+		switch in[i] {
+		case '\n':
+			n++
+		case '\r':
+			n++
+			if i+1 < len(in) && in[i+1] == '\n' { // CRLF is one break, not two
+				i++
+			}
+		case 0xC2: // NEL is C2 85
+			if i+1 < len(in) && in[i+1] == 0x85 {
+				n++
+				i++
+			}
+		case 0xE2: // LS is E2 80 A8, PS is E2 80 A9
+			if i+2 < len(in) && in[i+1] == 0x80 && (in[i+2] == 0xA8 || in[i+2] == 0xA9) {
+				n++
+				i += 2
+			}
+		}
+	}
+	return n
 }

@@ -3678,3 +3678,32 @@ func TestFromDockerComposeAdviceDependsOnWhoWroteTheOverlay(t *testing.T) {
 		})
 	}
 }
+
+// The override file is picked up without anyone passing `-f`, so the road where
+// several files get merged is the one most people are on without knowing it. A
+// failure there has to name both files, the same as when they were listed by
+// hand — the road, not just the message, is what this holds.
+func TestAFailureNamesBothFilesWhenTheOverrideWasFoundNotPassed(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("compose.yaml", "services:\n  app:\n    image: app\n")
+	// The problem is in the override, which nobody named on the command line.
+	write("compose.override.yaml", "services:\n  app:\n    user: someone\nvolumes:\n  data: \"\"\n")
+
+	t.Chdir(dir)
+	out, err := run(t, "config")
+	if err == nil {
+		t.Fatalf("the pair loaded:\n%s", out)
+	}
+	got := err.Error() + out
+	for _, want := range []string{"compose.yaml", "compose.override.yaml", "merged document"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the failure should carry %q:\n%s", want, got)
+		}
+	}
+}

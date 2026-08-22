@@ -150,3 +150,40 @@ func TestSniffLooksAtTheWholeHead(t *testing.T) {
 		t.Errorf("text with no NUL should pass, got: %s", msg)
 	}
 }
+
+// A compose file at the top of the repository is a leftover, and the gate says so.
+//
+// Written from both sides on purpose. A rule that starts out with nothing to find
+// is green whether it looks or not, so the cases that must be caught are here
+// beside the ones that must not be — examples/ holds real compose files, and a
+// name that merely contains one of these is somebody's own file.
+func TestAComposeFileAtTheTopIsALeftover(t *testing.T) {
+	for _, p := range []string{
+		"compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml",
+		"compose.override.yaml", "compose.opossum.yaml",
+		// The file system this is developed on does not tell these apart, so a
+		// tracked `Compose.yaml` is what `opossum up` opens when it asks for
+		// `compose.yaml`. Refusing one spelling and not the other would guard
+		// nothing.
+		"Compose.yaml", "COMPOSE.YML", "Docker-Compose.yaml",
+	} {
+		if got := repohygiene.Offense(p, 40, []byte("services:\n  app:\n    image: app\n")); got == "" {
+			t.Errorf("%s should be refused", p)
+		} else if !strings.Contains(got, "examples/") {
+			t.Errorf("%s: the message should say where one does belong:\n%s", p, got)
+		}
+	}
+	for _, p := range []string{
+		// The real ones, which are the reason the rule is about the top level only.
+		"examples/hello/compose.yaml",
+		"internal/compose/testdata/compose.yaml",
+		// A name of somebody's own that happens to contain one.
+		"my-compose.yaml",
+		"compose.yaml.tmpl",
+		"docs/compose.yaml.md",
+	} {
+		if got := repohygiene.Offense(p, 40, []byte("services:\n")); got != "" {
+			t.Errorf("%s should be allowed, got: %s", p, got)
+		}
+	}
+}

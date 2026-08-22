@@ -363,7 +363,7 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 				// here rather than at the final decode, and saying "not valid YAML"
 				// for it was the same wrong advice by a different route — the one a
 				// reader hits precisely when they have split their file up.
-				return nil, decodeErr(path, err)
+				return nil, decodeErr(path, false, err)
 			}
 			if merged == nil {
 				merged = m
@@ -373,10 +373,11 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 		}
 		// Merging builds a new tree, so there are no positions to keep: the files
 		// are one document by the time this is decoded, and a failure here names a
-		// line in THAT document while naming paths[0] as the file. Splitting a
-		// compose file therefore still gets the line numbers the single-file road
-		// used to get. The per-file pass above is the part that reads each file as
-		// the reader wrote it, and it only sees what a plain map can hold.
+		// line in THAT document. Which file a value came from is not recorded, so
+		// the message names them all and says the line is a merged one rather than
+		// picking one and being wrong. The per-file pass above is the part that
+		// reads each file as the reader wrote it, and it only sees what a plain
+		// map can hold.
 		data, err := yaml.Marshal(merged)
 		if err != nil {
 			return nil, fmt.Errorf("merging compose files: %w", err)
@@ -386,10 +387,10 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 
 	var f composeFile
 	if err := doc.into(&f); err != nil {
-		return nil, decodeErr(paths[0], err)
+		return nil, decodeErr(mergedName(paths), len(paths) > 1, blameService(doc, err))
 	}
 	if len(f.Services) == 0 {
-		return nil, fmt.Errorf("%s defines no services — add a top-level `services:` block with at least one service", paths[0])
+		return nil, fmt.Errorf("%s defines no services — add a top-level `services:` block with at least one service", mergedName(paths))
 	}
 
 	p := &Project{
@@ -551,7 +552,10 @@ func (p *Project) validateDeps() error {
 					return fmt.Errorf("service %q requires %q to be healthy, but %q is depended on to complete (run-to-completion services stop, so they can't stay healthy)", name, dep.Name, dep.Name)
 				}
 			default:
-				return fmt.Errorf("service %q: unsupported depends_on condition %q for %q — use service_started, service_healthy, or service_completed_successfully", name, dep.Condition, dep.Name)
+				// The dependency, not the condition it was given: there are three
+				// conditions and they are all named here, so the value adds nothing —
+				// and it can have come from a `${...}` reference.
+				return fmt.Errorf("service %q: unsupported depends_on condition for %q — use service_started, service_healthy, or service_completed_successfully", name, dep.Name)
 			}
 		}
 	}
@@ -626,7 +630,7 @@ func normalizePort(spec string) (norm string, mirrored bool) {
 // unmarshaler and it has already been got wrong twice by enumerating. What is
 // true is the shape of the rule: only what the decoder collected is classified,
 // and everything else keeps the words it arrived with.
-func decodeErr(path string, err error) error {
+func decodeErr(path string, merged bool, err error) error {
 	var collected *yaml.TypeError
 	switch {
 	case errors.As(err, &collected) && allDuplicateKeys(collected):
@@ -641,9 +645,19 @@ func decodeErr(path string, err error) error {
 		// mistake in a file that has none, and "check the indentation and
 		// quoting" sends them to the wrong place twice over. The file parsed;
 		// what is wrong is what the value turned out to be.
+		//
+		// The one extra line, when several files were merged to get here, is that
+		// the numbers below count in the merged document rather than in anything
+		// the reader wrote. It goes in the middle of one message rather than into
+		// a second copy of it: two copies is how half of a fix gets applied.
+		hint := ""
+		if merged {
+			hint = "\n  the line above counts in the merged document, not in any of the files as " +
+				"written — look for the key it names"
+		}
 		return fmt.Errorf("compose file %s parsed, but a value is not the shape "+
-			"that field takes:\n  %w\n  check what that field is set to — if the value came "+
-			"from a `${...}` reference, a variable that is not set leaves it empty", path, err)
+			"that field takes:\n  %w%s\n  check what that field is set to — if the value came "+
+			"from a `${...}` reference, a variable that is not set leaves it empty", path, err, hint)
 	case strings.HasPrefix(err.Error(), "yaml:"):
 		return fmt.Errorf("compose file %s is not valid YAML: %w\n  check the indentation and quoting near the line the parser names above", path, err)
 	}
@@ -702,4 +716,83 @@ func withoutEchoedValues(te *yaml.TypeError) *yaml.TypeError {
 		out.Errors[i] = strings.Join(strings.Fields(e[:lo]+e[hi+1:]), " ")
 	}
 	return out
+}
+
+// mergedName names the document a failure at the final decode is about.
+//
+// One file is itself, and the line the parser gives is a line in it. Several are
+// merged into a new document before this point, and there is no honest way to
+// point into any one of them: the line belongs to the merged text, and which file
+// a value came from is not recorded anywhere. Naming the first file — which is
+// what this used to do — sends the reader to a file that may not contain the
+// problem, at a line they cannot find.
+//
+// Naming them all is worse to read but true, and the reader can still act on it:
+// the value is in one of these, under the key the message names. The line is
+// still worth printing — it orders the failures when there are several — so it is
+// the claim about WHERE that has to go, not the number.
+func mergedName(paths []string) string {
+	if len(paths) == 1 {
+		return paths[0]
+	}
+	return strings.Join(paths, " + ")
+}
+
+// blameService says which service a decode failure came from, when the failure
+// itself does not.
+//
+// A service's own complaints — a duration that is not one, a restart policy that
+// is not one — are raised deep inside the decode and carry no name: `services:` is
+// decoded as a map, and the key never reaches the value's unmarshaler. That was
+// survivable while those messages quoted the value, because you could search the
+// file for it, and stopped being survivable when they stopped quoting it.
+//
+// The obvious fix — decode the services one at a time so the key is in hand — is
+// wrong: walking the mapping by hand skips what the decoder does for a mapping,
+// and duplicate service names started passing silently, last one winning. So the
+// ordinary decode stays authoritative and this runs only after it has failed,
+// where being wrong costs nothing: it re-reads each service on its own, and if
+// exactly one of them fails the same way, it says so. Anything else is left alone.
+func blameService(d interpolated, err error) error {
+	// The same document the decode read, not the bytes it was built from: those
+	// still carry the marks that stand where a reference expanded to nothing, and
+	// a service that is fine once they are taken out can look broken with them in.
+	// Reading a different document here does not produce a wrong name — a second
+	// match makes it say nothing — but it makes it say nothing on files where it
+	// had an answer.
+	doc := d.node
+	if doc == nil {
+		var parsed yaml.Node
+		if yaml.Unmarshal(d.raw, &parsed) != nil {
+			return err
+		}
+		doc = &parsed
+	}
+	if len(doc.Content) == 0 {
+		return err
+	}
+	root := doc.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return err
+	}
+	var services *yaml.Node
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value == "services" {
+			services = root.Content[i+1]
+		}
+	}
+	if services == nil || services.Kind != yaml.MappingNode {
+		return err
+	}
+	name, found := "", 0
+	for i := 0; i+1 < len(services.Content); i += 2 {
+		var svc Service
+		if e := services.Content[i+1].Decode(&svc); e != nil && e.Error() == err.Error() {
+			name, found = services.Content[i].Value, found+1
+		}
+	}
+	if found != 1 {
+		return err
+	}
+	return fmt.Errorf("service %q: %w", name, err)
 }

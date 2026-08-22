@@ -183,14 +183,19 @@ func resolveScalar(legacyKey, deployKey, legacy, deploy string, parse func(strin
 	if legacy != "" {
 		p, err := parse(legacy)
 		if err != nil {
-			return 0, err
+			// The key, because the message below will not repeat the value: these
+			// are read from the compose file, where a `${...}` reference can put a
+			// password in, and an error goes to the terminal and the CI log. Two
+			// keys can hold this number, so which one is being complained about is
+			// what the reader needs.
+			return 0, fmt.Errorf("%s: %w", legacyKey, err)
 		}
 		v = p
 	}
 	if deploy != "" {
 		p, err := parse(deploy)
 		if err != nil {
-			return 0, err
+			return 0, fmt.Errorf("%s: %w", deployKey, err)
 		}
 		if v != 0 && p != 0 && v != p {
 			return 0, fmt.Errorf("%s and %s are set to different values", legacyKey, deployKey)
@@ -215,7 +220,7 @@ func parseMemoryBytes(s string) (float64, error) {
 	}
 	num, err := strconv.ParseFloat(s[:end], 64)
 	if err != nil {
-		return 0, fmt.Errorf("invalid memory value %q — use a number with an optional unit, e.g. \"512m\" or \"2g\"", s)
+		return 0, fmt.Errorf("not a memory size — use a number with an optional unit, e.g. \"512m\" or \"2g\"")
 	}
 	unit := strings.ToLower(strings.TrimSpace(s[end:]))
 	unit = strings.TrimSuffix(unit, "ib") // mib -> m
@@ -223,7 +228,7 @@ func parseMemoryBytes(s string) (float64, error) {
 	mult := map[string]float64{"": 1, "k": 1 << 10, "m": 1 << 20, "g": 1 << 30, "t": 1 << 40, "p": 1 << 50}
 	f, ok := mult[unit]
 	if !ok {
-		return 0, fmt.Errorf("invalid memory unit in %q — use k, m, g, or t (e.g. \"512m\")", s)
+		return 0, fmt.Errorf("not a memory unit — use k, m, g, or t (e.g. \"512m\")")
 	}
 	return num * f, nil
 }
@@ -236,10 +241,10 @@ func parseCPUs(s string) (float64, error) {
 	}
 	f, err := strconv.ParseFloat(s, 64)
 	if err != nil {
-		return 0, fmt.Errorf("invalid cpus value %q — use a number, e.g. \"1.5\" or \"2\"", s)
+		return 0, fmt.Errorf("not a number of CPUs — use a number, e.g. \"1.5\" or \"2\"")
 	}
 	if f < 0 {
-		return 0, fmt.Errorf("cpus must not be negative, got %q", s)
+		return 0, fmt.Errorf("must not be negative")
 	}
 	return f, nil
 }
@@ -389,7 +394,7 @@ type Ports []string
 
 func (p *Ports) UnmarshalYAML(value *yaml.Node) error {
 	if value.Kind != yaml.SequenceNode {
-		return fmt.Errorf("ports must be a list, got %v", value.Tag)
+		return fmt.Errorf("ports must be a list, got %s", kindName(value.Kind))
 	}
 	out := make(Ports, 0, len(value.Content))
 	for _, item := range value.Content {
@@ -450,7 +455,7 @@ type Volumes []string
 
 func (v *Volumes) UnmarshalYAML(value *yaml.Node) error {
 	if value.Kind != yaml.SequenceNode {
-		return fmt.Errorf("volumes must be a list, got %v", value.Tag)
+		return fmt.Errorf("volumes must be a list, got %s", kindName(value.Kind))
 	}
 	out := make(Volumes, 0, len(value.Content))
 	for _, item := range value.Content {
@@ -490,7 +495,11 @@ func (v *Volumes) UnmarshalYAML(value *yaml.Node) error {
 			out = append(out, tmpfsMarker+lf.Target)
 			continue
 		default:
-			return fmt.Errorf("unsupported volume type %q (only bind, volume, tmpfs)", lf.Type)
+			// The target, not the type: the type is what is wrong, but it can have
+			// come from a `${...}` reference and the mount is what the reader has to
+			// find. There are only three types, so naming them is the whole of what
+			// they need to know about the value.
+			return fmt.Errorf("the mount at %s has an unsupported type (only bind, volume, tmpfs)", lf.Target)
 		}
 		// No source is an anonymous volume (short form is just the target path).
 		s := lf.Target
@@ -563,7 +572,7 @@ func (n *ServiceNetworks) UnmarshalYAML(value *yaml.Node) error {
 		*n = out
 		return nil
 	}
-	return fmt.Errorf("expected a list or map for networks, got yaml kind %d", value.Kind)
+	return fmt.Errorf("expected a list or a mapping for networks, got %s", kindName(value.Kind))
 }
 
 // Secret is a top-level compose secret. opossum supports only file-based
@@ -587,7 +596,7 @@ type SecretRefs []SecretRef
 
 func (s *SecretRefs) UnmarshalYAML(value *yaml.Node) error {
 	if value.Kind != yaml.SequenceNode {
-		return fmt.Errorf("secrets must be a list, got %v", value.Tag)
+		return fmt.Errorf("secrets must be a list, got %s", kindName(value.Kind))
 	}
 	out := make(SecretRefs, 0, len(value.Content))
 	for _, item := range value.Content {
@@ -648,7 +657,11 @@ func (c *Command) UnmarshalYAML(value *yaml.Node) error {
 	case yaml.ScalarNode:
 		parts, err := shellSplit(value.Value)
 		if err != nil {
-			return fmt.Errorf("command: %w", err)
+			// Both `command:` and `entrypoint:` are read by this, and which one is
+			// being read is not passed in — the message used to say "command" for
+			// either, which sent anyone with a bad entrypoint to look at the wrong
+			// line. Naming both is true and narrows it to two.
+			return fmt.Errorf("command or entrypoint: %w", err)
 		}
 		*c = parts
 		return nil
@@ -660,7 +673,10 @@ func (c *Command) UnmarshalYAML(value *yaml.Node) error {
 		*c = out
 		return nil
 	}
-	return fmt.Errorf("expected a string or list for command, got yaml kind %d", value.Kind)
+	// Both fields again: this is the same code reading either of them, six lines
+	// below the other place that used to name only one. Naming one there and not
+	// here would have left half the fix in.
+	return fmt.Errorf("command or entrypoint: expected a string or a list, got %s", kindName(value.Kind))
 }
 
 // EnvFileRef is one env_file entry. Required defaults to true (a missing file is
@@ -706,7 +722,7 @@ func (e *EnvFiles) UnmarshalYAML(value *yaml.Node) error {
 		*e = out
 		return nil
 	}
-	return fmt.Errorf("expected a string or list for env_file, got yaml kind %d", value.Kind)
+	return fmt.Errorf("expected a string or a list for env_file, got %s", kindName(value.Kind))
 }
 
 // StringOrSlice accepts a scalar (taken as one element) or a list. Used by
@@ -727,7 +743,7 @@ func (s *StringOrSlice) UnmarshalYAML(value *yaml.Node) error {
 		*s = out
 		return nil
 	}
-	return fmt.Errorf("expected a string or list, got yaml kind %d", value.Kind)
+	return fmt.Errorf("expected a string or a list, got %s", kindName(value.Kind))
 }
 
 // Environment normalizes both the list form (KEY=value) and the map form
@@ -761,7 +777,7 @@ func (e *Environment) UnmarshalYAML(value *yaml.Node) error {
 		*e = out
 		return nil
 	}
-	return fmt.Errorf("expected a list or map for environment, got yaml kind %d", value.Kind)
+	return fmt.Errorf("expected a list or a mapping for environment, got %s", kindName(value.Kind))
 }
 
 // depends_on condition values.
@@ -815,7 +831,7 @@ func (d *DependsOn) UnmarshalYAML(value *yaml.Node) error {
 		*d = out
 		return nil
 	}
-	return fmt.Errorf("expected a list or map for depends_on, got yaml kind %d", value.Kind)
+	return fmt.Errorf("expected a list or a mapping for depends_on, got %s", kindName(value.Kind))
 }
 
 // Names returns the dependency service names in order.
@@ -904,7 +920,27 @@ func parseDuration(s string, def time.Duration) (time.Duration, error) {
 	}
 	d, err := time.ParseDuration(s)
 	if err != nil {
-		return 0, fmt.Errorf("%q is not a duration — use a unit, e.g. 30s, 1m, or 500ms", s)
+		return 0, fmt.Errorf("not a duration — use a unit, e.g. 30s, 1m, or 500ms")
 	}
 	return d, nil
+}
+
+// kindName says what the parser found in words, rather than by the number YAML's
+// own decoder happens to use for it. A reader who wrote a mapping where a list
+// belongs cannot act on "yaml kind 4".
+//
+// There is no case for an alias: the decoder resolves one before any of this sees
+// it, so `command: *anchor` arrives as whatever the anchor held (measured).
+func kindName(k yaml.Kind) string {
+	switch k {
+	case yaml.ScalarNode:
+		return "a single value"
+	case yaml.SequenceNode:
+		return "a list"
+	case yaml.MappingNode:
+		return "a mapping"
+	case yaml.DocumentNode:
+		return "a document"
+	}
+	return "something else"
 }

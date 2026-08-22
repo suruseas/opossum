@@ -1,6 +1,6 @@
 package compose
 
-import "fmt"
+import "errors"
 
 // shellSplit splits a string into words using POSIX-ish shell quoting rules, so a
 // compose `command: sh -c "echo hi"` becomes ["sh", "-c", "echo hi"] instead of a
@@ -25,7 +25,7 @@ func shellSplit(s string) ([]string, error) {
 				i++
 			}
 			if i >= n {
-				return nil, fmt.Errorf("unterminated single quote in %q", s)
+				return nil, errors.New("a single quote is never closed")
 			}
 			i++ // consume closing quote
 
@@ -42,13 +42,13 @@ func shellSplit(s string) ([]string, error) {
 				i++
 			}
 			if i >= n {
-				return nil, fmt.Errorf("unterminated double quote in %q", s)
+				return nil, errors.New("a double quote is never closed")
 			}
 			i++ // consume closing quote
 
 		case c == '\\':
 			if i+1 >= n {
-				return nil, fmt.Errorf("trailing backslash in %q", s)
+				return nil, errors.New("it ends in a backslash with nothing after it")
 			}
 			inWord = true
 			cur = append(cur, runes[i+1])
