@@ -1,0 +1,6 @@
+# 使用中の named volume を delete したときの文言（container 1.2.2 / 2026-08-23）
+# resourceInUse（runtime.go:383）が "in use" に一致させている先
+# 引き方: container volume create → その volume を持つコンテナを走らせたまま container volume delete
+
+failed to delete volume: ["id": opossum-inuse-probe, "error": invalidArgument: "volume 'opossum-inuse-probe' is currently in use and cannot be accessed by another container, or deleted"]
+Error: delete failed for one or more volumes: ["opossum-inuse-probe"]

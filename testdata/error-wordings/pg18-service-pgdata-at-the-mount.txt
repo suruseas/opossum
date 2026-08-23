@@ -1,0 +1,23 @@
+# 18 に対して、サービス自身が PGDATA を旧パス（マウント先そのもの）に向けた場合（#488）
+# container CLI 1.2.2 / 2026-08-23。コンテナの env は image の ENV を上書きするので、
+# image が 18/docker を宣言していても、実効値はこのマウント自身になる
+$ cat compose.yaml
+services:
+  s:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_PASSWORD: x
+      PGDATA: /var/lib/postgresql/data
+    volumes:
+      - ./data:/var/lib/postgresql/data
+$ opossum up --no-supervisor
+Creating network svc-pgdata-at-net
+Starting s (postgres:18-alpine)
+s.svc-pgdata-at.opossum
+warning: [OPSM-407] service "s" exited right after starting (state "stopped"); its last log lines:
+  chmod: /var/lib/postgresql/data: Operation not permitted
+  chown: /var/lib/postgresql/data: Operation not permitted
+  → [OPSM-105] Apple `container` bind mounts are host-owned and can't be chowned from inside the container, so a DB image that chowns its data directory fails here. Use a named volume for that directory instead of a bind mount (host path); `opossum up --from-docker-compose` writes that change for you.
+opossum: [OPSM-407] 1 service(s) exited right after starting: "s" — see the logs above, fix the cause, and run `opossum up` again
+$ opossum ps | tail -1   # 見出し行は落としている
+s        s.svc-pgdata-at.opossum  postgres:18-alpine  -   -      stopped

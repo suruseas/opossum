@@ -1,0 +1,32 @@
+note: 2 compose fields are ignored (e.g. cs2-rconpanel: container_name) — run `opossum config` for details
+Creating network cs2-dedicated-server-net
+Starting cs2-rconpanel (ghcr.io/l4rm4nd/cs2-rcon-panel:latest)
+[0/6] [0s]
+[1/6] Fetching image [0s]
+[1/6] Fetching image [1s]
+[1/6] Fetching image 0% (1 of 15 blobs, 75 KB/406.7 MB, 2 KB/s) [2s]
+[1/6] Fetching image 4% (2 of 15 blobs, 18.4/406.7 MB, 7.1 MB/s) [3s]
+[1/6] Fetching image 9% (2 of 15 blobs, 37.1/406.7 MB, 17.9 MB/s) [4s]
+[1/6] Fetching image 13% (2 of 15 blobs, 55.6/406.7 MB, 19.2 MB/s) [5s]
+[1/6] Fetching image 17% (3 of 15 blobs, 71.6/406.7 MB, 16.5 MB/s) [6s]
+[1/6] Fetching image 21% (3 of 15 blobs, 89.3/406.7 MB, 16.0 MB/s) [7s]
+[1/6] Fetching image 26% (3 of 15 blobs, 108.0/406.7 MB, 17.4 MB/s) [8s]
+[1/6] Fetching image 31% (4 of 15 blobs, 127.5/406.7 MB, 18.5 MB/s) [9s]
+[1/6] Fetching image 35% (5 of 15 blobs, 144.5/406.7 MB, 18.5 MB/s) [10s]
+[1/6] Fetching image 39% (5 of 15 blobs, 160.6/406.7 MB, 15.7 MB/s) [11s]
+[1/6] Fetching image 43% (5 of 15 blobs, 178.0/406.7 MB, 17.3 MB/s) [12s]
+[1/6] Fetching image 48% (6 of 15 blobs, 196.5/406.7 MB, 18.9 MB/s) [13s]
+[1/6] Fetching image 52% (7 of 15 blobs, 214.7/406.7 MB, 17.1 MB/s) [14s]
+[1/6] Fetching image 57% (9 of 15 blobs, 234.8/406.7 MB, 20.2 MB/s) [15s]
+[1/6] Fetching image 62% (10 of 15 blobs, 255.6/406.7 MB, 20.8 MB/s) [16s]
+[1/6] Fetching image 68% (11 of 15 blobs, 277.0/406.7 MB, 21.6 MB/s) [17s]
+[1/6] Fetching image 73% (12 of 15 blobs, 298.6/406.7 MB, 21.9 MB/s) [18s]
+[1/6] Fetching image 78% (13 of 15 blobs, 317.6/406.7 MB, 18.5 MB/s) [19s]
+[1/6] Fetching image 83% (14 of 15 blobs, 339.7/406.7 MB, 18.5 MB/s) [20s]
+[1/6] Fetching image 88% (14 of 15 blobs, 359.9/406.7 MB, 21.0 MB/s) [21s]
+[1/6] Fetching image 92% (14 of 15 blobs, 376.5/406.7 MB, 19.4 MB/s) [22s]
+[1/6] Fetching image 97% (14 of 15 blobs, 394.6/406.7 MB, 17.0 MB/s) [23s]
+[1/6] Fetching image 100% (15 blobs, 406.7 MB) [23s]
+Error: image sha256:6822b95f872f22338d66c4d1140cb6fa56a8d061938da9b3145536382d291ff0 does not support required platforms
+opossum: starting service "cs2-rconpanel": exit status 1
+  → [OPSM-412] this image has no build for Apple silicon (arm64). Add `platform: linux/amd64` to the service — opossum runs an amd64 image through Rosetta.

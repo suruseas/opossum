@@ -31,6 +31,9 @@ const projectLabel = "opossum.project"
 
 // Orchestrator drives a single project.
 type Orchestrator struct {
+	// imageEnvs remembers what each image declared, so planning an overlay asks the
+	// runtime once per image rather than once per mount it considers.
+	imageEnvs map[string]map[string]string
 	Project   *compose.Project
 	DNSDomain string // local DNS domain enabling bare-name service discovery
 	rt        *runtime.Runtime
@@ -1824,12 +1827,49 @@ func runErrorHint(svc *compose.Service, err error) string {
 	}
 	s := re.Stderr
 	switch {
-	case strings.Contains(s, "does not support required platforms"):
+	// Two wordings for one failure, and 1.2.2 says it both ways. Measured on the
+	// corpus: an image whose index lists no arm64 fails early with `Error: platform
+	// linux/arm64`, while one that is fetched before the mismatch is found still
+	// says `does not support required platforms`. Which one a given image produces
+	// is not something to guess at, so both are matched — and the older wording is
+	// also all that anyone on 1.1.0 ever sees.
+	//
+	// The 1.2.2 wording names the platform that is *missing*, not the one being
+	// run: an image built only for arm64 and asked for as amd64 says `platform
+	// linux/amd64`. So it is matched for arm64 alone, and anchored to the start of
+	// the message — `platform linux/arm64` on its own is also a substring of
+	// `--platform linux/arm64`, which is an ordinary thing for a service to ask
+	// for, and this case sits first and would answer for the others.
+	case strings.Contains(s, "Error: platform linux/arm64"),
+		strings.Contains(s, "does not support required platforms"):
+		// Except when amd64 is what was asked for and what is missing. The older
+		// wording does not say which platform it wanted, so the service is what
+		// says it: told to add what it already has, a reader is being told to
+		// repeat what just failed.
+		if svc != nil && runtime.IsAMD64(svc.Platform) {
+			return ""
+		}
 		return "\n  → [" + string(codeImageNoArm64) + "] this image has no build for Apple silicon (arm64). " +
 			"Add `platform: linux/amd64` to the service — opossum runs an amd64 image through Rosetta."
+	// The receiver for a conflict the pre-flight missed, and there is one it does
+	// miss. checkHostPorts asks one question — is this address busy on the host
+	// right now — and asks it before anything starts. It never asks whether two
+	// services in this project want the same address, and at the time it runs the
+	// answer to the question it does ask is "no" for both of them. So they both
+	// pass, the first one binds, and the second one's bind fails here. Reached
+	// that way on 1.2.2; the recipe is in testdata/real-cli-output.md.
+	//
+	// (The shared `seen` set in that function is a dedupe, not the cause. Probing
+	// per service would change nothing: nothing holds the port yet.)
+	//
+	// The example this used to give — the runtime's own DNS on 53 — is not one of
+	// them: the pre-flight sees 53, and sees a port published by another project's
+	// running container too. A loopback-only listener is genuinely invisible to
+	// the probe, and still does not arrive here, because the runtime binds
+	// alongside it without complaint. All three were tried.
 	case strings.Contains(s, "Address already in use"):
 		hint := "\n  → [" + string(codeHostPortInUse) + "] a published host port is already in use, which opossum's " +
-			"pre-flight can't always see (a port held by the runtime itself, like its built-in DNS on 53). " +
+			"pre-flight did not see. " +
 			"Remap the port in the compose file"
 		if svc != nil {
 			if addrs := hostPublishAddrs(svc.Ports); len(addrs) > 0 {
@@ -2004,6 +2044,65 @@ func quoteAll(ss []string) []string {
 // (#57/#103).
 const postgresDataDir = "/var/lib/postgresql/data"
 
+// postgresBaseDir is where Postgres 18 and newer want the single mount: the
+// cluster lives in a major-version subdirectory below it, which is what makes
+// `pg_upgrade --link` possible without crossing a mount point.
+const postgresBaseDir = "/var/lib/postgresql"
+
+// pgVersionedLayoutHint decodes Postgres 18 and newer refusing to start because
+// the mount sits where 17 and earlier kept the data.
+//
+// Postgres 18 moved the data: the image wants one mount at /var/lib/postgresql and
+// puts the cluster in a major-version subdirectory below it. A mount at the old
+// /var/lib/postgresql/data is then data the image will not use, so it prints what
+// it found and exits. Measured on the real runtime with postgres:18-alpine, each
+// run kept in testdata/error-wordings/: the refusal at the old path with a bind
+// mount and with a named volume, a project differing only in that one path
+// starting once the mount moves up a level, and a host path working there — the
+// image makes the subdirectory itself, so it has nothing to chown. What it will
+// not do is take over a cluster an earlier major version wrote: handed one at the
+// path it asks for, 18 makes an empty `18/docker` below it and then refuses,
+// leaving the old PG_VERSION alone — which is why this hint says so rather than implying
+// the move carries the data.
+//
+// It runs before the chown decoder deliberately. When both signatures appear the
+// mount is at the old path, and moving it is the answer that needs nothing else: a
+// named volume there starts only once a PGDATA below it is added as well (both
+// measured). The chown decoder offers the volume on its own, and records the
+// failure so a later `up --from-docker-compose` can offer it too — half a fix on
+// 18, and the reason nothing is recorded here.
+//
+// The signature has to survive the crash report's window of last lines, so it is
+// taken from the tail of the message rather than its `Error:` opening, which a
+// message this long pushes out of view.
+func (o *Orchestrator) pgVersionedLayoutHint(svc *compose.Service, logs string) string {
+	if !strings.Contains(logs, "(unused mount/volume)") || !strings.Contains(logs, "pg_upgrade") {
+		return ""
+	}
+	// Name the mount that has to move, and only the one at the old data directory:
+	// "there" in the sentence points at that path, so a mount sitting elsewhere
+	// below /var/lib/postgresql — an injected postgresql.conf, a separate pg_wal —
+	// would be named for a place it is not. Anything other than exactly one leaves
+	// the sentence without the clause; the paths in it already say enough.
+	where, found := "", 0
+	for _, v := range svc.Volumes {
+		src, target, _, ok := splitMount(v)
+		if !ok || target != postgresDataDir {
+			continue
+		}
+		found++
+		where = fmt.Sprintf(" (this service mounts %s there)", src)
+	}
+	if found != 1 {
+		where = ""
+	}
+	return fmt.Sprintf("\n  → [%s] Postgres 18 and newer keep the cluster in a major-version subdirectory, "+
+		"so the mount belongs one level up: mount `%s` instead of `%s`%s. A host path works there — the image "+
+		"creates the subdirectory itself. Data an earlier major version wrote is a separate question: the image "+
+		"asks for `pg_upgrade`, which moving the mount does not do.",
+		codePGVersionedLayout, postgresBaseDir, postgresDataDir, where)
+}
+
 // initdbNotEmptyHint decodes Postgres refusing to initialise a data directory
 // that is not empty because it still holds `lost+found`.
 //
@@ -2141,14 +2240,15 @@ func indentLines(s string) string {
 }
 
 // crashHint decodes a crashed container's last log lines into an actionable hint
-// for a known Apple-`container` gotcha, appended to the crash report. It knows two
-// signatures: a chown-permission failure on a bind mount (Apple `container` bind
-// mounts are host-owned via virtiofs and can't be chowned from inside, so a DB
-// image that chowns its data directory fails with "chown: … Operation not
-// permitted" — a named volume IS chownable, so that's the fix), and Postgres
-// refusing a data directory that still holds `lost+found`.
+// for a known Apple-`container` gotcha, appended to the crash report. It knows
+// three signatures: a chown-permission failure on a bind mount (Apple `container`
+// bind mounts are host-owned via virtiofs and can't be chowned from inside, so a
+// DB image that chowns its data directory fails with "chown: … Operation not
+// permitted" — a named volume IS chownable, so that's the fix), Postgres refusing
+// a data directory that still holds `lost+found`, and Postgres 18 and newer
+// refusing a mount at the data directory 17 and earlier used.
 //
-// Both are decoders, not predictions: they answer a failure that has already
+// All three are decoders, not predictions: they answer a failure that has already
 // happened, in the words of the program that failed. Returns "" when nothing
 // matches (so callers can append unconditionally).
 func (o *Orchestrator) crashHint(name, logs string) string {
@@ -2156,11 +2256,26 @@ func (o *Orchestrator) crashHint(name, logs string) string {
 	if svc == nil {
 		return ""
 	}
+	if h := o.pgVersionedLayoutHint(svc, logs); h != "" {
+		return h
+	}
 	if h := o.chownCrashHint(name, svc, logs); h != "" {
 		return h
 	}
 	return o.initdbNotEmptyHint(name, svc, logs)
 }
+
+// crashWhy is the half of the guidance that is the same in every form: what went
+// wrong, and why a named volume is the way out.
+const crashWhy = "Apple `container` bind mounts are host-owned and can't be chowned from inside the container, so an " +
+	"image that takes ownership of its data directory at startup fails here. A named volume can be chowned"
+
+// crashCost is the other half every form ends with. The overlay's own suggestion
+// spends four lines on it, and two of these three forms hand the same change to
+// the reader to make by hand — but it belongs on all three, because the cost is a
+// property of the change, not of who makes it. A host directory full of data and
+// an output that looks like success either way is what this sentence is for.
+const crashCost = "; what is in the host directory now stays there, and the service stops seeing it"
 
 // chownCrashHint decodes a container that died chowning a bind mount, and records
 // which mount it was so a later `up --from-docker-compose` can propose a fix for
@@ -2171,17 +2286,43 @@ func (o *Orchestrator) chownCrashHint(name string, svc *compose.Service, logs st
 	}
 	// The same double gate decides whether to remember it. What is written down is
 	// the one thing a suggestion needs and guessing cannot supply: which mount died.
-	if src, target, ok := blamedMount(svc, logs); ok {
-		o.recordChownFailure(chownFailure{Service: name, Target: target, Source: src})
+	src, target, known := blamedMount(svc, logs)
+	recorded := false
+	if known {
+		recorded = o.recordChownFailure(chownFailure{Service: name, Target: target, Source: src})
 	}
 	for _, v := range svc.Volumes {
 		if isHostPath(strings.SplitN(v, ":", 2)[0]) {
-			// Carries the code so this reads the same whether it's hit on a plain
-			// `up` or fixed automatically by `up --from-docker-compose`.
-			return fmt.Sprintf("\n  → [%s] Apple `container` bind mounts are host-owned and can't be chowned from inside the "+
-				"container, so a DB image that chowns its data directory fails here. Use a named volume for that "+
-				"directory instead of a bind mount (host path); `opossum up --from-docker-compose` writes that change for you.",
-				codeBindDataDirChown)
+			// Which mount died and whether the note about it survived are two
+			// different facts, and folding them into one said "opossum could not
+			// work out which mount" about a container that had just named the
+			// directory on the line above. Where the mount is known it gets named,
+			// whatever happened to the note.
+			switch {
+			case !known:
+				// Several things stop it being known — a log that names no
+				// directory, one that names a directory this service does not
+				// mount, several mounts that could each be it — and this says the
+				// one thing true of all of them, because saying which would be a
+				// guess about the reader's own file.
+				return fmt.Sprintf("\n  → [%s] %s. opossum could not work out which of %q's mounts this container "+
+					"died on — change the mount holding its data to a named volume yourself%s.",
+					codeBindDataDirChown, crashWhy, name, crashCost)
+			case !recorded:
+				return fmt.Sprintf("\n  → [%s] %s. This container died on %s, and opossum could not keep a note of "+
+					"that in this project directory — change %[3]s to a named volume yourself%[4]s.",
+					codeBindDataDirChown, crashWhy, target, crashCost)
+			default:
+				// It says what died and what to change, and stops there. Four
+				// earlier versions of this sentence described what the next command
+				// would do — write the swap, write it commented, offer it to apply
+				// or ignore — and each was false for some project. What that command
+				// does is its own to report.
+				return fmt.Sprintf("\n  → [%s] %s. This container died on %s, and opossum has that on record: "+
+					"`opossum up --from-docker-compose` reads it. Changing %[3]s to a named volume is what gets "+
+					"past this%[4]s.",
+					codeBindDataDirChown, crashWhy, target, crashCost)
+			}
 		}
 	}
 	return ""

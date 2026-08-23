@@ -1,0 +1,19 @@
+# 引こうとして届かなかった: loopback だけを握る TCP リスナ
+# リスナが実在する証跡（lsof）:
+COMMAND   PID     USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+probe   50290 <user>    3u  IPv4 0x51e55a92f3eb66a9      0t0  TCP 127.0.0.1:19531 (LISTEN)
+# probe が見えないことの証跡（Go の net.Listen tcp4 ワイルドカード）:
+  ワイルドカード listen: 成功（＝pre-flight には見えない）
+# opossum の出力:
+Creating network w3-net
+Starting p (alpine)
+[0/6] [0s]
+[1/6] Fetching image [0s]
+[2/6] Unpacking image [0s]
+[3/6] Fetching kernel [0s]
+[4/6] Fetching init image [0s]
+[5/6] Unpacking init image [0s]
+[6/6] Starting container [0s]
+[6/6] Starting container [0s]
+p.w3.opossum
+  ↳ p on the host: localhost:19531

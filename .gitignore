@@ -52,3 +52,9 @@ CLAUDE.md
 # Generated documentation site (built by internal/site; never committed)
 _site_src/
 _site/
+
+# What opossum writes about a project it is running (MCP wiring, mount-failure
+# records, workspace snapshots). Read back at run time, so a committed copy is
+# state a fresh clone would act on. The tracked-file gate refuses it too — this
+# is the half that keeps it from being offered.
+.opossum/

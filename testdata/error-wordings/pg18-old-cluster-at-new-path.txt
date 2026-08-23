@@ -1,0 +1,87 @@
+# 17 が作ったクラスタを、案内どおり1つ上げた位置で 18 に渡したらどうなるか（#485）
+# 上流は image（docker-library/postgres）。container CLI 1.2.2 / 2026-08-23
+# ビルドの同一性は、両方の実行の直前に出している opossum バイナリの shasum で読む
+# 読み方は末尾の対照とあわせて：ここで案内が出ないのは、マウント位置が既に 18 の求める場所だから
+$ shasum $(which opossum) | awk '{print $1}'
+e8e648576c23cebb6f74110a849d56745cdb8ba9
+$ container image inspect postgres:18-alpine | grep -m1 digest
+        "digest" : "sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15",
+$ container run --rm --volume pg17-make_data17:/v alpine sh -c 'cat /v/PG_VERSION; ls /v | head -4'
+17
+PG_VERSION
+base
+global
+pg_commit_ts
+$ cat compose.yaml
+services:
+  s:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_PASSWORD: x
+    volumes:
+      - pg17-make_data17:/var/lib/postgresql
+volumes:
+  pg17-make_data17:
+    external: true
+$ opossum up --no-supervisor
+Creating network pg18-inherit-net
+Starting s (postgres:18-alpine)
+s.pg18-inherit.opossum
+warning: [OPSM-407] service "s" exited right after starting (state "stopped"); its last log lines:
+  format which is compatible with "pg_ctlcluster" (specifically, using
+         major-version-specific directory names).  This better reflects how
+         PostgreSQL itself works, and how upgrades are to be performed.
+         See also https://github.com/docker-library/postgres/pull/1259
+         Counter to that, there appears to be PostgreSQL data in:
+           /var/lib/postgresql
+         This is usually the result of upgrading the Docker image without
+         upgrading the underlying database using "pg_upgrade" (which requires both
+         versions).
+         The suggested container configuration for 18+ is to place a single mount
+         at /var/lib/postgresql which will then place PostgreSQL data in a
+         subdirectory, allowing usage of "pg_upgrade --link" without mount point
+         boundary issues.
+         See https://github.com/docker-library/postgres/issues/37 for a (long)
+         discussion around this process, and suggestions for how to do so.
+opossum: [OPSM-407] 1 service(s) exited right after starting: "s" — see the logs above, fix the cause, and run `opossum up` again
+$ opossum ps | tail -1   # 見出し行は落としている
+s        s.pg18-inherit.opossum  postgres:18-alpine  -   -      stopped
+$ container run --rm --volume pg17-make_data17:/v alpine sh -c 'ls -d /v/18/docker; ls -A /v/18/docker | wc -l; cat /v/PG_VERSION'
+/v/18/docker
+0
+17
+
+# --- 対照：同じバイナリ（上と同じ shasum）で、旧パスにマウントすると案内が出る ---
+$ cd ../pg18
+$ shasum $(which opossum) | awk '{print $1}'
+e8e648576c23cebb6f74110a849d56745cdb8ba9
+$ cat compose.yaml
+services:
+  s:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_PASSWORD: x
+    volumes:
+      - ./data:/var/lib/postgresql/data
+$ opossum up --no-supervisor
+Creating network pg18-net
+Starting s (postgres:18-alpine)
+s.pg18.opossum
+warning: [OPSM-407] service "s" exited right after starting (state "stopped"); its last log lines:
+  format which is compatible with "pg_ctlcluster" (specifically, using
+         major-version-specific directory names).  This better reflects how
+         PostgreSQL itself works, and how upgrades are to be performed.
+         See also https://github.com/docker-library/postgres/pull/1259
+         Counter to that, there appears to be PostgreSQL data in:
+           /var/lib/postgresql/data (unused mount/volume)
+         This is usually the result of upgrading the Docker image without
+         upgrading the underlying database using "pg_upgrade" (which requires both
+         versions).
+         The suggested container configuration for 18+ is to place a single mount
+         at /var/lib/postgresql which will then place PostgreSQL data in a
+         subdirectory, allowing usage of "pg_upgrade --link" without mount point
+         boundary issues.
+         See https://github.com/docker-library/postgres/issues/37 for a (long)
+         discussion around this process, and suggestions for how to do so.
+  → [OPSM-110] Postgres 18 and newer keep the cluster in a major-version subdirectory, so the mount belongs one level up: mount `/var/lib/postgresql` instead of `/var/lib/postgresql/data` (this service mounts ./data there). A host path works there — the image creates the subdirectory itself. Data an earlier major version wrote is a separate question: the image asks for `pg_upgrade`, which moving the mount does not do.
+opossum: [OPSM-407] 1 service(s) exited right after starting: "s" — see the logs above, fix the cause, and run `opossum up` again

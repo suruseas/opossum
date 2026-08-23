@@ -1,0 +1,26 @@
+# サービスが PGDATA を、マウントとは別の場所に向けた場合（#488）
+# container CLI 1.2.2 / 2026-08-23。17 の entrypoint での結末——18 は別（pg18-named-old-datadir.txt）
+$ container image inspect postgres:17-alpine | grep -m1 digest
+        "digest" : "sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193",
+$ cat compose.yaml
+services:
+  s:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_PASSWORD: x
+      PGDATA: /var/lib/postgresql/datax
+    volumes:
+      - ./data:/var/lib/postgresql/data
+$ opossum up --no-supervisor
+Creating network svc-pgdata-elsewhere-net
+Starting s (postgres:17-alpine)
+s.svc-pgdata-elsewhere.opossum
+$ opossum ps | tail -1   # 見出し行は落としている
+s        s.svc-pgdata-elsewhere.opossum  postgres:17-alpine  192.168.64.2  -      running
+$ ls -A data | wc -l
+       0
+$ container exec s.svc-pgdata-elsewhere.opossum sh -c 'ls -A /var/lib/postgresql/data | wc -l; ls /var/lib/postgresql/datax | head -3'
+0
+PG_VERSION
+base
+global

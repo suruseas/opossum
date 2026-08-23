@@ -19,10 +19,76 @@ func runErr(stderr string) error {
 	return &rt.RunError{Err: fmt.Errorf("exit status 1"), Stderr: stderr}
 }
 
+// An image with no arm64 build is told so in whichever words the runtime uses,
+// and an image with no amd64 build is not told to ask for amd64.
+//
+// The wordings are both measured, on the versions named beside them. The runtime
+// changed how it says this between them, and the older text kept working while
+// the newer one silently matched nothing: the guidance simply stopped appearing,
+// which from the outside looks like guidance that was never written. Every
+// wording here stays until the version that produces it is out of use.
+//
+// The last case is the one that makes the arm64 wording specific rather than
+// loose. The 1.2.2 message names the platform that is *missing*, so asking an
+// arm64-only image for amd64 says `platform linux/amd64` — and answering that
+// with "add `platform: linux/amd64`" tells someone to do the thing that just
+// failed.
 func TestRunErrorHintPlatform(t *testing.T) {
-	h := runErrorHint(&compose.Service{}, runErr("Error: image sha256:abc does not support required platforms"))
-	if !strings.Contains(h, "arm64") || !strings.Contains(h, "platform: linux/amd64") {
-		t.Errorf("amd64-only image should hint at `platform: linux/amd64`, got: %q", h)
+	for _, tc := range []struct {
+		name, platform, stderr string
+		wantHint               bool
+	}{
+		// container 1.1.0, and 1.2.2 as well: measured on the corpus, an image
+		// that is fetched before the mismatch is found still says this on 1.2.2
+		// (Compose-Examples/examples/cs2-dedicated-server, atlas).
+		{"the wording from both versions", "", "Error: image sha256:abc does not support required platforms", true},
+		// container 1.2.2, measured against excalidraw/excalidraw-room:latest,
+		// whose image index lists amd64 only.
+		{"the wording only 1.2.2 uses", "", "Error: platform linux/arm64", true},
+		// container 1.2.2, measured by building an image for arm64 only and
+		// running it with --platform linux/amd64. The message names what is
+		// missing, so this is not an arm64 problem and amd64 is not the answer.
+		{"an image with no amd64 build", "", "Error: platform linux/amd64", false},
+		// The older wording does not say which platform was wanted, so the service
+		// has to. Asked for amd64 and told to ask for amd64 is not advice.
+		{"the older wording, having already asked for amd64", "linux/amd64",
+			"Error: image sha256:abc does not support required platforms", false},
+		// The same request, spelled the other way. The runtime treats both as
+		// x86-64 and gives either one Rosetta; read differently here, a service
+		// written this way is told to ask for what it already asked for.
+		{"having asked for it as x86_64", "linux/x86_64",
+			"Error: image sha256:abc does not support required platforms", false},
+		{"having asked for it in capitals", "linux/AMD64",
+			"Error: image sha256:abc does not support required platforms", false},
+		// `platform linux/arm64` on its own is a substring of the flag a service
+		// legitimately asks for. Nothing writes a command line into this stream
+		// today — it carries the child's stderr and nothing else — so the anchor
+		// guards against text arriving from somewhere that is not this failure,
+		// rather than against a path anyone can point at now.
+		{"a command line that names the platform", "linux/arm64",
+			"run -d --platform linux/arm64 --name web web:latest: exit status 1", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := runErrorHint(&compose.Service{Platform: tc.platform}, runErr(tc.stderr))
+			if got := strings.Contains(h, "platform: linux/amd64"); got != tc.wantHint {
+				if tc.wantHint {
+					t.Errorf("this is an image with no arm64 build and nothing said so; the runtime "+
+						"wording changed and the match did not, got: %q", h)
+				} else {
+					t.Errorf("telling anyone to add `platform: linux/amd64` here is telling them to "+
+						"repeat what just failed, or to fix something that did not break, got: %q", h)
+				}
+			}
+			switch {
+			case tc.wantHint && !strings.Contains(h, "arm64"):
+				t.Errorf("the hint should say which architecture has no build, got: %q", h)
+			case !tc.wantHint && h != "":
+				// Not merely "no amd64 advice": any hint here is a wrong answer, and
+				// checking only for the amd64 wording would let a different wrong one
+				// through.
+				t.Errorf("nothing here is diagnosed, so nothing should be claimed, got: %q", h)
+			}
+		})
 	}
 }
 
@@ -103,6 +169,11 @@ func TestEachDecodedHintCarriesItsCode(t *testing.T) {
 	}{
 		{"an amd64-only image", &compose.Service{},
 			"Error: image sha256:abc does not support required platforms", codeImageNoArm64},
+		// The same failure in the words 1.2.2 also uses. Listed separately because
+		// a wording that decodes without carrying its code is a hint nobody can
+		// look up, and matching on new text is exactly where that gets forgotten.
+		{"an amd64-only image, in the newer wording", &compose.Service{},
+			"Error: platform linux/arm64", codeImageNoArm64},
 		// Reused, not minted: the pre-flight names this same conflict, and the
 		// only difference here is that it could not see it in advance.
 		{"a port the pre-flight could not see", &compose.Service{Ports: []string{"53:53/udp"}},

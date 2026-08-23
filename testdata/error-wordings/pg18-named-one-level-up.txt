@@ -1,0 +1,22 @@
+# postgres:18-alpine / 18 が求める位置に named volume を置いた場合（#485）
+# container CLI 1.2.2 / 2026-08-23
+$ cat compose.yaml
+services:
+  s:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_PASSWORD: x
+    volumes:
+      - pgdata:/var/lib/postgresql
+volumes:
+  pgdata:
+$ opossum up --no-supervisor
+Creating network pg18-named-newdir-net
+Starting s (postgres:18-alpine)
+s.pg18-named-newdir.opossum
+$ opossum ps | tail -1   # 見出し行は落としている
+s        s.pg18-named-newdir.opossum  postgres:18-alpine  192.168.64.2  -      running
+$ opossum logs s | tail -3
+2026-08-22 21:09:08.541 UTC [1] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-08-22 21:09:08.543 UTC [60] LOG:  database system was shut down at 2026-08-22 21:09:08 UTC
+2026-08-22 21:09:08.545 UTC [1] LOG:  database system is ready to accept connections

@@ -1,0 +1,19 @@
+# 17 に対して、サービス自身が PGDATA をマウントの配下に向けた場合（#488）
+# container CLI 1.2.2 / 2026-08-23。docker-library が案内している書き方
+$ cat compose.yaml
+services:
+  s:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_PASSWORD: x
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - ./data:/var/lib/postgresql/data
+$ opossum up --no-supervisor
+Creating network svc-pgdata-below-net
+Starting s (postgres:17-alpine)
+s.svc-pgdata-below.opossum
+$ opossum ps | tail -1   # 見出し行は落としている
+s        s.svc-pgdata-below.opossum  postgres:17-alpine  192.168.64.2  -      running
+$ ls -A data
+pgdata

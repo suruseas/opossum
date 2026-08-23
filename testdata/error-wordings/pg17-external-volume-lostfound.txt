@@ -1,0 +1,35 @@
+# 外部 named volume（lost+found あり）を 17 のデータディレクトリに置いた場合（#485 の比較対象）
+# 上流は image（docker-library/postgres）。container CLI 1.2.2 / 2026-08-23
+# initdb が空でないディレクトリを断り、OPSM-101 が発火する面（18 との違いは対の捕獲物）
+$ cat compose.yaml
+services:
+  s:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_PASSWORD: x
+    volumes:
+      - b480ext17:/var/lib/postgresql/data
+volumes:
+  b480ext17:
+    external: true
+$ container run --rm --volume b480ext17:/v alpine ls -A /v   # 起動前
+lost+found
+$ opossum up --no-supervisor
+Creating network pg17-ext-net
+Starting s (postgres:17-alpine)
+s.pg17-ext.opossum
+warning: [OPSM-407] service "s" exited right after starting (state "stopped"); its last log lines:
+  The files belonging to this database system will be owned by user "postgres".
+  This user must also own the server process.
+  The database cluster will be initialized with locale "en_US.utf8".
+  The default database encoding has accordingly been set to "UTF8".
+  The default text search configuration will be set to "english".
+  Data page checksums are disabled.
+  initdb: error: directory "/var/lib/postgresql/data" exists but is not empty
+  initdb: detail: It contains a lost+found directory, perhaps due to it being a mount point.
+  initdb: hint: Using a mount point directly as the data directory is not recommended.
+  Create a subdirectory under the mount point.
+  → [OPSM-101] Postgres will not initialise a data directory that isn't empty, and it still holds `lost+found` — the directory ext4 puts in every filesystem it makes. opossum removes it from volumes it creates, so this one was made before that or made elsewhere. This one is not opossum's to replace, so: keep the data below the mount point by adding `environment: PGDATA=/var/lib/postgresql/data/pgdata` to the service.
+opossum: [OPSM-407] 1 service(s) exited right after starting: "s" — see the logs above, fix the cause, and run `opossum up` again
+$ opossum ps | tail -1   # 見出し行は落としている
+s        s.pg17-ext.opossum  postgres:17-alpine  -   -      stopped

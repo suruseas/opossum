@@ -1,0 +1,31 @@
+[
+  {
+    "id": "0aa5733b304655944956ff18a7d7a5bdeeca68c09bc2e606c413f63e241e52a0",
+    "variants": [
+      {
+        "config": {
+          "architecture": "arm64",
+          "config": {
+            "Cmd": [
+              "sh"
+            ],
+            "Env": [
+              "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+              "PG_MAJOR=18",
+              "PGDATA=/home/postgres/pgdata/data"
+            ],
+            "WorkingDir": "/"
+          },
+          "created": "2026-06-16T00:01:20.474100947Z",
+          "os": "linux"
+        },
+        "digest": "sha256:6edd1d96f45166641449105e518d220647d1695981ee29ecbc7822f4ef742a00",
+        "platform": {
+          "architecture": "arm64",
+          "os": "linux"
+        },
+        "size": 4184603
+      }
+    ]
+  }
+]

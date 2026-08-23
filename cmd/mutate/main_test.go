@@ -277,3 +277,329 @@ func quote(s string) string {
 	}
 	return string(b)
 }
+
+// A mutation on a line no test runs is reported as that, not as a survivor.
+//
+// Both come back with the suite green and they mean opposite things: a survivor
+// says a test is missing where the code runs, and this says the code does not
+// run. The tool could not tell them apart, so every unreached mutation read as a
+// finding about the tests.
+//
+// End to end against a real toolchain, because the part that was missing is the
+// wiring — asking for a profile, and reading it back — not the arithmetic.
+func TestASurvivorNoTestReachesIsNotedAsOne(t *testing.T) {
+	mod := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(mod, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("go.mod", "module example.com/m\n\ngo 1.24\n")
+	write("m.go", "package m\n\nfunc Answer() int { return 42 }\n\nfunc Unreached() int { return 7 }\n")
+	write("m_test.go", "package m\n\nimport \"testing\"\n\n"+
+		"func TestAnswer(t *testing.T) {\n\tif Answer() != 42 {\n\t\tt.Fatal(\"wrong\")\n\t}\n}\n")
+	t.Chdir(mod)
+
+	var out, errOut bytes.Buffer
+	body := `[{"name":"a function nobody calls changes","file":"m.go",` +
+		`"from":"return 7","to":"return 8","packages":["./..."]}]`
+	code := run([]string{spec(t, body)}, &out, &errOut, nil, func(int) {})
+
+	got := out.String() + errOut.String()
+	if !strings.Contains(got, "appears to reach") || !strings.Contains(got, "m.go:5") {
+		t.Errorf("a survivor on a line no test runs should say so, and name the line:\n%s", got)
+	}
+	// Still a survivor: the defect is invisible to the suite either way, and that
+	// is what the reader acts on. The note says where to start.
+	if !strings.Contains(got, "SURVIVED") {
+		t.Errorf("the suite is green with the defect in place:\n%s", got)
+	}
+	if code != exitSurvivor {
+		t.Errorf("exit = %d, want the survivor status — the note is not an outcome", code)
+	}
+	// The note has to read as what it is: an observation from one measurement,
+	// not a fact about every test that exists. The baseline runs the packages this
+	// sweep named, which is less than the suite, and a reader who cannot see that
+	// has no way to doubt the note when it is wrong.
+	if !strings.Contains(got, "this sweep ran") {
+		t.Errorf("the note claims more than was measured — the baseline ran the packages this "+
+			"sweep named, not every test:\n%s", got)
+	}
+	if !strings.Contains(got, "baseline") {
+		t.Errorf("the note should say which measurement it came from:\n%s", got)
+	}
+}
+
+// A line the tests do run is never called unreached — not when the mutation
+// silences that very line, and not when the tests that run it live in another
+// package.
+//
+// The two shapes below both leave a real survivor: the suite stays green with the
+// defect in place, which is a missing test, not missing coverage. Reporting them
+// as "no test runs this line" hides a live survivor behind a report about
+// coverage, and turns a finding (exit 1) into a sweep that measured nothing
+// (exit 2). Everything else in this file checks that an unreached line is called
+// unreached; without these, only that direction is checked, and the way to pass
+// every one of them is to say "unreached" more often.
+func TestALineTheTestsDoRunIsNeverNotedAsUnreached(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		files map[string]string
+		mut   string
+		// Whether the reach can be decided at all, as opposed to which way it
+		// goes. Coverage is recorded per block, and which lines a block spans is
+		// the compiler's business — a `case` label sits inside its own block on
+		// Go 1.26 and inside none at all on Go 1.27. Where no block covers the
+		// line, "could not be measured" is the honest answer and the one this
+		// tool gives. Where a block does cover it, an undecided answer would mean
+		// the measurement quietly stopped working, so it is required.
+		reachMustBeDecided bool
+	}{
+		{
+			// The mutation is on a `case` label, which is where its coverage block
+			// begins. With the label changed the label no longer matches, so the
+			// block is counted zero on the mutated tree — while the tests, which
+			// never look at the answer, stay green.
+			name: "the mutation silences its own line",
+			files: map[string]string{
+				"go.mod": "module example.com/m\n\ngo 1.24\n",
+				"m.go": "package m\n\nfunc Classify(s string) string {\n\tswitch s {\n" +
+					"\tcase \"up\":\n\t\treturn \"rising\"\n\t}\n\treturn \"flat\"\n}\n",
+				"m_test.go": "package m\n\nimport \"testing\"\n\n" +
+					"func TestClassify(t *testing.T) {\n\tif Classify(\"up\") == \"\" {\n\t\tt.Fatal(\"empty\")\n\t}\n}\n",
+			},
+			mut: `{"name":"the label stops matching","file":"m.go",` +
+				`"from":"case \"up\":","to":"case \"UP\":","packages":["./..."]}`,
+		},
+		{
+			// helper has no test files of its own. Counted only in its own test
+			// binary, every statement in it comes back zero — stated as zero, so it
+			// reads as a definite "nothing runs this" rather than "not measured".
+			name: "the tests that run it are in another package",
+			files: map[string]string{
+				"go.mod":         "module example.com/m\n\ngo 1.24\n",
+				"helper/h.go":    "package helper\n\nfunc Double(n int) int {\n\treturn n * 2\n}\n",
+				"user/u.go":      "package user\n\nimport \"example.com/m/helper\"\n\nfunc Quad(n int) int { return helper.Double(helper.Double(n)) }\n",
+				"user/u_test.go": "package user\n\nimport \"testing\"\n\nfunc TestQuad(t *testing.T) {\n\tif Quad(2) == 0 {\n\t\tt.Fatal(\"zero\")\n\t}\n}\n",
+			},
+			mut: `{"name":"doubling stops doubling","file":"helper/h.go",` +
+				`"from":"return n * 2","to":"return n * 3","packages":["./..."]}`,
+			// A statement, so every toolchain puts it inside a block.
+			reachMustBeDecided: true,
+		},
+		{
+			// The same, named the way the guidance suggests: the one package whose
+			// tests are worth running, not the whole module. The mutated file is not
+			// in it. Coverage still has to reach across, and the sweep still has to
+			// be able to answer.
+			name: "the tests are in another package, named narrowly",
+			files: map[string]string{
+				"go.mod":         "module example.com/m\n\ngo 1.24\n",
+				"helper/h.go":    "package helper\n\nfunc Double(n int) int {\n\treturn n * 2\n}\n",
+				"user/u.go":      "package user\n\nimport \"example.com/m/helper\"\n\nfunc Quad(n int) int { return helper.Double(helper.Double(n)) }\n",
+				"user/u_test.go": "package user\n\nimport \"testing\"\n\nfunc TestQuad(t *testing.T) {\n\tif Quad(2) == 0 {\n\t\tt.Fatal(\"zero\")\n\t}\n}\n",
+			},
+			mut: `{"name":"doubling stops doubling","file":"helper/h.go",` +
+				`"from":"return n * 2","to":"return n * 3","packages":["./user/"]}`,
+			reachMustBeDecided: true,
+		},
+		{
+			// The change is on line 7, which the tests run. The pattern had to be
+			// widened backwards to match once — `return "other"` appears twice —
+			// and it now begins on line 5, which they do not. Followed to line 5,
+			// the answer is that nothing reaches the code; the change is on 7.
+			name: "the pattern is widened with a line nothing runs",
+			files: map[string]string{
+				"go.mod": "module example.com/m\n\ngo 1.24\n",
+				"m.go": "package m\n\nfunc Classify(n int) string {\n\tif n < 0 {\n\t\treturn \"neg\"\n\t}\n\treturn \"other\"\n}\n\n" +
+					"func Fallback() string { return \"other\" }\n",
+				"m_test.go": "package m\n\nimport \"testing\"\n\n" +
+					"func TestClassify(t *testing.T) {\n\tClassify(1)\n}\n",
+			},
+			mut: `{"name":"the classification stops being other","file":"m.go",` +
+				`"from":"return \"neg\"\n\t}\n\treturn \"other\"",` +
+				`"to":"return \"neg\"\n\t}\n\treturn \"OTHER\"","packages":["./..."]}`,
+			reachMustBeDecided: true,
+		},
+		{
+			// One mutation, two places: line 5, which nothing runs, and line 7,
+			// which the tests run every time. Asked about only the first, the whole
+			// defect is written off as code nothing reaches — but the tests run half
+			// of it, so they run the defect.
+			name: "the mutation changes two places, one of them run",
+			files: map[string]string{
+				"go.mod": "module example.com/m\n\ngo 1.24\n",
+				"m.go":   "package m\n\nfunc Handle(x int) int {\n\tif x < 0 {\n\t\treturn -1\n\t}\n\treturn x * 2\n}\n",
+				"m_test.go": "package m\n\nimport \"testing\"\n\n" +
+					"func TestHandle(t *testing.T) {\n\t_ = Handle(3)\n}\n",
+			},
+			mut: `{"name":"both returns start lying","file":"m.go",` +
+				`"from":"return -1\n\t}\n\treturn x * 2",` +
+				`"to":"return 0\n\t}\n\treturn x","packages":["./..."]}`,
+			reachMustBeDecided: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mod := t.TempDir()
+			for name, body := range tc.files {
+				path := filepath.Join(mod, name)
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Chdir(mod)
+
+			var out, errOut bytes.Buffer
+			code := run([]string{spec(t, "["+tc.mut+"]")}, &out, &errOut, nil, func(int) {})
+
+			got := out.String() + errOut.String()
+			// The note is what can be wrong now, and this is the direction that
+			// misleads: telling a reader that the code they are looking at is
+			// never run, when their tests run it every time.
+			if strings.Contains(got, "appears to reach") {
+				t.Errorf("a line the tests run was noted as one nothing reaches:\n%s", got)
+			}
+			if !strings.Contains(got, "SURVIVED") {
+				t.Errorf("the suite is green with the defect in place — that is a survivor:\n%s", got)
+			}
+			// Passing by not measuring is the way to satisfy this test without doing
+			// the work: an unmeasured reach says nothing about which way it would
+			// have gone. Where the line can be measured, it has to have been.
+			if tc.reachMustBeDecided && strings.Contains(got, "could not be measured") {
+				t.Errorf("the reach was never decided, so this says nothing about which way "+
+					"it would have gone:\n%s", got)
+			}
+			if code != exitSurvivor {
+				t.Errorf("exit = %d; a survivor is a finding, not a sweep that measured nothing", code)
+			}
+		})
+	}
+}
+
+// A line nothing runs is still called unreached when the pattern that found it
+// was widened with a line something does run.
+//
+// The other half of the same mistake. Read from the line the pattern starts on,
+// a change on a line no test reaches borrows the coverage of the line above it
+// and comes back as a plain survivor — "a test runs this and does not mind the
+// defect" — stated with no reservation at all. That is a claim about a test that
+// does not exist, and it is the reassuring direction, which is the one that gets
+// believed.
+func TestAWidenedPatternDoesNotBorrowTheCoverageOfTheLineAbove(t *testing.T) {
+	mod := t.TempDir()
+	for name, body := range map[string]string{
+		"go.mod": "module example.com/m\n\ngo 1.24\n",
+		"m.go": "package m\n\nfunc Classify(n int) string {\n\tif n < 0 {\n\t\treturn \"neg\"\n\t}\n\treturn \"other\"\n}\n\n" +
+			"func Fallback() string { return \"other\" }\n",
+		"m_test.go": "package m\n\nimport \"testing\"\n\nfunc TestClassify(t *testing.T) {\n\tClassify(1)\n}\n",
+	} {
+		if err := os.WriteFile(filepath.Join(mod, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Chdir(mod)
+
+	var out, errOut bytes.Buffer
+	// The change is on line 5, which no test reaches. The `if` on line 4, which
+	// the pattern was widened to include, runs every time.
+	body := `[{"name":"the negative branch stops saying neg","file":"m.go",` +
+		`"from":"if n < 0 {\n\t\treturn \"neg\"",` +
+		`"to":"if n < 0 {\n\t\treturn \"NEG\"","packages":["./..."]}]`
+	code := run([]string{spec(t, body)}, &out, &errOut, nil, func(int) {})
+
+	got := out.String() + errOut.String()
+	if !strings.Contains(got, "appears to reach") {
+		t.Errorf("a change on a line no test runs was reported with nothing said about it:\n%s", got)
+	}
+	if code != exitSurvivor {
+		t.Errorf("exit = %d, want the survivor status — the note is not an outcome", code)
+	}
+	if !strings.Contains(got, "m.go:5") {
+		t.Errorf("the note should name the line that changed, not the one the pattern starts on:\n%s", got)
+	}
+}
+
+// A pattern does not borrow the coverage of a line it only carried along.
+//
+// One mutation can change two places at once, and to match once the pattern
+// between them has to be swallowed whole. That middle stretch is not part of the
+// mutation: when the tests run it and run nothing that changed, the note is still
+// owed. Borrowed from there, a change nothing reaches passes for one the tests
+// watch — the reassuring direction, and the one that gets believed.
+func TestAPatternDoesNotBorrowTheCoverageOfWhatItCarried(t *testing.T) {
+	mod := t.TempDir()
+	for name, body := range map[string]string{
+		"go.mod": "module example.com/m\n\ngo 1.24\n",
+		"m.go": "package m\n\nfunc F(x int) int {\n\tif x < 0 {\n\t\treturn -1\n\t}\n\t_ = x + 1\n" +
+			"\tif x > 100 {\n\t\treturn 999\n\t}\n\treturn x\n}\n",
+		"m_test.go": "package m\n\nimport \"testing\"\n\nfunc TestF(t *testing.T) {\n\t_ = F(5)\n}\n",
+	} {
+		if err := os.WriteFile(filepath.Join(mod, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Chdir(mod)
+
+	var out, errOut bytes.Buffer
+	// Lines 5 and 9 change; neither is ever run. Line 7, between them, is run
+	// every time and is identical on both sides of the mutation.
+	body := `[{"name":"both dead returns start lying","file":"m.go",` +
+		`"from":"return -1\n\t}\n\t_ = x + 1\n\tif x > 100 {\n\t\treturn 999",` +
+		`"to":"return 0\n\t}\n\t_ = x + 1\n\tif x > 100 {\n\t\treturn 998","packages":["./..."]}]`
+	code := run([]string{spec(t, body)}, &out, &errOut, nil, func(int) {})
+
+	got := out.String() + errOut.String()
+	if !strings.Contains(got, "appears to reach") {
+		t.Errorf("nothing runs either line that changed, and the report said nothing about it:\n%s", got)
+	}
+	if code != exitSurvivor {
+		t.Errorf("exit = %d, want the survivor status — the note is not an outcome", code)
+	}
+}
+
+// A shorter replacement takes whole lines with it, and those lines can still show
+// the change being run.
+//
+// They have no counterpart to compare against, so nothing marks where their code
+// starts — and asked about at the left margin they fall outside every coverage
+// block and answer nothing, every time. That is not a quiet failure: these are
+// the lines that could have shown the tests running part of what changed and let
+// the note fall silent. Without them the note appears over code that runs on
+// every test.
+func TestLinesARemovalTakesAreStillAsked(t *testing.T) {
+	mod := t.TempDir()
+	for name, body := range map[string]string{
+		"go.mod": "module example.com/m\n\ngo 1.24\n",
+		"m.go": "package m\n\nfunc Tab(a int) int {\n\tn := 0\n\tif a > 0 {\n\t\tn = 1\n\t} else {\n" +
+			"\t\tn = 2\n\t}\n\treturn n\n}\n",
+		"m_test.go": "package m\n\nimport \"testing\"\n\nfunc TestTab(t *testing.T) {\n\t_ = Tab(-1)\n}\n",
+	} {
+		if err := os.WriteFile(filepath.Join(mod, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Chdir(mod)
+
+	var out, errOut bytes.Buffer
+	// Four lines go and two come back. Line 8 is one of the four, and the test
+	// runs it every time.
+	body := `[{"name":"the else branch goes","file":"m.go",` +
+		`"from":"\t\tn = 1\n\t} else {\n\t\tn = 2\n\t}","to":"\t\tn = 1\n\t}","packages":["./..."]}]`
+	code := run([]string{spec(t, body)}, &out, &errOut, nil, func(int) {})
+
+	got := out.String() + errOut.String()
+	if strings.Contains(got, "appears to reach") {
+		t.Errorf("the tests run one of the lines this removes, and it was written up as code "+
+			"nothing reaches:\n%s", got)
+	}
+	if strings.Contains(got, "could not be measured") {
+		t.Errorf("the lines this removes are ordinary statements; the reach was measurable:\n%s", got)
+	}
+	if code != exitSurvivor {
+		t.Errorf("exit = %d, want the survivor status", code)
+	}
+}

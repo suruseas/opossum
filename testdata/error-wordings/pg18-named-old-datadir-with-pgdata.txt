@@ -1,0 +1,20 @@
+# postgres:18-alpine / named volume at 旧パス + PGDATA をその下に明示 / container CLI 1.2.2 / 2026-08-23
+# = opossum の up --from-docker-compose が 18 に対して今書く形（#485 のレビュー指摘の検証）
+# compose:
+#   environment: { POSTGRES_PASSWORD: x, PGDATA: /var/lib/postgresql/data/pgdata }
+#   volumes: ["dbdata:/var/lib/postgresql/data"]
+#   volumes(top): { dbdata: }
+# 起動する——ただし overlay がこの2つを揃えて書くとは限らない（PGDATA を書かない分岐がある）
+$ opossum up --no-supervisor
+Creating network pg18-named-pgdata-net
+Starting s (postgres:18-alpine)
+s.pg18-named-pgdata.opossum
+$ opossum ps | tail -1   # 見出し行は落としている
+s        s.pg18-named-pgdata.opossum  postgres:18-alpine  192.168.64.2  -      running
+$ opossum logs s | tail -6
+2026-08-22 19:53:42.539 UTC [1] LOG:  starting PostgreSQL 18.4 on aarch64-unknown-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+2026-08-22 19:53:42.539 UTC [1] LOG:  listening on IPv4 address "0.0.0.0", port 5432
+2026-08-22 19:53:42.540 UTC [1] LOG:  listening on IPv6 address "::", port 5432
+2026-08-22 19:53:42.540 UTC [1] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-08-22 19:53:42.542 UTC [57] LOG:  database system was shut down at 2026-08-22 19:53:42 UTC
+2026-08-22 19:53:42.544 UTC [1] LOG:  database system is ready to accept connections

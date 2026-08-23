@@ -187,3 +187,71 @@ func TestAComposeFileAtTheTopIsALeftover(t *testing.T) {
 		}
 	}
 }
+
+// What opossum writes about a project it is running does not belong in the tree.
+//
+// The same reason as the compose rule and a wider reach: this is state a fresh
+// clone acts on, and a project can live in a subdirectory, so it is not only the
+// top level. Nothing of the sort is tracked today — which is what makes it cheap
+// to say, and also what makes the second half of this table the important half,
+// because a rule with nothing to find is green whether it looks or not.
+func TestWhatOpossumWritesAtRunTimeIsNotTracked(t *testing.T) {
+	for _, p := range []string{
+		".opossum/mcp/db.json",
+		".opossum/chown-failures.json",
+		"examples/hello/.opossum/mcp/web.json",
+		"internal/orchestrator/testdata/proj/.opossum/anything",
+		// The file system does not tell these apart, so opossum reads back what is
+		// tracked under either spelling.
+		".Opossum/mcp/db.json", ".OPOSSUM/chown-failures.json",
+	} {
+		if got := repohygiene.Offense(p, 40, []byte("{}")); got == "" {
+			t.Errorf("%s should be refused", p)
+		} else if !strings.Contains(got, "run time") {
+			t.Errorf("%s: the message should say why it matters:\n%s", p, got)
+		}
+	}
+	for _, p := range []string{
+		// Named after it without being it.
+		"docs/opossum-state.md",
+		"internal/compose/opossum.go",
+		"compose.opossum.yaml.md",
+		".opossumrc",
+		"docs/.opossum-notes.md",
+	} {
+		if got := repohygiene.Offense(p, 40, []byte("x")); got != "" {
+			t.Errorf("%s should be allowed, got: %s", p, got)
+		}
+	}
+}
+
+// No rule here is stricter about case than the file system is.
+//
+// Written across the rules rather than inside any one of them, because that is
+// where the defect lives: each rule used to choose its own comparison, and three
+// of them chose the strict one — in three separate sittings, the third of them
+// hours after the second had been corrected for exactly this. `Scripts/` was
+// still passing when this was written.
+//
+// A rule added later that compares with `==` fails here, which is the point:
+// the table is over the rules, not over one rule's inputs.
+func TestNoRuleIsStricterAboutCaseThanTheFileSystem(t *testing.T) {
+	for _, tc := range []struct{ rule, lower, upper string }{
+		{"maintainer directory", "scripts/release.sh", "Scripts/release.sh"},
+		{"compose at the top", "compose.yaml", "Compose.yaml"},
+		{"runtime state", ".opossum/mcp/db.json", ".Opossum/mcp/db.json"},
+		{"a throwaway name", "zz_tmp.go", "ZZ_TMP.go"},
+	} {
+		t.Run(tc.rule, func(t *testing.T) {
+			lower := repohygiene.Offense(tc.lower, 40, []byte("x"))
+			upper := repohygiene.Offense(tc.upper, 40, []byte("x"))
+			if lower == "" {
+				t.Fatalf("%s is not refused at all, so this compares nothing", tc.lower)
+			}
+			if upper == "" {
+				t.Errorf("%s is refused but %s is not — the file system does not tell them apart, "+
+					"so whichever is tracked is the one that gets read", tc.lower, tc.upper)
+			}
+		})
+	}
+}

@@ -661,7 +661,10 @@ func (c *Command) UnmarshalYAML(value *yaml.Node) error {
 			// being read is not passed in — the message used to say "command" for
 			// either, which sent anyone with a bad entrypoint to look at the wrong
 			// line. Naming both is true and narrows it to two.
-			return fmt.Errorf("command or entrypoint: %w", err)
+			// No name here: this is handed the value without being told which key it
+			// came from, and the one place that can tell — after the decode has failed,
+			// by re-reading each key on its own — puts it back on.
+			return err
 		}
 		*c = parts
 		return nil
@@ -676,7 +679,8 @@ func (c *Command) UnmarshalYAML(value *yaml.Node) error {
 	// Both fields again: this is the same code reading either of them, six lines
 	// below the other place that used to name only one. Naming one there and not
 	// here would have left half the fix in.
-	return fmt.Errorf("command or entrypoint: expected a string or a list, got %s", kindName(value.Kind))
+	// Same: named from the outside, or not at all.
+	return fmt.Errorf("expected a string or a list, got %s", kindName(value.Kind))
 }
 
 // EnvFileRef is one env_file entry. Required defaults to true (a missing file is

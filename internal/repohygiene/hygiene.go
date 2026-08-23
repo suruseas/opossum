@@ -40,13 +40,37 @@ var imageExts = map[string]bool{
 // allowedBinary reports whether path is a location where binary content is
 // expected. Paths are slash-separated and repo-relative (as `git ls-files` emits
 // them), so this does no filesystem access and is safe to unit-test directly.
+// sameName compares one element of a path — a directory, a file name — the way
+// the file systems this is developed and shipped on compare them, which is
+// without case. `Scripts/` is the directory `scripts/`, and a rule that refuses
+// one while letting the other through refuses nothing.
+//
+// Every rule below goes through this rather than choosing for itself. Three of
+// them chose `==` in three separate sittings, the third of them hours after the
+// second was corrected for exactly this, and one of the three was still wrong
+// when this was written. A rule that can be written the strict way will be.
+func sameName(a, b string) bool { return strings.EqualFold(a, b) }
+
+// underDir reports whether p is inside dir, comparing each element by name.
+func underDir(p, dir string) bool {
+	if sameName(p, dir) {
+		return true
+	}
+	segs := strings.Split(p, "/")
+	for i := range segs {
+		if sameName(strings.Join(segs[:i+1], "/"), dir) {
+			return true
+		}
+	}
+	return false
+}
+
 func allowedBinary(p string) bool {
 	if !imageExts[strings.ToLower(path.Ext(p))] {
 		return false
 	}
-	dir := path.Dir(p)
 	for _, d := range binaryDirs {
-		if dir == d || strings.HasPrefix(dir, d+"/") {
+		if underDir(path.Dir(p), d) {
 			return true
 		}
 	}
@@ -105,9 +129,36 @@ var rootComposeNames = []string{
 // asks for `compose.yaml`. Matching exactly would have let the one spelling
 // through that behaves identically to the one refused.
 func isRootCompose(p string) bool {
-	lower := strings.ToLower(p)
 	for _, name := range rootComposeNames {
-		if lower == name {
+		if sameName(p, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// runtimeStateDir is where opossum keeps what it writes about a project it is
+// running — the MCP wiring it hands to a service, the record of a mount that
+// failed, a workspace's snapshots.
+//
+// Tracking any of it is the same mistake as tracking a compose file at the top:
+// these are read back at run time, so a copy committed here is not a leftover
+// sitting quietly, it is state that a fresh clone will act on. Nothing of the
+// sort is tracked today, which is the cheapest moment to say so.
+const runtimeStateDir = ".opossum"
+
+// underRuntimeState reports whether p is inside it, anywhere in the tree — a
+// project can be a subdirectory (examples/ holds several), so this is not about
+// the top level the way the compose rule is.
+func underRuntimeState(p string) bool {
+	for _, seg := range strings.Split(p, "/") {
+		// Without case, for the same reason as the compose rule directly below:
+		// the file system this is developed on does not tell `.Opossum` from
+		// `.opossum`, so a tracked one is what opossum reads back. Written
+		// case-sensitively at first, hours after the other rule was corrected for
+		// exactly this — a rule can be learnt and the next one still written the
+		// old way.
+		if sameName(seg, runtimeStateDir) {
 			return true
 		}
 	}
@@ -125,7 +176,7 @@ var maintainerDirs = []string{"scripts"}
 // underMaintainerDir reports whether p lives in one of them.
 func underMaintainerDir(p string) bool {
 	for _, d := range maintainerDirs {
-		if p == d || strings.HasPrefix(p, d+"/") {
+		if underDir(p, d) {
 			return true
 		}
 	}
@@ -157,6 +208,15 @@ func Offense(p string, size int64, head []byte) string {
 			"compiles, asserts nothing, and passes CI indefinitely.\n"+
 			"  Remove it (`git rm --cached %s`). If the name is a false alarm, rename the file "+
 			"to say what it is, or widen the allow-list in internal/repohygiene with a reason.", p, p)
+	}
+	if underRuntimeState(p) {
+		return fmt.Sprintf("%s is under %s/, where opossum keeps what it writes about a project "+
+			"it is running.\n"+
+			"  That is read back at run time — the wiring handed to a service, a record of a mount "+
+			"that failed — so a copy committed here is not a file sitting quietly. A fresh clone "+
+			"acts on it.\n"+
+			"  Remove it (`git rm --cached %s`) and let opossum write its own. Add %s/ to "+
+			".gitignore if it keeps coming back.", p, runtimeStateDir, p, runtimeStateDir)
 	}
 	if isRootCompose(p) {
 		return fmt.Sprintf("%s is a compose file at the top of the repository, and there is no "+

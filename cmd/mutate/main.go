@@ -42,6 +42,13 @@
 // could not be read, a suite that was already failing). "It found something" and
 // "it never ran" must not look alike, and neither may look like "everything is
 // guarded".
+//
+// Whether the tests appear to run a survivor's line is a note beside it, not an
+// outcome and not part of the exit status. It is worth knowing and it is measured
+// over the packages this sweep named, which is less than "every test"; reported
+// as an outcome, a wrong reading turns "write a test" into "find out why this
+// code is dead". As a note it can be wrong without moving anyone off the survivor
+// in front of them.
 package main
 
 import (
@@ -148,8 +155,8 @@ func run(args []string, stdout, stderr io.Writer, sigs <-chan os.Signal, exit fu
 	// nothing. Reporting that as "all caught" would be the same lie in a quieter
 	// place: the table says so, and the exit status has to agree with the table.
 	if n := count(results, mutate.Broken) + count(results, mutate.Inconclusive); n > 0 {
-		fmt.Fprintf(stderr, "mutate: %d of %d mutations measured nothing (they did not build, or the "+
-			"run named no tests) — that is not the same as being caught\n", n, len(results))
+		fmt.Fprintf(stderr, "mutate: %d of %d mutations measured nothing (they did not build, or "+
+			"the run named no tests) — that is not the same as being caught\n", n, len(results))
 		return exitFailed
 	}
 	return exitAllCaught

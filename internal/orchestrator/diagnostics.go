@@ -44,6 +44,8 @@ const (
 	codeBindFilePlaceholder   diagCode = "OPSM-107" // a bind mount names a file that doesn't exist, so a directory stands in its place
 	codeVolumeNotSeeded       diagCode = "OPSM-108" // a fresh volume could not be filled or cleared using the image (no shell to run it with)
 	codeSymlinkedSocket       diagCode = "OPSM-109" // a bind source is a symlink to a socket, which the runtime refuses to mount
+	codePGVersionedLayout     diagCode = "OPSM-110" // Postgres 18+ wants the mount one level above the old data directory
+	codeDataDirNotThisMount   diagCode = "OPSM-111" // the cluster does not land in a mounted data directory, and the overlay left it alone
 	codeHostPortRemapped      diagCode = "OPSM-206" // a container-only port's mirrored host port was taken, so opossum picked a free one
 	codeBuildTmpContext       diagCode = "OPSM-301" // build context under /private/tmp (builder can't read it)
 	codeBuildSymlink          diagCode = "OPSM-302" // build context is a symlink (builder may reject it)
@@ -72,7 +74,8 @@ const (
 // AGENTS.md, so adding a code forces documenting it.
 var allDiagCodes = []diagCode{
 	codePGDATADatadir, codeSharedVolume, codeVolumeAttachBusy, codeBindDirCreate, codeBindDataDirChown, codeHostDeviceMount,
-	codeBindFilePlaceholder, codeVolumeNotSeeded, codeSymlinkedSocket,
+	codeBindFilePlaceholder, codeVolumeNotSeeded, codeSymlinkedSocket, codePGVersionedLayout,
+	codeDataDirNotThisMount,
 	codeHostPortInUse, codeDNSDomainAbsent, codeInternalEgress, codeDockerSocket, codeExternalNetAbsent, codeHostPortRemapped,
 	codeBuildTmpContext, codeBuildSymlink,
 	codeDepNotRunning, codeOrphans, codeDepNoHealth,

@@ -1,0 +1,16 @@
+# doctor が一致させている2つの出力（container 1.2.2 / 2026-08-23）
+# parseReclaimable: RECLAIMABLE 列の '数値 単位 (' に一致
+# parseBuilder: STATE の running/stopped と MEMORY の MB/GB に一致
+
+$ container system df
+TYPE           TOTAL  ACTIVE  SIZE      RECLAIMABLE
+Images         126    2       98.83 GB  96.11 GB (97%)
+Containers     2      1       2.75 GB   1.12 GB (41%)
+Local Volumes  2      2       239.4 MB  0 B (0%)
+
+$ container builder status
+ID        IMAGE                                                STATE    IP                CPUS  MEMORY
+buildkit  ghcr.io/apple/container-builder-shim/builder:0.13.1  running  192.168.69.23/24  2     2048 MB
+⚠️  builder  the build VM has only 2048 MB — heavy builds (large multi-stage, big apt-get) can be slow or fail
+            ↳ give it more: container builder delete --force && container builder start --cpus 4 --memory 8g
+⚠️  storage  97.2 GB of images/volumes are reclaimable — not referenced by any running container, and untagged ones don't show in `container images ls`, so this can fill the disk unseen

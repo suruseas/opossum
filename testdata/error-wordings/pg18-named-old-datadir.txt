@@ -1,0 +1,37 @@
+# postgres:18-alpine / named volume を 17 までのデータディレクトリに置いた場合（#485）
+# 上流は image（docker-library/postgres）。container CLI 1.2.2 / 2026-08-23 / OPSM-110 を持つビルド
+# bind と同じ理由で断られる＝「named volume にする」だけでは 18 では直らない
+$ cat compose.yaml
+services:
+  s:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_PASSWORD: x
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+volumes:
+  pgdata:
+$ opossum up --no-supervisor
+Creating network pg18-named-olddir-net
+Starting s (postgres:18-alpine)
+s.pg18-named-olddir.opossum
+warning: [OPSM-407] service "s" exited right after starting (state "stopped"); its last log lines:
+  format which is compatible with "pg_ctlcluster" (specifically, using
+         major-version-specific directory names).  This better reflects how
+         PostgreSQL itself works, and how upgrades are to be performed.
+         See also https://github.com/docker-library/postgres/pull/1259
+         Counter to that, there appears to be PostgreSQL data in:
+           /var/lib/postgresql/data (unused mount/volume)
+         This is usually the result of upgrading the Docker image without
+         upgrading the underlying database using "pg_upgrade" (which requires both
+         versions).
+         The suggested container configuration for 18+ is to place a single mount
+         at /var/lib/postgresql which will then place PostgreSQL data in a
+         subdirectory, allowing usage of "pg_upgrade --link" without mount point
+         boundary issues.
+         See https://github.com/docker-library/postgres/issues/37 for a (long)
+         discussion around this process, and suggestions for how to do so.
+  → [OPSM-110] Postgres 18 and newer keep the cluster in a major-version subdirectory, so the mount belongs one level up: mount `/var/lib/postgresql` instead of `/var/lib/postgresql/data` (this service mounts pgdata there). A host path works there — the image creates the subdirectory itself. Data an earlier major version wrote is a separate question: the image asks for `pg_upgrade`, which moving the mount does not do.
+opossum: [OPSM-407] 1 service(s) exited right after starting: "s" — see the logs above, fix the cause, and run `opossum up` again
+$ opossum ps | tail -1   # 見出し行は落としている
+s        s.pg18-named-olddir.opossum  postgres:18-alpine  -   -      stopped

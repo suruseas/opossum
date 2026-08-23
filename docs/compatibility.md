@@ -157,7 +157,7 @@ properties of the runtime rather than mistakes in your file:
 | What | Why it fails on Apple `container` | What the overlay does |
 |---|---|---|
 | A named volume mounted at Postgres's data directory | Historically the volume arrived holding `lost+found`, so the directory wasn't empty and `initdb` refused it (`OPSM-101`). opossum now clears that from volumes it creates, so this only bites on a volume made elsewhere | Points `PGDATA` at a subdirectory — the data stays in the same volume |
-| A database's data directory on a bind mount | Bind mounts are host-owned and can't be chowned from inside the container, which every official DB image does at startup (`OPSM-105`) | Mounts a named volume there instead — **this changes where the data lives**; the host directory is left untouched, not copied |
+| A database's data directory on a bind mount | Bind mounts are host-owned and can't be chowned from inside the container, which the official Postgres, MySQL/MariaDB, ClickHouse and MongoDB images do at startup (`OPSM-105`) | Mounts a named volume there instead — **this changes where the data lives**; the host directory is left untouched, not copied. The Redis family is not on that list — its images disagree with each other, so the name says nothing. Those mounts are left exactly as written; if one is seen failing and opossum can tell which mount died, what follows is put in front of you to decide on — in the overlay when there isn't one yet, on screen when there is — not a change already made. Where it cannot tell, it says so and leaves the change to you |
 
 The file is the whole compatibility picture for the project, not just the fixes,
 so what opossum *couldn't* fix is in the same place. Entries come in three kinds,

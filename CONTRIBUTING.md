@@ -125,3 +125,11 @@ claim when the same job was done by hand:
 A mutation nothing catches is the finding worth having: it says so in the table
 and exits 1. A sweep that could not run exits 2 — "it found something" and "it
 never ran" must not look alike.
+
+Beside a survivor you may see a note saying that no test the sweep ran appears to
+reach what it changed, or that the reach could not be measured. It comes from the
+coverage of the unmutated run: the tests the sweep ran are the ones in the
+packages it named, which is less than every test there is, so read the note as a
+place to start rather than a verdict. A survivor is a survivor either way — the
+work is to write the test — and where the note says nothing could be measured, it
+is saying only that, not that anything runs the line.

@@ -1,8 +1,8 @@
 package orchestrator_test
 
-// These evals verify the *command sequence* opossum emits against the container
-// runtime — the argument-assembly logic that §5 of the project brief designates
-// for the "fake layer". They run a fake `container` shim, capture every
+// These tests verify the *command sequence* opossum emits against the container
+// runtime: the argument assembly, which is logic and can be checked without the
+// runtime being there. They run a fake `container` shim, capture every
 // invocation it receives, and assert on the exact arguments and ordering.
 // No real runtime is involved.
 

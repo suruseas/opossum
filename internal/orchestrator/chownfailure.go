@@ -84,12 +84,31 @@ func chownedPath(logs string) string {
 func blamedMount(svc *compose.Service, logs string) (src, target string, ok bool) {
 	type mount struct{ src, target string }
 	var binds []mount
+	others := 0 // mounts that are not a bind this could propose, but could still be what died
 	for _, v := range svc.Volumes {
 		s, t, mode, ok := splitMount(v)
-		if !ok || !isHostPath(s) || readOnlyMount(mode) || isHostDevicePath(s) {
-			continue
+		switch {
+		case !ok:
+			// An anonymous volume, or a line this cannot read. Either way it is a
+			// place the image may have been writing, so it counts against being
+			// sure.
+			others++
+		case !isHostPath(s):
+			// A named volume. An image chowning one succeeds, so this is unlikely
+			// to be what died — but "unlikely" is not "cannot", and telling a
+			// volume at the data directory from one somewhere else needs the very
+			// table this change removed. The cost is real: a service with a bind
+			// for its data and a volume for its logs gets no suggestion.
+			others++
+		case readOnlyMount(mode) || isHostDevicePath(s):
+			// Not a candidate and not a rival: a database cannot run on a
+			// read-only mount, and a device node is not a data directory. Counting
+			// these was this check's own over-reach — a config file bound `:ro`
+			// beside the data directory is how Redis is usually written, and it
+			// took the suggestion away from the shape that needs it most.
+		default:
+			binds = append(binds, mount{s, t})
 		}
-		binds = append(binds, mount{s, t})
 	}
 	if len(binds) == 0 {
 		return "", "", false
@@ -124,8 +143,11 @@ func blamedMount(svc *compose.Service, logs string) (src, target string, ok bool
 		return "", "", false
 	}
 	// No usable path in the log at all (redis reports `chown: .:`). One bind mount
-	// leaves nothing else it could have been.
-	if len(binds) == 1 {
+	// leaves nothing else it could have been — but only if there is nothing else.
+	// A service with a volume at its data directory and a bind for its config is an
+	// ordinary way to write Redis, and blaming the config bind would propose
+	// detaching a directory that is working, in prose that says it is not a guess.
+	if len(binds) == 1 && others == 0 {
 		return binds[0].src, binds[0].target, true
 	}
 	return "", "", false
@@ -136,13 +158,28 @@ func (o *Orchestrator) chownFailurePath() string {
 	return filepath.Join(o.Project.BaseDir, ".opossum", chownFailureFile)
 }
 
-// recordChownFailure adds one observation, ignoring a repeat. Failing to write is
-// silent on purpose: this is a note to a later command, and a project that cannot
-// be written to has bigger problems to report than this one.
-func (o *Orchestrator) recordChownFailure(f chownFailure) {
-	if o.Project.BaseDir == "" {
-		return
+// recordChownFailure adds one observation, ignoring a repeat, and reports whether
+// the record is on disk afterwards. Failing to write stays silent — a project that
+// cannot be written to has bigger problems to report than this one — but the
+// caller has to know, because everything it goes on to tell the reader about a
+// later run depends on this note surviving.
+//
+// It answers by reading the record back rather than by tracking which step
+// failed. There are four ways to fail here and one way to be sure, and the sure
+// one is the same question the next run will ask.
+func (o *Orchestrator) recordChownFailure(f chownFailure) bool {
+	if o.Project.BaseDir != "" {
+		o.writeChownFailure(f)
 	}
+	for _, e := range o.recordedChownFailures() {
+		if e == f {
+			return true
+		}
+	}
+	return false
+}
+
+func (o *Orchestrator) writeChownFailure(f chownFailure) {
 	have := o.recordedChownFailures()
 	for _, e := range have {
 		if e == f {

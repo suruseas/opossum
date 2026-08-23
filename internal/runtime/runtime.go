@@ -276,7 +276,8 @@ func (r *Runtime) capture(args ...string) (string, error) {
 // progress to stderr, so the combined stream of capture cannot be read as data.
 //
 // It bypasses the dry-run recording on purpose, so callers must be sure of what
-// they are running. Its one caller (VolumeEntries) reads a volume mounted `:ro`.
+// they are running. Both of them are: VolumeEntries reads a volume mounted `:ro`,
+// and ImageEnv reads what an image declares.
 func (r *Runtime) captureSplitQuery(args ...string) (string, string, error) {
 	r.trace(args)
 	cmd := r.newCmd(r.baseCtx(), args...)
@@ -387,6 +388,64 @@ func resourceInUse(out string) bool {
 func (r *Runtime) ImageExists(ref string) bool {
 	_, err := r.capture("image", "inspect", ref)
 	return err == nil
+}
+
+// ImageEnv reads the environment an image declares in its own config.
+//
+// It is there to stop opossum from knowing things the image can be asked. The
+// Postgres images, for one, declare `PGDATA` — and 18 moved it from
+// /var/lib/postgresql/data to a version subdirectory, which a constant in here
+// could only find out by breaking.
+//
+// ok is false only when the image could not be asked — it is not present locally
+// (`image inspect` exits 1 on a missing reference) or answered something this
+// cannot read — so a caller can fall back to what it knows and, more importantly,
+// say that it did. An image that declares nothing answers with an empty map and
+// ok true, because "told us nothing" is not "was not there".
+//
+// Variants (one per architecture) are read in order and the first value for a
+// name wins. They are the same image built for different machines, so a name that
+// differs between them is not something to pick a side on here.
+func (r *Runtime) ImageEnv(ref string) (map[string]string, bool) {
+	// stdout and stderr apart: mixing them would put a warning inside the JSON, and
+	// the caller would be told the image could not be reached when it answered
+	// perfectly well — while letting stderr through would print the runtime's
+	// "image not found" to someone who is only having an overlay written, for which
+	// not finding the image is the ordinary case.
+	out, _, err := r.captureSplitQuery("image", "inspect", ref)
+	if err != nil {
+		return nil, false
+	}
+	var images []struct {
+		Variants []struct {
+			Config struct {
+				Config struct {
+					Env []string `json:"Env"`
+				} `json:"config"`
+			} `json:"config"`
+		} `json:"variants"`
+	}
+	if err := json.Unmarshal([]byte(out), &images); err != nil {
+		return nil, false
+	}
+	env := map[string]string{}
+	for _, img := range images {
+		for _, v := range img.Variants {
+			for _, e := range v.Config.Config.Env {
+				name, value, ok := strings.Cut(e, "=")
+				if !ok {
+					continue
+				}
+				if _, seen := env[name]; !seen {
+					env[name] = value
+				}
+			}
+		}
+	}
+	// ok says the image answered, not that it declared anything: an image with an
+	// empty environment is a real answer, and a caller that reports it as "not here
+	// to be asked" would be telling its reader something false.
+	return env, true
 }
 
 // DeleteImage removes an image, best-effort (--force ignores a missing image),
@@ -758,6 +817,21 @@ type RunOptions struct {
 	CapDrop    []string // --cap-drop
 }
 
+// IsAMD64 reports whether a compose `platform:` value asks for x86-64.
+//
+// One predicate, because two places act on the answer and they have to agree:
+// this package adds `--rosetta` for it, and the orchestrator withholds the
+// "add `platform: linux/amd64`" advice from a service that already asked. Told
+// apart, a service written as `linux/x86_64` gets Rosetta from one and, from the
+// other, advice to ask for the thing it just asked for.
+//
+// Both spellings and any case, because the runtime takes the value as written
+// and compose does not normalise it.
+func IsAMD64(platform string) bool {
+	p := strings.ToLower(platform)
+	return strings.Contains(p, "amd64") || strings.Contains(p, "x86_64")
+}
+
 // Run starts a container.
 func (r *Runtime) Run(o RunOptions) error {
 	args := []string{"run"}
@@ -799,7 +873,7 @@ func (r *Runtime) Run(o RunOptions) error {
 		// Run the image for a specific platform. amd64 on Apple silicon needs
 		// Rosetta to emulate x86-64 (the runtime is otherwise arm64-only).
 		args = append(args, "--platform", o.Platform)
-		if p := strings.ToLower(o.Platform); strings.Contains(p, "amd64") || strings.Contains(p, "x86_64") {
+		if IsAMD64(o.Platform) {
 			args = append(args, "--rosetta")
 		}
 	}

@@ -1,0 +1,40 @@
+[
+  {
+    "id": "9bdf7939c9afc3b1ddbfa8a8567b4fa2a64e74eac44054077784e4e3f61ff24d",
+    "variants": [
+      {
+        "config": {
+          "architecture": "arm64",
+          "config": {
+            "Cmd": [
+              "postgres"
+            ],
+            "Entrypoint": [
+              "docker-entrypoint.sh"
+            ],
+            "Env": [
+              "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+              "GOSU_VERSION=1.19",
+              "LANG=en_US.utf8",
+              "PG_MAJOR=17",
+              "PG_VERSION=17.10",
+              "PG_SHA256=078a03516dcdbdb705fecaf415ea3d13a956c589e46f09fed68a06fb00598c90",
+              "DOCKER_PG_LLVM_DEPS=llvm21-dev \t\tclang21",
+              "PGDATA=/var/lib/postgresql/data/"
+            ],
+            "StopSignal": "SIGINT",
+            "WorkingDir": "/"
+          },
+          "created": "2026-07-07T17:46:49.401690597Z",
+          "os": "linux"
+        },
+        "digest": "sha256:34e64825d7276f67858659d503dec71f5f8fd7391614b0301d842caa06306237",
+        "platform": {
+          "architecture": "arm64",
+          "os": "linux"
+        },
+        "size": 114970186
+      }
+    ]
+  }
+]

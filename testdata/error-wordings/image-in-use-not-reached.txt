@@ -1,0 +1,8 @@
+# image 側：この経路では届かなかった記録（container 1.2.2 / 2026-08-23）
+# 前提の証跡（ib のコンテナが alpine を使って走っている）:
+a.ia.opossum  docker.io/library/alpine:latest                      linux  arm64  running  192.168.64.2/24   4     1024 MB  2026-08-22T17:33:46Z
+b.ib.opossum  docker.io/library/alpine:latest                      linux  arm64  running  192.168.66.2/24   4     1024 MB  2026-08-22T17:33:48Z
+
+$ (ia) opossum down --rmi all
+Stopping a
+Removing image alpine

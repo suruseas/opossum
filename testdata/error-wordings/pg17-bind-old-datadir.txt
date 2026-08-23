@@ -1,0 +1,21 @@
+# postgres:17-alpine / bind mount を旧データディレクトリに置いた場合（#485 の比較対象）
+# container CLI 1.2.2 / 2026-08-23。17 は従来どおり chown に失敗する＝OPSM-105 の面
+# compose:
+#   environment: { POSTGRES_PASSWORD: x }
+#   volumes: ["./data:/var/lib/postgresql/data"]
+$ container image inspect postgres:17-alpine | grep -m1 digest
+        "digest" : "sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193",
+$ opossum up --no-supervisor
+Creating network pg17-net
+Starting s (postgres:17-alpine)
+s.pg17.opossum
+warning: [OPSM-407] service "s" exited right after starting (state "stopped"); its last log lines:
+  chmod: /var/lib/postgresql/data: Operation not permitted
+  chown: /var/lib/postgresql/data: Operation not permitted
+  → [OPSM-105] Apple `container` bind mounts are host-owned and can't be chowned from inside the container, so a DB image that chowns its data directory fails here. Use a named volume for that directory instead of a bind mount (host path); `opossum up --from-docker-compose` writes that change for you.
+opossum: [OPSM-407] 1 service(s) exited right after starting: "s" — see the logs above, fix the cause, and run `opossum up` again
+$ opossum ps | tail -1   # 見出し行は落としている
+s        s.pg17.opossum  postgres:17-alpine  -   -      stopped
+$ opossum logs s
+chmod: /var/lib/postgresql/data: Operation not permitted
+chown: /var/lib/postgresql/data: Operation not permitted

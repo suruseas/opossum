@@ -7,6 +7,7 @@ package compose
 
 import (
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -803,10 +804,11 @@ func TestACommandThatDoesNotCloseIsNotReadBack(t *testing.T) {
 		{
 			// Reached through `entrypoint:`, which is read by the same code. It used
 			// to say "command" whichever it was, sending anyone with a bad
-			// entrypoint to the wrong line; it now names both, which is true.
+			// entrypoint to the wrong line; then it named both; now it names the
+			// one that failed, worked out after the decode by re-reading each.
 			name:  "an entrypoint ending in a backslash",
 			body:  "services:\n  app:\n    image: app\n    entrypoint: \"${SECRET} \\\\\"\n",
-			keeps: []string{`service "app"`, "command or entrypoint", "ends in a backslash"},
+			keeps: []string{`service "app"`, "entrypoint", "ends in a backslash"},
 		},
 		{
 			// The other exit from the same code: not a string at all. It named only
@@ -815,7 +817,7 @@ func TestACommandThatDoesNotCloseIsNotReadBack(t *testing.T) {
 			// rather than everywhere it is written.
 			name:  "neither a string nor a list",
 			body:  "services:\n  app:\n    image: app\n    entrypoint:\n      ${SECRET}: v\n",
-			keeps: []string{`service "app"`, "command or entrypoint", "expected a string or a list", "a mapping"},
+			keeps: []string{`service "app"`, "entrypoint", "expected a string or a list", "a mapping"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -909,6 +911,107 @@ func TestWhatEachShapeIsCalled(t *testing.T) {
 	} {
 		if got := kindName(tc.kind); got != tc.want {
 			t.Errorf("kindName(%d) = %q, want %q", tc.kind, got, tc.want)
+		}
+	}
+}
+
+// Which of the two fields failed, worked out after the decode.
+//
+// `command:` and `entrypoint:` are read by the same code, and the parser hands it
+// the value without the key, so the message it makes cannot say which one it was
+// reading. Saying `command` whichever it was sent half the readers to the wrong
+// line; saying `command or entrypoint` was true but made them check both.
+//
+// The name is worked out the way the service's is: once the decode has failed,
+// each of the two is read on its own, and the one that fails the same way is the
+// one named. Being wrong costs nothing here, so the rule is the same — name it
+// only when there is one answer.
+func TestWhichOfTheTwoFieldsFailedIsWorkedOut(t *testing.T) {
+	const broken = "sh -c 'x"
+	for _, tc := range []struct{ name, body, want, wantNot string }{
+		{
+			name: "the command", want: "command",
+			body:    "services:\n  app:\n    image: app\n    command: " + broken + "\n",
+			wantNot: "entrypoint",
+		},
+		{
+			// And not the other one, anywhere in the message: a reader who is told
+			// "entrypoint" and also shown the word "command" has learnt nothing.
+			// The check is written both ways round because only one of them was
+			// here at first, and a message that named the pair passed it.
+			name: "the entrypoint", want: "entrypoint",
+			body:    "services:\n  app:\n    image: app\n    entrypoint: " + broken + "\n",
+			wantNot: "command",
+		},
+		{
+			// Both, failing the same way: there is no single answer, so it says the
+			// pair rather than picking the first one written.
+			name: "both, the same way", want: "command or entrypoint",
+			body: "services:\n  app:\n    image: app\n    command: " + broken + "\n    entrypoint: " + broken + "\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := loadErr(t, tc.body)
+			if !strings.Contains(got, "never closed") {
+				t.Fatalf("a different failure got there first, so this checked nothing:\n%s", got)
+			}
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("the message should name %q:\n%s", tc.want, got)
+			}
+			if tc.wantNot != "" && strings.Contains(got, tc.wantNot) {
+				t.Errorf("the message names %q, which is not the one that failed:\n%s", tc.wantNot, got)
+			}
+		})
+	}
+}
+
+// Working out which field failed compares one error against another by substring,
+// and that is only safe while no message this reader produces is contained in
+// another one of them.
+//
+// If one were — say a shorter message that read like the start of a longer one —
+// the field whose value produced the shorter error would match the longer error
+// too, and two matches make it say nothing. The name would go missing on exactly
+// the files that have two different faults, which is where it is most wanted.
+//
+// The assumption is stated here rather than left in the head of whoever wrote the
+// comparison, because the next message added to that reader is where it breaks.
+func TestNoMessageFromACommandContainsAnother(t *testing.T) {
+	msgs := map[string]string{}
+	for name, body := range map[string]string{
+		"single quote": "sh -c 'x",
+		"double quote": `sh -c "x`,
+		"backslash":    `echo x \`,
+	} {
+		var c Command
+		var n yaml.Node
+		if err := yaml.Unmarshal([]byte("v: "+strconv.Quote(body)+"\n"), &n); err != nil {
+			t.Fatal(err)
+		}
+		err := c.UnmarshalYAML(n.Content[0].Content[1])
+		if err == nil {
+			t.Fatalf("%s: expected a failure from %q", name, body)
+		}
+		msgs[name] = err.Error()
+	}
+	// And the one for a value that is not a string or a list at all.
+	var c Command
+	var n yaml.Node
+	if err := yaml.Unmarshal([]byte("v:\n  k: q\n"), &n); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.UnmarshalYAML(n.Content[0].Content[1]); err != nil {
+		msgs["wrong shape"] = err.Error()
+	} else {
+		t.Fatal("expected a failure for a mapping")
+	}
+
+	for a, ma := range msgs {
+		for b, mb := range msgs {
+			if a != b && strings.Contains(ma, mb) {
+				t.Errorf("the %s message contains the %s message, so one value's failure "+
+					"matches another's:\n  %q\n  %q", a, b, ma, mb)
+			}
 		}
 	}
 }

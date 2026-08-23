@@ -164,6 +164,49 @@ list; codes are add-only and never change meaning.
   that volume), or add `environment: PGDATA=/var/lib/postgresql/data/pgdata`.
   Volumes opossum creates are cleared, so a plain `pgdata:/var/lib/postgresql/data`
   works without either.
+- **`[OPSM-110]` … `(unused mount/volume)` … `pg_upgrade`** → Postgres 18 changed
+  where the image keeps its data: one mount at `/var/lib/postgresql`, with the
+  cluster in a major-version subdirectory below it. A mount at the old
+  `/var/lib/postgresql/data` is data the image will not use, so it exits. Move the
+  mount up one level — a host path works there, since the image makes the
+  subdirectory itself. Data an earlier major version wrote needs `pg_upgrade`;
+  moving the mount does not do that — handed such a cluster at the path it asks
+  for, 18 makes an empty `18/docker` below it and refuses there too.
+- **`[OPSM-111]` … `is a bind mount, and … — left as it is`** (from `up
+  --from-docker-compose`; the middle reads `… this service points PGDATA at <path>
+  instead`, `… this image keeps its cluster in <path> instead`, or `… PGDATA comes
+  in from the environment`) → the cluster this service will write does not land in
+  the directory it mounts, so moving that mount to a named volume would not help on
+  its own, and the overlay left it as it was. Which shape you are in decides what
+  happens and what to change; each line here is a run recorded in
+  `testdata/error-wordings/`:
+
+  - **The cluster lands *below* the mount** (`PGDATA` names a subdirectory of it) —
+    nothing is wrong: the image creates that subdirectory itself and chowns what it
+    made, so a bind mount works. `pg17-service-pgdata-below-the-mount.txt`,
+    `pg-image-declares-pgdata-below-the-mount.txt` (both Postgres 17).
+  - **The cluster lands *at* the mount** — the image chowns the directory it was
+    handed, and a bind mount cannot be chowned, so it fails with `[OPSM-105]`
+    whoever named the path. `pg17-bind-old-datadir.txt`,
+    `pg18-service-pgdata-at-the-mount.txt`.
+  - **The cluster lands somewhere else, on 18 or later** — the container will not
+    start: 18 and later refuse a mount their cluster does not land in.
+    `pg18-named-old-datadir.txt`, `pg18-versioned-layout.txt`. `[OPSM-110]` is this
+    same question in its usual form, when the cluster is below
+    `/var/lib/postgresql`.
+  - **The cluster lands somewhere else, on 17 or earlier** — the container starts
+    and leaves the mount empty, writing the cluster inside the container, where it
+    does not survive it. `pg17-service-pgdata-elsewhere.txt`.
+
+  Make the two agree, in one of the two ways this file has runs for: point
+  `PGDATA` at a subdirectory of the mount (the first line above, on 17), or move
+  the mount so that the cluster lands below it (`pg18-mount-one-level-up.txt`, on
+  18). Both end in the same shape — a bind mount with the cluster below it — which
+  is why the first line's runs are the evidence for either. Mounting the cluster's
+  own directory is not one of them: that is the second line, and it fails. When the
+  service passes `PGDATA` in from the environment, opossum cannot read which line
+  you are in and says so instead of guessing; set `PGDATA` in the compose file if
+  you want it to reason about this.
 - **`[OPSM-204]` … `mounts the Docker socket … Apple container has no Docker daemon
   socket`** → the service needs Docker (e.g. Portainer); it can't work here. Remove
   the `docker.sock` mount or run that tool differently.
@@ -179,7 +222,7 @@ list; codes are add-only and never change meaning.
   held by something the host probe cannot see — the runtime's own DNS on 53, say. Same
   port, same fix, whichever moment it is caught at.
 - **`[OPSM-412]` … `this image has no build for Apple silicon (arm64)`** → decoded from a
-  failed start under `up` (`does not support required platforms`); a one-off `run` reports
+  failed start under `up` (`does not support required platforms`, or `Error: platform linux/arm64` — 1.2.2 uses both, see `testdata/real-cli-output.md`); a one-off `run` reports
   the runtime's own wording instead. Add `platform: linux/amd64` to the
   service and start again: opossum runs an amd64 image under Rosetta. Check first that the
   image really has no arm64 tag — many publish one under a different tag, and a native
@@ -241,14 +284,33 @@ list; codes are add-only and never change meaning.
   of its data directory at startup dies there. Two paths reach this code, and they
   claim different things. `up --from-docker-compose` **applies** the swap to a named
   volume for the databases whose behaviour is known (Postgres, MySQL/MariaDB,
-  ClickHouse, MongoDB, Redis — matched on image name, so a sidecar built on the same
-  image is left alone). For anything else opossum waits: when a container actually
-  dies with this signature, that service and that mount are recorded, and the next
+  ClickHouse, MongoDB — matched on image name, so a sidecar built on the same
+  image is left alone). **Redis is not on that list, and neither are Valkey or
+  Redis Stack**: the images disagree about whether they chown at all. Run on
+  container 1.2.2 and recorded in `redis-family-chown-split.txt` — `redis:7-alpine`
+  exits with `chown: .: Operation not permitted`, `redis:8-alpine` starts and
+  writes to the host directory, and `valkey/valkey:8-alpine` ships the same
+  entrypoint as Valkey 7 and exits like redis 7; `redis-stack-server`, read rather
+  than run, has no chown in its entrypoint at all. Nothing in the image declares
+  which of those it is, so they go the way everything unknown goes, below.
+  For anything else opossum waits: when a container actually dies with this
+  signature, that service and that mount are recorded, and the next
   `up --from-docker-compose` proposes a **suggestion** naming exactly that mount —
   into the overlay when there isn't one yet, on screen when there is (an existing
   `compose.opossum.yaml` is never overwritten). It never proposes a swap for a
   directory that has not failed: an earlier version guessed from the shape of the
-  mount and was wrong about half the time.
+  mount and was wrong about half the time. Nor does it propose one where the swap
+  was already applied for that same mount, so the overlay never carries two blocks
+  for one mount. It also has to be able to tell which mount died, and often it
+  cannot: the log may name no directory (`chown: .:`), or name one this service
+  does not mount, or the service may have more than one mount that could each have
+  been it. The reasons are not worth enumerating to the reader and the crash report
+  does not try — it says it could not work out which, and leaves the change to
+  them. Nothing is recorded in that case, so no suggestion appears later either.
+  There is a third thing the report can say: the mount is known but the note about
+  it could not be written (a project directory that is read-only, say). Then it
+  names the mount and hands the change over, because knowing which mount died is
+  worth saying whether or not it could be written down.
 - **`[OPSM-206]` … `opossum published it on <port> instead`** → the compose file gave
   only a container port (`ports: ["3000"]`), so the host port is opossum's to choose;
   the mirrored port was taken, so a free one was used. docker compose does the same.
@@ -355,6 +417,8 @@ Every `[OPSM-NNN]` opossum can emit (add-only; grouped 1xx storage / 2xx network
 - `OPSM-107` — a bind mount names a file that doesn't exist, so a directory stands in its place.
 - `OPSM-108` — a fresh volume couldn't be filled from the image, or cleared of ext4's `lost+found` (no shell in it to run either with).
 - `OPSM-109` — a bind source is a symlink to a socket, which the runtime refuses to mount.
+- `OPSM-110` — Postgres 18+ wants the mount one level above the old data directory (the cluster sits in a major-version subdirectory).
+- `OPSM-111` — a Postgres service's cluster does not land in the data directory it mounts, so the overlay left that mount alone.
 - `OPSM-201` — a published host port is already taken, whether the pre-flight saw it or
   the start failed on it.
 - `OPSM-202` — the DNS domain isn't registered (no bare-name discovery).

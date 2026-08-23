@@ -6,20 +6,94 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-08-23
+
+### Added
+
+- `up` now explains Postgres 18's refusal to start when the mount sits at the
+  data directory 17 and earlier used. Postgres 18 keeps the cluster in a
+  major-version subdirectory, so the image wants a single mount at
+  `/var/lib/postgresql`; a mount at `/var/lib/postgresql/data` is data it will
+  not use, and it exits saying so. The crash report now names the fix
+  (`[OPSM-110]`): move the mount up one level, since the image creates the
+  subdirectory itself — a host path works there, measured on Postgres 18. Data
+  an earlier major version wrote is a separate question: the image asks for
+  `pg_upgrade`, and moving the mount does not do that — 18 refuses a cluster an
+  earlier version wrote even at the path it asks for.
+
+### Changed
+
+- `up --from-docker-compose` no longer turns a Redis, Valkey or Redis Stack bind
+  mount into a named volume on sight. It did that because an image that takes
+  ownership of its data directory cannot do so on a bind mount, but the images
+  disagree about whether they try. Run on container 1.2.2 and recorded in
+  `redis-family-chown-split.txt`: `redis:7-alpine` exits with `chown: .: Operation
+  not permitted`, `redis:8-alpine` starts and writes to the host directory, and
+  `valkey/valkey:8-alpine` ships the same entrypoint as Valkey 7 and exits the way
+  redis 7 does. `redis-stack-server`, which was read rather than run, has no chown
+  in its entrypoint at all. Nothing in the image says which of those an image is.
+  Rewriting on the name meant a project that works today had its host directory
+  swapped for a volume it cannot open, and the output read like success. Now the
+  mount is left as written. If the container does die that way, opossum records
+  which mount it died on where it can, and the next `up --from-docker-compose`
+  says what it does about that mount — writing into `compose.opossum.yaml` when
+  there isn't one yet, and on screen when there is, since an overlay that is
+  already there is never overwritten. Where the mount cannot be told apart from
+  the ones that are working, nothing is recorded and the crash report says so
+  instead of naming a next step that would do nothing. Postgres, MySQL/MariaDB,
+  ClickHouse and MongoDB, whose images take ownership of their data directory at
+  startup, are unchanged.
+
+  If an earlier version already moved one of these mounts for you, the
+  `compose.opossum.yaml` it wrote still holds the swap and nothing changes. Delete
+  that file, though — which is how you opt out of it — and this version will not
+  write the swap again: the service comes back on the host directory, which is
+  empty, and the data stays behind in the named volume the earlier version made
+  (`<project>_<service>-data`). On Redis 7 and Valkey the container will not start
+  at all, so this is hard to miss; on Redis 8 it starts and answers as though the
+  data were gone. Both were watched on container 1.2.2. To get it back, put the
+  mount back the way the overlay had it, or copy what is in that volume into the
+  host directory.
+- `up --from-docker-compose` now works out where a Postgres service actually
+  keeps its data instead of assuming a path, and what it writes follows from
+  that. The service's own `PGDATA` decides it when the compose file sets one (a
+  container's environment overrides the image's); otherwise the image is asked,
+  and the images declare it — 18 moved it into a version subdirectory. Where the
+  cluster lands in the mounted directory itself, that mount still becomes a
+  named volume. Where it lands *below* the mount, a host path works — measured
+  on Postgres 17 — and the mount is now left alone, which is a change for anyone
+  whose service sets `PGDATA` to a subdirectory. Where it lands somewhere else
+  entirely — 18, at the path 17 used — the named volume only starts alongside
+  the `PGDATA` written with it, so if that half cannot be written (the service
+  sets its own `PGDATA`, passes one in from the environment, or mounts something
+  below the data directory) opossum writes neither half and says what it found
+  (`[OPSM-111]`). What that costs and what to change are in that code's entry,
+  which lists the shapes this comes in — the cluster landing below the mount, at
+  it, or somewhere else on 18 or on 17 — with the run each one was measured in.
+  The comment on each change says where the answer came from: read from the
+  service, read from the image, or assumed because the image was not on the
+  machine yet.
+
+### Fixed
+
+- An error about the quoting or shape of a `command:` or `entrypoint:` now names which of the two it is. They are read by the same code, which is handed the value without being told the key it came from, so the message used to say `command` whichever it was — sending anyone with a bad entrypoint to the wrong line — and then said `command or entrypoint`, which was true but left you to check both. Where both are wrong in the same way it still says the pair, because there is no single answer to give.
+- An image with no build for Apple silicon is told so again. The runtime has two ways of wording that failure and opossum recognised only one of them, so for the images that produce the other, the guidance went quiet: what came back instead was the raw error and a suggestion to read the logs, from a container that had never started. Both wordings are recognised now. Neither is answered with "ask for linux/amd64" when amd64 is what was asked for and what the image lacks — that failure is a different one, and repeating the request is not the fix for it.
+- The message about a published port that is already taken no longer offers the runtime's built-in DNS on port 53 as the example of what the check before startup cannot see. That check does see port 53, and a port published by another project's running container. The blind spot it was pointing at is real — two services in one project publishing the same address are not both checked, and the second one's start is where this message comes from — but the example was wrong, and an example that does not happen is worse than none. What the message tells you about the port itself is unchanged.
+
 ## [0.22.1] - 2026-08-22
 
 ### Fixed
 
 - `ports`, a service's `volumes`, and a service's `secrets` now say what they found in words when it is not a list. They answered with the YAML tag — "must be a list, got !!str" — which is the spec's own notation and no more use than the decoder's numbering was to the fields that have already stopped using it.
 - When more than one compose file goes into a project, a failure at the final check no longer names the first file as though the problem were in it. More than one is easier to end up with than it sounds: several passed with `-f`, or any override file found next to your `compose.yaml` — including the one `opossum adapt` writes for you. They are merged into a single document before that check, so the line the parser reports counts in the merged text, and no record survives of which file a value came from. Naming the first one sent you to a file that need not contain the problem, at a line you could not find. All the files are named now, and the line is marked as belonging to the merged document. A single file still names itself and a line you can count to.
+- What is wrong and where to find it are still there, and there is more of it than before. A rejected memory or CPU limit now says which of the two keys it read, a rejected mount type names the mount, and a healthcheck that rejects one of its durations now names the service it belongs to instead of leaving you to guess which of them it meant.
+- A field given the wrong shape now says what it found in words. `networks`, `env_file`, `environment`, `depends_on`, a healthcheck's `test`, and `command` all answered with the number the YAML decoder uses internally — "got yaml kind 4" — which is nothing anyone can act on. They say "a mapping", "a list", "a single value".
 
 ### Security
 
 - A `${` with no closing `}` now says where it is instead of quoting what came after it. What came after it is the rest of whatever was being expanded: in a compose file that is the tail of the file, and in an env file it is the value — where a password or a token can be. In a compose file the message now names the line the reference starts on, counting lines where YAML breaks them rather than only at a newline, so a file written with the old Mac line ending is counted the same way the parser counts it. In an env file the file and line were already there, so the message adds nothing to them.
 - The fields with a small, fixed set of accepted values no longer read the value back when they reject it — the memory and CPU limits, a healthcheck's durations, a mount's type, `restart`, and a `depends_on` condition. What they are given comes out of the compose file, where a `${...}` reference can put a password or a token, and the error goes to the terminal, the CI log, and whatever issue the output is pasted into; unlike the parser's own message, these printed the value in full. Each of these messages already lists what the field accepts, so the value it was given added nothing it needed to say. Fields whose value is free text — a `command`, an env file's path — still quote what they were given, because there the text is the only way to see what is wrong with it.
-- What is wrong and where to find it are still there, and there is more of it than before. A rejected memory or CPU limit now says which of the two keys it read, a rejected mount type names the mount, and a healthcheck that rejects one of its durations now names the service it belongs to instead of leaving you to guess which of them it meant.
 - An error about a `command:` or `entrypoint:` no longer reads the command back. A command is free text and can hold a token — `sh -c 'curl -H "Bearer ${TOKEN}"'` is an ordinary thing to write — and quoting the whole of it into an error put that in the terminal, the CI log, and any issue the output was pasted into. It now names the service and says which quote never closes, which is what you need to find it. Docker Compose quotes nothing here either, and names the exact field where this says `command or entrypoint`: the two are read by the same code, which is not told which one it is reading, so naming both is as close as this can get for now. It used to say `command` whichever it was, which sent anyone with a bad entrypoint to the wrong line.
-- A field given the wrong shape now says what it found in words. `networks`, `env_file`, `environment`, `depends_on`, a healthcheck's `test`, and `command` all answered with the number the YAML decoder uses internally — "got yaml kind 4" — which is nothing anyone can act on. They say "a mapping", "a list", "a single value".
 
 ## [0.22.0] - 2026-08-21
 
@@ -851,7 +925,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.22.1...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.23.0...HEAD
+[0.23.0]: https://github.com/suruseas/opossum/compare/v0.22.1...v0.23.0
 [0.22.1]: https://github.com/suruseas/opossum/compare/v0.22.0...v0.22.1
 [0.22.0]: https://github.com/suruseas/opossum/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/suruseas/opossum/compare/v0.20.0...v0.21.0

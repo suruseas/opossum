@@ -1,0 +1,31 @@
+[
+  {
+    "id": "a5a0c00208823c696e7cb49a94fc2b6272b308304b7bc9faccb8fa1a029319a2",
+    "variants": [
+      {
+        "config": {
+          "architecture": "arm64",
+          "config": {
+            "Cmd": [
+              "sh"
+            ],
+            "Env": [
+              "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+              "PG_MAJOR=9.6",
+              "PGDATA=/var/lib/postgresql/data-elsewhere"
+            ],
+            "WorkingDir": "/"
+          },
+          "created": "2026-06-16T00:01:20.474100947Z",
+          "os": "linux"
+        },
+        "digest": "sha256:816ba07e3c1788c4a3180da9fc13964dfce9534fd9705023abe7e4c54fbeffb1",
+        "platform": {
+          "architecture": "arm64",
+          "os": "linux"
+        },
+        "size": 4184621
+      }
+    ]
+  }
+]

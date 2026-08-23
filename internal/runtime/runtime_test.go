@@ -210,7 +210,7 @@ func TestFidelityDNSDomainExists(t *testing.T) {
 func TestFidelitySystemRunning(t *testing.T) {
 	// The real `container system status` output when the daemon is up: a table with
 	// a `status running` field. SystemRunning must read that as running.
-	const realStatus = "FIELD              VALUE\nstatus             running\nappRoot            /Users/x\n"
+	const realStatus = "FIELD              VALUE\nstatus             running\nappRoot            /Users/<user>\n"
 	if !replayShim(t, realStatus, 0).SystemRunning() {
 		t.Error("SystemRunning should be true for a `status running` report")
 	}
@@ -344,6 +344,16 @@ func TestRunArgvBranches(t *testing.T) {
 				Memory: "512M", CPUs: "2", Tmpfs: []string{"/tmp"},
 				Interactive: true, TTY: true, SSH: true},
 			"run -i -t --ssh --name web --platform linux/amd64 --rosetta -m 512M -c 2 --tmpfs /tmp web:latest",
+		},
+		{
+			// The other spelling of the same architecture. The runtime takes the
+			// value as written and compose does not normalise it, so a service
+			// asking this way has to get Rosetta too — and the orchestrator asks
+			// the same question of the same value when it decides whether to
+			// suggest amd64, which is why they share one predicate.
+			"x86_64 is the same request and gets rosetta too",
+			RunOptions{Name: "web", Image: "web:latest", Platform: "linux/x86_64"},
+			"run --name web --platform linux/x86_64 --rosetta web:latest",
 		},
 		{
 			"arm64 does not add rosetta",

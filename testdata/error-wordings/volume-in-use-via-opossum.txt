@@ -1,0 +1,17 @@
+# resourceInUse（runtime.go）の警告を opossum 経由で引いた記録
+# container 1.2.2 / 2026-08-23
+# 引き方: A の named volume を、B が external: true で握ったまま A を down -v
+
+$ cat xa/compose.yaml
+services:
+  a: { image: alpine, volumes: ["data:/d"], command: sleep 60 }
+volumes: { data: }
+$ cat xb/compose.yaml
+services:
+  b: { image: alpine, volumes: ["av:/d"], command: sleep 60 }
+volumes: { av: { external: true, name: xa_data } }
+
+$ (xa) opossum down -v
+Stopping a
+Removing volume xa_data
+warning: could not remove volume "xa_data": it's still in use by a container — stop the container, then remove it with `container volume delete xa_data`

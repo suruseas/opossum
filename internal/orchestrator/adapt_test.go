@@ -4,6 +4,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -657,16 +658,12 @@ services:
 	}
 }
 
-// The data directories below were each confirmed on the real runtime to fail the
-// same way as Postgres/MySQL — the image chowns its data directory and exits.
-// Redis's `/data` is generic, so the image name is doing all the work: the exact
-// match is what keeps an unrelated service mounting `/data` from being rewritten.
+// The data directories below were each watched failing on the real runtime the
+// same way Postgres and MySQL do — the image chowns its data directory and exits.
 func TestPlanOverlayCoversMoreDatabases(t *testing.T) {
 	cases := []struct{ image, dir string }{
 		{"clickhouse/clickhouse-server:25.3-alpine", "/var/lib/clickhouse"},
 		{"mongo:7", "/data/db"},
-		{"redis:7-alpine", "/data"},
-		{"valkey/valkey:8", "/data"},
 	}
 	for _, c := range cases {
 		_, changes := planFor(t, "name: demo\nservices:\n  db:\n    image: "+c.image+
@@ -682,14 +679,14 @@ func TestPlanOverlayCoversMoreDatabases(t *testing.T) {
 }
 
 // …and a service that merely mounts one of those paths without being that
-// database is still left alone. `/data` in particular is mounted by all sorts of
-// images, so a wrong match here would swap real data for an empty volume.
+// database is still left alone. `/data/db` is mounted by all sorts of images, so
+// a wrong match here would swap real data for an empty volume.
 func TestPlanOverlayGenericDataDirNeedsMatchingImage(t *testing.T) {
-	for _, img := range []string{"busybox", "alpine:3", "myapp/data-loader:1", "redis-exporter:1"} {
+	for _, img := range []string{"busybox", "alpine:3", "myapp/data-loader:1", "mongo-exporter:1"} {
 		body, changes := planFor(t, "name: demo\nservices:\n  svc:\n    image: "+img+
-			"\n    volumes:\n      - ./d:/data\n")
+			"\n    volumes:\n      - ./d:/data/db\n")
 		if body != "" || len(changes) != 0 {
-			t.Errorf("%s mounting /data is not a database; got %d change(s):\n%s", img, len(changes), body)
+			t.Errorf("%s mounting /data/db is not a database; got %d change(s):\n%s", img, len(changes), body)
 		}
 	}
 }
@@ -758,7 +755,7 @@ func mergeOverlay(t *testing.T, srcBody, overlayBody string) *compose.Project {
 // empty volume.
 func TestPlanOverlaySkipsNonServerCommand(t *testing.T) {
 	cases := []string{
-		"name: demo\nservices:\n  dump:\n    image: redis:7-alpine\n    command: [\"redis-cli\",\"--pipe\"]\n    volumes:\n      - ./dumps:/data\n",
+		"name: demo\nservices:\n  dump:\n    image: mysql:8\n    command: [\"mysql\",\"-e\",\"select 1\"]\n    volumes:\n      - ./dumps:/var/lib/mysql\n",
 		"name: demo\nservices:\n  restore:\n    image: mongo:7\n    entrypoint: [\"mongorestore\"]\n    volumes:\n      - ./dump:/data/db\n",
 		"name: demo\nservices:\n  shell:\n    image: mongo:7\n    command: [\"sh\",\"-c\",\"mongodump\"]\n    volumes:\n      - ./dump:/data/db\n",
 	}
@@ -775,11 +772,11 @@ func TestPlanOverlayAdaptsServerWithFlags(t *testing.T) {
 	_, changes := planFor(t, `
 name: demo
 services:
-  cache:
-    image: redis:7-alpine
-    command: ["redis-server", "--appendonly", "yes"]
+  db:
+    image: mongo:7
+    command: ["mongod", "--auth"]
     volumes:
-      - ./data:/data
+      - ./data:/data/db
 `)
 	if len(changes) != 1 {
 		t.Errorf("a server invoked with flags should still be adapted, got %+v", changes)
@@ -1319,6 +1316,261 @@ services:
 	}
 	if !strings.Contains(body, suggestionMarker) {
 		t.Errorf("the entry should be a suggestion, not applied:\n%s", body)
+	}
+}
+
+// Redis and its relatives are not rewritten on sight any more, and the reason is
+// that the images disagree with each other. Run on the runtime (container 1.2.2)
+// and kept in testdata/error-wordings/redis-family-chown-split.txt:
+// `redis:7-alpine` exits with `chown: .: Operation not permitted`;
+// `redis:8-alpine` starts and writes to the host directory; `valkey/valkey:8-alpine`
+// ships the same entrypoint as Valkey 7 and exits like redis 7. `redis-stack-server`
+// was read rather than run: its entrypoint has no chown in it. Four images, three
+// behaviours, and no version to sort them by — and the Debian-based tags were not
+// run at all, which is the other half of why the name cannot decide this.
+//
+// Rewriting on the image's name meant a project that works today gets its host
+// directory quietly swapped for a volume, and the output reads like success. The
+// other mistake — leaving a mount that does need swapping — ends in a container
+// that exits saying so, which is decoded and then proposed for. One is silent and
+// one is loud, and the loud one already has somewhere to land.
+func TestPlanOverlayLeavesRedisFamilyBindMountsAlone(t *testing.T) {
+	for _, img := range []string{"redis:7-alpine", "redis:8", "valkey/valkey:8-alpine", "redis/redis-stack-server:latest"} {
+		body, changes := planFor(t, "name: demo\nservices:\n  cache:\n    image: "+img+
+			"\n    volumes:\n      - ./d:/data\n")
+		if len(changes) != 0 {
+			t.Errorf("%s: nothing has failed, so the mount stays as written; got %+v", img, changes)
+		}
+		if body != "" {
+			t.Errorf("%s: no overlay should be written:\n%s", img, body)
+		}
+	}
+}
+
+// What replaces the rewrite: the same container, watched failing. Redis says
+// nothing about which path it could not chown (`chown: .:`), so this is also the
+// case where the mount has to be identified from the service rather than the log.
+func TestPlanOverlayProposesForRedisOnceItHasActuallyDied(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "rdata"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, dir, "compose.yaml", `
+name: demo
+services:
+  cache:
+    image: redis:7-alpine
+    volumes:
+      - ./rdata:/data
+`)
+	p0, err := compose.Load(filepath.Join(dir, "compose.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := New(p0, nil, "opossum", io.Discard)
+	if _, changes := o.PlanOverlay(); len(changes) != 0 {
+		t.Fatalf("before any crash there is nothing to propose, got %+v", changes)
+	}
+
+	// The line the image actually prints, from the run in this repository.
+	if h := o.crashHint("cache", "chown: .: Operation not permitted"); h == "" {
+		t.Fatal("the crash should be decoded")
+	}
+	body, changes := o.PlanOverlay()
+	var suggested []string
+	for _, c := range changes {
+		if c.Kind == "suggestion" {
+			suggested = append(suggested, c.Summary)
+		}
+	}
+	if len(suggested) != 1 || !strings.Contains(suggested[0], "/data") {
+		t.Fatalf("the mount that died should be proposed, got %v", suggested)
+	}
+	if !strings.Contains(body, suggestionMarker) {
+		t.Errorf("the entry should be a suggestion, not applied:\n%s", body)
+	}
+}
+
+// The crash guidance is read by whoever is staring at a container that just died,
+// and everything it says has to be true of every project that reaches it. Five
+// versions of it have been wrong about something: what the next command writes,
+// how it writes it, whether it offers or applies it, and once about whether
+// opossum knew which mount had died at all.
+//
+// So the three forms are written out here word for word rather than checked for
+// phrases they must not contain. A list of banned words only catches the wordings
+// someone already thought of — a sixth version can be just as false without using
+// any of them. Changing any of these sentences fails this test, which is the
+// point: the words are the interface, and a new one should be a decision rather
+// than a diff nobody reads.
+//
+// They take the mount and the service as arguments for the same reason. A flat
+// constant with /data written into it stopped anyone noticing that the guidance
+// had stopped using the mount it was given — a mutation that hardcoded /data
+// passed the whole suite, which meant a Mongo container that died on /data/db
+// would be told to change /data, a path it does not mount.
+func crashWhyText() string {
+	return "Apple `container` bind mounts are host-owned and can't be chowned from inside the container, so an " +
+		"image that takes ownership of its data directory at startup fails here. A named volume can be chowned"
+}
+
+// The mount is known and the note about it survived.
+func crashKnownText(target string) string {
+	return "\n  → [OPSM-105] " + crashWhyText() + ". This container died on " + target + ", and opossum has that on " +
+		"record: `opossum up --from-docker-compose` reads it. Changing " + target + " to a named volume is what gets " +
+		"past this; what is in the host directory now stays there, and the service stops seeing it."
+}
+
+// The mount is known, but nothing could be written down about it.
+func crashUnrecordedText(target string) string {
+	return "\n  → [OPSM-105] " + crashWhyText() + ". This container died on " + target + ", and opossum could not " +
+		"keep a note of that in this project directory — change " + target + " to a named volume yourself; what is " +
+		"in the host directory now stays there, and the service stops seeing it."
+}
+
+// Which mount died cannot be told apart from the ones that are working.
+func crashUnknownText(service string) string {
+	return "\n  → [OPSM-105] " + crashWhyText() + ". opossum could not work out which of " + strconv.Quote(service) +
+		"'s mounts this container died on — change the mount holding its data to a named volume yourself; what is " +
+		"in the host directory now stays there, and the service stops seeing it."
+}
+
+func TestTheCrashGuidanceSaysOnlyWhatItKnows(t *testing.T) {
+	const saysNothing = "chown: .: Operation not permitted"
+	at := func(t *testing.T, dir string) *Orchestrator {
+		t.Helper()
+		return New(&compose.Project{Name: "demo", BaseDir: dir, Services: map[string]*compose.Service{}}, nil, "opossum", io.Discard)
+	}
+	unwritable := func(t *testing.T) string {
+		t.Helper()
+		dir := t.TempDir()
+		if err := os.Chmod(dir, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+		return dir
+	}
+	// Two shapes reach each of the first two forms, and they name different
+	// mounts: one where nothing else could have been it, and one where the
+	// container said which directory it could not take.
+	saidNothing := &compose.Service{Image: "redis:7-alpine", Volumes: []string{"./rdata:/data"}}
+	namedIt := &compose.Service{Image: "mongo:7", Volumes: []string{"./m:/data/db", "./conf:/etc/mongo:ro"}}
+	const namedItLogs = "chown: changing ownership of '/data/db': Operation not permitted"
+
+	t.Run("the mount is known and the note is kept", func(t *testing.T) {
+		for _, c := range []struct {
+			svc          *compose.Service
+			logs, target string
+		}{
+			{saidNothing, saysNothing, "/data"},
+			{namedIt, namedItLogs, "/data/db"},
+		} {
+			want := crashKnownText(c.target)
+			if got := at(t, t.TempDir()).chownCrashHint("cache", c.svc, c.logs); got != want {
+				t.Errorf("guidance changed:\n got: %q\nwant: %q", got, want)
+			}
+		}
+	})
+
+	t.Run("the mount is known but the note cannot be kept", func(t *testing.T) {
+		for _, c := range []struct {
+			svc          *compose.Service
+			logs, target string
+		}{
+			{saidNothing, saysNothing, "/data"},
+			{namedIt, namedItLogs, "/data/db"},
+		} {
+			want := crashUnrecordedText(c.target)
+			if got := at(t, unwritable(t)).chownCrashHint("cache", c.svc, c.logs); got != want {
+				t.Errorf("guidance changed:\n got: %q\nwant: %q", got, want)
+			}
+		}
+	})
+
+	t.Run("there is nowhere to keep the note at all", func(t *testing.T) {
+		// Without a project directory the record has no home, and the path it
+		// would otherwise use is relative — which lands in whatever directory the
+		// process happens to be in. This runs somewhere disposable and checks
+		// nothing was left there. (Defensive: every loaded project has a BaseDir.)
+		dir := t.TempDir()
+		t.Chdir(dir)
+		want := crashUnrecordedText("/data")
+		if got := at(t, "").chownCrashHint("cache", saidNothing, saysNothing); got != want {
+			t.Errorf("guidance changed:\n got: %q\nwant: %q", got, want)
+		}
+		if _, err := os.Stat(filepath.Join(dir, ".opossum")); err == nil {
+			t.Error("a project with no directory wrote its record into the working directory")
+		}
+	})
+
+	// Which shapes land on the unknown form. All of them get the same words, and
+	// those words state no reason — saying which would be a guess about the
+	// reader's own file. The service is named, so it is passed rather than fixed.
+	for _, c := range []struct {
+		name, service, logs string
+		svc                 *compose.Service
+	}{
+		{name: "several binds and a log naming none", service: "cache", logs: saysNothing,
+			svc: &compose.Service{Image: "redis:7-alpine", Volumes: []string{"./rdata:/data", "./conf:/usr/local/etc/redis"}}},
+		{name: "a named volume beside the bind", service: "store", logs: saysNothing,
+			svc: &compose.Service{Image: "redis:7-alpine", Volumes: []string{"cachedata:/data", "./conf:/usr/local/etc/redis"}}},
+		{name: "an anonymous volume beside the bind", service: "cache", logs: saysNothing,
+			svc: &compose.Service{Image: "redis:7-alpine", Volumes: []string{"/data", "./conf:/usr/local/etc/redis"}}},
+		{name: "a log naming a path nothing mounts", service: "db", logs: "chown: changing ownership of '/var/lib/postgresql/data': Operation not permitted",
+			svc: &compose.Service{Image: "postgres:17-alpine", Volumes: []string{"./init:/docker-entrypoint-initdb.d"}}},
+		{name: "mounts nested inside each other, so which one owns the path is a guess", service: "db",
+			logs: "chown: changing ownership of '/var/lib/postgresql/data/pg_wal': Operation not permitted",
+			svc:  &compose.Service{Image: "postgres:17-alpine", Volumes: []string{"./pg:/var/lib/postgresql/data", "./pgwal:/var/lib/postgresql/data/pg_wal"}}},
+	} {
+		want := crashUnknownText(c.service)
+		if got := at(t, t.TempDir()).chownCrashHint(c.service, c.svc, c.logs); got != want {
+			t.Errorf("%s:\n got: %q\nwant: %q", c.name, got, want)
+		}
+	}
+
+	// …and the shape that must reach the known form, because it is how Redis is
+	// usually written: a config file bound read-only is not a candidate and not a
+	// rival, since a database cannot run on one.
+	withConf := &compose.Service{Image: "redis:7-alpine", Volumes: []string{"./rdata:/data", "./redis.conf:/usr/local/etc/redis/redis.conf:ro"}}
+	want := crashKnownText("/data")
+	if got := at(t, t.TempDir()).chownCrashHint("cache", withConf, saysNothing); got != want {
+		t.Errorf("a read-only config bind should not take the suggestion away:\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// A named volume beside a bind is the ordinary way to write Redis, and the volume
+// is the likelier thing the image chowns. Blaming the bind would propose
+// detaching a directory that is working — and say a container died on it.
+func TestNothingIsBlamedWhenAVolumeCouldHaveBeenIt(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "conf"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, dir, "compose.yaml", `
+name: demo
+services:
+  cache:
+    image: redis:7-alpine
+    volumes:
+      - cachedata:/data
+      - ./conf:/usr/local/etc/redis
+volumes:
+  cachedata: {}
+`)
+	p0, err := compose.Load(filepath.Join(dir, "compose.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := New(p0, nil, "opossum", io.Discard)
+	o.crashHint("cache", "chown: .: Operation not permitted")
+	body, changes := o.PlanOverlay()
+	for _, c := range changes {
+		if c.Kind == "suggestion" {
+			t.Errorf("the container never named a directory and a volume could have been it; nothing should be proposed, got %q", c.Summary)
+		}
+	}
+	if strings.Contains(body, "/usr/local/etc/redis") {
+		t.Errorf("the config bind is working; it must not appear in the overlay:\n%s", body)
 	}
 }
 

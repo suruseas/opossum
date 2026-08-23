@@ -1,0 +1,24 @@
+# postgres:18-alpine / 18 が求める位置（/var/lib/postgresql）に bind mount を置いた場合（#485）
+# 上流は image（docker-library/postgres）。container CLI 1.2.2 / 2026-08-23
+# 案内が指す形——起動し、ホスト側に 18/ が作られる
+$ cat compose.yaml
+services:
+  s:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_PASSWORD: x
+    volumes:
+      - ./data:/var/lib/postgresql
+$ opossum up --no-supervisor
+Creating network pg18-bind-newdir-net
+Starting s (postgres:18-alpine)
+s.pg18-bind-newdir.opossum
+$ opossum ps | tail -1   # 見出し行は落としている
+s        s.pg18-bind-newdir.opossum  postgres:18-alpine  192.168.64.2  -      running
+$ ls -l data
+total 0
+drwxr-xr-x  3 <user>  staff  96 Aug 23 05:14 18
+$ opossum logs s | tail -3
+2026-08-22 20:14:47.555 UTC [1] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-08-22 20:14:47.560 UTC [61] LOG:  database system was shut down at 2026-08-22 20:14:47 UTC
+2026-08-22 20:14:47.564 UTC [1] LOG:  database system is ready to accept connections

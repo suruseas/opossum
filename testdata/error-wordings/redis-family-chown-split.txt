@@ -1,0 +1,42 @@
+# redis / valkey / redis-stack が chown で落ちるかどうかは image ごとに違う（#486）
+# 上流は image（docker-library/redis, valkey-io/valkey, redis-stack）。container CLI 1.2.2 / 2026-08-23
+# entrypoint は image から取り出した（container run --rm <ref> cat <path>）
+
+# ── redis:7-alpine / redis:7 ── entrypoint は両者バイト一致（714 bytes）
+$ container run -d -v <dir>:/data redis:7-alpine
+$ container logs <id>
+chown: .: Operation not permitted
+# → 起動せず stopped。無条件 chown（find . \! -user redis -exec chown redis '{}' +）＋ set -e
+
+# ── redis:8-alpine / redis:8 ── 4853 / 4863 bytes（差は shebang と setpriv の絶対パスだけ）
+$ container run -d -v <dir>:/data redis:8-alpine
+$ container exec <id> redis-cli set k v && container exec <id> redis-cli save
+OK
+OK
+$ ls -l <dir>
+-rw-------  1 <user>  staff  98 dump.rdb
+# → 起動してホスト側に書ける。ログに Warning は1行も無い（entrypoint 自身の
+#   echo "Starting Redis Server" は出ているので、entrypoint の stdout は拾えている）。
+#   entrypoint の中では chown が `err=$(chown redis "$file") || echo "Warning: …"` で
+#   包まれていて set -e では死ねない形になっているが、この run が示しているのは
+#   「死ななかった」ことだけで、chown を試して許されたのか、試さなかったのかは
+#   この出力からは決まらない
+
+# ── valkey/valkey:7-alpine と valkey/valkey:8-alpine ── entrypoint は両者バイト一致（811 bytes）
+$ container run -d -v <dir>:/data valkey/valkey:8-alpine
+$ container logs <id>
+chown: .: Operation not permitted
+# → 無条件 chown。redis 7 と同じ1行で落ちる（chown が出すメッセージなので valkey とは書かれない）
+
+# ── redis/redis-stack-server:latest ── /entrypoint.sh（docker-entrypoint.sh は無い）
+$ container run --rm redis/redis-stack-server:latest sh -c 'cat /entrypoint.sh' | grep -c chown
+0
+# → entrypoint に chown が1つも無い。走らせてはいないので、起動時に何をするかは
+#   このファイルでは測っていない
+
+# ── bind mount そのものの性質（redis:8-alpine の中から）
+$ chown redis .
+chown: .: Operation not permitted        # root でも chown できない
+$ setpriv --reuid redis --regid redis --clear-groups sh -c 'touch probe.out'
+$ ls -l <dir>
+-rw-------  1 <user>  staff  0 probe.out # それでも非 root は書ける

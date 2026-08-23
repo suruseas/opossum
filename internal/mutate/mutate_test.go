@@ -1,6 +1,7 @@
 package mutate
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -758,5 +759,400 @@ func TestNewRunnerActuallyRunsTheGoToolchain(t *testing.T) {
 	so, se, _ := r.Go("this-is-not-a-go-subcommand")
 	if so != "" || se == "" {
 		t.Errorf("the complaint should be on stderr alone, got stdout=%q stderr=%q", so, se)
+	}
+}
+
+// What the profile can speak for is a place — a line and a column — not a line.
+//
+// A coverage block runs from one column of one line to another column of another,
+// and both ends can land in the middle of a line that has more on it. The block
+// for an if-body ends at the closing brace, and an `else` on that same line
+// belongs to no block: matched by line alone it inherits the if-body's count,
+// which on a run that took the else branch is zero. A line the tests take every
+// time is then written up as one nothing reaches.
+//
+// Decided one way only. A match that is ambiguous, a file the profile never
+// mentions, a place no block covers — all of them say nothing, because saying
+// "nothing reaches this" about code that runs sends the reader after the wrong
+// problem, and saying nothing costs a note in a table.
+func TestWhichPlacesTheProfileCanSpeakFor(t *testing.T) {
+	// The last two lines of d/f.go are one block listed twice. Real profiles do
+	// that: with -coverpkg every test binary reports on every package it was told
+	// to count, so a package exercised by another package's tests comes back
+	// counted zero by its own binary and counted by theirs.
+	//
+	// e/f.go is the shape that needs columns: a block that ends at the first
+	// column of line 51, with code after it on that same line.
+	const prof = "mode: set\n" +
+		"example.com/m/internal/a/f.go:10.5,12.20 2 1\n" +
+		"example.com/m/internal/a/f.go:20.5,22.20 2 0\n" +
+		"example.com/m/internal/b/f.go:30.1,31.1 1 1\n" +
+		"example.com/m/internal/d/f.go:40.1,41.1 1 0\n" +
+		"example.com/m/internal/d/f.go:40.1,41.1 1 1\n" +
+		"example.com/m/internal/e/f.go:50.3,51.1 1 0\n"
+	for _, tc := range []struct {
+		name         string
+		file         string
+		at           Pos
+		ran, decided bool
+	}{
+		{"a place that ran", "internal/a/f.go", Pos{11, 1}, true, true},
+		{"a place in a block nothing ran", "internal/a/f.go", Pos{21, 1}, false, true},
+		{"where a block begins", "internal/a/f.go", Pos{10, 5}, true, true},
+		// Before the block begins, on the block's own first line.
+		{"left of where a block begins", "internal/a/f.go", Pos{10, 4}, false, false},
+		{"inside a block's last line", "internal/a/f.go", Pos{12, 19}, true, true},
+		// The end column is where the block stops, not part of it.
+		{"where a block ends", "internal/a/f.go", Pos{12, 20}, false, false},
+		// The `else` case: the only block naming line 51 stops at column 1.
+		{"past the end of the only block on the line", "internal/e/f.go", Pos{51, 2}, false, false},
+		{"inside that block", "internal/e/f.go", Pos{50, 3}, false, true},
+		{"a line no block covers", "internal/a/f.go", Pos{99, 1}, false, false},
+		{"a line before every block in the file", "internal/a/f.go", Pos{1, 1}, false, false},
+		// Counted zero by one binary and counted by another: something ran it.
+		{"a block listed twice, run by one of them", "internal/d/f.go", Pos{40, 1}, true, true},
+		// Two files end the same way, so the tail cannot say which is meant.
+		{"a name that matches more than one file", "f.go", Pos{11, 1}, false, false},
+		// The profile never mentions it — the package may not have been run at all.
+		{"a file the profile does not mention", "internal/c/f.go", Pos{1, 1}, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ran, decided := Executed([]byte(prof), tc.file, tc.at)
+			if ran != tc.ran || decided != tc.decided {
+				t.Errorf("Executed(%q, %d.%d) = (%v, %v), want (%v, %v)",
+					tc.file, tc.at.Line, tc.at.Col, ran, decided, tc.ran, tc.decided)
+			}
+		})
+	}
+}
+
+// The line a mutation lands on, counted from the byte it starts at.
+func TestTheLineAMutationLandsOn(t *testing.T) {
+	src := []byte("package m\n\nfunc A() int {\n\treturn 1\n}\n")
+	for _, tc := range []struct {
+		name string
+		at   int
+		want int
+	}{
+		{"the first byte", 0, 1},
+		{"just before a newline", 8, 1},
+		{"just after a newline", 10, 2},
+		{"inside the body", bytes.Index(src, []byte("return")), 4},
+		{"the last byte", len(src), 6},
+		// Not a position in this file at all: say nothing rather than a number
+		// that reads like an answer.
+		{"past the end", len(src) + 1, 0},
+		{"before the start", -1, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := LineOf(src, tc.at); got != tc.want {
+				t.Errorf("LineOf(%d) = %d, want %d", tc.at, got, tc.want)
+			}
+		})
+	}
+}
+
+// The baseline and the run that decides a mutation's fate are instrumented the
+// same way, and only the baseline writes a profile.
+//
+// Coverage costs time. A baseline measured in a cheaper configuration than the
+// runs it vouches for is no baseline at all: a test with a deadline in it passes
+// there and fails under every mutation, and the sweep reports a suite that caught
+// everything. So the instrumentation has to match.
+//
+// Only one profile is taken, and it is the baseline's, because which lines the
+// tests run is a question about the tree the author wrote. Reading it from a
+// mutated tree lets a mutation silence its own line and be reported as code no
+// test reaches.
+func TestTheBaselineAndTheDecidingRunAreInstrumentedAlike(t *testing.T) {
+	f := newFake(t, map[string]string{"x.go": "call()"})
+	f.testOut["noop()"] = passJSON
+	var runs [][]string
+	inner := f.Runner.Go
+	f.Runner.Go = func(args ...string) (string, string, error) {
+		if args[0] == "test" {
+			runs = append(runs, append([]string(nil), args...))
+		}
+		return inner(args...)
+	}
+
+	if _, err := f.Sweep([]Mutation{mut()}); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("the suite ran %d times for one mutation; it should be the baseline and the "+
+			"mutation, and a second measured run could disagree with the first", len(runs))
+	}
+	instrumented := func(args []string) (cover bool, pkg string, profiles int) {
+		for _, a := range args {
+			switch {
+			case a == "-cover":
+				cover = true
+			case strings.HasPrefix(a, "-coverprofile="):
+				cover, profiles = true, profiles+1
+			case strings.HasPrefix(a, "-coverpkg="):
+				pkg = a
+			}
+		}
+		return
+	}
+	baseCover, basePkg, baseProfiles := instrumented(runs[0])
+	mutCover, mutPkg, mutProfiles := instrumented(runs[1])
+	if !baseCover || !mutCover {
+		t.Errorf("instrumented: baseline %v, mutation %v — a baseline run in a cheaper "+
+			"configuration vouches for a suite nobody else runs", baseCover, mutCover)
+	}
+	if basePkg != mutPkg {
+		t.Errorf("the two runs disagree about which packages are counted: %q and %q", basePkg, mutPkg)
+	}
+	if basePkg == "" {
+		t.Error("no -coverpkg: a package exercised only by another package's tests comes back " +
+			"counted zero, and a live survivor is then reported as a line nothing reaches")
+	}
+	if baseProfiles != 1 || mutProfiles != 0 {
+		t.Errorf("profiles written: baseline %d, mutation %d — reach is a question about the "+
+			"tree as it was, so the baseline's is the only one that answers it", baseProfiles, mutProfiles)
+	}
+}
+
+// A suite that passes plain and fails when measured is stopped at the baseline,
+// not reported as a suite that catches everything.
+//
+// Coverage instrumentation makes the tests slower — enough that a test written
+// with a deadline in it can pass one way and fail the other. If the baseline is
+// run plain while the run that decides is measured, the baseline sees green, and
+// then every mutation is red for a reason that has nothing to do with the
+// mutation. The sweep reports that the suite caught all of them and exits 0: the
+// most reassuring thing it can say, and it measured nothing.
+//
+// The baseline exists to notice exactly this, and it can only notice it if it is
+// run the same way as the run it is a baseline for.
+func TestASuiteThatOnlyFailsWhenMeasuredIsCaughtByTheBaseline(t *testing.T) {
+	f := newFake(t, map[string]string{"x.go": "call()"})
+	f.testOut["noop()"] = passJSON
+	inner := f.Runner.Go
+	f.Runner.Go = func(args ...string) (string, string, error) {
+		for _, a := range args {
+			if strings.HasPrefix(a, "-coverprofile=") {
+				// The deadline in the test does not survive the instrumentation.
+				return failJSON("TestFinishesInTime"), "", errors.New("exit 1")
+			}
+		}
+		return inner(args...)
+	}
+
+	res, err := f.Sweep([]Mutation{mut()})
+	if err == nil {
+		t.Fatalf("the sweep ran to the end and reported %v; a suite that is red the way the "+
+			"mutations are run cannot be a baseline for them", res)
+	}
+	if !strings.Contains(err.Error(), "TestFinishesInTime") {
+		t.Errorf("the error should name the test that is already failing, got: %v", err)
+	}
+	for _, r := range res {
+		if r.Outcome == Caught {
+			t.Errorf("%q was reported as caught, by a test that fails without it", r.Mutation.Name)
+		}
+	}
+}
+
+// When the reach could not be measured, the report says so.
+//
+// The outcome is `Survived` either way — whether the tests reach the line is a
+// note, not a verdict. But a survivor with nothing beside it reads as "a test
+// runs this line and does not mind the defect", and that is a stronger claim
+// than what happened. Saying that the reach could not be measured is the
+// difference between a survivor and a survivor nobody could check.
+func TestASurvivorWhoseReachCouldNotBeMeasuredSaysSo(t *testing.T) {
+	f := newFake(t, map[string]string{"x.go": "call()"})
+	f.testOut["noop()"] = passJSON
+	inner := f.Runner.Go
+	f.Runner.Go = func(args ...string) (string, string, error) {
+		for _, a := range args {
+			if p, ok := strings.CutPrefix(a, "-coverprofile="); ok {
+				// A run that wrote no profile: killed, out of disk, a toolchain
+				// that never got as far as writing one.
+				os.Remove(p)
+			}
+		}
+		return inner(args...)
+	}
+
+	res, err := f.Sweep([]Mutation{mut()})
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if len(res) != 1 || res[0].Outcome != Survived {
+		t.Fatalf("an unmeasurable reach must leave the louder reading, got %v", res)
+	}
+	if !strings.Contains(res[0].Detail, "could not be measured") {
+		t.Errorf("the report should say the reach was not ruled out, got detail %q", res[0].Detail)
+	}
+}
+
+// What a survivor's report could not establish is said in the table, not only in
+// the running log.
+//
+// The table is what gets pasted into a pull request; the log scrolls past in a
+// terminal. A survivor whose reach could not be measured is a weaker finding than
+// one whose reach was measured — "invisible to the suite" is the louder of two
+// readings there, not an established one — and the difference has to survive the
+// trip into the report or it may as well not have been recorded.
+func TestASurvivorsUnmeasuredReachSurvivesIntoTheTable(t *testing.T) {
+	out := Report([]Result{{
+		Mutation: Mutation{Name: "the wire is cut"},
+		Outcome:  Survived,
+		Detail:   "whether any test reaches m.go:5 could not be measured",
+	}})
+	if !strings.Contains(out, "could not be measured") {
+		t.Errorf("the table dropped what the run could not establish:\n%s", out)
+	}
+	if !strings.Contains(out, "invisible to the suite") {
+		t.Errorf("it is still a survivor and the table should say so:\n%s", out)
+	}
+}
+
+// A mutation is measured where it actually changes something, and nowhere else.
+//
+// A pattern has to match exactly once, and the way to make it match once is to
+// widen it, which the guidance for writing one says to do. Widened, it carries
+// lines the mutation leaves exactly as they were — above it, below it, and in
+// between when one mutation changes two places at once — and every one of them
+// borrows in a direction that misleads. Above and below: a change the tests run,
+// written up as unreachable code. In between: a change nothing runs, passing for
+// one the tests watch.
+//
+// The column matters as much as the line. A pattern rarely starts at the left
+// margin, and the block that covers the rest of that line may not cover where the
+// pattern begins.
+func TestWhereAMutationChangesSomething(t *testing.T) {
+	src := []byte("package m\n\nfunc Total(xs []int) int {\n\ttotal := 0\n\n\tfor _, x := range xs {\n\t\ttotal += x\n\t}\n\treturn total\n}\n")
+	for _, tc := range []struct {
+		name, from, to string
+		want           []Pos
+	}{
+		{"the pattern is the change", "return total", "return 0", []Pos{{9, 9}}},
+		// The pattern starts on 8; nothing on 8 changes.
+		{"widened with the closing brace above", "\t}\n\treturn total", "\t}\n\treturn 0", []Pos{{9, 9}}},
+		// The pattern starts on 4, a line the tests certainly run.
+		{"widened with a line of code above", "total := 0\n\n\tfor _, x := range xs {", "total := 0\n\n\tfor _, x := range nil {", []Pos{{6, 20}}},
+		{"widened with a blank line above", "\n\tfor _, x := range xs {", "\n\tfor _, x := range nil {", []Pos{{6, 20}}},
+		{"past the indentation, where the change is", "\t\ttotal += x", "\t\ttotal -= x", []Pos{{7, 9}}},
+		{"the replacement only removes", "total += x", "total", []Pos{{7, 8}}},
+		// Two changes, four lines apart, with an unchanged line carried between
+		// them. The unchanged one is not part of the mutation.
+		{"two changes with a passenger between", "total := 0\n\n\tfor _, x := range xs {\n\t\ttotal += x", "total := 1\n\n\tfor _, x := range xs {\n\t\ttotal -= x", []Pos{{4, 11}, {7, 9}}},
+		// Different numbers of lines: which became which is a guess, so the whole
+		// span counts as changed. An unchanged line in it can still silence the
+		// note, which is the quiet direction.
+		{"the replacement has more lines", "return total", "x := total\n\treturn x", []Pos{{9, 2}}},
+		// The replacement is shorter, so whole lines go. Each of them is asked
+		// about where its code starts: at the margin they would fall outside every
+		// block and answer nothing — and these are exactly the lines that can show
+		// the change being run and let the note fall silent.
+		{"the replacement has fewer lines", "\tfor _, x := range xs {\n\t\ttotal += x\n\t}", "\ttotal = 0",
+			[]Pos{{6, 2}, {7, 3}, {8, 2}}},
+		// The pattern ends at a line boundary. It does not reach into the line
+		// after it, and a place invented there is about code it never touched.
+		{"the pattern ends with a break", "\tfor _, x := range xs {\n\t\ttotal += x\n\t}\n", "",
+			[]Pos{{6, 2}, {7, 3}, {8, 2}}},
+		{"a pattern that is not there", "return nothing", "x", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := changedPlaces(src, tc.from, tc.to)
+			if len(got) != len(tc.want) {
+				t.Fatalf("changedPlaces(%q -> %q) = %v, want %v", tc.from, tc.to, got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("changedPlaces(%q -> %q)[%d] = %d.%d, want %d.%d — this is where the "+
+						"note about reaching the mutation is looked up",
+						tc.from, tc.to, i, got[i].Line, got[i].Col, tc.want[i].Line, tc.want[i].Col)
+				}
+			}
+		})
+	}
+}
+
+// Whatever the coverage says, a mutation the suite let through is a survivor.
+//
+// This is the guarantee the note rests on, and the reason it is allowed to be
+// imprecise. Deciding the reach turned out to be hard: six attempts at making it
+// an outcome produced six ways of calling a line the tests run a line nothing
+// reaches, and each of those sent a reader off to work out why live code was
+// dead. As a note it can still be wrong, and the reader is looking at a survivor
+// with a misleading hint beside it — the work in front of them, writing the test,
+// does not change.
+//
+// That only holds while nothing downstream reads the note. Pinned here because
+// the cheap way to make the reach useful again is to let it decide something,
+// and this is the line that must not be crossed.
+func TestTheReachNeverDecidesTheOutcome(t *testing.T) {
+	const reached = "mode: set\nexample.com/m/x.go:1.1,99.1 1 1\n"
+	const notReached = "mode: set\nexample.com/m/x.go:1.1,99.1 1 0\n"
+	for _, tc := range []struct{ name, profile string }{
+		{"the coverage says the line runs", reached},
+		{"the coverage says nothing runs it", notReached},
+		{"there is no coverage at all", ""},
+		{"the coverage is unreadable", "not a profile\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFake(t, map[string]string{"x.go": "call()"})
+			f.testOut["noop()"] = passJSON
+			f.Runner.reach = []byte(tc.profile)
+			// The baseline overwrites reach, so hold this one in place.
+			inner := f.Runner.Go
+			f.Runner.Go = func(args ...string) (string, string, error) {
+				out, errOut, err := inner(args...)
+				f.Runner.reach = []byte(tc.profile)
+				return out, errOut, err
+			}
+
+			res, err := f.Sweep([]Mutation{mut()})
+			if err != nil {
+				t.Fatalf("Sweep: %v", err)
+			}
+			if len(res) != 1 || res[0].Outcome != Survived {
+				t.Fatalf("the suite passed with the defect in place; that is a survivor whatever "+
+					"the coverage says, got %v", res)
+			}
+		})
+	}
+}
+
+// The note names the lines the coverage answered for, and no others.
+//
+// Two ways to name more than was measured. A range takes in the untouched lines
+// a widened pattern carried between two changes — asked about deliberately, and
+// deliberately left out — so a reader who checks one of them finds the note
+// saying something false about it. And among the lines that were asked about,
+// the ones no coverage block covers were not ruled out by anything: listed
+// beside the ones that were, they borrow a certainty the profile never gave.
+func TestTheNoteNamesOnlyWhatWasMeasured(t *testing.T) {
+	// Lines 10 and 30 are covered and unrun. Line 20, between them, is covered
+	// and run. Line 40 is in no block at all.
+	const prof = "mode: set\n" +
+		"example.com/m/x.go:10.1,10.9 1 0\n" +
+		"example.com/m/x.go:20.1,20.9 1 1\n" +
+		"example.com/m/x.go:30.1,30.9 1 0\n"
+	r := &Runner{reach: []byte(prof)}
+	for _, tc := range []struct {
+		name   string
+		places []Pos
+		want   string
+	}{
+		{"two unrun lines with a run one between", []Pos{{10, 1}, {30, 1}},
+			"no test this sweep ran appears to reach x.go:10, 30, in the baseline's coverage"},
+		{"one of them unrun, one unmeasured", []Pos{{10, 1}, {40, 1}},
+			"no test this sweep ran appears to reach x.go:10, in the baseline's coverage"},
+		{"nothing measured at all", []Pos{{40, 1}, {41, 1}},
+			"whether any test reaches x.go:40, 41 could not be measured"},
+		{"one of them ran", []Pos{{10, 1}, {20, 1}}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := r.noteFor("x.go", tc.places); got != tc.want {
+				t.Errorf("note = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

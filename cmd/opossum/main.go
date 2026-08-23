@@ -1092,7 +1092,11 @@ func adaptProject(stderr io.Writer, o *orchestrator.Orchestrator, dryRun bool) (
 		if _, changes := o.PlanOverlay(); len(changes) > 0 {
 			fmt.Fprintf(stderr, "opossum: found %d change(s) this project needs, but -f was given — "+
 				"an overlay is only merged when opossum discovers the compose file itself. "+
-				"Re-run without -f to have them written, or apply them by hand (see the warnings below).\n", len(changes))
+				"Re-run without -f to have them written, or apply them by hand:\n", len(changes))
+			// Listed here rather than pointing at warnings further down: on this
+			// path there are none. A reader told to apply changes by hand has to be
+			// able to see which.
+			reportEntries(stderr, changes)
 		}
 		return nil, nil
 	}
@@ -1145,8 +1149,9 @@ func adaptProject(stderr io.Writer, o *orchestrator.Orchestrator, dryRun bool) (
 		// The overlay is a convenience. A directory we can't write to, or a file
 		// that doesn't survive its own self-check, must not turn an `up` that used
 		// to work into a failure — fall back to the warnings `up` already prints.
-		fmt.Fprintf(stderr, "opossum: couldn't write %s (%v) — starting without it; "+
-			"the warnings below say what to change by hand\n", orchestrator.OverlayFileName, err)
+		fmt.Fprintf(stderr, "opossum: couldn't write %s (%v) — starting without it. "+
+			"What it would have contained:\n", orchestrator.OverlayFileName, err)
+		reportEntries(stderr, changes)
 		return nil, nil
 	}
 	reportOverlay(stderr, "wrote", changes)

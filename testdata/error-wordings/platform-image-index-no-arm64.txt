@@ -1,0 +1,8 @@
+Creating network w1-net
+Starting room (excalidraw/excalidraw-room:latest)
+[0/6] [0s]
+[1/6] Fetching image [0s]
+[1/6] Fetching image [0s]
+Error: platform linux/arm64
+opossum: starting service "room": exit status 1
+  → [OPSM-412] this image has no build for Apple silicon (arm64). Add `platform: linux/amd64` to the service — opossum runs an amd64 image through Rosetta.

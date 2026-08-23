@@ -80,7 +80,6 @@ const mysqlDataDir = "/var/lib/mysql"
 // the same way (the container starts, chowns its data directory, and exits):
 //
 //	clickhouse  chown: /var/lib/clickhouse/: Operation not permitted
-//	redis       chown: .: Operation not permitted
 //	mongo       chown: changing ownership of '/data/db': Operation not permitted
 //
 // The trap is that `up` reports success and exits 0: the container is created and
@@ -93,7 +92,6 @@ const (
 	// the first leaves the container dying on the second — with the change already
 	// announced as the fix and the user's directory already detached.
 	mongoConfigDir = "/data/configdb"
-	redisDataDir   = "/data"
 )
 
 // dbDataDir pairs a database's data directory with the images that own it. Both
@@ -121,9 +119,6 @@ var dbDataDirs = []dbDataDir{
 	{clickhouseDataDir, []string{"clickhouse", "clickhouse-server"}},
 	{mongoDataDir, []string{"mongo", "mongodb", "mongodb-community-server"}},
 	{mongoConfigDir, []string{"mongo", "mongodb", "mongodb-community-server"}},
-	// `/data` is a generic path, so the image name carries all the weight here —
-	// which is exactly why the match is exact rather than a substring.
-	{redisDataDir, []string{"redis", "redis-stack", "redis-stack-server", "valkey"}},
 }
 
 // imageName reduces an image reference to its bare name: the last path segment,
@@ -145,12 +140,12 @@ func imageName(ref string) string {
 
 // serverCommands are the entrypoint arguments that make a database image behave
 // as the server. The official images only chown their data directory on that
-// path: redis chowns when argv[0] is `redis-server`, mongo when it's `mongod`.
+// path: mongo chowns when argv[0] is `mongod`, postgres when it's `postgres`.
 // A sidecar built on the same image to dump, restore or poke at the data
 // (`redis-cli`, `mongodump`, a shell) reads a bind mount perfectly well — and
 // rewriting it would swap that service's real data for an empty volume.
 var serverCommands = map[string]bool{
-	"redis-server": true, "mongod": true, "clickhouse-server": true, "clickhouse": true,
+	"mongod": true, "clickhouse-server": true, "clickhouse": true,
 	"postgres": true, "docker-entrypoint.sh": true,
 	"mysqld": true, "mysqld_safe": true, "mariadbd": true,
 }
@@ -166,6 +161,268 @@ func runsAsServer(svc *compose.Service) bool {
 		return true // the image's default: the server
 	}
 	return serverCommands[pathLeaf(svc.Command[0])]
+}
+
+// pgdataSource says how the answer about a Postgres image's data directory was
+// come by. "Asked and told nothing" is not the same as "could not ask", and the
+// overlay says which, so a reader is never told the image was unreachable when it
+// simply declares nothing.
+type pgdataSource int
+
+const (
+	// Unreachable is the zero value on purpose: a path that never asked must not
+	// come back looking like a reading.
+	pgdataUnreachable pgdataSource = iota // the image is not here to be asked
+	pgdataRead                            // it was declared, by the image or the service
+	pgdataNotDeclared                     // the image answered and declares none
+)
+
+// dataDirDecision is where a service's cluster actually goes, and who said so.
+//
+// It is one value, made in one place, because three rounds of review found the
+// same defect three times: the answer was right where it was computed and wrong
+// where it was described, since every site worked it out again. Anything that
+// needs to say where the data directory is — the swap, the comment on it, the note
+// when there is no fix — takes this and does not ask again.
+type dataDirDecision struct {
+	path   string
+	source pgdataSource
+	// byService is true when the compose file sets PGDATA: a container's
+	// environment overrides the image's, so then the image's declaration is not
+	// what will happen.
+	byService bool
+	// valueUnknown is true when the service sets PGDATA without a value opossum can
+	// read — `environment: [PGDATA]` passes the host's through. What the image
+	// declares is the best guess left, and saying so is the point.
+	valueUnknown bool
+}
+
+// explain is how the overlay tells a reader where this came from. Every wording
+// about the data directory goes through here, so a reader is never told the image
+// decided something the service did.
+func (d dataDirDecision) explain() []string {
+	switch {
+	case d.byService && d.valueUnknown:
+		// Where the fallback came from still has to be said: "the image declares" is
+		// a claim, and this branch reaches it having asked, having been told nothing,
+		// or not having asked at all.
+		lead := "This service passes PGDATA in from the environment, so where its cluster"
+		switch d.source {
+		case pgdataRead:
+			return []string{lead, fmt.Sprintf("goes cannot be read here; %s is what the image declares.", esc(d.path))}
+		case pgdataNotDeclared:
+			return []string{lead, fmt.Sprintf("goes cannot be read here, and the image declares none; %s is", esc(d.path)),
+				"the path the Postgres images use by default."}
+		default:
+			return []string{lead, "goes cannot be read here, and the image was not here to be asked;",
+				fmt.Sprintf("%s is the path the Postgres images used through 17.", esc(d.path))}
+		}
+	case d.byService:
+		return []string{fmt.Sprintf("The data directory is the one this service sets: PGDATA=%s.", esc(d.path))}
+	case d.source == pgdataRead:
+		return []string{fmt.Sprintf("The data directory is the one this image declares: PGDATA=%s.", esc(d.path))}
+	case d.source == pgdataNotDeclared:
+		return []string{
+			fmt.Sprintf("This image declares no PGDATA, so %s is the path the Postgres", esc(d.path)),
+			"images use by default.",
+		}
+	default:
+		return []string{
+			fmt.Sprintf("The image was not here to be asked, so %s is the path the", esc(d.path)),
+			"Postgres images used through 17. Postgres 18 moved it; if the container",
+			fmt.Sprintf("exits at startup, %s says where it goes now.", codePGVersionedLayout),
+		}
+	}
+}
+
+// oneLine keeps a value from an image or a compose file inside the line it is
+// written on: a stray newline in either would carry YAML out of a comment block
+// and cost the whole overlay.
+func oneLine(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < ' ' || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, s)
+}
+
+// whyNoPGDATA names the one thing that stopped opossum writing the other half,
+// rather than listing both and leaving the reader to work out which applies.
+func (d dataDirDecision) whyNoPGDATA() string {
+	switch {
+	case d.valueUnknown:
+		return "this service passes PGDATA in from the environment"
+	case d.byService:
+		return "this service sets its own PGDATA"
+	}
+	return "this service mounts something below the data directory"
+}
+
+// who is the clause for a one-line summary that has to attribute the path. The
+// reasoning behind it belongs to explain, which every comment goes through, so the
+// two can never disagree.
+func (d dataDirDecision) who() string {
+	if d.byService {
+		return "this service points PGDATA at"
+	}
+	return "this image keeps its cluster in"
+}
+
+// postgresDataDirFor asks the image where it keeps its data, since it says so:
+// the Postgres images declare PGDATA, and 18 moved it from
+// /var/lib/postgresql/data to a version subdirectory below /var/lib/postgresql.
+// A constant here could only find that out by being wrong, which is what happened.
+//
+// asked is false when the image cannot be reached — `up --from-docker-compose`
+// writes the overlay before anything is pulled, so this is the ordinary case, not
+// an edge — and the caller says so in the comment it writes rather than passing an
+// assumption off as a reading.
+func (o *Orchestrator) postgresDataDirFor(svc *compose.Service) dataDirDecision {
+	// The service's own PGDATA wins: a container's environment overrides the
+	// image's, so when the compose file sets it, where the image would have
+	// initialised is no longer where it will.
+	// The value ends up in a comment block, so it is kept on its line — the service's
+	// as much as the image's, and this one wins over the image's.
+	if p := strings.TrimRight(oneLine(servicePGDATA(svc)), "/"); p != "" {
+		// The image still answers for what its entrypoint does; only the path is the
+		// service's. Asking costs one inspect, remembered per image.
+		return dataDirDecision{path: p, source: pgdataRead, byService: true}
+	}
+	d := o.imageDataDir(svc)
+	// A PGDATA with no value opossum can read still overrides the image at runtime.
+	// The image's path is the best guess left, and the wording says as much.
+	if hasPGDATA(svc) {
+		d.byService, d.valueUnknown = true, true
+	}
+	return d
+}
+
+// imageDataDir is what the image says, with nothing from the compose file.
+func (o *Orchestrator) imageDataDir(svc *compose.Service) dataDirDecision {
+	if o.rt == nil || svc.Image == "" {
+		// Nobody to ask: a caller planning without a runtime (the plan is printed,
+		// not run). An empty Image is rare — the loader fills in a derived tag for a
+		// service that builds — but it costs nothing to answer the same way.
+		return dataDirDecision{path: postgresDataDir, source: pgdataUnreachable}
+	}
+	env, ok := o.imageEnv(svc.Image)
+	if !ok {
+		return dataDirDecision{path: postgresDataDir, source: pgdataUnreachable}
+	}
+	if p := strings.TrimRight(oneLine(env["PGDATA"]), "/"); p != "" {
+		// The value comes from the image and ends up in a comment block, so it is
+		// kept on its line: a stray newline would carry YAML into the overlay and
+		// cost the whole file.
+		return dataDirDecision{path: p, source: pgdataRead}
+	}
+	return dataDirDecision{path: postgresDataDir, source: pgdataNotDeclared}
+}
+
+// servicePGDATA returns the PGDATA the compose file sets on this service, or "".
+func servicePGDATA(svc *compose.Service) string {
+	for _, e := range svc.Environment {
+		if name, value, ok := strings.Cut(e, "="); ok && name == "PGDATA" {
+			return value
+		}
+	}
+	return ""
+}
+
+// imageEnv is ImageEnv with the answer remembered: planning an overlay asks about
+// the same image for every mount it considers, and each ask is a process.
+func (o *Orchestrator) imageEnv(ref string) (map[string]string, bool) {
+	if o.imageEnvs == nil {
+		o.imageEnvs = map[string]map[string]string{}
+	}
+	if env, seen := o.imageEnvs[ref]; seen {
+		return env, env != nil
+	}
+	env, ok := o.rt.ImageEnv(ref)
+	if !ok {
+		env = nil
+	}
+	o.imageEnvs[ref] = env
+	return env, ok
+}
+
+// swapHelpsHere reports whether moving this mount to a named volume is a fix,
+// and how the answer was come by.
+//
+// The swap exists because the image chowns the directory it is handed, and a bind
+// mount cannot be chowned from inside. Whether that is this directory depends on
+// where the cluster actually goes: the Postgres images declare PGDATA, and a
+// service that sets its own overrides them. Three shapes, each measured on the real
+// runtime and kept in testdata/error-wordings/:
+//
+//   - declared AT this mount (17 and earlier) — the image chowns the mount itself
+//     and a bind mount fails: pg17-bind-old-datadir.txt. Swap.
+//   - declared BELOW this mount — the image makes that subdirectory inside the
+//     mount and chowns what it made, so a bind mount works and moving it would
+//     take the data somewhere the user did not ask for:
+//     pg-image-declares-pgdata-below-the-mount.txt. Leave it.
+//   - declared SOMEWHERE ELSE (18 keeps its cluster under /var/lib/postgresql)
+//     — the image will not look at this mount at all unless PGDATA is set to point
+//     back into it. What it does about that depends on its entrypoint — 18 refuses
+//     to start rather than ignore the mount (pg18-named-old-datadir.txt, which also
+//     carries the OPSM-110 line), 17 runs and leaves it empty
+//     (pg17-service-pgdata-elsewhere.txt) — and both shapes, with the runs they
+//     come from, are written down in OPSM-111's entry in AGENTS.md rather than in
+//     the note. The pair
+//     (named volume plus that PGDATA) does start:
+//     pg18-named-old-datadir-with-pgdata.txt. So the swap goes in only alongside the PGDATA
+//     half, and when that half cannot be written, neither goes in.
+//
+// needsPGDATA is true for the third shape: the caller has to know the swap is only
+// half of the fix.
+func (o *Orchestrator) swapHelpsHere(svc *compose.Service, target string) (helps, needsPGDATA bool, d dataDirDecision) {
+	if !ownsDataDir(svc, target) {
+		return false, false, dataDirDecision{path: target}
+	}
+	if !isPostgresImage(svc) {
+		return true, false, dataDirDecision{path: target}
+	}
+	d = o.postgresDataDirFor(svc)
+	switch {
+	case d.source != pgdataRead:
+		// Nothing was read, so this is the answer opossum has always written, and
+		// the comment says it was assumed.
+		return true, false, d
+	case d.path == target:
+		return true, false, d
+	case strings.HasPrefix(d.path, target+"/"):
+		return false, false, d
+	default:
+		return true, true, d
+	}
+}
+
+// isPostgresImage reports whether the service runs one of the Postgres images the
+// data-directory table knows, which are the ones that declare PGDATA.
+func isPostgresImage(svc *compose.Service) bool {
+	name := imageName(svc.Image)
+	for _, d := range dbDataDirs {
+		if d.path != postgresDataDir {
+			continue
+		}
+		for _, img := range d.images {
+			if name == img {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// howWeKnowTheDataDir says whether the data directory in this change was read
+// from the image or assumed, so the reader is never left guessing which. The
+// Postgres images declare it and moved it in 18; when the image is not here to be
+// asked, what is written is the path they used through 17.
+func howWeKnowTheDataDir(svc *compose.Service, d dataDirDecision) []string {
+	if !isPostgresImage(svc) {
+		return nil
+	}
+	return d.explain()
 }
 
 // ownsDataDir reports whether svc looks like the database that owns target — i.e.
@@ -271,13 +528,68 @@ func (o *Orchestrator) adaptService(name string, svc *compose.Service, claimed m
 		return nil
 	}
 	var out []serviceAdaptation
-	swaps, swappedPostgres := o.adaptBindMountedDataDir(name, svc, claimed)
+	// Ask first whether the PGDATA half is available: for an image that initialises
+	// somewhere other than the mount, the swap is only a fix alongside it.
+	_, pgdataFixApplies := o.adaptPGDATA(name, svc, true)
+	swaps, swappedPostgres := o.adaptBindMountedDataDir(name, svc, claimed, pgdataFixApplies)
 	out = append(out, swaps...)
 	if p, ok := o.adaptPGDATA(name, svc, swappedPostgres); ok {
 		out = append(out, p)
 	}
 	out = append(out, o.noteUnfixable(name, svc)...)
 	return out
+}
+
+// notePGDATAHalfMissing writes down the case opossum finds and will not fix: a
+// Postgres image that keeps its cluster somewhere other than the directory this
+// mount lands on, where the swap to a named volume only works
+// alongside a PGDATA pointing back into it — and that half cannot be written here.
+// Three things stop it, and all are reachable from here: the service sets its own
+// PGDATA, passes one in from the environment, or mounts something below the data
+// directory. The external-volume
+// case in adaptPGDATA is not: this path only ever sees bind mounts.
+//
+// Writing nothing would leave a reader to meet the trouble with no sign opossum
+// knew. What that trouble is depends on the image, and the shapes it comes in —
+// with the run each was measured in — are in OPSM-111's entry in AGENTS.md rather
+// than here, so this note reads the same whatever the image turns out to be.
+func (o *Orchestrator) notePGDATAHalfMissing(name string, svc *compose.Service, target string, d dataDirDecision) serviceAdaptation {
+	var what, fact string
+	if !d.valueUnknown {
+		what = fmt.Sprintf("service %q: %s is a bind mount, and %s %s instead — left as it is",
+			name, target, d.who(), d.path)
+		fact = fmt.Sprintf("The cluster this service will write does not land in %s.", esc(target))
+	} else {
+		// The line most readers see is this one — a note-only overlay is not written
+		// at all (#491) — so it hedges where the body does.
+		what = fmt.Sprintf("service %q: %s is a bind mount, and PGDATA comes in from the environment — left as it is",
+			name, target)
+		fact = "Whether it lands in this mount therefore cannot be read here either."
+	}
+	return serviceAdaptation{
+		Adaptation: Adaptation{Service: name, Code: string(codeDataDirNotThisMount), Summary: what, Kind: "note"},
+		class:      classNote,
+		comment: noteBlock(
+			fmt.Sprintf("%s service %q: %s left as a bind mount.", noteMarker, esc(name), esc(target)),
+			append(append(d.explain(), fact), d.secondHalf()...),
+			[]string{
+				fmt.Sprintf("%s in AGENTS.md has the shapes this comes in, what each costs,", codeDataDirNotThisMount),
+				"and what to change.",
+			},
+		),
+	}
+}
+
+// secondHalf says why the mount was left rather than swapped. It is the same
+// sentence in every shape on purpose: fourteen rounds of review found a defect in
+// this note ten times, and every one of them was in a sentence that varied by
+// branch. What varies belongs in the code's entry in AGENTS.md, where each line
+// can name the run it comes from.
+func (d dataDirDecision) secondHalf() []string {
+	return []string{
+		"opossum left it alone: moving it to a named volume only helps together with",
+		fmt.Sprintf("a PGDATA pointing back into it, and that could not be written here (%s).", d.whyNoPGDATA()),
+	}
 }
 
 // noteUnfixable records the problems opossum finds but will not change: things the
@@ -378,7 +690,7 @@ func noteBlock(what string, why, expect []string) string {
 // volume. This MOVES WHERE THE DATA LIVES (out of the host directory, into a
 // volume the runtime manages), so the generated comment says so plainly — it's the
 // one automated change a user could be surprised by.
-func (o *Orchestrator) adaptBindMountedDataDir(name string, svc *compose.Service, claimed map[string]bool) ([]serviceAdaptation, bool) {
+func (o *Orchestrator) adaptBindMountedDataDir(name string, svc *compose.Service, claimed map[string]bool, pgdataFixApplies bool) ([]serviceAdaptation, bool) {
 	var out []serviceAdaptation
 	swappedPostgres := false
 	for _, v := range svc.Volumes {
@@ -389,9 +701,18 @@ func (o *Orchestrator) adaptBindMountedDataDir(name string, svc *compose.Service
 		// Both must hold: the path is a database data directory AND this service
 		// is the database that owns it. A read-only mount rules it out — a database
 		// can't run on one, so the service is something else looking at the files.
-		if !ownsDataDir(svc, target) || readOnlyMount(mode) || !runsAsServer(svc) {
+		helps, needsPGDATA, decision := o.swapHelpsHere(svc, target)
+		if !helps || readOnlyMount(mode) || !runsAsServer(svc) {
 			continue
 		}
+		// The swap is half a fix for an image that initialises elsewhere. Without the
+		// other half the project does not start, so say what was found instead of
+		// writing something that looks like a fix.
+		if needsPGDATA && !pgdataFixApplies {
+			out = append(out, o.notePGDATAHalfMissing(name, svc, target, decision))
+			continue
+		}
+
 		// Another service on the same host directory means deliberate sharing;
 		// splitting it is the user's call, not ours.
 		if o.sharesHostDataDir(name, src) {
@@ -416,15 +737,16 @@ func (o *Orchestrator) adaptBindMountedDataDir(name string, svc *compose.Service
 			},
 			comment: commentBlock(
 				fmt.Sprintf("%s service %q: %s now uses the named volume %q instead of the host path %q.", overlayMarker, esc(name), esc(target), vol, esc(src)),
-				[]string{
+				append([]string{
 					"Apple container bind-mounts host directories read-write but host-owned,",
 					"and they cannot be chowned from inside the container. Official database",
 					"images chown their data directory at startup, so they fail on a bind",
 					fmt.Sprintf("mount. A named volume is chownable. Diagnostic: %s.", codeBindDataDirChown),
+				}, append(howWeKnowTheDataDir(svc, decision), []string{
 					"NOTE: this changes where the data lives. The database now writes into",
 					fmt.Sprintf("the volume, not into %s. Existing data in that directory is", esc(src)),
 					"not copied — it is left untouched on the host.",
-				},
+				}...)...),
 				[]string{
 					fmt.Sprintf("after `opossum up`, `opossum logs %s` should show the database", name),
 					"initializing and accepting connections, with no chown error.",

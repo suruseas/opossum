@@ -6,9 +6,16 @@ stdout+stderr と exit code の golden。`testdata/fake-container.sh` はこれ�
 整合を確認する。**CLI 更新時はここを再採取して同期すること。**
 
 **最終検証: 2026-08-21 / `container CLI version 1.2.2`（Homebrew formula `1.2.2_1`）。**
-下記のすべての節を実機で採り直し、**引用している文字列・exit code・出力形式に変化が
-無いことを確認した**（生出力は `~/opossum-dogfood/results/df421-after/`）。各節に付いて
-いる古い採取日は、その記述が**最初に**確かめられた日。
+下記の節を実機で採り直した（生出力は `~/opossum-dogfood/results/df421-after/`）。各節に
+付いている古い採取日は、その記述が**最初に**確かめられた日。
+
+**その回で「全節・変化なし」と書いたのは誤りだった（2026-08-23 訂正）。**
+`--platform` の節が載せている失敗の文言は、1.2.2 で**もう1つ増えていた**。採り直したのは
+**実機で再現できた部分だけ**で、`--platform` の節のうち**失敗時の文言**は、再現に arm64
+ビルドの無い image が要るという理由で**引き金を実際に引き直していなかった**（同じ節の
+`--platform --rosetta` で起動するほうは採り直してある）——にもかかわらず、まとめは全節に
+ついて書いていた。
+再現できなかった節がどれかを、そのときここに書いていれば済んだ話（→ #421 / #477 / #478）。
 
 以前は 1.0.0 採取のまま2節だけが 1.1.0 で更新されており、版が混在していた。混在した
 ゴールデンは「差分が出たとき、どの版で変わったのか」を答えられない——fake が現実と
@@ -143,14 +150,298 @@ $ container image delete --force nonexistent:none   # --force で不在を無視
 サブコマンド名は `image {inspect,delete}`（`delete` は `rm` エイリアスあり、`list` は `ls`）。
 
 ## `container run --platform <p> [--rosetta]`  （#130 compose `platform:` の根拠 / 2026-07-06 実機採取）
-`container run --help` に **`--platform <platform>`**（マルチプラットフォーム image 用）、**`--rosetta`**（コンテナ内 x86-64 エミュ有効化）、`-a/--arch`（既定 arm64）が存在。amd64 専用 image は arm64 既定だと
-`does not support required platforms` で失敗するが、`--platform linux/amd64 --rosetta` で起動可能:
+`container run --help` に **`--platform <platform>`**（マルチプラットフォーム image 用）、**`--rosetta`**（コンテナ内 x86-64 エミュ有効化）、`-a/--arch`（既定 arm64）が存在。amd64 専用 image は arm64 既定だと失敗するが、`--platform linux/amd64 --rosetta` で起動可能:
 ```
 $ container run -d --platform linux/amd64 --rosetta redislabs/redismod   # amd64 専用 image
 $ container exec <name> redis-cli ping   # -> PONG（Rosetta で稼働）
 ```
 → `runtime.Run` は `RunOptions.Platform` があれば `--platform <p>` を発行し、`p` に `amd64`/`x86_64` を含めば
 `--rosetta` も付与。`orchestrator` は compose `platform:`（`Service.Platform`）を配線。
+
+### 失敗時の文言（**1つではない** / 2026-08-23 に 1.2.2 で採取）
+
+この節は長く `does not support required platforms` だけを載せていた。**1.2.2 はもう1つの言い方もする**ので、両方を書く。どちらが出るかは image によって決まり、選べない:
+
+```
+# image index が arm64 を持たない（excalidraw/excalidraw-room:latest）——取得前に落ちる
+$ container run --rm excalidraw/excalidraw-room:latest true
+Error: platform linux/arm64
+
+# 取得してから不一致が分かる（Compose-Examples/examples/cs2-dedicated-server, atlas）
+Error: image sha256:6822b9… does not support required platforms
+```
+
+**名指しされるのは「無いほうの platform」**。arm64 だけの image を amd64 として要求すると、そう言う:
+
+```
+$ container build --platform linux/arm64 -t x:test .   # arm64 だけの image を作る
+$ container run --rm --platform linux/amd64 x:test true
+Error: platform linux/amd64
+```
+
+だから `platform linux/` に広く一致させてはいけない——**この失敗に「その platform を要求しろ」と答えることになる**。`runErrorHint` は arm64 の形だけを、`Error: ` から始めて一致させる。`platform linux/arm64` だけだと `--platform linux/arm64` という**正当な指定**の部分文字列でもあるので、この失敗**以外**から来たテキストを拾わないため（`RunError.Stderr` に入るのは子プロセスの stderr だけで、コマンド行が混ざる経路は現状無い——「いま誰かが指させる経路」への備えではない）。
+
+前の節が「1.2.2 で全節を採り直して変化なし」と書いているのに、この文言の変化は入っていなかった。**引き金を実際に引き直していなかった**ため（→ #421 への追記、#478）。
+
+## 診断が一致させている文言と、その引き方  （2026-08-23 に 1.2.2 で確認）
+
+opossum は、ランタイムの出力の文言に一致させて案内を出す。**一致しなくなっても、出るのは
+「案内が無い」状態**で、テストは古い文言を入力にしているので緑のまま——**壊れた形ではなく、
+最初から無かった形**に見える（実際に起きた: #477）。
+
+だから、それぞれ**どう引くか**をここに書く。**引けなかったものは、「引けない」ではなく
+「どの経路を試して、どうなったか」を書く**——この表を書く過程で「引けない」と3回書いて、
+**3回とも別の経路が見つかった**（うち**上流の文言まで届いたのは2件**で、残る1件は経路だけ）。
+示せるのは**思いついた道で届かなかったこと**までで、それは
+「引けない」とは違う。
+
+**数え方**：単位は「**別々に引かないと確かめられないもの1つ**」＝表の1行。`OPSM-412` の2つの
+文言は**別の image が要る**ので2行（片方だけ黙りうることは #477 が実証した）。`buildhint` の
+3群は、1群につき1つの状況で引けると見込んで3行にしていた——**経路については確かめた**
+（3群とも独立に発火する）。上流の文言のほうは未確認なので、そちらを引いたときに割り直す
+かもしれない。数える対象で答えが変わるので、3つとも書いておく：**一致させている文字列は17個**、
+**複数条件の AND を1つに畳むと14**（`OPSM-107` が1、`OPSM-103` が2、畳まれる）、
+**`grep -o 'strings.Contains'` で数えるソース上の出現は10**（`buildhint` は8文言を1つの
+ループで回す。`grep -c` は行を数えるので9——1行に2つある箇所があるため）。
+行11・12 は正規表現と `strings.Fields` なのでこの数には入らない（行10 は `runtime.go` の
+`strings.Contains` で、行9 と同じもの）。
+
+**この表が数えているのは、ランタイム自身の出力の文言に一致させていて、外れると
+「何も言わなくなる」もの**。2つの軸で切っている:
+
+- **上流が image のもの**は別（#480）——`OPSM-101`（`initdb:` + `lost+found`）と
+  `OPSM-105`（`chown` + `Operation not permitted`）と `OPSM-110`（`(unused mount/volume)` +
+  `pg_upgrade`）は、コンテナのログに一致させている。この面の生出力もここに置いてある
+  （`pg17-*.txt` 5件・`pg18-*.txt` 8件）が、**表には入れない**——上流が image である以上、
+  版を書いた記録の形が違う（#480 で決める）
+- **外れても見えるもの**は別——`runtime.go` の `"exist"`（network create の冪等化）は文言が
+  ずれると**失敗する**。`"not found"`（teardown の冪等化）は失敗しないが、**余計な警告が出る**。
+  どちらも見える。**黙るのは見えない**
+
+**この2軸で外れる上流が他にもある**（射程外だが、同じ壊れ方をする）：`audit.go` の tinyproxy
+ログ（`Request (file descriptor N):`——外れると egress の宛先一覧が黙って空になる／上流は
+image）、`compose/load.go` の go-yaml の文言（**上流はライブラリ**という第3の上流。外れ方は
+一様ではない——`yaml:` は素のエラーに退化するだけだが、`already defined at line` が外れると
+**キーの二重定義に「値の形が違う」という別の助言**が出て、`cannot unmarshal` が外れると
+**エコーされた値が消されずに出る**＝#450/#451 で直した情報漏れが戻る）、`hoststats.go` の `pgrep`/`lsof` の出力（外れると
+HOST FOOTPRINT が黙って `—`／上流はホストのコマンド）。
+
+行6〜12 は `[OPSM-nnn]` を持たないが（build の3群も `hint: …` だけでコードが無い）、
+**外れると何も言わなくなる**ので入れている。
+コードを索引にするのではなく、**黙り方**で切ること。**行11・12 は黙るより悪い**——
+「問題なし」と言う。
+
+**「未確認」は「引き方が無い」ではない**——引いていない、というだけ。**書けるのは
+「どこまで確かめたか」だけ**で、「確かめようがない」は別に示さないと言えない
+（上の3件がその実例）。
+
+**列が2つある理由**：**経路**（この文言に当たれば案内が出る、という配線が生きているか）と
+**上流の文言**（`container` などが**いまもその文言を出すか**）は別のこと。前者は文言を自分で
+偽装すれば確かめられるが、それでは**上流が言い換えたことは永久に検出できない**。この表が
+存在する理由は後者なので、混ぜない。
+
+| # | 診断 | 一致させている場所 | 上流の文言（**全部**が捕獲物に入っていること） | **経路** | **上流の文言** |
+|---|---|---|---|---|---|
+| 1 | OPSM-412 | `orchestrator.go` `runErrorHint` | `does not support required platforms` | `raw:corpus-cs2-old-wording.txt` | `raw:corpus-atlas-old-wording.txt` |
+| 2 | OPSM-412 | 同上 | `Error: platform linux/arm64` | `raw:platform-image-index-no-arm64.txt` | `raw:platform-image-index-no-arm64.txt` |
+| 3 | OPSM-107 | 同上 | `failed to resolve` `in rootfs` | `raw:rootfs-resolve.txt` | `raw:rootfs-resolve.txt` |
+| 4 | OPSM-201 | 同上 | `Address already in use` | `raw:port-in-use-duplicate-publish.txt` | `raw:port-in-use-duplicate-publish.txt` |
+| 5 | OPSM-103 | `isStorageAttachmentError` | `VZErrorDomain` `Code=2` `storage device attachment is invalid` | `raw:vzerror-shared-named-volume.txt` | `raw:vzerror-shared-named-volume.txt` |
+| 6 | build（cache 破損） | `buildhint.go` | `unable to read root manifest` | `raw:build-cache-path-only.txt` | `unverified` |
+| 7 | build（resource） | 同上 | `rpc error: code = Unavailable` | `raw:build-resource-path-only.txt` | `unverified` |
+| 8 | build（disk full） | 同上 | `No space left on device` | `raw:build-disk-full.txt` | `unverified` |
+| 9 | volume の削除警告 | `runtime.go` `resourceInUse` | `in use` | `raw:volume-in-use-via-opossum.txt` | `raw:volume-in-use.txt` |
+| 10 | image の削除警告 | `runtime.go` `DeleteImage` | `in use` | `path-tried:image-in-use-not-reached.txt` | `unverified` |
+| 11 | `doctor` の storage 警告 | `doctor.go` `parseReclaimable` | `GB (` | `raw:doctor-inputs.txt` | `raw:doctor-inputs.txt`（`GB` と `B` のみ。`KB`/`MB`/`TB`/`PB` は unverified） |
+| 12 | `doctor` の builder 警告 | `doctor.go` `parseBuilder` | `running` `MB` | `raw:doctor-inputs.txt` | `raw:doctor-inputs.txt`（`running` と `MB` のみ。`stopped` と `GB` は unverified） |
+
+**文言列に書くのは、上流が出す文字列だけ。** コードの識別子やファイル名は「一致させている
+場所」に出す。混ぜていたときは、`runtime.go` のような**コード側の名前まで「上流の文言」として
+数えられていた**。
+
+**「全部が入っていること」を検査する。** 1つでも入っていれば通す形だと、`MB` のような短い語が
+**別の捕獲物のダウンロード進捗行に偶然入っていて**通ってしまう。行5 のような AND の判定は、
+上流が3つのうち2つを言い換えても**1つ残っていれば緑**になる——診断が壊れる変化を、表の検査が
+見逃す。
+
+**行6〜8 の文言は、群の代表1本だけを書いている。** 各群は3本・2本・3本あり、引いたのは
+1本ずつ。**残りは `unverified`**——「ほか2つ」と書いて全部引いたように読ませない。
+
+
+
+**セルは3つのうち1つで始める。** そのあとに括弧で**到達範囲**を足してよいが、
+**形が決まっている**——`（X のみ。Y は unverified）`。eval が見るのは**この形だけ**で、
+**中身の広さは誰も見ていない**——同じ形のまま「実は全部確認済み」と書けば通る。形を決めたのは、
+散文の留保が**セルの断定と反対のことを言える**のを止めるためであって、
+「狭いことしか書けない」ようにはなっていない。
+
+- **`raw:<ファイル>`** — `testdata/error-wordings/` に保存した生出力を指す。**そのファイルに、
+  その文言が実際に入っている**
+- **`path-tried:<ファイル>`** — 経路を試した記録。**届かなかった**ことの記録も含む
+- **`unverified`** — 引いていない
+
+**なぜ散文の留保ではなく、セルの3値にするか。** この表を書く過程で、私は自分の出力を「上流の
+文言」として2回書いた（行8 と行11）。どちらも散文には正しい説明を書いていたのに、セルは
+「確認済み」に見えたままだった。**指す生出力が無ければ `raw:` は書けない**——その形にすれば、
+同じ間違いは書こうとした時点で止まる。
+
+**`internal/runtime/wordingcite_test.go` が機械で確かめる**——セルが3値のどれかで始まること、
+捕獲物が `testdata/error-wordings/` の `.txt` として実在すること、**`raw:` の捕獲物に、その行の
+文言が全部入っていること**、注が**決めた形**であること、行が12あること、セルの数が
+崩れた行を落とさないこと。
+
+**捕獲物のうち、`#` と `$ ` で始まる行は証拠に数えない。** レシピやコマンドは自分で書いて
+いるので、そこに一致させると**表が自分の書いたものを引用して確かめたことにする**。実際、
+行12 は `builder status` を文言として挙げていたが、それは**私が書いた `$ container
+builder status` の行にしか無かった**——この検査を入れて初めて分かった。
+
+**ただしこれは「手で書いた行」と同じではない。** 落ちるのは行頭のこの2種類だけで、buildkit の
+進捗行（`#1 [resolver] …`）のような**本物の出力も一緒に落ちている**（厳しい側に外れている）。
+逆に、opossum 自身が印字した行（`warning: [OPSM-…]`、`hint:`）は**本文として残る**ので、
+**上流の文言の証拠として通ってしまう**。`#`/`$ ` の除外が塞いだのは自己引用そのものではなく、
+その一部でしかない。
+
+(3) が要る理由：(2) だけだと**指す先を別のファイルに差し替えても通る**。実際、この eval の
+最初の版はそうなっていて、しかもテストのコメントには「その文言が入っている」と書いてあった
+——**テストの説明が、テストの到達範囲より広い**。この表が扱っている誤りそのものを、
+その表を守るテストがやっていた。
+
+**引き方（レシピ）は下に移した。** 表は「何を、どこまで確かめたか」だけを言う。
+
+
+
+**行10 が「未確認」な理由**：思いついた経路では届かなかった。`DeleteImage` が `--force` を
+付けているのを疑っているが、**記録に残っているのは opossum の出力だけ**で、
+`container image delete` の stderr も終了コードも採っていない。**原因は未確認**、
+**別の経路があるかも分からない**。
+
+**行11・12 の「〜のみ」が意味すること**：一致させているのは**分岐のある形**で、上流から
+引いたのはその一部だけ。行11 は `GB` と `B`（`KB`/`MB`/`TB`/`PB` は未観測）、行12 は
+`running` と `MB`（`stopped` と `GB` は未観測）。**分岐を列挙したまま「確認済み」と書くと、
+確かめていない分岐まで確かめたことになる。**
+
+**行6〜8 の「経路のみ」が意味すること**：`RUN` の出力に文言を書けば hint は出る——**配線は
+生きている**。だが発火させたのは**こちらが書いた文字列**であって、`container` が出したもの
+ではない。**上流が言い換えても、このレシピは永久に緑のまま通る。** 行8 で実際に当たったのは
+alpine の busybox `dd` が出した `No space left on device` で、Apple の builder の文言ではない。
+
+**最初はこれを行1〜5 と同じ列に「1.2.2 で確認」と書いていた。** 経路を確かめただけなのに、
+上流を確かめたように見える書き方をしていた——`#477` の「誰かが確かめたはず」を、今度は
+確かめた側が作っていた。列を分けたのはそのため。
+
+生出力は `testdata/error-wordings/`。corpus 走査の2件も同じ場所に取り込んである
+（リポジトリの外を指していると、eval が確かめられない）。
+
+**6〜8 を「0件だから噛み合っていない」と読まないこと。** corpus 走査の母数（`df402-imageonly.txt`）は
+`build:` を持たないプロジェクトだけで、実測で **75件中0件**。build の経路は**構造的に通らない**ので、
+走査で0件でも何も分からない。区別するには **build を持つ corpus** が要る。
+
+### レシピ：`failed to resolve … in rootfs`（OPSM-107）
+
+```yaml
+services:
+  m:
+    image: alpine
+    volumes:
+      - ./notthere.conf:/etc/passwd   # 存在しない bind source を、コンテナ内のファイルへ
+    command: sleep 20
+```
+
+opossum は存在しない bind source を**ディレクトリとして作る**ので、コンテナ内のファイルパスに
+載らない。
+
+### レシピ：`Address already in use`（OPSM-201）
+
+**同じプロジェクトの2サービスが、同じ host port を publish する。**
+
+```yaml
+services:
+  a: { image: alpine, ports: ["19532:19532"], command: sleep 25 }
+  b: { image: alpine, ports: ["19532:19532"], command: sleep 25 }
+```
+
+この分岐は **pre-flight が見落としたときの受け皿**。pre-flight は「**いまホストでそのアドレスが
+塞がっているか**」しか訊かず、しかも**何も起動する前**に訊く。「同一プロジェクトの2サービスが
+同じアドレスを要求していないか」は訊かないので、その時点ではどちらも「空いている」。両方が
+通り、1本目が bind し、2本目がランタイムで失敗してここへ来る。
+
+（同じ関数の `seen` はサービスをまたいで共有されているが、**それは原因ではない**——同じ
+アドレスを2度叩かないための dedupe で、サービスごとに probe しても結果は変わらない。
+その時点では誰もポートを握っていないので。）
+
+**届かなかった道も書いておく**（次に同じ道を辿る人のために）:
+
+- ランタイム自身の DNS が握る **53 を publish** → pre-flight が捕まえる。`netstat` でワイルドカードに
+  リスナがあるので、probe が確実に落ちる
+- **別プロジェクトの動いているコンテナ**と同じポート → 同じく pre-flight が捕まえる
+- **loopback だけを握る TCP リスナ**（`127.0.0.1:port`）→ **pre-flight の死角は実在する**
+  （Go の `net.Listen` は `SO_REUSEADDR` を立てるので、ワイルドカード probe が成功してしまう）。
+  **しかしランタイム側も失敗せず、コンテナは起動する**ので、ここへは来ない。
+  `port-attempt-loopback.txt` に、リスナが実在した `lsof` と probe が見えなかった出力を残してある
+
+### レシピ：`in use` の警告（行9）
+
+**A の named volume を、B が `external: true` で握ったまま A を `down -v`。**
+
+```yaml
+# xa/compose.yaml
+services: { a: { image: alpine, volumes: ["data:/d"], command: sleep 60 } }
+volumes: { data: }
+
+# xb/compose.yaml — A の namespaced volume を実名で握る
+services: { b: { image: alpine, volumes: ["av:/d"], command: sleep 60 } }
+volumes: { av: { external: true, name: xa_data } }
+```
+
+`xa` で `opossum down -v`:
+
+```
+Stopping a
+Removing volume xa_data
+warning: could not remove volume "xa_data": it's still in use by a container — stop the container, then remove it with `container volume delete xa_data`
+```
+
+**最初は「引けない」と書いていた。** 自分のコンテナは `down` が先に止めるし、named volume は
+project 名前空間なので他プロジェクトからは触れない——と考えたため。**`external: true` で実名を
+書けば触れる**。「設計上塞がっている」ではなく「**思いついた経路では届かなかった**」だった。
+
+**image 側は、この経路では届かなかった**（`image-in-use-not-reached.txt`）。別プロジェクトの
+コンテナが同じ image で走っている状態（記録に `container ls` の証跡あり）で `down --rmi all`
+→ `Removing image alpine`、警告なし。`DeleteImage` は `--force` を付けているが、**コードの
+コメントはそれを「不在の image を無視する」意味で説明していて**、「使用中でも消える」は
+この1回の実測からの推測。**別の経路があるかは分からない。**
+
+### レシピ：build が disk full（行8）
+
+**ホストのディスクを埋める必要はない。** `buildErrorDetector` は build のストリーム全体を
+見ているので、`RUN` の出力に文言が出れば足りる:
+
+```dockerfile
+FROM alpine
+RUN dd if=/dev/zero of=/dev/full bs=1M count=1
+```
+
+```
+opossum: building service "b": exit status 1
+hint: the build ran out of disk space — Apple's builder pulls multi-GB base images …
+```
+
+**最初は「引き方が無い（ディスクを故意に埋める必要がある）」と書いていた。** どこで文言が
+出ても発火することを見ていなかった。
+
+### レシピ：`VZErrorDomain` …（OPSM-103）
+
+**同じ named volume を2サービスが同時に持つ。**
+
+```yaml
+services:
+  a: { image: alpine, volumes: ["shared:/data"], command: sleep 25 }
+  b: { image: alpine, volumes: ["shared:/data"], command: sleep 25 }
+volumes: { shared: }
+```
+
+named volume の attach は排他なので、2本目が
+`Error Domain=VZErrorDomain Code=2 "The storage device attachment is invalid."` で落ちる。
 
 ## `container ls -a --format json` (初出 2026-07-15)
 

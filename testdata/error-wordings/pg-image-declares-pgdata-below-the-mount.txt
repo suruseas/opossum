@@ -1,0 +1,27 @@
+# 宣言を自分で下げた image（FROM postgres:17-alpine ＋ PGDATA=/var/lib/postgresql/data/pgdata）に
+# 旧データディレクトリへ bind mount を置いた場合（#488）。container CLI 1.2.2 / 2026-08-23
+# この image は捕獲後に削除した。作り方は $ cat Dockerfile の行にある通りで、由来は
+# testdata/image-inspect/README.md にも書いてある（同じ image の inspect 出力がそこにある）
+$ cat Dockerfile
+FROM postgres:17-alpine
+ENV PGDATA=/var/lib/postgresql/data/pgdata
+$ cat compose.yaml
+services:
+  s:
+    image: postgres:b480-below
+    environment:
+      POSTGRES_PASSWORD: x
+    volumes:
+      - ./data:/var/lib/postgresql/data
+$ opossum up --no-supervisor
+Creating network run-net
+Starting s (postgres:b480-below)
+s.run.opossum
+$ opossum ps | tail -1   # 見出し行は落としている
+s        s.run.opossum  postgres:b480-below  192.168.64.2  -      running
+$ ls -A data
+pgdata
+$ opossum logs s | tail -3
+2026-08-22 22:46:44.624 UTC [1] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-08-22 22:46:44.628 UTC [51] LOG:  database system was shut down at 2026-08-22 22:46:44 UTC
+2026-08-22 22:46:44.632 UTC [1] LOG:  database system is ready to accept connections

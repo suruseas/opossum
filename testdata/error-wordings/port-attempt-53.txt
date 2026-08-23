@@ -1,0 +1,9 @@
+# 引こうとして届かなかった: ランタイム自身の DNS が握る 53 を publish
+# netstat の証跡:
+tcp6       0      0  *.53                   *.*                    LISTEN     
+tcp4       0      0  *.53                   *.*                    LISTEN     
+udp6       0      0  *.53                   *.*                               
+# opossum の出力:
+opossum: [OPSM-201] host port already in use:
+  - 53/udp (service "d")
+free the port or remap it in the compose file, then retry

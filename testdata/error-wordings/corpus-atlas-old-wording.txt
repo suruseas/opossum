@@ -1,0 +1,19 @@
+note: 3 compose fields are ignored (e.g. atlas: container_name) — run `opossum config` for details
+warning: [OPSM-204] service "socket-proxy" mounts the Docker socket (/var/run/docker.sock:/var/run/docker.sock:ro), but Apple `container` has no Docker daemon socket to share — the container can't reach Docker, and the mount will fail. Tools that drive Docker over its socket don't work here.
+Creating network atlas-net
+Starting atlas (keinstien/atlas:latest)
+[0/6] [0s]
+[1/6] Fetching image [0s]
+[1/6] Fetching image [1s]
+[1/6] Fetching image [2s]
+[1/6] Fetching image 0% (1 of 13 blobs, 3 KB/236.0 MB, 1 KB/s) [3s]
+[1/6] Fetching image 7% (3 of 13 blobs, 16.6/236.0 MB, 15 KB/s) [4s]
+[1/6] Fetching image 18% (6 of 13 blobs, 43.3/236.0 MB, 36.9 MB/s) [5s]
+[1/6] Fetching image 35% (8 of 13 blobs, 83.3/236.0 MB, 18.6 MB/s) [6s]
+[1/6] Fetching image 54% (10 of 13 blobs, 128.3/236.0 MB, 45.8 MB/s) [7s]
+[1/6] Fetching image 74% (12 of 13 blobs, 176.2/236.0 MB, 45.4 MB/s) [8s]
+[1/6] Fetching image 95% (12 of 13 blobs, 224.9/236.0 MB, 49.7 MB/s) [9s]
+[1/6] Fetching image 100% (13 blobs, 236.0 MB) [9s]
+Error: image sha256:74a1771fa342571c6740930c92221b38043b9d90762022d44cd946a675612edb does not support required platforms
+opossum: starting service "atlas": exit status 1
+  → [OPSM-412] this image has no build for Apple silicon (arm64). Add `platform: linux/amd64` to the service — opossum runs an amd64 image through Rosetta.

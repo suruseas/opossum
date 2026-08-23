@@ -25,8 +25,10 @@
 package mutate
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -136,6 +138,21 @@ const (
 	Inconclusive
 )
 
+// Whether the tests appear to reach a survivor's line is reported as a note on
+// the survivor, not as an outcome of its own.
+//
+// It was an outcome once. Six attempts at deciding it produced six ways of
+// getting it wrong, every one of them the same shape — a line the tests do run,
+// called a line nothing reaches — and every one of them turning a survivor, which
+// says "write a test", into unreachable code, which says "go and find out why
+// this is dead". Wrong work, from a confident-sounding report.
+//
+// The reach is worth knowing and it is not worth that. As a note it still tells
+// the reader where to start; when the note is wrong, the reader is looking at a
+// survivor with a misleading hint beside it rather than at the wrong task
+// entirely. What the note may not do is sound more certain than the measurement
+// behind it, which is why it says where it came from and hedges.
+
 func (o Outcome) String() string {
 	switch o {
 	case Caught:
@@ -175,6 +192,14 @@ func Report(rs []Result) string {
 		switch r.Outcome {
 		case Survived:
 			killers = "**none — this defect is invisible to the suite**"
+			if r.Detail != "" {
+				// A survivor with something to add: the reach could not be measured,
+				// so "invisible to the suite" is the louder of two readings rather
+				// than an established one. Said here, in the table, because the table
+				// is what gets pasted into a pull request — a note that only ever
+				// appears in the running log is a note nobody reads.
+				killers += " (" + oneLine(r.Detail) + ")"
+			}
 		case Broken:
 			killers = "n/a (not evidence: no test ran)"
 		case Inconclusive:
@@ -191,4 +216,88 @@ func cell(s string) string { return strings.ReplaceAll(oneLine(s), "|", `\|`) }
 // oneLine folds a multi-line detail into something a table row can hold.
 func oneLine(s string) string {
 	return strings.Join(strings.Fields(strings.ReplaceAll(s, "\n", " ")), " ")
+}
+
+// LineOf returns the 1-based line that byte offset idx falls on.
+func LineOf(src []byte, idx int) int {
+	if idx < 0 || idx > len(src) {
+		return 0
+	}
+	return bytes.Count(src[:idx], []byte("\n")) + 1
+}
+
+// Pos is a place in a file: a line, and the column the text of interest starts
+// at. Both count from one, the way a coverage profile writes them.
+type Pos struct {
+	Line, Col int
+}
+
+// Executed reports whether a coverage profile shows the given place being run,
+// and whether it could tell at all.
+//
+// The profile names files by import path and the sweep names them by path from
+// the root of the tree, so the two are matched by their tails. That match can be
+// ambiguous — a sweep naming `types.go` matches every `types.go` in the module —
+// and it can find nothing, if the package never made it into the profile.
+//
+// Both of those return decided=false, and the caller says nothing rather than
+// something it cannot support.
+func Executed(profile []byte, file string, at Pos) (ran, decided bool) {
+	// Cleaned first: a sweep that writes "./m.go" names the same file as one that
+	// writes "m.go", and a suffix comparison that keeps the "./" matches neither
+	// profile line — which would turn the reach check off without saying so.
+	want := "/" + strings.TrimPrefix(filepath.ToSlash(filepath.Clean(file)), "/")
+	files := map[string]bool{}
+	type block struct {
+		start, end Pos
+		count      int
+	}
+	var blocks []block
+	for _, l := range strings.Split(string(profile), "\n") {
+		colon := strings.LastIndex(l, ":")
+		if colon < 0 || !strings.HasSuffix(l[:colon], want) {
+			continue
+		}
+		var b block
+		var stmts int
+		if _, err := fmt.Sscanf(l[colon+1:], "%d.%d,%d.%d %d %d",
+			&b.start.Line, &b.start.Col, &b.end.Line, &b.end.Col, &stmts, &b.count); err != nil {
+			continue
+		}
+		files[l[:colon]] = true
+		blocks = append(blocks, b)
+	}
+	if len(files) != 1 {
+		return false, false
+	}
+	// Columns, not just lines. A block runs from one column of one line to another
+	// column of another, and both ends can fall in the middle of a line that has
+	// more on it: the block for an if-body ends at the `}` and the `else` that
+	// follows on the same line belongs to no block at all. Matched by line alone,
+	// that `else` inherits the if-body's count — zero, on the run where the else
+	// branch is the one that was taken — and a line the tests take every time is
+	// written up as one nothing reaches.
+	//
+	// A place no block covers is a place the profile says nothing about, and that
+	// is not the same as a place it says nothing ran. Which of the two it is
+	// changes with the compiler: Go 1.26 opened the block for a `case` clause on
+	// the `case` line, Go 1.27 opens it on the line after. Answered as "no test
+	// runs this", a toolchain upgrade alone turns a live survivor into a report
+	// about unreachable code.
+	covered := false
+	for _, b := range blocks {
+		if before(at, b.start) || !before(at, b.end) {
+			continue
+		}
+		covered = true
+		if b.count > 0 {
+			return true, true
+		}
+	}
+	return false, covered
+}
+
+// before reports whether a comes strictly before b in a file.
+func before(a, b Pos) bool {
+	return a.Line < b.Line || (a.Line == b.Line && a.Col < b.Col)
 }

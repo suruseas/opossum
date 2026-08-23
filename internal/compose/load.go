@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -785,14 +786,59 @@ func blameService(d interpolated, err error) error {
 		return err
 	}
 	name, found := "", 0
+	var culprit *yaml.Node
 	for i := 0; i+1 < len(services.Content); i += 2 {
 		var svc Service
 		if e := services.Content[i+1].Decode(&svc); e != nil && e.Error() == err.Error() {
-			name, found = services.Content[i].Value, found+1
+			name, found, culprit = services.Content[i].Value, found+1, services.Content[i+1]
 		}
 	}
 	if found != 1 {
 		return err
 	}
+	if field := blameField(culprit, err); field != "" {
+		return fmt.Errorf("service %q: %s: %w", name, field, err)
+	}
 	return fmt.Errorf("service %q: %w", name, err)
+}
+
+// sharedFields are the ones read by a type that serves more than one key, so the
+// message they produce cannot say which key it was reading. `command:` and
+// `entrypoint:` are both a Command; the parser hands the value to it without the
+// name, and saying one of them is a guess that sends half the readers to the
+// wrong line.
+var sharedFields = []string{"command", "entrypoint"}
+
+// blameField says which of them failed, or "" when it cannot tell.
+//
+// The same shape as naming the service, and for the same reason: the decode has
+// already failed, so re-reading a field costs nothing and being wrong costs
+// nothing either — it says nothing rather than picking. Both broken the same way
+// is the case that must stay quiet, because there is no answer to give.
+func blameField(svc *yaml.Node, err error) string {
+	if svc == nil || svc.Kind != yaml.MappingNode {
+		return ""
+	}
+	name, found := "", 0
+	for i := 0; i+1 < len(svc.Content); i += 2 {
+		key := svc.Content[i].Value
+		if !slices.Contains(sharedFields, key) {
+			continue
+		}
+		var c Command
+		if e := svc.Content[i+1].Decode(&c); e != nil && strings.Contains(err.Error(), e.Error()) {
+			name, found = key, found+1
+		}
+	}
+	switch found {
+	case 0:
+		// Not one of these at all; whatever failed says so in its own words.
+		return ""
+	case 1:
+		return name
+	}
+	// Both, failing the same way. Naming one would send half the readers to the
+	// wrong line, and naming neither would leave a message with no field in it at
+	// all — the reader knows it is one of two, which is what is true.
+	return strings.Join(sharedFields, " or ")
 }

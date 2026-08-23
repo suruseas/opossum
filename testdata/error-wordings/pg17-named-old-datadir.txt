@@ -1,0 +1,19 @@
+# postgres:17-alpine / named volume を旧データディレクトリに置いた場合（#485 の比較対象）
+# container CLI 1.2.2 / 2026-08-23。17 ではこの形で起動する——18 との違いはここ
+# compose:
+#   environment: { POSTGRES_PASSWORD: x }
+#   volumes: ["pgdata:/var/lib/postgresql/data"]
+#   volumes(top): { pgdata: }
+$ opossum up --no-supervisor
+Creating network pg17-named-net
+Starting s (postgres:17-alpine)
+s.pg17-named.opossum
+$ opossum ps | tail -1   # 見出し行は落としている
+s        s.pg17-named.opossum  postgres:17-alpine  192.168.64.2  -      running
+$ opossum logs s | tail -6
+2026-08-22 19:29:27.592 UTC [1] LOG:  starting PostgreSQL 17.10 on aarch64-unknown-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+2026-08-22 19:29:27.593 UTC [1] LOG:  listening on IPv4 address "0.0.0.0", port 5432
+2026-08-22 19:29:27.593 UTC [1] LOG:  listening on IPv6 address "::", port 5432
+2026-08-22 19:29:27.594 UTC [1] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-08-22 19:29:27.595 UTC [50] LOG:  database system was shut down at 2026-08-22 19:29:27 UTC
+2026-08-22 19:29:27.597 UTC [1] LOG:  database system is ready to accept connections

@@ -1,0 +1,26 @@
+# 外部 named volume（lost+found あり）を 18 が求める位置に置いた場合（#485 の比較対象）
+# 上流は image（docker-library/postgres）。container CLI 1.2.2 / 2026-08-23
+# 17 の旧パスでは lost+found が initdb を止める（対の捕獲物）。18 ではクラスタがサブディレクトリに入る
+$ cat compose.yaml
+services:
+  s:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_PASSWORD: x
+    volumes:
+      - b480ext:/var/lib/postgresql
+volumes:
+  b480ext:
+    external: true
+$ container run --rm --volume b480ext:/v alpine ls -A /v   # 起動前
+lost+found
+$ opossum up --no-supervisor
+Creating network pg18-ext-net
+Starting s (postgres:18-alpine)
+s.pg18-ext.opossum
+$ opossum ps | tail -1   # 見出し行は落としている
+s        s.pg18-ext.opossum  postgres:18-alpine  192.168.64.2  -      running
+$ container run --rm --volume b480ext:/v alpine sh -c 'ls -A /v; ls -d /v/18/docker'   # 起動後
+18
+lost+found
+/v/18/docker

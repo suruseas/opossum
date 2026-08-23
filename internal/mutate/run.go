@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -48,6 +49,14 @@ type Runner struct {
 	pendPath string
 	pendOrig []byte
 	aborted  bool
+
+	// reach is the baseline's coverage, taken over the tree as it was. Which
+	// lines the tests run is a question about that tree, not about a mutated one,
+	// so every mutation is answered from this one profile.
+	reach []byte
+	// measured records whether the baseline was instrumented, so the runs it
+	// vouches for are instrumented the same way — including when it could not be.
+	measured bool
 }
 
 // NewRunner returns a Runner wired to the real toolchain and filesystem.
@@ -130,7 +139,31 @@ func (r *Runner) baseline(ms []Mutation) error {
 	if r.Log != nil {
 		r.Log("baseline: running the suite unmutated over " + strings.Join(pkgs, " "))
 	}
-	out, errOut, err := r.Go(append([]string{"test", "-count=1", "-json"}, pkgs...)...)
+	// Instrumented, like every run that decides a mutation's fate, and the only run
+	// whose profile is kept.
+	//
+	// Instrumented because coverage makes the tests slower: a baseline run without
+	// it can pass while a test with a deadline in it fails under every mutation,
+	// and that is reported as a suite which caught all of them. The baseline exists
+	// to rule that out, and it can only do so from the same instrumentation.
+	//
+	// Kept because which lines the tests run is a question about the tree as the
+	// author wrote it. Answered from a mutated tree, a mutation that stops its own
+	// line from running looks like a line nothing reaches.
+	prof, cleanup := r.profilePath()
+	defer cleanup()
+	// Whether this run is measured decides whether the mutation runs are, so that
+	// the two cannot end up instrumented differently when there is nowhere to
+	// write a profile.
+	r.measured = prof != ""
+	out, errOut, err := r.Go(append(withCoverage([]string{"test", "-count=1", "-json"}, prof), pkgs...)...)
+	if prof != "" {
+		// Read before the failure checks below: a red baseline stops the sweep, and
+		// then nobody asks about reach anyway, but a profile that was written and
+		// then dropped on the floor is the kind of thing that gets quietly removed
+		// later for looking unused.
+		r.reach, _ = os.ReadFile(prof)
+	}
 	if failing := Failures(out); len(failing) > 0 {
 		return fmt.Errorf("the suite is already failing before any mutation is applied:\n  %s\n"+
 			"Every mutation would be reported as caught by these, so the sweep would measure "+
@@ -269,7 +302,16 @@ func (r *Runner) one(m Mutation) (res Result, err error) {
 	if vetOut, vetErr, buildErr := r.Go(append([]string{"vet"}, m.Packages...)...); buildErr != nil {
 		return Result{Mutation: m, Outcome: Broken, Detail: lastLines(vetOut+vetErr, 3)}, nil
 	}
-	testOut, testErrOut, testErr := r.Go(append([]string{"test", "-count=1", "-json"}, m.Packages...)...)
+	// Instrumented the same way the baseline was. Coverage costs time, and a
+	// baseline measured in a cheaper configuration than the runs it vouches for is
+	// no baseline at all: a test with a deadline in it passes there and fails under
+	// every mutation, and the sweep calls that a suite which caught everything. No
+	// profile is asked for here — the reach question is answered from the baseline.
+	args := []string{"test", "-count=1", "-json"}
+	if r.measured {
+		args = append(args, "-cover", coverPkg)
+	}
+	testOut, testErrOut, testErr := r.Go(append(args, m.Packages...)...)
 	killers := Failures(testOut)
 	switch {
 	case len(killers) > 0:
@@ -281,7 +323,221 @@ func (r *Runner) one(m Mutation) (res Result, err error) {
 		// most likely to hang.
 		return Result{Mutation: m, Outcome: Inconclusive, Detail: whyItDied(testOut, testErrOut)}, nil
 	}
-	return Result{Mutation: m, Outcome: Survived}, nil
+	// Nothing failed. That reads as "the suite is fine with this defect" — but it
+	// reads the same way when no test runs the line at all, and those are opposite
+	// findings. Ask which one this is.
+	//
+	// Asked of the baseline, not of the run that just finished. "Do the tests run
+	// this line" is a question about the tree the author wrote; the tree being
+	// measured here has a defect in it, and the defect can stop its own line from
+	// running. A mutation to a `case` label is the plain example — the label is
+	// where its coverage block begins, so changing it makes the block count zero
+	// while the tests stay green. Read from the mutated tree, that is a live
+	// survivor reported as a line no test reaches, which is the one answer this
+	// must never invent.
+	//
+	// Written as a note beside the survivor, never as the outcome. A note that is
+	// wrong leaves a reader looking at a survivor with a misleading hint; an
+	// outcome that is wrong sends them to find out why live code is dead.
+	return Result{Mutation: m, Outcome: Survived, Detail: r.reachNote(m, original)}, nil
+}
+
+// reachNote says what the baseline's coverage had to say about the lines this
+// mutation changes, in the words the measurement can support.
+//
+// "No test" means no test that this sweep ran. The baseline runs the packages the
+// sweep names, and -coverpkg widens the counting to what those tests reach, but a
+// test in a package nobody named is not in the profile at all — and narrow is the
+// way the guidance says to name them. Saying "no test runs this" on that evidence
+// claims a suite that was never executed.
+//
+// An empty note means the coverage showed the change being run, or there is
+// nothing to say about it. Silence is the safe direction here: a survivor read
+// without a note is a survivor, which is what it is.
+func (r *Runner) reachNote(m Mutation, original []byte) string {
+	return r.noteFor(m.File, changedPlaces(original, m.From, m.To))
+}
+
+// noteFor is reachNote once the places are known, kept apart from finding them so
+// the wording can be held to the measurement without a tree to mutate.
+func (r *Runner) noteFor(file string, places []Pos) string {
+	if len(places) == 0 {
+		return ""
+	}
+	var answered []Pos
+	for _, p := range places {
+		ran, decided := Executed(r.reach, file, p)
+		if ran {
+			// Something ran part of what this changes. That is as much as the
+			// question asks.
+			return ""
+		}
+		if decided {
+			answered = append(answered, p)
+		}
+	}
+	// Listed, not spanned, and only the places the profile answered for.
+	//
+	// A mutation can change two lines with untouched ones between them, and a
+	// range claims the ones it deliberately left out. The lines the profile said
+	// nothing about are left out for the same reason: naming them among the ones
+	// it called unrun says the coverage ruled them out, and it did not.
+	if len(answered) == 0 {
+		return fmt.Sprintf("whether any test reaches %s could not be measured",
+			file+":"+strings.Join(lineNumbers(places), ", "))
+	}
+	return fmt.Sprintf("no test this sweep ran appears to reach %s, in the baseline's coverage",
+		file+":"+strings.Join(lineNumbers(answered), ", "))
+}
+
+// profilePath names a file for `go test` to write coverage into, and returns the
+// call that removes it. An empty name means no profile could be made; the run
+// still happens, and the caller reports the reach as unmeasured.
+//
+// Outside the tree on purpose: written inside, a killed run would leave the file
+// behind, which is the shape of accident the tracked-file gate exists to catch.
+func (r *Runner) profilePath() (path string, cleanup func()) {
+	f, err := os.CreateTemp("", "opossum-mutate-*.cover")
+	if err != nil {
+		return "", func() {}
+	}
+	f.Close()
+	return f.Name(), func() { os.Remove(f.Name()) }
+}
+
+// changedPlaces is where in the file the mutation actually changes something.
+//
+// Not where its pattern lies, when those differ — and they differ often. A
+// pattern has to match exactly once, and the way to make it match once is to
+// widen it until it does, which the guidance for writing one says to do. Widened,
+// it takes in lines the mutation leaves exactly as they were: above it, below it,
+// and in between, when one mutation changes two places at once.
+//
+// All three borrow. Ask about a line the pattern starts on and a change the tests
+// run is written up as unreachable code; ask about a line in the middle that the
+// pattern only carried along, and a change nothing runs passes for one the tests
+// watch. So the answer is the lines that differ, each of them, and none of the
+// ones that came along for the ride.
+//
+// Compared line by line, and only when both sides have the same number of lines.
+// When they do not, which line became which is a guess, and the whole span is
+// treated as changed — an unchanged line in the span can then still silence the
+// note, which is the quiet direction and the safe one.
+func changedPlaces(src []byte, from, to string) []Pos {
+	at := bytes.Index(src, []byte(from))
+	if at < 0 {
+		return nil
+	}
+	base := LineOf(src, at)
+	// The pattern rarely starts at the left margin: its first line begins wherever
+	// it begins, and every line after it begins at the margin.
+	firstCol := at - lastBreakBefore(src, at) + 1
+	f, t := lines(from), lines(to)
+	var out []Pos
+	for i := range f {
+		if len(f) == len(t) && f[i] == t[i] {
+			continue
+		}
+		col := 1
+		if i == 0 {
+			col = firstCol
+		}
+		switch {
+		case i < len(t):
+			// Past what this line keeps. A block begins at the first token on its
+			// line, not at the margin, so asking about the indentation asks about a
+			// place no block covers — and the change is not in the indentation.
+			col += commonPrefix(f[i], t[i])
+		default:
+			// This line has no counterpart: the replacement is shorter, so the whole
+			// of it goes. Asked about at the margin it would land outside every
+			// block and answer nothing, every time — which is worse than it sounds,
+			// because these are the lines that could have shown the change being
+			// run and let the note fall silent. Ask where its code starts.
+			col = max(col, firstToken(f[i]))
+		}
+		out = append(out, Pos{Line: base + i, Col: col})
+	}
+	return out
+}
+
+// lines splits text into the lines it occupies. Text ending in a break occupies
+// the lines before it and not the empty one after: a pattern written to end at a
+// line boundary does not reach into the line that follows, and a place invented
+// there belongs to code the mutation never touches.
+func lines(s string) []string {
+	out := strings.Split(s, "\n")
+	if n := len(out); n > 1 && out[n-1] == "" {
+		return out[:n-1]
+	}
+	if len(out) == 1 && out[0] == "" {
+		return nil
+	}
+	return out
+}
+
+// lineNumbers is the lines the places fall on, in the order they are given, with
+// a run of places on one line named once. It does not sort, and it does not look
+// past the place before: given lines out of order, or the same line twice with
+// another between, it names them as many times as they arrive. Places are made
+// one to a line and in file order, so here that is every line named once.
+func lineNumbers(places []Pos) []string {
+	var out []string
+	last := 0
+	for _, p := range places {
+		// Not `p.Line == last` alone: an unset line is zero, and zero would be
+		// swallowed by the initial value rather than named. Nothing makes one
+		// today — a place comes from an offset that was found — and quietly
+		// dropping a line is not the way to find out that something started to.
+		if last != 0 && p.Line == last {
+			continue
+		}
+		last = p.Line
+		out = append(out, strconv.Itoa(p.Line))
+	}
+	return out
+}
+
+// firstToken is the column where a line's code starts, past its indentation.
+func firstToken(line string) int {
+	return 1 + len(line) - len(strings.TrimLeft(line, " \t"))
+}
+
+// lastBreakBefore is the offset just past the line break before at, so that
+// at minus it is the one-based column.
+func lastBreakBefore(src []byte, at int) int {
+	return bytes.LastIndexByte(src[:at], '\n') + 1
+}
+
+// commonPrefix is how many leading bytes two strings share.
+func commonPrefix(a, b string) int {
+	n := min(len(a), len(b))
+	for i := 0; i < n; i++ {
+		if a[i] != b[i] {
+			return i
+		}
+	}
+	return n
+}
+
+// coverPkg makes the profile record every package in the module, not only the
+// ones whose own tests are running.
+//
+// Without it, `go test` counts a file's statements only in the test binary built
+// for that file's package. A package with no test files of its own, exercised
+// entirely by another package's tests, comes back with every count zero — stated
+// as zero, not left out, so it reads as a definite "nothing runs this". That is a
+// live survivor reported as unreachable code.
+const coverPkg = "-coverpkg=./..."
+
+// withCoverage adds the coverage flags when there is somewhere to write the
+// profile. The baseline and the runs that decide each mutation are instrumented
+// the same way, so neither vouches for a suite the other never ran.
+func withCoverage(args []string, profile string) []string {
+	if profile == "" {
+		return args
+	}
+	return append(args, "-coverprofile="+profile, coverPkg)
 }
 
 // inRoot refuses a path that would write outside the tree being swept.

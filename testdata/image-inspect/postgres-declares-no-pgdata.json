@@ -1,0 +1,29 @@
+[
+  {
+    "id": "e86aee7632f374e04c3d878e636f168f5aaffd6801dd71f867de475f6e83b135",
+    "variants": [
+      {
+        "config": {
+          "architecture": "arm64",
+          "config": {
+            "Cmd": [
+              "sh"
+            ],
+            "Env": [
+              "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            ],
+            "WorkingDir": "/"
+          },
+          "created": "2026-06-16T00:01:20.474100947Z",
+          "os": "linux"
+        },
+        "digest": "sha256:65fe1760c470ebd1bcdd83163afa577917a667b1fe2902774e2ed1a923bc7b15",
+        "platform": {
+          "architecture": "arm64",
+          "os": "linux"
+        },
+        "size": 4184270
+      }
+    ]
+  }
+]
