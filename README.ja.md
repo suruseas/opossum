@@ -213,7 +213,7 @@ opossum が扱う／無視する／拒否する compose フィールドの全て
 ## 開発
 
 ```sh
-go test ./...
+make test
 
 # fake shim を使うと、実ランタイムなしでオーケストレーションをスモークテストできます：
 OPOSSUM_CONTAINER_BIN="$PWD/testdata/fake-container.sh" \

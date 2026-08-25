@@ -48,7 +48,7 @@ opossum は二層で検証する:
 実ランタイム無しで、発行される `container` コマンド列を高速・無人で検証する。
 
 ```sh
-go test ./...        # 回帰ゲート
+make test            # 回帰ゲート（CI と同じ -race -cover で走る）
 
 # end-to-end スモーク（発行コマンドは $FAKE_LOG に記録される）
 FAKE_LOG=/tmp/opossum-fake.log \

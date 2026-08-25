@@ -3,10 +3,15 @@
 Real output from `container image inspect <ref>` (container CLI 1.2.2, 2026-08-23),
 used to test what opossum reads back from an image rather than assumes about it.
 Each file keeps the whole document except `history` and `rootfs`, which say nothing
-about the environment and are long.
+about the environment and are long. The older files were trimmed further, before
+that rule was written down: they start at the image's `id` rather than the
+`configuration` block the runtime prints above it.
 
 | file | image | why it is here |
 |---|---|---|
+| `redis-7-alpine.json` | `redis:7-alpine` | declares `WorkingDir=/data` — what turns a log that says only `chown: .:` into a path |
+| `two-variants-second-declares-workdir.json` | built here from `redis-7-alpine.json`: two variants, the first with no `WorkingDir` key | an image whose first variant declares nothing — reading only that one would answer "" for an image that does declare a directory |
+| `redis-redis-stack-server.json` | `redis/redis-stack-server:latest` | declares no working directory at all (the key is absent), so `.` stays unresolved — the answer opossum has to keep giving |
 | `postgres17.json` | `postgres:17-alpine` | declares `PGDATA=/var/lib/postgresql/data` — the path opossum used to hold as a constant |
 | `postgres18.json` | `postgres:18-alpine` | declares `PGDATA=/var/lib/postgresql/18/docker` — the move that made the constant wrong |
 | `postgres-pgdata-below-datadir.json` | built here: `FROM postgres:17-alpine` with `ENV PGDATA=/var/lib/postgresql/data/pgdata`, tagged `postgres:b480-below` | an image that initialises *below* the mount it is handed. What it then does is measured in `../error-wordings/pg-image-declares-pgdata-below-the-mount.txt` |

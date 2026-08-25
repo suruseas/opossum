@@ -34,14 +34,17 @@ type Orchestrator struct {
 	// imageEnvs remembers what each image declared, so planning an overlay asks the
 	// runtime once per image rather than once per mount it considers.
 	imageEnvs map[string]map[string]string
-	Project   *compose.Project
-	DNSDomain string // local DNS domain enabling bare-name service discovery
-	rt        *runtime.Runtime
-	out       interface{ Write([]byte) (int, error) }
-	sleep     func(time.Duration) // overridable so tests don't wait in real time
-	ctx       context.Context     // cancelled on Ctrl-C so a partial `up` rolls back
-	profiles  map[string]bool     // active compose profiles (--profile / COMPOSE_PROFILES)
-	up        upOptions           // per-invocation `up` flags
+	// imageWorkdirs remembers where each image starts its process, for the same
+	// reason: a crash decode asks once per image, not once per mount.
+	imageWorkdirs map[string]string
+	Project       *compose.Project
+	DNSDomain     string // local DNS domain enabling bare-name service discovery
+	rt            *runtime.Runtime
+	out           interface{ Write([]byte) (int, error) }
+	sleep         func(time.Duration) // overridable so tests don't wait in real time
+	ctx           context.Context     // cancelled on Ctrl-C so a partial `up` rolls back
+	profiles      map[string]bool     // active compose profiles (--profile / COMPOSE_PROFILES)
+	up            upOptions           // per-invocation `up` flags
 	// crashGrace is how long verifyStarted watches a just-started service before
 	// concluding it started. Per-Orchestrator so an eval can set its own.
 	crashGrace time.Duration
@@ -2286,7 +2289,7 @@ func (o *Orchestrator) chownCrashHint(name string, svc *compose.Service, logs st
 	}
 	// The same double gate decides whether to remember it. What is written down is
 	// the one thing a suggestion needs and guessing cannot supply: which mount died.
-	src, target, known := blamedMount(svc, logs)
+	src, target, known := blamedMount(svc, logs, func() string { return o.startingDir(svc) })
 	recorded := false
 	if known {
 		recorded = o.recordChownFailure(chownFailure{Service: name, Target: target, Source: src})

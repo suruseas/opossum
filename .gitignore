@@ -9,6 +9,13 @@
 
 # Build output
 /opossum
+# `go build ./cmd/x` without -o writes the binary here under its package name.
+# The tracked-file check catches it, but only once it is already committed — so
+# every command in cmd/ is listed, not only the ones that have bitten somebody.
+/busy
+/changelog
+/mutate
+/noleftovers
 /dist/
 
 # Go

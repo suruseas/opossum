@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"github.com/suruseas/opossum/internal/suitedir"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,7 +25,7 @@ import (
 var fakeShimBin string
 
 func TestMain(m *testing.M) {
-	d, err := os.MkdirTemp("", "opossum-rt-test-")
+	d, err := suitedir.Make("opossum-rt-test-")
 	if err != nil {
 		panic(err)
 	}
@@ -78,8 +79,11 @@ func TestVerboseTracesCommands(t *testing.T) {
 	r := &Runtime{Bin: shim, Verbose: true, Trace: &buf}
 
 	r.capture("inspect", "web.foo.opossum")
-	if got := buf.String(); !strings.Contains(got, "+ "+shim+" inspect web.foo.opossum") {
-		t.Errorf("verbose trace = %q, want the inspect command echoed", got)
+	// The whole buffer, not a phrase in it: `Contains` on the command is
+	// satisfied by a line that has the command and something else on it, and
+	// what this traces is meant to be exactly what ran.
+	if got, want := buf.String(), "+ "+shim+" inspect web.foo.opossum\n"; got != want {
+		t.Errorf("verbose trace = %q, want %q", got, want)
 	}
 
 	// The stream path (used by `up`, so it carries the key `container run …` line)
@@ -88,8 +92,8 @@ func TestVerboseTracesCommands(t *testing.T) {
 	if err := r.stream("run", "-d", "--name", "web.foo.opossum", "web:latest"); err != nil {
 		t.Fatalf("stream: %v", err)
 	}
-	if got := buf.String(); !strings.Contains(got, "+ "+shim+" run -d --name web.foo.opossum web:latest") {
-		t.Errorf("stream path should trace the run command, got %q", got)
+	if got, want := buf.String(), "+ "+shim+" run -d --name web.foo.opossum web:latest\n"; got != want {
+		t.Errorf("stream trace = %q, want %q", got, want)
 	}
 
 	// A multi-line arg (e.g. a PEM env value) is quoted so the trace stays on one

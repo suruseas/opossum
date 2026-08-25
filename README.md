@@ -258,7 +258,7 @@ ignored, and `opossum config` tells you which fields in your file were skipped.
 ## Development
 
 ```sh
-go test ./...
+make test
 
 # Smoke-test the orchestration without the real runtime using the fake shim:
 OPOSSUM_CONTAINER_BIN="$PWD/testdata/fake-container.sh" \

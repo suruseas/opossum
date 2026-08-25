@@ -54,16 +54,8 @@ var chownPathRE = regexp.MustCompile(`chown:[^\n]*?'([^']+)'|chown:\s+([^:\n]+):
 // not carry a usable one — redis reports `chown: .:`, which says nothing about
 // which mount died.
 func chownedPath(logs string) string {
-	m := chownPathRE.FindStringSubmatch(logs)
-	if m == nil {
-		return ""
-	}
-	p := m[1]
-	if p == "" {
-		p = m[2]
-	}
-	p = strings.TrimSpace(p)
-	if !strings.HasPrefix(p, "/") {
+	p, ok := chownedToken(logs)
+	if !ok || !strings.HasPrefix(p, "/") {
 		return "" // "." and friends: a path we cannot attribute
 	}
 	// Returned as written, trailing slash and all: the matching below absorbs one,
@@ -73,15 +65,50 @@ func chownedPath(logs string) string {
 	return p
 }
 
+// chownedToken is whatever the failure line named, path or not.
+func chownedToken(logs string) (string, bool) {
+	m := chownPathRE.FindStringSubmatch(logs)
+	if m == nil {
+		return "", false
+	}
+	p := m[1]
+	if p == "" {
+		p = m[2]
+	}
+	return strings.TrimSpace(p), true
+}
+
+// saysWorkingDirectory reports whether the failure line named the directory the
+// process was in, and nothing else. `.` is that; `..` is its parent and `sub/dir`
+// is something under it, and resolving either of those to the working directory
+// would name a mount the container never mentioned — in prose that says it is not
+// a guess.
+func saysWorkingDirectory(logs string) bool {
+	p, ok := chownedToken(logs)
+	return ok && (p == "." || p == "./")
+}
+
 // blamedMount picks the bind mount a chown failure is about.
+//
+// workdir answers where the container's process starts, and is what turns a log
+// that says only `chown: .:` into a path. It is a function because answering costs
+// a process and most of the time the question never comes up: a log that names its
+// own path needs no help, and neither does a service with no bind mount to propose.
+// It answers "" when nothing says.
+//
+// Where the process starts is not necessarily where it stood when it called chown.
+// An overridden entrypoint, a `cd` in the image's own script, a subshell — none of
+// that is accounted for, which is why only `.` itself is resolved this way and
+// never `..` or a path below it.
 //
 // Naming the wrong mount would be worse than naming none: the suggestion would
 // propose detaching a directory that is working. So it answers only when the
 // answer is forced — the failing path resolves to exactly one of the service's
-// bind mounts, or the service has exactly one bind mount and so there is nothing
-// else it could have been. Otherwise it declines, and the crash still gets its
-// generic hint.
-func blamedMount(svc *compose.Service, logs string) (src, target string, ok bool) {
+// bind mounts, or the log said only `.` and the directory that stands for resolves
+// to exactly one of them, or the service has exactly one bind mount and so there
+// is nothing else it could have been. Otherwise it declines, and the crash still
+// gets its generic hint.
+func blamedMount(svc *compose.Service, logs string, workdir func() string) (src, target string, ok bool) {
 	type mount struct{ src, target string }
 	var binds []mount
 	others := 0 // mounts that are not a bind this could propose, but could still be what died
@@ -113,7 +140,18 @@ func blamedMount(svc *compose.Service, logs string) (src, target string, ok bool
 	if len(binds) == 0 {
 		return "", "", false
 	}
-	if p := chownedPath(logs); p != "" {
+	named := chownedPath(logs)
+	p := named
+	// `binds` is not empty here — the early return above saw to that — so there is
+	// always something a resolved directory could land in.
+	if p == "" && saysWorkingDirectory(logs) {
+		// The log said `.` and nothing more. That is a directory — the one the
+		// process starts in — and the image says where it is. Resolving it here is
+		// the difference between a suggestion and a shrug for the ordinary way
+		// Redis is written: a bind for the data and a bind for the config.
+		p = workdir()
+	}
+	if p != "" {
 		// The mount that holds the failing path. `chown /var/lib/mysql` names the
 		// mount itself; `chown /var/lib/mysql/data` names something inside it.
 		var holds []mount
@@ -128,6 +166,16 @@ func blamedMount(svc *compose.Service, logs string) (src, target string, ok bool
 		if len(holds) > 1 {
 			return "", "", false // nested mounts: which one owns the path is a guess
 		}
+		// Nothing holds it, and where that leaves us depends on who said it.
+		//
+		// A path the container named is strong evidence, and evidence that points
+		// outside this service's mounts says the failure was not about them (see
+		// below). A path we resolved ourselves is weaker: the image told us where
+		// the process starts, and it lands nowhere useful — a relative working
+		// directory, a `/`, a directory nobody mounted. That says nothing about the
+		// mounts, so it must not take away what was known without asking. Asking
+		// can widen this answer; it must not narrow it.
+
 		// Nothing holds it. A branch here that blamed a mount *underneath* the
 		// failing path was tried and removed: it fired on `chown: /:` for every
 		// absolute mount, and the reading behind it was wrong anyway. A log naming
@@ -140,9 +188,11 @@ func blamedMount(svc *compose.Service, logs string) (src, target string, ok bool
 		// directory, chowned by an entrypoint running as a non-root user. Falling
 		// back to "well, there is only one bind mount" would name a directory that
 		// is working and tell the reader it is the one that died.
-		return "", "", false
+		if named != "" {
+			return "", "", false
+		}
 	}
-	// No usable path in the log at all (redis reports `chown: .:`). One bind mount
+	// No usable path in the log, and nothing to resolve `.` with. One bind mount
 	// leaves nothing else it could have been — but only if there is nothing else.
 	// A service with a volume at its data directory and a bind for its config is an
 	// ordinary way to write Redis, and blaming the config bind would propose

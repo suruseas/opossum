@@ -183,8 +183,14 @@ services:
     image: app
     networks: [missing]
 `))
-	if err == nil || !strings.Contains(err.Error(), "undefined network") {
-		t.Fatalf("expected an undefined-network error, got %v", err)
+	// The whole message, not the two words in the middle. It names a service and
+	// a network, both strings, both fed to `%q` — and `Contains(…, "undefined
+	// network")` reads neither of them, so swapping the two arguments leaves this
+	// green while the message sends the reader after the wrong thing. Measured:
+	// that swap survived the whole of internal/compose.
+	const want = `service "app" references undefined network "missing" (declare it under top-level networks:)`
+	if err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %s", err, want)
 	}
 }
 
@@ -217,8 +223,9 @@ services:
     image: app
     networks: [a, missing]
 `))
-	if err == nil || !strings.Contains(err.Error(), "undefined network") {
-		t.Fatalf("expected an undefined-network error, got %v", err)
+	const want = `service "app" references undefined network "missing" (declare it under top-level networks:)`
+	if err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %s", err, want)
 	}
 }
 
@@ -437,8 +444,12 @@ services:
     secrets:
       - missing
 `))
-	if err == nil {
-		t.Fatal("expected an error for a service referencing an undefined secret")
+	// Not just "there was an error": the message names a service and a secret,
+	// and nothing here read either of them until this line.
+	want := `service "db" references undefined secret "missing" — declare it under ` +
+		"top-level secrets: with a file:, or remove the reference"
+	if err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %s", err, want)
 	}
 }
 
@@ -454,8 +465,9 @@ services:
     secrets:
       - db-password
 `))
-	if err == nil {
-		t.Fatal("expected an error for an external (non-file) secret")
+	want := `service "db": external secret "db-password" is not supported (only file-based secrets)`
+	if err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %s", err, want)
 	}
 }
 
@@ -472,8 +484,9 @@ services:
       - source: s
         target: ../escape
 `))
-	if err == nil {
-		t.Fatal("expected an error for a secret target with a path separator")
+	want := `service "db": secret target "../escape" must be a bare name (no path separators)`
+	if err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %s", err, want)
 	}
 }
 
@@ -844,8 +857,13 @@ services:
   db:
     image: postgres
 `))
-	if err == nil {
-		t.Fatal("expected error: service_healthy on a dependency with no healthcheck")
+	// The whole message. It names the dependant and the dependency, both
+	// strings on one format call, and "there was an error" reads neither — so
+	// the version that tells the reader to add a healthcheck to the wrong
+	// service passes just as well.
+	want := `service "web" requires "db" to be healthy, but "db" defines no healthcheck`
+	if err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %s", err, want)
 	}
 }
 
@@ -913,8 +931,10 @@ services:
     healthcheck:
       test: ["CMD", "true"]
 `))
-	if err == nil {
-		t.Fatal("expected error: a service can't be both run-to-completion and required healthy")
+	want := `service "b" requires "job" to be healthy, but "job" is depended on to complete ` +
+		"(run-to-completion services stop, so they can't stay healthy)"
+	if err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %s", err, want)
 	}
 }
 

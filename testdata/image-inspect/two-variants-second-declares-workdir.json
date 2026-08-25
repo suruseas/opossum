@@ -1,0 +1,71 @@
+[
+  {
+    "configuration": {
+      "creationDate": "2026-07-26T04:41:41Z",
+      "descriptor": {
+        "digest": "sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2",
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "size": 10213
+      },
+      "name": "docker.io/library/redis:two-variants"
+    },
+    "id": "e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2",
+    "variants": [
+      {
+        "config": {
+          "architecture": "amd64",
+          "config": {
+            "Cmd": [
+              "redis-server"
+            ],
+            "Entrypoint": [
+              "docker-entrypoint.sh"
+            ],
+            "Env": [
+              "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+              "REDIS_VERSION=7.4.10"
+            ]
+          },
+          "created": "2026-07-26T04:41:41.717448539Z",
+          "os": "linux",
+          "variant": "v8"
+        },
+        "digest": "sha256:102aa93d02c163a634662ec18a1a1db51bf5b8b6a2f28547ce24626218a40d54",
+        "platform": {
+          "architecture": "amd64",
+          "os": "linux",
+          "variant": "v8"
+        },
+        "size": 16779941
+      },
+      {
+        "config": {
+          "architecture": "arm64",
+          "config": {
+            "Cmd": [
+              "redis-server"
+            ],
+            "Entrypoint": [
+              "docker-entrypoint.sh"
+            ],
+            "Env": [
+              "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+              "REDIS_VERSION=7.4.10"
+            ],
+            "WorkingDir": "/data"
+          },
+          "created": "2026-07-26T04:41:41.717448539Z",
+          "os": "linux",
+          "variant": "v8"
+        },
+        "digest": "sha256:102aa93d02c163a634662ec18a1a1db51bf5b8b6a2f28547ce24626218a40d54",
+        "platform": {
+          "architecture": "arm64",
+          "os": "linux",
+          "variant": "v8"
+        },
+        "size": 16779941
+      }
+    ]
+  }
+]

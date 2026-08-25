@@ -6,6 +6,53 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.23.1] - 2026-08-26
+
+### Fixed
+
+- A project where everything opossum found is something it cannot fix now reads
+  the same as one where it fixed something. Those findings — a mounted Docker
+  socket, a host device, a Postgres cluster the image keeps somewhere the mount
+  does not cover — are written into `compose.opossum.yaml` with the whole of what
+  they mean: what will happen, and what to do instead. But that file is not
+  written when such findings are all there is, since it is never overwritten once
+  it exists and a comment-only one would use up that single chance. So the body
+  went nowhere and a one-line summary was all that arrived, while the same
+  finding in a project that also needed a real change was explained in full. When
+  the findings are all of that kind, the file is still not written and what it
+  would have said is now printed instead. (An overlay left unwritten for some other reason —
+  one is already there, `-f` named the compose file, the run is a dry run — still
+  reports only the summaries.)
+- Running `up --from-docker-compose` with an explicit `-f` does not write an
+  overlay, and opossum said so by sending you back for a second run without the
+  flag — even where everything it found was something no compose change can fix.
+  An overlay is never written for those alone, so the run you were sent back for
+  had nothing of theirs to write down. Opossum now says that instead, and reads
+  the findings out in full: what will happen, and what to do about it. What a
+  second run would do with the rest of your project is not something opossum can
+  tell from behind `-f`, and it says nothing about that here: with the flag it
+  reads the files you named, and without it whatever discovery turns up, override
+  files included.
+- A Redis container that dies taking ownership of its data directory is now
+  helped in the shape Redis is usually written in — a bind mount for the data and
+  another for the config, or a bind for the data beside a volume for something
+  else. What it prints is `chown: .: Operation not permitted`, which names a
+  directory without saying where it is, so opossum could only work out which mount
+  had died when the service had exactly one to choose from; with anything beside
+  it, the crash report had to say it could not tell. The image knows where `.` is
+  and now gets asked, the same way it is asked where a database keeps its data.
+  `redis:7-alpine` declares `/data`, so the data mount is named and the swap is
+  offered for that mount alone; `redis/redis-stack-server` declares no working
+  directory, and there the report says it could not tell, as before. A
+  `working_dir:` in the compose file wins over the image, since that is what the
+  runtime is given. Asking can only add: where the answer lands nowhere useful —
+  a relative `working_dir:`, an image that declares `/`, a directory nobody
+  mounted — the report says exactly what it said before. The suggestion this
+  writes says it is not a guess, and for a mount named this way that rests on one
+  step more than it used to: the container said `.`, and the image says where `.`
+  is. That holds unless something moved the process in between, which nothing
+  here checks.
+
 ## [0.23.0] - 2026-08-23
 
 ### Added
@@ -925,7 +972,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.23.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.23.1...HEAD
+[0.23.1]: https://github.com/suruseas/opossum/compare/v0.23.0...v0.23.1
 [0.23.0]: https://github.com/suruseas/opossum/compare/v0.22.1...v0.23.0
 [0.22.1]: https://github.com/suruseas/opossum/compare/v0.22.0...v0.22.1
 [0.22.0]: https://github.com/suruseas/opossum/compare/v0.21.0...v0.22.0

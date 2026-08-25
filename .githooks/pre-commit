@@ -1,0 +1,124 @@
+#!/bin/sh
+# Refuses a commit whose working tree does not build.
+#
+# The working tree, not the commit: git records the index, and this reads what
+# is on disk. Stage half of a change and the half you did not stage is still
+# here, so a commit that does not build on its own goes through without a word.
+# What this catches is the whole-tree mistake — the file that does not compile,
+# the one that is not formatted — which is the shape that has actually reached
+# CI from here.
+#
+# Only the checks that answer in about a second. The suite is minutes, and a
+# commit hook that takes minutes teaches people to pass --no-verify by habit,
+# after which nothing is checked at all. The suite stays in `make test` and CI.
+#
+# Install with: git config core.hooksPath .githooks
+
+# Asked once, with the two streams sent to different places. They mean different
+# things — a list of files a command fixes, and a diagnosis a person fixes — and
+# the whole point of this hook is that each arrives under its own heading.
+#
+# The obvious way to keep them apart is to ask twice, once discarding each. That
+# is what this did, and it cost more than it looked: two calls give two exit
+# statuses, they can disagree, and every arm below then had to decide which call
+# it was talking about. Three separate defects came out of exactly that, each one
+# an arm asserting something about the call its own condition had not read.
+#
+# One call, one status, and no such question. Both streams come back through one
+# capture, so the result is cut in two again on a marker that carries this
+# shell's process id: a tree cannot name a file after a pid it cannot know.
+# Cutting uses prefix and suffix removal, which every POSIX shell has — substring
+# expansion would not do, dash has none.
+#
+# Which stream goes where is a speed decision, and a large one. Every cut below
+# scans as far as the first marker, so whichever stream is written first is the
+# one paid for. The diagnosis goes first because it is short in the case that
+# matters: `gofmt -l .` names every unformatted file in the tree, while a
+# diagnosis appears only for files that do not parse. With the listing first, a
+# tree of five thousand unformatted files took 2.6 seconds to cut under bash and
+# 13 under dash; with the diagnosis first, 78 milliseconds and 61. A tree of five
+# thousand unparseable files would pay it the other way round — a tree in which
+# this hook's answer is the least of anyone's problems.
+#
+# The inner command is wrapped in `{ ; }` rather than left bare. Bare, ksh 93u+
+# puts the listing into the variable meant for the diagnosis; wrapped, bash 3.2,
+# dash, ksh and zsh all agree. Fd 3 is left open to gofmt rather than closed with
+# `3>&-`, because closing it makes ksh 93u+ hand back a status of its own
+# invention; gofmt does not write there. Nothing external is needed — no temp
+# file, no `cat`, no `rm` — which matters because the case worth reporting well
+# is the one where nothing is on PATH.
+#
+# Under ksh 93u+ specifically, this stalls somewhere above two thousand listed
+# files; the other three shells stay in tens of milliseconds. Nothing runs this
+# hook under ksh — `#!/bin/sh` is bash here and dash on the machines that build
+# it — so what is checked is that the shells a machine does have all read this
+# the same way, on the trees it is normally handed.
+mark="@@opossum-$$-gofmt@@"
+raw=$( { names=$( { gofmt -l . ; } 2>&3 ); printf '%s%s%s%s' "$mark" "$?" "$mark" "$names"; } 3>&1 )
+gofmt_said=${raw%%"$mark"*}
+rest=${raw#*"$mark"}
+gofmt_status=${rest%%"$mark"*}
+gofmt_names=${rest#*"$mark"}
+# The diagnosis arrives before the marker, so its trailing newline is still on
+# it. The listing came back through a capture, which strips its own.
+newline='
+'
+while [ "${gofmt_said%"$newline"}" != "$gofmt_said" ]; do
+	gofmt_said=${gofmt_said%"$newline"}
+done
+
+# 126 and up is the shell, not gofmt: it could not run the thing at all.
+#
+# There used to be two statuses here and each half of this arm named a call. Two
+# versions of that named the wrong one — an arm speaking for a variable its own
+# condition had not read. With one call there is one status and nothing to name.
+if [ "$gofmt_status" -ge 126 ]; then
+	printf 'gofmt could not run at all (exit %s)\n' "$gofmt_status" >&2
+	if [ -n "$gofmt_said" ]; then
+		printf '%s\n' "$gofmt_said" >&2
+	fi
+	if [ -n "$gofmt_names" ]; then
+		printf 'it named these before it stopped:\n%s\n' "$gofmt_names" >&2
+	fi
+	printf 'nothing here was checked\n' >&2
+	exit 1
+fi
+
+# Both can be true at once — a file that needs formatting next to one that does
+# not parse — and reporting only the first would take away the harder half. So
+# each is said if it applies, and one flag decides the answer.
+trouble=0
+if [ "$gofmt_status" -ne 0 ] && [ -n "$gofmt_said" ]; then
+	printf 'gofmt stopped on this tree:\n%s\n' "$gofmt_said" >&2
+	printf 'formatting is not the fix here — this has to parse, and be readable, first\n' >&2
+	trouble=1
+fi
+if [ -n "$gofmt_names" ]; then
+	printf 'gofmt has something to say about this tree:\n%s\n' "$gofmt_names" >&2
+	printf 'run `gofmt -w .`, or `git commit --no-verify` if you meant it\n' >&2
+	trouble=1
+fi
+# Left over: it failed and nothing above had anything to print — no diagnosis and
+# no file list. Said only when neither of the above did, so a tree with real
+# trouble is not also told this.
+if [ "$trouble" -eq 0 ] && [ "$gofmt_status" -ne 0 ]; then
+	printf 'gofmt failed with nothing to say (exit %s), so nothing here was checked\n' "$gofmt_status" >&2
+	trouble=1
+fi
+if [ "$trouble" -ne 0 ]; then
+	exit 1
+fi
+
+if ! out=$(go vet ./... 2>&1); then
+	printf 'go vet cannot make sense of this tree:\n%s\n' "$out" >&2
+	printf 'this is the one that lets a commit that does not compile through\n' >&2
+	exit 1
+fi
+
+if ! out=$(GOOS=linux go vet ./... 2>&1); then
+	printf 'go vet cannot make sense of this tree for linux:\n%s\n' "$out" >&2
+	printf 'CI builds for linux, so this is a red CI you would find out about later\n' >&2
+	exit 1
+fi
+
+exit 0

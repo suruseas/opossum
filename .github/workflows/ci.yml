@@ -205,8 +205,10 @@ jobs:
           # (nothing under cmd/opossum imports repohygiene or claimcite at all;
           # `go list -deps ./cmd/... | grep claimcite` is empty, and the only file
           # importing it is its own test). Add to this list only after checking the
-          # same way — that no product code imports it.
-          shipped="$(echo "$changed" | grep -E '^(cmd|internal)/' | grep -v '_test\.go$' | grep -v '/testdata/' | grep -v '^cmd/changelog/' | grep -v '^internal/changelog/' | grep -v '^internal/repohygiene/' | grep -v '^internal/claimcite/' | grep -v '^cmd/mutate/' | grep -v '^internal/mutate/' || true)"
+          # same way — that no product code imports it. The checking is not only
+          # by hand: internal/repohygiene/gate_test.go pins the set of packages the
+          # released binary links, so an exemption that becomes a lie fails there.
+          shipped="$(echo "$changed" | grep -E '^(cmd|internal)/' | grep -v '_test\.go$' | grep -v '/testdata/' | grep -v '^cmd/changelog/' | grep -v '^internal/changelog/' | grep -v '^internal/repohygiene/' | grep -v '^internal/claimcite/' | grep -v '^cmd/mutate/' | grep -v '^internal/mutate/' | grep -v '^cmd/noleftovers/' | grep -v '^cmd/busy/' | grep -v '^internal/suitedir/' || true)"
           if [ -z "$shipped" ]; then
             echo "No shipped code changed — no fragment needed."; exit 0
           fi

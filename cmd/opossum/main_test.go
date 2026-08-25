@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,6 +19,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/suruseas/opossum/internal/compose"
+	"github.com/suruseas/opossum/internal/orchestrator"
+	"github.com/suruseas/opossum/internal/suitedir"
 	"github.com/suruseas/opossum/internal/workspace"
 )
 
@@ -78,7 +83,13 @@ var fakeShimBin string
 var opossumBin string
 
 func TestMain(m *testing.M) {
-	d, err := os.MkdirTemp("", "opossum-cmd-test-")
+	// Recorded before any test chdirs: a child `go test .` has to be pointed at
+	// the sources, and by then the working directory is somebody's t.TempDir().
+	if wd, werr := os.Getwd(); werr == nil {
+		testPackageDir = wd
+	}
+
+	d, err := suitedir.Make("opossum-cmd-test-")
 	if err != nil {
 		panic(err)
 	}
@@ -92,9 +103,224 @@ func TestMain(m *testing.M) {
 		os.RemoveAll(d)
 		panic(fmt.Sprintf("building fake shim: %v\n%s", berr, out))
 	}
+	// Every test in this package runs against this directory rather than the
+	// developer's own. `restart:` starts a supervisor, and a supervisor writes a
+	// pid file and a log under XDG_STATE_HOME — so a test that forgets to say
+	// where that goes writes into the home directory of whoever ran `go test`.
+	// Tests that want their own still set it; this is only the floor.
+	os.Setenv("XDG_STATE_HOME", filepath.Join(d, "state"))
+
+	// Probes from an earlier run that was killed before it could clean up. The
+	// probe names its project after the run that asked for it, so a probe whose
+	// parent is gone is an orphan and nobody's but ours; one whose parent is
+	// alive belongs to a suite running right now and is left alone. Swept before
+	// the snapshot below, so they are not mistaken for this run's own leaks.
+	sweepOrphanedProbes()
+
+	// What was already supervising something before any test ran. Anything in
+	// this set is somebody else's, however it got there. If the look failed, the
+	// difference below is not taken at all: an empty "before" that means "could
+	// not see" would make everything on this machine look new.
+	supervisorsBefore, lookedBefore := runningSupervisors()
+
 	code := m.Run()
+
+	// A supervisor is meant to outlive the command that started it. That is the
+	// point of it, and it is why a test that starts one and does not stop it
+	// leaves a process running on this machine after `go test` has printed ok —
+	// one that goes on watching a project whose files are about to be deleted.
+	// Asked once: StopSupervisor waits for the process to go before it returns,
+	// so a supervisor a test stopped is already gone by here. One that is still
+	// running is one nobody stopped.
+	reported := map[int]bool{}
+	leaked, lookedPath := leakedProcesses(opossumBin)
+	if len(leaked) > 0 {
+		fmt.Fprint(os.Stderr, "\n"+leakReport(opossumBin, leaked))
+		for _, pid := range leaked {
+			reported[pid] = true
+		}
+		code = 1
+	}
+	// And any supervisor at all that was not running when this started. Searching
+	// by path only finds the one path it was given, and a supervisor can be
+	// started from three: the binary built above, this test binary (when a test
+	// forgets OPOSSUM_SELF_BIN), and a copy a test made somewhere of its own.
+	// Asking instead what is new since the suite began covers all three without
+	// naming any of them — and leaves alone whatever was already running on this
+	// machine, which is not this suite's to report.
+	now, lookedAfter := runningSupervisors()
+	if lookedAfter && lookedBefore {
+		if started := unreported(newSupervisors(supervisorsBefore, now), reported); len(started) > 0 {
+			fmt.Fprint(os.Stderr, "\n"+newSupervisorReport(started))
+			code = 1
+		}
+	}
+	// A look that did not happen is not a clean bill of health. Saying so on
+	// stderr is not enough: `go test ./...` keeps the output of a package that
+	// passed and throws away the rest, so in the one form the gate and CI use,
+	// a note about not having looked lands in a green run and is never read.
+	if why := uncheckedReport(lookedBefore, lookedPath, lookedAfter); why != "" {
+		fmt.Fprint(os.Stderr, "\n"+why)
+		code = 1
+	}
+
 	os.RemoveAll(d)
 	os.Exit(code)
+}
+
+// leakReport is what the suite says when something outlived it. The command in
+// it is meant to be typed, so the pids go in bare: printing a []int gives
+// "kill [321 654]", which bash rejects as an argument and zsh tries to glob.
+func leakReport(bin string, pids []int) string {
+	var b strings.Builder
+	b.WriteString("these processes outlived the tests that started them: ")
+	for i, pid := range pids {
+		if i > 0 {
+			b.WriteString(" ")
+		}
+		fmt.Fprintf(&b, "%d", pid)
+	}
+	fmt.Fprintf(&b, "\nthey are running %s, which is about to be removed — `kill", bin)
+	for _, pid := range pids {
+		fmt.Fprintf(&b, " %d", pid)
+	}
+	b.WriteString("` ends them\n")
+	return b.String()
+}
+
+// uncheckedReport is what the suite says when one of its looks did not happen.
+// It returns nothing when all three did.
+//
+// Each look is named rather than summarised, because they fail for different
+// reasons and a reader who sees "the one before the tests" knows the comparison
+// was skipped, while "the one after" means it was never made at all.
+func uncheckedReport(before, path, after bool) string {
+	var missed []string
+	if !before {
+		missed = append(missed, "the look before the tests")
+	}
+	if !path {
+		missed = append(missed, "the look for processes running the binary this suite built")
+	}
+	if !after {
+		missed = append(missed, "the look after the tests")
+	}
+	if len(missed) == 0 {
+		return ""
+	}
+	return "this run did not check whether the tests left anything running: " +
+		strings.Join(missed, " and ") + " did not happen.\n" +
+		"the note above says why. a run that could not look is not a run that found nothing.\n"
+}
+
+// leakSaid is where the "I could not look" notes go. It is os.Stderr except
+// while a test is reading them: those two branches are the ones that must not
+// look like "no leaks", so something has to be able to see what they said.
+var leakSaid io.Writer = os.Stderr
+
+// runningSupervisors is every opossum supervisor on this machine right now,
+// whoever started it, and whether the look succeeded at all. TestMain asks it
+// before the tests and after, and the difference is what the tests left behind;
+// the tests below ask it too, to check that it can see and that it says when it
+// cannot.
+func runningSupervisors() (pids []int, looked bool) {
+	return leakedProcesses("__supervise")
+}
+
+// unreported drops the pids the search by path already named, so one process is
+// named once. The path search speaks with more certainty — it found a process
+// running a binary this suite built into a directory of its own — so it is the
+// one that keeps them.
+func unreported(pids []int, already map[int]bool) []int {
+	var out []int
+	for _, pid := range pids {
+		if !already[pid] {
+			out = append(out, pid)
+		}
+	}
+	return out
+}
+
+// newSupervisorReport is what the suite says about supervisors that appeared
+// while it ran. It is a weaker claim than the report by path and says so: these
+// were not running before and are running now, which is usually a test that
+// started one and did not stop it, and is sometimes someone else on this machine
+// starting one while the tests ran. Nothing here can tell those apart, so the
+// command is offered for the first case rather than given as the thing to do —
+// and the second case has an exit worth naming, because a reader who has just
+// been told about a process they recognise should not go looking for a bug.
+func newSupervisorReport(pids []int) string {
+	var b strings.Builder
+	b.WriteString("these supervisors were not running when the tests started, and are now:")
+	for _, pid := range pids {
+		fmt.Fprintf(&b, " %d", pid)
+	}
+	b.WriteString("\nif the tests started them, `kill")
+	for _, pid := range pids {
+		fmt.Fprintf(&b, " %d", pid)
+	}
+	b.WriteString("` ends them; if something else on this machine did, leave them be and run the tests again — they will be there before the next run and it will not mention them\n")
+	return b.String()
+}
+
+// newSupervisors is what is running now and was not before. A pid in both is
+// the same process — pids are not reused while the process is alive, and these
+// two lists are separated by one test run.
+func newSupervisors(before, now []int) []int {
+	was := make(map[int]bool, len(before))
+	for _, pid := range before {
+		was[pid] = true
+	}
+	var started []int
+	for _, pid := range now {
+		if !was[pid] {
+			started = append(started, pid)
+		}
+	}
+	return started
+}
+
+// leakedProcesses reports the pids still running the given binary. It is used
+// after the suite, when the answer should be none.
+//
+// It asks pgrep rather than reading the pid files the supervisors write: a test
+// that points XDG_STATE_HOME somewhere of its own would hide its pid file from
+// us, and the process it leaves behind is the thing that matters. Where pgrep is
+// not available it finds nothing, and says so rather than reporting none.
+func leakedProcesses(bin string) (pids []int, looked bool) {
+	if _, err := exec.LookPath("pgrep"); err != nil {
+		fmt.Fprintf(leakSaid, "\nno pgrep here, so nothing checked whether any process outlived the tests\n")
+		return nil, false
+	}
+	// Quoted: pgrep -f takes an expression, and a temp directory with a bracket
+	// in its name would turn into a pattern that matches something else — or
+	// nothing, which reads here as "no leaks".
+	out, err := exec.Command("pgrep", "-f", regexp.QuoteMeta(bin)).Output()
+	if err != nil {
+		// Exit 1 is pgrep's way of saying it matched nothing, which is the good
+		// case. Anything else means it did not look, and that is not the same
+		// answer even though it arrives in the same shape.
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 1 {
+			return nil, true
+		}
+		fmt.Fprintf(leakSaid, "\npgrep could not look for processes outliving the tests: %v\n", err)
+		return nil, false
+	}
+	// Nothing to exclude for this process. For the built binary's path there is
+	// nothing to exclude at all — this test binary's command line does not carry
+	// it. For "__supervise" the answer does not depend on the platform either:
+	// the two snapshots are taken by the same process, so a pid that pgrep hands
+	// back both times cancels in the difference. (An earlier version searched for
+	// os.Executable(), and there the exclusion did matter, on Linux but not on
+	// macOS — dropping it turned CI red with exactly one process reported while
+	// every test passed, run 32671779974. That version is gone.)
+	for _, line := range strings.Fields(string(out)) {
+		if pid, cerr := strconv.Atoi(line); cerr == nil {
+			pids = append(pids, pid)
+		}
+	}
+	return pids, true
 }
 
 // fakeShim writes a `container` stand-in that logs each invocation to $FAKE_LOG
@@ -621,6 +847,424 @@ func TestFromDockerComposeNoGenerationWithExplicitFile(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "compose.opossum.yaml")); err == nil {
 		t.Error("an explicit -f should not generate an overlay (it wouldn't be merged)")
 	}
+}
+
+// A note is what opossum found and cannot fix with a compose change. Its body —
+// what happens, and what to do instead — lives in the overlay, and the overlay is
+// not written when notes are all there is: it is never overwritten once it exists,
+// so a comment-only file would burn that one chance.
+//
+// That reasoning is about the file, not about the reader. Before this, a
+// notes-only project got one summary line and nothing else, while the same note
+// in a project that also needed a real change got its full body — the same
+// diagnostic explained or not depending on what some other service required.
+// The notes are read out without their comment marks, so a newline in anything
+// they quote back — a path, a service name — would leave the rest of it standing
+// on its own line, indistinguishable from a note opossum wrote. In the file that
+// line is loose YAML and the overlay is rejected before it is written; on screen
+// there is no such check, so the newline has to be gone before it gets there.
+func TestAPathCannotWriteItsOwnNote(t *testing.T) {
+	fakeShim(t)
+	dir := t.TempDir()
+	// Written as it appears inside the double-quoted YAML scalar below.
+	forged := `[opossum note] service \"payroll\": opossum deleted your database`
+	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte(
+		"name: notes\nservices:\n  usb:\n    image: alpine:3\n    volumes:\n"+
+			"      - \"/dev/ttyUSB0\\n"+forged+":/dev/ttyUSB0\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	out, err := run(t, "up", "--from-docker-compose", "--no-build", "--dry-run")
+	if err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	// The whole screen, not just the read-out: the summary lines quote the path
+	// back too. (The planned-command listing further down still breaks argv
+	// across lines — that is #512, and it is not opossum speaking there.)
+	starts := 0
+	for _, line := range screenWithoutCommands(out) {
+		if strings.HasPrefix(strings.TrimSpace(line), "[opossum note] service \"payroll\"") {
+			t.Errorf("a path wrote itself a note:\n%s", out)
+		}
+		// Echoed inside a line it is a path; starting a line it is a note. One
+		// service with one thing wrong with it should start exactly one.
+		if strings.HasPrefix(strings.TrimSpace(line), "[opossum note]") {
+			starts++
+		}
+	}
+	if starts != 1 {
+		t.Errorf("one service, one thing wrong with it, one note, got %d in:\n%s", starts, out)
+	}
+}
+
+// screenWithoutCommands is everything opossum says in its own voice — the part
+// of a dry run that lists the argv it would hand the runtime is quoting, and
+// still splits an argument that holds a newline (#512).
+func screenWithoutCommands(out string) []string {
+	var kept []string
+	skipping := false
+	for _, line := range strings.Split(out, "\n") {
+		switch {
+		case strings.HasPrefix(line, "Commands that would run:"):
+			skipping = true
+		case skipping && strings.TrimSpace(line) == "":
+			skipping = false
+		case !skipping:
+			kept = append(kept, line)
+		}
+	}
+	return kept
+}
+
+// The same path, doubled: the overlay escapes "$" so compose reads the text as
+// the literal the user wrote. Read out on screen it goes through no compose, so
+// a path with a "$" in it would come back saying something the user never typed
+// — and the summary line two rows up would spell it the other way.
+func TestAPathIsReadOutTheWayItWasWritten(t *testing.T) {
+	fakeShim(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte(
+		"name: notes\nservices:\n  usb:\n    image: alpine:3\n    volumes:\n"+
+			"      - \"/dev/tty$$USB0:/dev/ttyUSB0\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	out, err := run(t, "up", "--from-docker-compose", "--no-build", "--dry-run")
+	if err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	if !strings.Contains(out, "/dev/tty$USB0") {
+		t.Errorf("the path should be read out as it was written:\n%s", out)
+	}
+	if strings.Contains(out, "/dev/tty$$USB0") {
+		t.Errorf("the doubled $ is for compose, and nothing here goes through compose:\n%s", out)
+	}
+}
+
+// …and when there is nothing to read out, the offer to read it out goes too.
+// Otherwise the reader is told "here is what it would have said" and handed a
+// blank space, which reads as opossum having nothing to say rather than as
+// opossum having lost track of it.
+func TestNothingToReadOutMeansNoOfferToReadItOut(t *testing.T) {
+	var buf strings.Builder
+	body := "# Generated by opossum\n# ── Applied ───────────\n# [opossum] service \"db\": switched to a named volume.\n"
+	reportNotesOnly(&buf, body, []orchestrator.Adaptation{{Code: "OPSM-106", Summary: "mounts a device"}})
+	out := buf.String()
+	if strings.Contains(out, "here is what it would have said") {
+		t.Errorf("nothing was read out, so nothing should have been offered:\n%s", out)
+	}
+	if !strings.Contains(out, "OPSM-106") {
+		t.Errorf("the summary is now the whole of it and should still be there:\n%s", out)
+	}
+	// Saying nothing at all is the other way to get this wrong: the reader is
+	// looking for a file that is not there, and why it is not there is the one
+	// thing left to tell them.
+	if !strings.Contains(out, "no overlay was written") {
+		t.Errorf("the file is still missing and still needs explaining:\n%s", out)
+	}
+}
+
+// A body with no note in it is a body this function has stopped understanding.
+// The old shape returned it whole, which would have put the overlay's own
+// framing — or an applied block — on screen as if it were a note.
+func TestProseFromABodyWithNoNoteInItIsEmpty(t *testing.T) {
+	body := "# Generated by opossum\n# ── Applied ───────────\n# [opossum] service \"db\": switched to a named volume.\n"
+	if got := noteProse(body); got != "" {
+		t.Errorf("nothing here is a note, so there is nothing to read out; got:\n%s", got)
+	}
+}
+
+// With -f, opossum sent the reader back for a second run without it — but for a
+// project whose findings are all notes, that second run writes no overlay either,
+// so the advice cost them a run and left them where they started. Which advice
+// they get now comes from the same test the writing path uses, so it cannot
+// promise a file that path would not write.
+func TestMinusFDoesNotSendTheReaderBackForNothing(t *testing.T) {
+	fakeShim(t)
+
+	// Notes only: nothing here is fixable by a compose change.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "mine.yaml"), []byte(
+		"name: notes\nservices:\n  app:\n    image: alpine:3\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n"+
+			"  usb:\n    image: alpine:3\n    volumes:\n      - /dev/ttyUSB0:/dev/ttyUSB0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	out, err := run(t, "up", "--from-docker-compose", "-f", "mine.yaml", "--no-build", "--dry-run")
+	if err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	if strings.Contains(out, "Re-run without -f") {
+		t.Errorf("dropping -f writes nothing for these, so the reader should not be sent back:\n%s", out)
+	}
+	// Saying nothing is not the fix either — that was the state before opossum
+	// said anything at all here. The line that explains why is the change.
+	// The whole line, not a clause of it: how many, and why. Pinning one phrase
+	// leaves the rest of the sentence free to say anything, and the count is the
+	// half a reader checks against the list below it.
+	const because = "An overlay is never written for these alone"
+	want := "opossum: found 2 thing(s) in this project that no compose change can fix. " + because +
+		", so here is what one would have said:"
+	if !strings.Contains(out, want) {
+		t.Errorf("the reader should be told how many and why, got:\n%s\nwant a line: %s", out, want)
+	}
+	// And since the second run would not deliver them either, they are delivered
+	// here — the same words the overlay would have held.
+	if !strings.Contains(out, "exposes no socket") || !strings.Contains(out, "PulseAudio") {
+		t.Errorf("the notes' own words should reach the reader on this path too:\n%s", out)
+	}
+	// With the codes, which only the summary lines carry: the bodies name the
+	// service, and the code is what AGENTS.md is indexed by.
+	for _, code := range []string{"OPSM-204", "OPSM-106"} {
+		if !strings.Contains(out, "opossum:   ["+code+"]") {
+			t.Errorf("%s should be listed, not just described:\n%s", code, out)
+		}
+	}
+
+	// The other side: one fixable thing, and dropping -f really does write it.
+	fixable := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fixable, "mine.yaml"), []byte(
+		"name: fix\nservices:\n  app:\n    image: alpine:3\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n"+
+			"  db:\n    image: postgres:16\n    volumes:\n      - ./pgdata:/var/lib/postgresql/data\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(fixable)
+	out, err = run(t, "up", "--from-docker-compose", "-f", "mine.yaml", "--no-build", "--dry-run")
+	if err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	if !strings.Contains(out, "Re-run without -f") {
+		t.Errorf("there is a change here that a second run would write, so say so:\n%s", out)
+	}
+	// One or the other, never both: a project with a fixable thing and a note in
+	// it takes the first branch whole.
+	if strings.Contains(out, because) {
+		t.Errorf("a second run writes an overlay here, so the reader should not also be told it does not:\n%s", out)
+	}
+
+	// One note, not two. Two notes is the shape where "the notes" and "the last
+	// note" are the same thing, and a count that starts at the wrong number reads
+	// the same in both — a project with exactly one unfixable thing is the one
+	// this whole path exists for.
+	single := t.TempDir()
+	if err := os.WriteFile(filepath.Join(single, "mine.yaml"), []byte(
+		"name: one\nservices:\n  sup:\n    image: alpine:3\n    restart: on-failure\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(single)
+	// Not a dry run: the command in the report this came from is a plain `up`,
+	// and a path that only spoke when nothing was going to happen anyway would
+	// miss the reader it was written for. `restart:` is what starts a supervisor,
+	// so this says where its state goes and asks for none — a background process
+	// that outlives the test run is exactly what the opt-out is for.
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	out, err = run(t, "up", "--from-docker-compose", "-f", "mine.yaml", "--no-build", "--no-supervisor")
+	if err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	if !strings.Contains(out, "opossum: found 1 thing(s) in this project that "+"no compose change can fix. "+because) ||
+		!strings.Contains(out, "`always` and `unless-stopped` are honoured exactly") {
+		t.Errorf("one unfixable thing is still one the reader has to hear about:\n%s", out)
+	}
+
+	// What this does not cover, so that reading it is not mistaken for reading
+	// more than it is. A second run also writes nothing when there is an overlay
+	// in the directory already, when the compose file is under a name discovery
+	// does not look for, and when the second run is another --dry-run. Opossum
+	// still offers the second run in all three: -f puts it in the file's
+	// directory and the second run reads the reader's, so from here it cannot
+	// tell. They are #518, and none of them is measured by this test.
+}
+
+// A suggestion is not applied, but it is written down for the reader to
+// uncomment — so an overlay does hold it, and sending the reader back for a run
+// that writes one is right. The question this asks is the same one the writing
+// path asks, and asking a narrower one here (only applied changes count) would
+// tell a project of suggestions that nothing can be done about them.
+func TestMinusFStillOffersTheSecondRunForSuggestions(t *testing.T) {
+	fakeShim(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "mine.yaml"), []byte(
+		"name: sug\nservices:\n  web:\n    image: nginx\n    volumes:\n      - shared:/srv\n"+
+			"  worker:\n    image: busybox\n    volumes:\n      - shared:/srv\nvolumes:\n  shared: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	out, err := run(t, "up", "--from-docker-compose", "-f", "mine.yaml", "--no-build", "--dry-run")
+	if err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	if !strings.Contains(out, "Re-run without -f") {
+		t.Errorf("an overlay holds a suggestion, so the run that writes one is worth offering:\n%s", out)
+	}
+	if strings.Contains(out, "no compose change can fix") {
+		t.Errorf("these are suggestions, not things nothing can be done about:\n%s", out)
+	}
+}
+
+// A suggestion is something the reader can act on by uncommenting it, so an
+// overlay gets written to hold it. Both the writing path and the -f advice ask
+// the same question to decide, and a version of that question that only counted
+// applied changes would take a project of suggestions down the notes path — an
+// overlay that never gets written, and advice calling them unfixable.
+func TestASuggestionIsSomethingToWriteDown(t *testing.T) {
+	fakeShim(t)
+	dir := t.TempDir()
+	// Two services sharing one named volume: Apple container has no shared
+	// volumes, so opossum writes the split as a suggestion rather than applying
+	// it — which of the two should keep the data is not opossum's to decide.
+	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte(
+		"name: sug\nservices:\n  web:\n    image: nginx\n    volumes:\n      - shared:/srv\n"+
+			"  worker:\n    image: busybox\n    volumes:\n      - shared:/srv\nvolumes:\n  shared: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	out, err := run(t, "up", "--from-docker-compose", "--no-build", "--dry-run")
+	if err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	if !strings.Contains(out, "would write compose.opossum.yaml") {
+		t.Errorf("a suggestion is worth a file — it is the thing the reader uncomments:\n%s", out)
+	}
+	if strings.Contains(out, "no overlay was written") || strings.Contains(out, "no compose change can fix") {
+		t.Errorf("these are suggestions, not things nothing can be done about:\n%s", out)
+	}
+}
+
+// The notes a compose file cannot fix are written into the overlay, and when
+// they are all there is, no overlay is written. This checks the words that would
+// have been in it reach the reader instead — against the overlay itself, not
+// against a list of phrases: a list only ever covers the lines someone thought
+// to list, and the failure being fixed here is lines going missing.
+func TestANoteReachesTheReaderWhenNoOverlayIsWritten(t *testing.T) {
+	fakeShim(t)
+
+	// Three things a compose file cannot fix, so all three are notes and there is
+	// no actionable entry. Three and not one, and not two: with one note "the
+	// notes" and "the note" are the same thing, and with two "the second" and
+	// "the last" are — a middle note is the only one that is neither.
+	const notes = "  app:\n    image: alpine:3\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n" +
+		"  sup:\n    image: alpine:3\n    restart: on-failure\n" +
+		"  usb:\n    image: alpine:3\n    volumes:\n      - /dev/ttyUSB0:/dev/ttyUSB0\n"
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte("name: notes\nservices:\n"+notes), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// What the overlay would have held, taken from the planner that writes it
+	// rather than from a list of phrases: a list only covers the lines someone
+	// thought to list, and lines going missing is the failure being fixed here.
+	proj, err := compose.Load(filepath.Join(dir, "compose.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, changes := orchestrator.New(proj, nil, "opossum", io.Discard).PlanOverlay()
+	var want []string
+	for _, line := range strings.Split(body, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "# ──") {
+			continue
+		}
+		trimmed = strings.ReplaceAll(strings.TrimPrefix(strings.TrimPrefix(trimmed, "#"), " "), "$$", "$")
+		if !strings.HasPrefix(trimmed, "[opossum note]") {
+			if len(want) == 0 {
+				continue // the file describing its own sections, ahead of the first note
+			}
+		} else if len(want) > 0 {
+			// In the file the column of "# " keeps the notes apart; on screen
+			// nothing does but a blank line.
+			want = append(want, "")
+		}
+		want = append(want, trimmed)
+	}
+	if n := countPrefixed(want, "[opossum note]"); n != len(changes) || n != 3 {
+		t.Fatalf("three unfixable things, %d planned and %d written up:\n%s", len(changes), n, body)
+	}
+
+	t.Chdir(dir)
+	out, err := run(t, "up", "--from-docker-compose", "--no-build", "--dry-run")
+	if err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "compose.opossum.yaml")); err == nil {
+		t.Error("a comment-only overlay is still not written; that part has not changed")
+	}
+
+	// Every line of it, in order, and nothing invented in between. What this
+	// checks is the screen against the overlay: whatever the notes say, the
+	// reader gets it word for word. Whether they say enough is the planner's own
+	// business, and both sides here come from the planner — a note that thins out
+	// upstream thins out on both sides of this comparison and stays green.
+	got := readOut(t, out)
+	if len(got) != len(want) {
+		t.Errorf("the notes are %d lines in the overlay and %d on screen:\nwant:\n%s\ngot:\n%s",
+			len(want), len(got), strings.Join(want, "\n"), strings.Join(got, "\n"))
+	}
+	for i := range want {
+		if i >= len(got) {
+			break
+		}
+		if got[i] != want[i] {
+			t.Errorf("line %d differs:\nwant: %q\ngot:  %q\nfull screen:\n%s", i+1, want[i], got[i], out)
+			break
+		}
+	}
+	// The short form is the one for when there is nothing to read out. Having
+	// read the notes out, saying it too would tell the reader the offer above
+	// came to nothing.
+	if strings.Contains(out, "(it would only hold comments).") {
+		t.Errorf("the notes were read out, so the version that says they were not should be gone:\n%s", out)
+	}
+	// The summaries name the code; only the bodies name the service, and two
+	// services on one image have identical summaries.
+	for _, svc := range []string{`service "app"`, `service "sup"`, `service "usb"`} {
+		if !strings.Contains(out, svc) {
+			t.Errorf("a note that does not say whose it is cannot be acted on — %s is missing from:\n%s", svc, out)
+		}
+	}
+}
+
+// readOut is the block of notes opossum prints when it writes no overlay: the
+// lines after it offers them, indented, with the blank line between notes kept
+// so a note that loses its heading shows up as a line count that no longer
+// matches.
+func readOut(t *testing.T, out string) []string {
+	t.Helper()
+	const opening = "here is what it would have said:"
+	i := strings.Index(out, opening)
+	if i < 0 {
+		t.Fatalf("the notes were not read out at all:\n%s", out)
+	}
+	var got []string
+	for _, line := range strings.Split(out[i+len(opening):], "\n") {
+		if strings.TrimSpace(line) == "" {
+			if len(got) > 0 {
+				got = append(got, "")
+			}
+			continue
+		}
+		if !strings.HasPrefix(line, "  ") {
+			break
+		}
+		got = append(got, strings.TrimPrefix(line, "  "))
+	}
+	for len(got) > 0 && got[len(got)-1] == "" {
+		got = got[:len(got)-1]
+	}
+	return got
+}
+
+func countPrefixed(lines []string, prefix string) int {
+	n := 0
+	for _, l := range lines {
+		if strings.HasPrefix(l, prefix) {
+			n++
+		}
+	}
+	return n
 }
 
 // Two paths tell the reader to apply the changes by hand. Both used to point at
@@ -3265,15 +3909,42 @@ func TestDestroyPlanNamesTheDirectoryAndWarnsAboutMistargeting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("destroy --dry-run: %v", err)
 	}
-	if !strings.Contains(out, dir) {
-		t.Errorf("the plan should name the directory whose files it would remove, got:\n%s", out)
+	// Both lines whole, because both carry two things that can be swapped for
+	// each other. The heading's directory was checked with `Contains(out, dir)`,
+	// which is satisfied by any of the three places the directory appears — the
+	// heading and the two paths under it; the warning names two
+	// project names and says which files belong to which, and `Contains(out,
+	// "belongs to project \"mine\"")` reads only the half before the swap. The
+	// format string behind it has two same-typed arguments and has already
+	// shipped that fault once — see the note beside codeBindFilePlaceholder.
+	//
+	// Measured: swapping the last two verbs of that format string leaves the
+	// whole of cmd/opossum green.
+	wantHeading := "  files opossum generated in " + dir + ":"
+	if got, n := oneLineWith(out, "  files opossum generated in"); n != 1 || got != wantHeading {
+		t.Errorf("the heading over the local files is not what it should be (%d lines start "+
+			"with it).\n got: %q\nwant: %q", n, got, wantHeading)
 	}
-	if !strings.Contains(out, "belongs to project \"mine\"") {
-		t.Errorf("the plan should say whose files these are, got:\n%s", out)
+	wantWarning := "    ! this directory belongs to project \"mine\", not \"other\" — these files " +
+		"are \"mine\"'s. Use --keep-local to remove only \"other\"'s containers, volumes and images."
+	if got, n := oneLineWith(out, "    ! this directory"); n != 1 || got != wantWarning {
+		t.Errorf("the warning about whose files these are is not what it should be (%d lines "+
+			"start with it).\n got: %q\nwant: %q", n, got, wantWarning)
 	}
-	if !strings.Contains(out, "--keep-local") {
-		t.Errorf("the plan should name the way to avoid it, got:\n%s", out)
+}
+
+// oneLineWith returns the line of s that begins with prefix, and how many there
+// were. The count comes back rather than being folded into an empty string: a
+// line that vanished, one that grew a twin, and one whose wording changed are
+// three different faults.
+func oneLineWith(s, prefix string) (string, int) {
+	found, n := "", 0
+	for _, line := range strings.Split(s, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			found, n = line, n+1
+		}
 	}
+	return found, n
 }
 
 // A volume left by a service that was renamed or deleted is still on the disk
@@ -3415,8 +4086,10 @@ func TestDestroyDryRunIsNeverRefused(t *testing.T) {
 
 // The plan's heading is the claim that these files are in this directory. A
 // substring test against the whole output is satisfied by the absolute paths
-// alone, so this pins the heading itself.
-func TestDestroyPlanHeadingNamesTheDirectory(t *testing.T) {
+// alone — and pinning only the heading is satisfied by a heading that names a
+// directory below this one. The plan is short and every path in it comes from
+// the directory this test made, so the whole thing is written out.
+func TestDestroyPlanIsWhatItSaysItIs(t *testing.T) {
 	fakeShim(t)
 	t.Setenv("STATE_DIR", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
@@ -3428,8 +4101,23 @@ func TestDestroyPlanHeadingNamesTheDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("destroy --dry-run: %v", err)
 	}
-	if want := "files opossum generated in " + dir; !strings.Contains(out, want) {
-		t.Errorf("the plan should head the local files with %q, got:\n%s", want, out)
+	want := "Destroying project \"named\" would remove:\n" +
+		"  containers:\n" +
+		"    - web-run.named.opossum\n" +
+		"    - web.named.opossum\n" +
+		"  networks:\n" +
+		"    - named-net\n" +
+		"  images:\n" +
+		"    - web\n" +
+		"  files opossum generated in " + dir + ":\n" +
+		"    - " + filepath.Join(dir, ".opossum") + "\n" +
+		"    - " + filepath.Join(dir, "compose.opossum.yaml") + "\n" +
+		"  your compose file, .env and sources are NOT touched.\n" +
+		"Left alone, because it isn't this project's to remove:\n" +
+		"  - the \"opossum\" DNS domain — remove with: sudo container system dns delete opossum\n" +
+		"  - the build cache and unused images — reclaim with: container builder delete --force && container image prune -a\n"
+	if out != want {
+		t.Errorf("the plan is not what it should be.\n got: %q\nwant: %q", out, want)
 	}
 }
 
@@ -3573,30 +4261,39 @@ func TestDestroyReportsWorkspaceSnapshotsOnlyWhenThereAreSome(t *testing.T) {
 			if err != nil {
 				t.Fatalf("destroy: %v", err)
 			}
+			// The whole output, for the name alone: the block below is read
+			// from "Left alone," onwards, so a plan that names the snapshot
+			// directory *above* that line is outside it. Removing this in
+			// favour of the block was a real loss — measured, on a mutation
+			// that put the name in the plan.
 			if got := strings.Contains(out, workspace.SnapshotDirName); got != tc.snapshots {
 				t.Errorf("mentions snapshots = %v, want %v, got:\n%s", got, tc.snapshots, out)
 			}
+			// The whole block, not a phrase out of it. This hands the user an
+			// `rm -rf`, and a check that looks for `rm -rf <dir>` is satisfied
+			// by `rm -rf <dir>/..` — which removes the project. Measured: that
+			// is exactly what the version before this let through.
+			//
+			// Built from the directory rather than normalised away, because the
+			// test made the directory and can say what belongs on the line.
+			want := "Left alone, because it isn't this project's to remove:\n" +
+				"  - the \"opossum\" DNS domain — remove with: sudo container system dns delete opossum\n" +
+				"  - the build cache and unused images — reclaim with: container builder delete --force && container image prune -a"
+			if tc.snapshots {
+				want += "\n  - workspace snapshots in " + snapDir +
+					" — they belong to that directory, not to this project; see them with: ls " + snapDir +
+					", remove with: rm -rf " + snapDir
+			}
+			_, block, found := strings.Cut(out, "Left alone,")
+			if !found {
+				t.Fatalf("no `Left alone` section at all, got:\n%s", out)
+			}
+			if got := strings.TrimRight("Left alone,"+block, "\n"); got != want {
+				t.Errorf("the section that tells people what to run themselves is not what it "+
+					"should be.\n got: %q\nwant: %q", got, want)
+			}
 			if !tc.snapshots {
 				return
-			}
-			// The path matters more than the mention: this hands the user an `rm -rf`,
-			// and a check that only looks for the directory's name is satisfied by the
-			// first half of the line while the command points somewhere else entirely.
-			if !strings.Contains(out, "rm -rf "+snapDir) {
-				t.Errorf("the removal command should name this project's snapshot directory %q, got:\n%s", snapDir, out)
-			}
-			// `ws` reads its snapshots from beside the workspace given to --path, so a
-			// bare `opossum ws ls` lists a different directory than the one on this line
-			// whenever the workspace isn't the default.
-			if !strings.Contains(out, "ls "+snapDir) {
-				t.Errorf("the way to look inside has to name this directory, not send the reader "+
-					"to whatever `ws` defaults to, got:\n%s", out)
-			}
-			// Snapshots are not shared with other projects — they belong to a directory.
-			// A heading that says otherwise contradicts the line under it.
-			if strings.Contains(out, "Shared with other projects") {
-				t.Errorf("the heading claims these are shared between projects, which snapshots "+
-					"are not, got:\n%s", out)
 			}
 			if _, err := os.Stat(filepath.Join(snapDir, "try-1")); err != nil {
 				t.Errorf("destroy removed a workspace snapshot it said it was leaving alone: %v", err)
@@ -3808,5 +4505,823 @@ func TestAFailureNamesBothFilesWhenTheOverrideWasFoundNotPassed(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("the failure should carry %q:\n%s", want, got)
 		}
+	}
+}
+
+// The check that runs after the suite, checked here: a ratchet that reports
+// "none" is indistinguishable from one that cannot look, and this package would
+// read the first as proof it leaks nothing. So it is asked about a process that
+// is definitely there, through the same function the suite uses.
+func TestTheLeakCheckCanSeeARunningProcess(t *testing.T) {
+	if _, err := exec.LookPath("pgrep"); err != nil {
+		// Not a skip: skipping is how the whole mechanism goes quiet and the
+		// package still prints ok. If this machine cannot run the check, the gate
+		// should say so where the gate is read.
+		t.Fatal("pgrep is not on PATH, so the check that no process outlives this suite cannot look at all")
+	}
+	// A binary with a name nothing else on this machine is running, in a
+	// directory whose name is also an expression: pgrep -f takes a pattern, and
+	// an unquoted "(" here matches nothing — which arrives in the same shape as
+	// "nothing is running", the answer this check exists to distinguish.
+	dir := filepath.Join(t.TempDir(), "probe(1)")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(dir, "opossum-leak-probe")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nsleep 60 &\nwait\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := startProbe(t, bin)
+
+	found, _ := leakedProcesses(bin)
+	if len(found) == 0 {
+		t.Fatalf("a process running %s is right there and the check did not see it", bin)
+	}
+	// …and it goes quiet once nothing is running it, so the suite's "none" means
+	// none rather than "never looked".
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cmd.Process.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if now, _ := leakedProcesses(bin); len(now) == 0 {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	still, _ := leakedProcesses(bin)
+	t.Errorf("nothing is running %s any more, but the check still reports %v", bin, still)
+}
+
+// Nothing in this package writes to the state directory of whoever ran the
+// tests. TestMain points XDG_STATE_HOME at a directory of its own; this says so
+// out loud, because the failure it prevents is silent — a supervisor.log
+// appearing under someone's home with a panic in it, which is what happened.
+func TestTheSuiteDoesNotWriteToTheRealStateDirectory(t *testing.T) {
+	state := os.Getenv("XDG_STATE_HOME")
+	if state == "" {
+		t.Fatal("XDG_STATE_HOME is unset, so a supervisor started by any test here lands in the home directory of whoever ran it")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home directory to compare against")
+	}
+	// The whole home directory, not just ~/.local/state: pointing it anywhere
+	// under there leaves files on the machine of whoever ran the tests, and the
+	// name of this test would still read as if that were covered.
+	if rel, rerr := filepath.Rel(home, state); rerr == nil && !strings.HasPrefix(rel, "..") {
+		t.Errorf("XDG_STATE_HOME is %s, inside the home directory %s", state, home)
+	}
+}
+
+// startProbe runs a script that stays up, and takes the whole process group down
+// again afterwards.
+//
+// The script keeps the shell in place rather than exec'ing: pgrep -f matches
+// command lines, and exec'ing replaces the one holding the path this check
+// searches for. It also backgrounds the sleep on purpose, so the shell always
+// has a child — killing the shell alone then leaves that child running for a
+// minute, which is the thing this whole file is about, and which is what makes
+// the group kill below something a test can actually check.
+func startProbe(t *testing.T, bin string) *exec.Cmd {
+	t.Helper()
+	cmd := exec.Command(bin)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	// Wait for the shell to fork the sleep. Without this the kill lands first —
+	// measured at a few milliseconds, against the ~200ms the fork takes — and the
+	// child this whole helper is about never exists, so nothing below is testing
+	// anything.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		// Reported from what the loop saw, not from a fresh look: the group moves,
+		// and a message that re-asks can describe a moment the decision was not
+		// made in.
+		members := groupMembers(t, cmd.Process.Pid)
+		if len(members) >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the probe never started its child; the group is %v", members)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	t.Cleanup(func() {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_, _ = cmd.Process.Wait()
+		// The group, not the binary: the child's command line does not carry the
+		// path, so pgrep -f would report it gone while it is still running — the
+		// same blind spot the suite's own ratchet has.
+		until := time.Now().Add(5 * time.Second)
+		var left []int
+		for time.Now().Before(until) {
+			if left = groupMembers(t, cmd.Process.Pid); len(left) == 0 {
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		t.Errorf("something the probe started outlived the test: %v", left)
+	})
+	return cmd
+}
+
+// groupMembers is the pids still in a process group. Reaped pids are gone from
+// it, so an empty answer means the group is finished.
+func groupMembers(t *testing.T, pgid int) []int {
+	t.Helper()
+	out, err := exec.Command("pgrep", "-g", strconv.Itoa(pgid)).Output()
+	if err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 1 {
+			return nil
+		}
+		t.Fatalf("pgrep could not list process group %d: %v", pgid, err)
+	}
+	var pids []int
+	for _, f := range strings.Fields(string(out)) {
+		if pid, cerr := strconv.Atoi(f); cerr == nil {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
+}
+
+// The command the report offers has to be one a shell will take. Printing a
+// []int gives `kill [321 654]`: bash refuses the argument, zsh tries to glob it.
+// A report nobody can act on is the same as no report, and this one is only read
+// when something has already gone wrong.
+func TestTheLeakReportOffersACommandAShellWillTake(t *testing.T) {
+	// Held whole. Its sibling report is pinned this way because a list of things
+	// the sentence must not say only ever catches the wordings someone already
+	// thought of — and this one was written with such a list, which let a version
+	// through that said the opposite of what it meant. Both inputs are chosen
+	// here, so nothing has to be normalised away first.
+	for _, tc := range []struct {
+		pids []int
+		want string
+	}{
+		{[]int{321}, "these processes outlived the tests that started them: 321\n" +
+			"they are running /tmp/x/opossum, which is about to be removed — `kill 321` ends them\n"},
+		{[]int{321, 654}, "these processes outlived the tests that started them: 321 654\n" +
+			"they are running /tmp/x/opossum, which is about to be removed — `kill 321 654` ends them\n"},
+		// Three, because two is where a list and a pair look the same: a version
+		// that printed the slice for anything longer would read correctly at two.
+		{[]int{321, 654, 987}, "these processes outlived the tests that started them: 321 654 987\n" +
+			"they are running /tmp/x/opossum, which is about to be removed — `kill 321 654 987` ends them\n"},
+	} {
+		if got := leakReport("/tmp/x/opossum", tc.pids); got != tc.want {
+			t.Errorf("with %d pids the report is not what this file says it should be\n got: %q\nwant: %q", len(tc.pids), got, tc.want)
+		}
+	}
+	// Run it, with a shell, against a process that is really there.
+	bin := filepath.Join(t.TempDir(), "opossum-kill-probe")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nsleep 60 &\nwait\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := startProbe(t, bin)
+
+	line := leakReport(bin, []int{cmd.Process.Pid})
+	_, after, ok := strings.Cut(line, "`")
+	if !ok {
+		t.Fatalf("no command in the report to run:\n%s", line)
+	}
+	killCmd, _, ok := strings.Cut(after, "`")
+	if !ok {
+		t.Fatalf("no command in the report to run:\n%s", line)
+	}
+	if out, err := exec.Command("sh", "-c", killCmd).CombinedOutput(); err != nil {
+		t.Fatalf("the command the report offers does not run: %v\n%s\n%s", err, killCmd, out)
+	}
+	// Accepted by the shell is not the same as it did anything: `true` is also
+	// accepted. The process has to have died of the signal it was sent — and
+	// within a few seconds, because waiting on the probe's own minute would turn
+	// a broken report into a test that looks slow rather than wrong.
+	type done struct {
+		st  *os.ProcessState
+		err error
+	}
+	waited := make(chan done, 1)
+	go func() {
+		st, err := cmd.Process.Wait()
+		waited <- done{st, err}
+	}()
+	var st *os.ProcessState
+	select {
+	case d := <-waited:
+		if d.err != nil {
+			t.Fatal(d.err)
+		}
+		st = d.st
+	case <-time.After(10 * time.Second):
+		t.Fatalf("the command the report offers ran, and %s is still going: %s", bin, killCmd)
+	}
+	// Not guarded for other platforms: this file already calls syscall.Kill
+	// unconditionally, and a skip here would turn "the command ended nothing"
+	// into silence — the one shape this whole check exists to avoid.
+	ws := st.Sys().(syscall.WaitStatus)
+	if !ws.Signaled() {
+		t.Errorf("the process was still alive to exit on its own, so the command ended nothing: %v", st)
+	}
+}
+
+// The three states pgrep can leave this in, driven from PATH: it is not there,
+// it ran and could not look, and it ran and found nothing. The first two used to
+// arrive in the shape of the third, which is the one answer this must never
+// invent — the suite reads it as proof it leaks nothing. The third is here
+// because it is the state every clean machine is in, and a version that read it
+// as a failure would skip the comparison and print ok having checked nothing.
+// What this does not reach:
+//
+//   - Half of each look's answer. The look by path is asked for its pids and its
+//     `looked` is thrown away; the look for supervisors is asked the opposite
+//     way round. Measured: a by-path look that prints the note and returns
+//     looked=true survives here. The dangerous shape of that — pgrep present and
+//     failing — is caught next door by
+//     TestARunThatCouldNotLookDoesNotPassForGreen/the_look_for_the_binary_this_suite_built
+//     (measured); the shape that survives everything is "no pgrep on the machine
+//     at all". There the run still goes red, because the other two looks return
+//     false and uncheckedReport fires on any of the three — measured on a PATH
+//     with every tool but pgrep: the report names two looks instead of three and
+//     the run still fails.
+//   - The order the two looks come in. It is set by the two call sites in the
+//     body below, not by the code under test, and TestMain calls them in a
+//     different order again (supervisors, path, supervisors). If these two
+//     lines are ever swapped, the values stay right and the names in the
+//     message go wrong.
+//   - The third look. TestMain takes the supervisor snapshot twice, before and
+//     after; this drives two looks, not three. The third shares its code path
+//     with the second.
+func TestPgrepNotAnsweringIsNotTheSameAsNoLeaks(t *testing.T) {
+	for _, tc := range []struct {
+		name, script, want string
+		looked             bool
+	}{
+		// Held whole, not by a phrase it must contain: the sentence's job is to
+		// not be read as "and there are none", and a check for a substring lets
+		// exactly that be appended to it.
+		{name: "missing", want: "no pgrep here, so nothing checked whether any process outlived the tests"},
+		{name: "cannot look", script: "#!/bin/sh\nexit 2\n",
+			want: "pgrep could not look for processes outliving the tests: exit status 2"},
+		// The third state, and the one every clean machine is in: pgrep ran and
+		// found nothing. It has to read as an answer — a machine with no
+		// supervisor on it is where this whole check normally runs, and if that
+		// reads as "could not look", the comparison TestMain makes is skipped and
+		// the suite goes green having checked nothing.
+		{name: "found nothing", script: "#!/bin/sh\nexit 1\n", looked: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.script != "" {
+				if err := os.WriteFile(filepath.Join(dir, "pgrep"), []byte(tc.script), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("PATH", dir)
+			var said strings.Builder
+			leakSaid = &said
+			defer func() { leakSaid = os.Stderr }()
+
+			if got, _ := leakedProcesses("/tmp/whatever/opossum"); len(got) != 0 {
+				t.Errorf("nothing was found, so nothing should be reported as leaked: %v", got)
+			}
+			// Taken here, before the second look, so the two are judged apart.
+			// Read at the end instead, the two notes arrive as one string, and
+			// the total is the same whichever look said them: a version where one
+			// speaks twice while the other stays quiet passed. Measured, on the
+			// commit before this line existed, in both directions (2/0 and 0/2).
+			//
+			// A silent look is not cosmetic: uncheckedReport says "the note above
+			// says why", and above would be empty.
+			//
+			// Only that imbalance is new, and it is new at both places a note is
+			// written — "no pgrep here" and "pgrep could not look" — so four
+			// mutations in all. "One look went quiet entirely" was already
+			// caught, because with a fixed total of two notes, losing one changes
+			// the total too.
+			byPath := said.String()
+			said.Reset()
+			// And it says so in the value, not only in the note: the difference
+			// between the two snapshots is only meaningful if both were taken.
+			// An empty "before" that means "could not see" would make every
+			// supervisor on this machine look new; an answer misread as a failure
+			// makes TestMain skip the comparison and print ok having checked
+			// nothing.
+			if _, looked := runningSupervisors(); looked != tc.looked {
+				t.Errorf("this is %q; the look should read as looked=%v, got %v", tc.name, tc.looked, looked)
+			}
+			// Keyed on whether the look succeeded, not on whether this row has
+			// something to look for in the note: those come apart the moment a
+			// row is added for a look that failed quietly.
+			looks := []struct{ which, got string }{
+				{"the look by path", byPath},
+				{"the look for supervisors", said.String()},
+			}
+			if tc.looked {
+				// Split by look for the message, not for the reach: "nothing was
+				// said in total" and "nothing was said by either" are the same
+				// statement, and this half was already caught before the split.
+				// What it buys is that a red says which look spoke.
+				for _, look := range looks {
+					if look.got != "" {
+						t.Errorf("this is %q — an answer, not a failure — so %s has nothing to say: %q",
+							tc.name, look.which, look.got)
+					}
+				}
+				return
+			}
+			// Word for word, and once each: what was said before the second
+			// look, and what was said during it.
+			want := "\n" + tc.want + "\n"
+			for _, look := range looks {
+				if look.got != want {
+					t.Errorf("this is %q, and %s has to say why it could not look\n got: %q\nwant: %q",
+						tc.name, look.which, look.got, want)
+				}
+			}
+		})
+	}
+}
+
+// What the suite reports is the difference between two lists, so the difference
+// is worth its own test: reading it wrong in the quiet direction (nothing is
+// ever new) is the failure that leaves a process running and prints ok.
+func TestOnlySupervisorsThatWereNotAlreadyThereAreReported(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		before, now []int
+		want        []int
+	}{
+		{"nothing anywhere", nil, nil, nil},
+		{"one already running, still running", []int{29867}, []int{29867}, nil},
+		{"one already running, one started", []int{29867}, []int{29867, 40001}, []int{40001}},
+		{"none before, two started", nil, []int{40001, 40002}, []int{40001, 40002}},
+		{"one already running, and it stopped", []int{29867}, nil, nil},
+		{"started and stopped again", []int{29867}, []int{29867}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := newSupervisors(tc.before, tc.now)
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Fatalf("got %v, want %v", got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// …and that the list it works on is really every supervisor, including one this
+// suite did not start. The machine this runs on has had one from a test days
+// ago; a search that only found this suite's own would report the same "none"
+// on a machine with nothing on it, and there would be no way to tell.
+func TestTheSupervisorSearchLooksBeyondThisSuite(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "opossum-supervise-probe")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nsleep 60 &\nwait\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Started with the word the search looks for, from a path this suite never
+	// built — which is what a copy a test made somewhere of its own looks like.
+	cmd := exec.Command(bin, "__supervise", "-p", "probe")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_, _ = cmd.Process.Wait()
+	})
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		found, looked := runningSupervisors()
+		if !looked {
+			t.Fatal("pgrep could not look, so this test would pass by finding nothing")
+		}
+		if slices.Contains(found, cmd.Process.Pid) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("a supervisor at %s is running as %d and the search did not find it: %v",
+				bin, cmd.Process.Pid, found)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// What the suite says about supervisors that appeared while it ran, word for
+// word. The wording is the whole of this report's correctness: the check cannot
+// tell a test's supervisor from one someone else started, so a sentence that
+// says it can — or a command attached to the wrong half of the condition — tells
+// a reader to kill a process they are using.
+//
+// Held as the whole string rather than as a list of things it must not say. A
+// list only catches the wordings someone already thought of: with one in place,
+// a version that moved `kill` from the tests' case to the other one passed, and
+// so did one that opened with a flat claim that the tests started them.
+func TestTheNewSupervisorReportIsWordForWordWhatWeMeanToSay(t *testing.T) {
+	want := "these supervisors were not running when the tests started, and are now: 321 654\n" +
+		"if the tests started them, `kill 321 654` ends them; if something else on this machine did, " +
+		"leave them be and run the tests again — they will be there before the next run and it will not mention them\n"
+	if got := newSupervisorReport([]int{321, 654}); got != want {
+		t.Errorf("the report is not what this file says it should be\n got: %q\nwant: %q", got, want)
+	}
+	// One pid reads the same way; the sentence is written for either count.
+	wantOne := "these supervisors were not running when the tests started, and are now: 321\n" +
+		"if the tests started them, `kill 321` ends them; if something else on this machine did, " +
+		"leave them be and run the tests again — they will be there before the next run and it will not mention them\n"
+	if got := newSupervisorReport([]int{321}); got != wantOne {
+		t.Errorf("with one pid the report is not what this file says it should be\n got: %q\nwant: %q", got, wantOne)
+	}
+}
+
+// One process, named once. The report by path speaks with more certainty, so it
+// keeps the pids it found and the weaker report drops them; a reader given the
+// same pid twice, in two voices, has to work out whether it is one problem.
+func TestAProcessIsNamedByOneReportOrTheOther(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		pids    []int
+		already map[int]bool
+		want    []int
+	}{
+		{"nothing already named", []int{1, 2}, map[int]bool{}, []int{1, 2}},
+		{"one already named", []int{1, 2}, map[int]bool{1: true}, []int{2}},
+		{"all already named", []int{1, 2}, map[int]bool{1: true, 2: true}, nil},
+		{"named but not new", nil, map[int]bool{1: true}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := unreported(tc.pids, tc.already)
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Fatalf("got %v, want %v", got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// What the suite says when a look did not happen, word for word. The sentence
+// has one job — to stop a run that checked nothing from reading as a run that
+// found nothing — so it is held whole rather than by the words it must avoid.
+func TestTheUncheckedReportIsWordForWordWhatWeMeanToSay(t *testing.T) {
+	const tail = "the note above says why. a run that could not look is not a run that found nothing.\n"
+	for _, tc := range []struct {
+		name                string
+		before, path, after bool
+		want                string
+	}{
+		{name: "all three looked", before: true, path: true, after: true, want: ""},
+		{
+			name: "only the one before failed", path: true, after: true,
+			want: "this run did not check whether the tests left anything running: the look before the tests did not happen.\n" + tail,
+		},
+		{
+			name: "only the path search failed", before: true, after: true,
+			want: "this run did not check whether the tests left anything running: the look for processes running the binary this suite built did not happen.\n" + tail,
+		},
+		{
+			name: "only the one after failed", before: true, path: true,
+			want: "this run did not check whether the tests left anything running: the look after the tests did not happen.\n" + tail,
+		},
+		{
+			name: "none of them looked",
+			want: "this run did not check whether the tests left anything running: the look before the tests and the look for processes running the binary this suite built and the look after the tests did not happen.\n" + tail,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := uncheckedReport(tc.before, tc.path, tc.after); got != tc.want {
+				t.Errorf("the report is not what this file says it should be\n got: %q\nwant: %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The wiring, not just the sentence: a run that could not look has to end with a
+// non-zero status, or the whole thing is a note in a green run that `go test
+// ./...` throws away. Checked by running this package again in a child process
+// with a pgrep that refuses, and selecting no tests at all — TestMain runs
+// either way, which is the property that makes this cheap (about a second).
+//
+// Two of the three looks are driven here. The third (the one after the tests)
+// shares its code path with the one before it, and there is no way to fail only
+// that one from outside without also failing the tests that use pgrep.
+func TestARunThatCouldNotLookDoesNotPassForGreen(t *testing.T) {
+	real, err := exec.LookPath("pgrep")
+	if err != nil {
+		t.Fatal("pgrep is not on PATH, so a child that refuses to look would be indistinguishable from this machine")
+	}
+	// Quoted into the script below: the path is not ours to assume is one word.
+	quoted := "'" + strings.ReplaceAll(real, "'", `'\''`) + "'"
+	for _, tc := range []struct {
+		name, script, want string
+	}{
+		{
+			// Fails the first call only, which is the look taken before any test
+			// runs; every later call is the real thing, so the tests themselves
+			// still pass and the run would otherwise be green.
+			name: "the look before the tests",
+			// The sweep for orphaned probes asks first and is let through by
+			// name; the count is of the looks this is about, so adding another
+			// call ahead of them does not move which one fails.
+			script: "#!/bin/sh\ncase \"$*\" in *" + leakProbeProjectPrefix + "*) exec " + quoted + " \"$@\" ;; esac\n" +
+				"C=\"$0.count\"\nn=$(cat \"$C\" 2>/dev/null || echo 0)\necho $((n+1)) > \"$C\"\n" +
+				"[ \"$n\" -eq 0 ] && exit 2\nexec " + quoted + " \"$@\"\n",
+			want: "the look before the tests did not happen",
+		},
+		{
+			// Fails only the search for the binary this suite built.
+			name:   "the look for the binary this suite built",
+			script: "#!/bin/sh\ncase \"$*\" in *opossum-cmd-test*) exit 2 ;; esac\nexec " + quoted + " \"$@\"\n",
+			want:   "the look for processes running the binary this suite built did not happen",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "pgrep"), []byte(tc.script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			// No test is selected, so nothing here runs twice; TestMain still does.
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "go", "test", "-count=1", "-run", "TestThereIsNoSuchTestAsThis", ".")
+			cmd.Dir = packageDir(t)
+			cmd.Env = append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Errorf("this run checked nothing and still passed:\n%s", out)
+			}
+			if !strings.Contains(string(out), tc.want) {
+				t.Errorf("the run should say which look did not happen — %q is missing from:\n%s", tc.want, out)
+			}
+			// Red is not the same as red for this reason. A child that failed
+			// because something really did outlive it would satisfy both checks
+			// above while saying nothing about the look that did not happen.
+			for _, other := range []string{"outlived the tests that started them", "were not running when the tests started"} {
+				if strings.Contains(string(out), other) {
+					t.Errorf("this child was meant to fail for not looking, and it also %q:\n%s", other, out)
+				}
+			}
+		})
+	}
+}
+
+// packageDir is where this package's sources are, so a child `go test .` finds
+// them. The tests chdir a lot, so it is read once from the caller of TestMain
+// rather than from the working directory.
+func packageDir(t *testing.T) string {
+	t.Helper()
+	if testPackageDir == "" {
+		t.Fatal("the package directory was not recorded")
+	}
+	return testPackageDir
+}
+
+var testPackageDir string
+
+// leakProbeEnv turns one test in this package into a deliberate leak, so a child
+// process can be made to fail the way a forgetful test would. It is only ever
+// set by the test below, on the child.
+const leakProbeEnv = "OPOSSUM_LEAK_PROBE"
+
+// leakProbePidFileEnv is where the probe writes what it left running. A file and
+// not stdout: `go test .` keeps the output of a package that failed and throws
+// away the rest, and the parent breaks the report on purpose — so the runs that
+// leak hardest are exactly the ones whose output never arrives.
+const leakProbePidFileEnv = "OPOSSUM_LEAK_PROBE_PIDFILE"
+
+// sweepOrphanedProbes ends leaked probe supervisors whose run is over. A run
+// killed by a timeout or a Ctrl-C never reaches its own cleanup, and there is
+// nothing a dead process can do about that — so the next run does it, which is
+// the only place left that knows these are test leavings.
+func sweepOrphanedProbes() {
+	out, err := exec.Command("pgrep", "-fl", regexp.QuoteMeta("__supervise -p "+leakProbeProjectPrefix)).Output()
+	if err != nil {
+		return // exit 1 is "none", and anything else is not ours to guess about
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		pid, rest, ok := strings.Cut(strings.TrimSpace(line), " ")
+		if !ok {
+			continue
+		}
+		_, after, ok := strings.Cut(rest, "-p "+leakProbeProjectPrefix)
+		if !ok {
+			continue
+		}
+		// Read through suitedir: 0 is this whole process group, -1 is everything
+		// reachable, and a number too large for a pid_t arrives as some other
+		// process entirely. Those bounds used to be written out here and not
+		// there, which is exactly the shape that drifts.
+		ownerPid, ok := suitedir.PidLeading(after)
+		if !ok {
+			continue
+		}
+		// Alive, or alive and not ours to signal: only "no such process" says the
+		// run that asked for this leak is over. Anything else is somebody there.
+		// (A run that has exited but not been reaped answers as alive, so its
+		// orphan waits for the run after this one. Late, and never wrong.)
+		//
+		// Asked through suitedir because the temp-directory sweep asks the same
+		// question about the same kind of leftover, and two answers to one
+		// question drift: these had already parted company over errors.Is before
+		// they were joined.
+		if suitedir.Alive(ownerPid) {
+			continue
+		}
+		if p, perr := strconv.Atoi(pid); perr == nil {
+			_ = syscall.Kill(p, syscall.SIGTERM)
+		}
+	}
+}
+
+// leakProbeProjectPrefix is how a probe's project is recognised as one. What
+// follows it is the pid of the run that asked for the leak.
+const leakProbeProjectPrefix = "leakprobe-"
+
+// leakProbeProjectEnv names the project the probe leaves supervised. The parent
+// makes it unique to itself so that sweeping by name afterwards cannot reach a
+// supervisor belonging to another run — or to somebody working on this machine.
+const leakProbeProjectEnv = "OPOSSUM_LEAK_PROBE_PROJECT"
+
+// TestZZLeakProbeStartsASupervisorAndWalksAway is skipped unless a parent asks
+// for it. When asked, it starts a supervisor and does not stop it — which is the
+// thing TestMain is supposed to catch, and the thing no test in this package
+// could check until one of them was willing to do it on purpose.
+func TestZZLeakProbeStartsASupervisorAndWalksAway(t *testing.T) {
+	kind := os.Getenv(leakProbeEnv)
+	if kind == "" {
+		t.Skip("only a parent asking for a leak runs this")
+	}
+	project := os.Getenv(leakProbeProjectEnv)
+	if project == "" {
+		t.Fatal("the parent has to name the project, so its own sweep cannot reach anyone else's")
+	}
+	fakeShim(t)
+	self := opossumBin
+	if kind == "elsewhere" {
+		// A copy the test made somewhere of its own: the search by path never
+		// looks here, so only the before/after difference can see it.
+		self = filepath.Join(t.TempDir(), "opossum")
+		src, err := os.ReadFile(opossumBin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(self, src, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	state := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", state)
+	t.Setenv("OPOSSUM_SELF_BIN", self)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"),
+		[]byte("name: "+project+"\nservices:\n  web:\n    image: web\n    restart: always\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	if _, err := run(t, "up", "--no-build"); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	var pid int
+	waitFor(t, "the supervisor to claim the project", func() bool {
+		pid = supervisorPID(t, state, project)
+		return pid != 0
+	})
+	// Written where the parent can always read it, however this run ends.
+	if f := os.Getenv(leakProbePidFileEnv); f != "" {
+		if err := os.WriteFile(f, []byte(strconv.Itoa(pid)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// And then nothing: no down, no cleanup. That is the point.
+}
+
+// A supervisor a test starts and does not stop has to fail the run, and fail it
+// with the report that fits how it was found. Checked from a child process
+// because the thing being checked is TestMain's own wiring, which nothing inside
+// a test can reach — the two reports and the choice between them are written
+// there, and until now deleting either block left this package green.
+func TestALeakedSupervisorFailsTheRunItLeaked(t *testing.T) {
+	if _, err := exec.LookPath("pgrep"); err != nil {
+		t.Fatal("pgrep is not on PATH, so a child could leak and still pass")
+	}
+	const (
+		byPath = "outlived the tests that started them"
+		byDiff = "were not running when the tests started"
+	)
+	for _, tc := range []struct {
+		kind, want, absent string
+	}{
+		// Started from the binary this suite built: the search by path finds it,
+		// and the difference must not name it a second time.
+		{kind: "built", want: byPath, absent: byDiff},
+		// Started from a copy somewhere else: only the difference can see it.
+		{kind: "elsewhere", want: byDiff, absent: byPath},
+	} {
+		t.Run(tc.kind, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "go", "test", "-count=1",
+				"-run", "TestZZLeakProbeStartsASupervisorAndWalksAway", ".")
+			cmd.Dir = packageDir(t)
+			pidFile := filepath.Join(t.TempDir(), "pid")
+			project := fmt.Sprintf("%s%d-%s", leakProbeProjectPrefix, os.Getpid(), tc.kind)
+			cmd.Env = append(os.Environ(),
+				leakProbeEnv+"="+tc.kind,
+				leakProbePidFileEnv+"="+pidFile,
+				leakProbeProjectEnv+"="+project)
+			// The deadline has to reach the test binary `go` starts, not just
+			// `go`: WaitDelay does not, having only the direct child to work
+			// with. A group of its own does, and Cancel is where the group is
+			// ended — measured by hanging the child and watching for what is
+			// left behind.
+			// (A side effect: the child is no longer in this terminal's foreground
+			// group, so a Ctrl-C here does not reach it. It ends on its own in a
+			// second or two, and anything it started is swept by the next run.)
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			cmd.Cancel = func() error {
+				if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); errors.Is(err, syscall.ESRCH) {
+					return os.ErrProcessDone // os/exec reads this as "it had already finished"
+				} else if err != nil {
+					return err
+				}
+				return nil
+			}
+			cmd.WaitDelay = 5 * time.Second
+			t.Cleanup(func() { killProbe(t, pidFile, project) })
+			out, err := cmd.CombinedOutput()
+
+			if err == nil {
+				t.Errorf("a supervisor was left running and the run passed:\n%s", out)
+			}
+			if !strings.Contains(string(out), tc.want) {
+				t.Errorf("the leak should be reported as %q, missing from:\n%s", tc.want, out)
+			}
+			if strings.Contains(string(out), tc.absent) {
+				t.Errorf("one process, one report: %q should not also appear in:\n%s", tc.absent, out)
+			}
+			// The pid in the report has to be the one the probe left, not some
+			// other supervisor that happened to supply the expected words.
+			// Nothing the child started may outlive it. Without this, the group
+			// kill above is unguarded — and the thing it replaced (WaitDelay) sat
+			// here for a round doing nothing while its comment said otherwise.
+			if kerr := syscall.Kill(-cmd.Process.Pid, 0); !errors.Is(kerr, syscall.ESRCH) {
+				t.Errorf("the child's process group still has somebody in it: %v", kerr)
+			}
+			raw, rerr := os.ReadFile(pidFile)
+			if rerr != nil {
+				t.Errorf("the probe should have left a pid behind; without one the check below is skipped exactly when it matters: %v\n%s", rerr, out)
+			} else if !strings.Contains(string(out), strings.TrimSpace(string(raw))) {
+				t.Errorf("the report should name the process the probe left (%s):\n%s", raw, out)
+			}
+		})
+	}
+}
+
+// killProbe ends what the probe left behind, reading the pid from a file rather
+// than from the run's output: a run that broke the report on purpose still
+// started a real supervisor, and the runs that break it hardest are the ones
+// that pass — whose output `go test` discards.
+func killProbe(t *testing.T, pidFile, project string) {
+	t.Helper()
+	if raw, err := os.ReadFile(pidFile); err == nil {
+		if pid, cerr := strconv.Atoi(strings.TrimSpace(string(raw))); cerr == nil {
+			_ = syscall.Kill(pid, syscall.SIGTERM)
+		} else {
+			t.Errorf("the probe wrote %q where a pid should be", raw)
+		}
+	}
+	// And then by name, because the pid file only exists when the probe got far
+	// enough to write it — and the runs that leak are the ones where it did not.
+	// The name carries this process's pid, so this reaches nothing that is not
+	// ours. Waited out rather than fired and forgotten: the suite's own check
+	// runs moments later and would report a supervisor that is on its way out.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		left, looked := leakedProcesses("__supervise -p " + project)
+		if !looked {
+			t.Errorf("could not look for the probe's supervisors, so this test cannot say it left none")
+			return
+		}
+		if len(left) == 0 {
+			return
+		}
+		for _, pid := range left {
+			_ = syscall.Kill(pid, syscall.SIGTERM)
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("the probe's supervisors are still running: %v", left)
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

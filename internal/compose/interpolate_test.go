@@ -91,8 +91,11 @@ func TestInterpolateRequiredVar(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error for an unset required variable")
 	}
-	if !strings.Contains(err.Error(), "NEEDED") || !strings.Contains(err.Error(), "must be set") {
-		t.Errorf("error should name the variable and message, got: %v", err)
+	// Both halves, in order. Checking for each separately is satisfied by a
+	// message that has them the other way round — and they are two strings on
+	// the same format call, so that swap costs one edit and no compile error.
+	if want := `variable "NEEDED": must be set`; err.Error() != want {
+		t.Errorf("error = %v, want %s", err, want)
 	}
 	// A provided value satisfies the requirement.
 	got, err := interpolate([]byte("image: ${NEEDED:?must be set}"), lk(map[string]string{"NEEDED": "x"}))

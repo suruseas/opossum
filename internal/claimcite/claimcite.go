@@ -38,10 +38,11 @@
 //     and that difference is exactly where several days went.
 //   - It does not read what people write outside the repository — a pull request
 //     description is not here to be checked.
-//   - It reads the fragments waiting for a release. A release folds them into
-//     CHANGELOG.md and deletes them, and no published section is ever read again,
-//     so a sentence has one chance to be looked at: while its fragment exists.
-//     A published section already carries one such sentence (#496).
+//   - It reads the fragments waiting for a release, and the sections a release
+//     folded them into. What it does not read is anything else: a pull request
+//     description, a commit message, the prose in docs/, the strings a diagnostic
+//     prints. The last of those is where two claims went wrong on the same day
+//     this was written, and no check saw them.
 //   - It matches phrases, so a claim worded another way passes, including the
 //     past and plural forms of these ones ("worked there", "host paths work
 //     there") and every wording that avoids them ("a bind mount works at that

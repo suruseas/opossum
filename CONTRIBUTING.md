@@ -69,11 +69,195 @@ are written in English, inside a code fence as much as outside one.
 ```sh
 gofmt -l .        # must be empty
 go vet ./...
-go test ./...     # the regression gate
+make test         # the regression gate: what CI runs, with -race and -cover
 ```
 
 Behaviour-changing pull requests get an independent review before merge, and the
 review's findings are recorded on the PR.
+
+### A commit the tree cannot be built from
+
+Reading the gate and making the commit are two acts, and nothing joins them: a
+tree that does not compile can be committed and pushed, and the first thing that
+notices is CI, minutes later — or a reader who takes the red for the answer to
+whatever they were measuring at the time.
+
+There is a hook for the half of that which answers in about a second:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+It runs `gofmt -l .` and `go vet` for both platforms, and refuses the commit if
+either has something to say. `git commit --no-verify` still goes through, which
+is the point — a hook long enough to be worth skipping is a hook that gets
+skipped.
+
+What it does not catch, so that a green commit is not read as more than it is:
+
+- **The suite.** `go test ./...` is minutes; a commit hook that takes minutes
+  teaches people to pass `--no-verify` by habit, and then nothing is checked at
+  all. So a commit whose tests fail goes through.
+- **Half of a change.** The hook reads the working tree; git records the index.
+  Stage part of your work and the rest is still on disk, so a commit that does
+  not build on its own passes without a word. Splitting a change across commits
+  is exactly this shape.
+- **Merges that go through on their own.** `git merge` runs `pre-merge-commit`,
+  not this, so a merge whose result does not build lands unremarked. Rebase
+  replays the same way. (A merge you finish by hand after a conflict ends in a
+  `git commit`, and that one does come here.)
+- **Anything but the tree.** It reads `.` — including files git is not tracking.
+  A scratch `.go` file that does not compile will stop every commit until it is
+  moved out or deleted.
+
+`core.hooksPath` replaces `.git/hooks` rather than adding to it: anything already
+there stops running. Nothing is there in this repository today (only the samples
+git ships), but a tool that installs its own hooks later — `git lfs install`, for
+one — would go quiet.
+
+### A run that ends before it can clean up
+
+The suites build their binaries under `$TMPDIR` and remove them when they
+finish, and `cmd/opossum` looks for processes the tests left running before it
+returns. Both of those live after `m.Run()` — so a panic, a `-timeout` firing,
+or a `^C` skips them. A run that dies that way leaves a directory behind and,
+if a test had started a supervisor, a process still running out of it. The
+in-suite check is the one thing that could have named that process, and on this
+path it never speaks.
+
+`make test` therefore runs the suite through a second look from the outside:
+
+```sh
+go run ./cmd/noleftovers go test ./... -race -cover
+```
+
+Out here the test binary's death is only an exit status. It takes the set of
+`opossum-*` entries in `$TMPDIR` before and after, reports anything new, names
+any process still running out of it, and fails a run that would otherwise have
+passed. It survives `^C` on purpose — the signal reaches the whole process
+group, so without that it would be killed alongside the thing it is watching.
+A command a signal killed is reported as killed rather than as having exited,
+and the run's status becomes 128 plus the signal, as a shell would write it.
+
+A command that catches `^C` for itself is reported as interrupted too. `go test`
+does exactly that: it handles the signal, tidies up, and exits 1 — the same 1 a
+run whose tests failed would give. Read from that status alone the run looks
+like a failure, so the interrupt is reported from this side, where it was also
+received.
+
+To run the suite without the second look — while bisecting, say — call `go test`
+directly.
+
+`pgrep` has to be on PATH. The tool itself does without it — it says it could not
+look rather than claiming there was nothing to find — but the tests that check
+the `^C` path use it twice: to wait until there is something an interrupt can
+reach, and afterwards to see whether anything survived it. The wait fails the
+test outright when pgrep is missing, and again when it can be run but never sees
+the process — which is what keeps the second use from quietly passing on a
+machine that cannot answer. A run that skipped these tests
+would still print `ok`, which is the worse of the two.
+
+What it does not catch:
+
+- **Which test leaked.** Out here a directory is new or it is not; nothing
+  connects it to a name. That is what the in-suite check is for, and why this is
+  a second net rather than a replacement.
+- **Anything that was already there.** The difference starts when the command
+  does, so a leak from an earlier run is invisible. It also means that running
+  again straight after a red one goes green while the leak is still sitting
+  there — which is the first thing most people try.
+- **Whose a new directory is.** The difference is in time, not in ownership: a
+  suite started in another terminal while this one runs appears here too and
+  cannot be told apart from a leak. The report says so, and does not hand over
+  an unconditional `rm -rf`. Check that nothing is using a directory before
+  removing it.
+- **Anything not named `opossum-*`.** `internal/orchestrator` makes one temp
+  directory with the prefix `sk`, because a Unix socket path has to stay short.
+  No pattern that matches it in a shared `$TMPDIR` would leave strangers alone,
+  so a run that leaks only that one passes.
+- **A leak a concurrent run tidies up.** The difference is taken across the
+  command, so something that appears and disappears while it runs is never seen.
+- **An interrupted run that left nothing behind.** Nothing is printed when there
+  is nothing to report, so `^C` on a clean run is indistinguishable from a run
+  that simply failed.
+- **Any way of being killed but `^C`.** Only an interrupt is survived. `SIGTERM`
+  (from `timeout`, a cancelled CI job, a harness) and `SIGHUP` (closing the
+  terminal on a run that takes minutes) kill it as silently as they killed the
+  suite, and those endings are the same kind. Catching `SIGTERM` would stop
+  `kill <pid>` working on it, which is worse.
+- **Leftovers below the top of `$TMPDIR`**, or inside somebody else's directory.
+- **The difference between a directory and a file.** `cmd/mutate` writes
+  `opossum-mutate-*.cover` at the top of `$TMPDIR`, so an interrupted sweep can
+  put a file under a heading that talks about directories.
+- **Whether the process it names is ours.** `pgrep -f` is handed the whole
+  directory path, but reads it as a regular expression rather than as text.
+- **The exit status, by the time `make` sees it.** The tool returns the
+  command's own status, except that a run which left something behind is never
+  green — a command that succeeded, or that chose 0 after catching `^C`, comes
+  back as 1. `make test` reaches it through `go run`, which collapses
+  every non-zero status to 1. The number is printed as well for that reason —
+  but only when something was left, since that is the only time it prints at all.
+  `make` only tells zero from non-zero, so the gate is unaffected — a script
+  reading `make test`'s status is not.
+- **`make cover` and the commit hook**, which do not go through it, and CI,
+  which is tracked separately.
+
+### Making the machine busy on purpose
+
+Some tests only fail when things are slow, and the way to find out is to load the
+machine while they run:
+
+```sh
+go build -o /tmp/busy ./cmd/busy
+/tmp/busy -n 4 -for 5m -- go test -count=20 -run TestSomethingTiming ./cmd/opossum/
+```
+
+Build it rather than `go run ./cmd/busy`. `go run` is a second process holding
+the first: kill it — a `^C` that lands there, a harness that reaps it — and the
+loaded process is orphaned, measured at 399% of CPU with a ppid of 1. That is the
+accident this exists to prevent, reintroduced one layer up. `go run` also
+collapses the command's exit status to 1.
+
+Write the loop by hand and you get the same accident, twice recorded: once a
+review's shell spawned two dozen spinners and died before its last line, leaving
+forty orphans burning 600% of a laptop for five hours; once a flake sweep did the
+same and took a machine somebody was using to a load average of 157. Both times
+the cleanup line was correct and simply never ran — `kill $(jobs -p)` finds
+nothing to kill in a non-interactive shell, and a killed parent never reaches its
+last line at all.
+
+`busy` keeps the load inside its own process, so there is nothing to orphan.
+Measured by killing the parent mid-run and counting what is left in its process
+group:
+
+```
+by hand   : 6 processes before → 5 after
+cmd/busy  : 2 processes before → 1 after   (the command, which is next)
+```
+
+`-for` bounds the load in case the tool is left running rather than killed; it
+stops the load, not the command, and says so when it fires. It defaults to five
+minutes, which is shorter than most sweeps — pass a longer one deliberately
+rather than discovering the load stopped halfway.
+
+**On a machine someone is using, ask for fewer workers than it has cores.** The
+default is every core, which is right for a machine you are only measuring on and
+wrong for one anybody is typing into.
+
+What it does not do:
+
+- **Keep the command from being orphaned.** Kill `busy` and the command it
+  started keeps running — the same limit `cmd/noleftovers` has. Only the load is
+  guaranteed to go.
+- **Survive being run under something else.** The guarantee is about what `busy`
+  starts, not about what starts `busy`: anything that can be killed between you
+  and it — `go run`, a wrapper script — is a parent that can leave it behind.
+- **Promise a particular amount of contention.** `-n` asks for that many
+  spinning threads; the hardware answers. Eight workers on a two-core runner burn
+  two cores' worth, not eight. How much each one gets is the scheduler's
+  business, and on a machine with other work it is not fixed.
+- **Know whether the load is the kind your race needs.** It makes the machine
+  busy. Whether that is enough is a question for whoever is hunting.
 
 ## Showing that a test guards what it claims
 

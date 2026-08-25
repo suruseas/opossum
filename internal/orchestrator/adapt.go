@@ -346,6 +346,46 @@ func (o *Orchestrator) imageEnv(ref string) (map[string]string, bool) {
 	return env, ok
 }
 
+// startingDir is the directory a service's process starts in, or "" when nothing
+// says. The compose file wins when it names one — that is what the runtime is
+// given — and otherwise the image is asked, the same way it is asked where a
+// database keeps its data.
+//
+// Called only when the answer is needed — asking costs a process, and a log that
+// names its own path never asks. The answer is remembered per image.
+//
+// This is a declaration, not a prediction — but the line is finer than it looks.
+// What the image declares is where the process *starts*; what the log's `.` means
+// is the argument chown was given, which is the process's directory only if chown
+// was run there. They line up unless something moved in between — an overridden
+// `entrypoint:` or `command:`, a `cd` inside the image's own entrypoint script, a
+// subshell — and none of that is checked here. So this is used only to read a
+// path the container itself named, and only where the answer lands inside a mount
+// the service actually has. It does widen what gets *proposed*: a crash that used
+// to end in a shrug now leaves a record, and the next run offers that mount. What
+// it never widens is what gets applied — that list is elsewhere and does not read
+// this.
+func (o *Orchestrator) startingDir(svc *compose.Service) string {
+	if d := strings.TrimSpace(svc.WorkingDir); d != "" {
+		return d
+	}
+	if o.rt == nil || svc.Image == "" {
+		return ""
+	}
+	if o.imageWorkdirs == nil {
+		o.imageWorkdirs = map[string]string{}
+	}
+	if d, seen := o.imageWorkdirs[svc.Image]; seen {
+		return d
+	}
+	// An image that could not be asked answers "" — the same as one that declares
+	// nothing, which is right here: both leave `.` unresolved, and the caller falls
+	// back to the mount being forced or not at all.
+	d, _ := o.rt.ImageWorkingDir(svc.Image)
+	o.imageWorkdirs[svc.Image] = d
+	return d
+}
+
 // swapHelpsHere reports whether moving this mount to a named volume is a fix,
 // and how the answer was come by.
 //
@@ -567,7 +607,7 @@ func (o *Orchestrator) notePGDATAHalfMissing(name string, svc *compose.Service, 
 		fact = "Whether it lands in this mount therefore cannot be read here either."
 	}
 	return serviceAdaptation{
-		Adaptation: Adaptation{Service: name, Code: string(codeDataDirNotThisMount), Summary: what, Kind: "note"},
+		Adaptation: Adaptation{Service: name, Code: string(codeDataDirNotThisMount), Summary: oneLine(what), Kind: "note"},
 		class:      classNote,
 		comment: noteBlock(
 			fmt.Sprintf("%s service %q: %s left as a bind mount.", noteMarker, esc(name), esc(target)),
@@ -599,7 +639,7 @@ func (o *Orchestrator) noteUnfixable(name string, svc *compose.Service) []servic
 	var out []serviceAdaptation
 	note := func(code diagCode, what string, why, next []string) {
 		out = append(out, serviceAdaptation{
-			Adaptation: Adaptation{Service: name, Code: string(code), Summary: what},
+			Adaptation: Adaptation{Service: name, Code: string(code), Summary: oneLine(what)},
 			class:      classNote,
 			comment:    noteBlock(fmt.Sprintf("%s service %q: %s", noteMarker, esc(name), esc(what)), why, next),
 		})
@@ -669,15 +709,22 @@ func isHostDevicePath(src string) bool {
 
 // noteBlock renders a note: what it is, why nothing can be done, and what to
 // expect instead. Notes carry no YAML, so they end at "What to expect".
+// Every line goes through oneLine. The heading is where a raw path or service
+// name arrives from the compose file, and a newline in one of them would end the
+// comment and start a line of its own: in the file that line is loose YAML; on
+// screen, where the notes are read out without their comment marks, it is a note
+// that says whatever its author wanted it to say. The rest arrives normalised
+// already, and goes through anyway so that a new caller cannot open this by not
+// knowing.
 func noteBlock(what string, why, expect []string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "# %s\n", what)
+	fmt.Fprintf(&b, "# %s\n", oneLine(what))
 	section := func(label string, lines []string) {
 		for i, l := range lines {
 			if i == 0 {
-				fmt.Fprintf(&b, "# %s: %s\n", label, l)
+				fmt.Fprintf(&b, "# %s: %s\n", label, oneLine(l))
 			} else {
-				fmt.Fprintf(&b, "#   %s\n", l)
+				fmt.Fprintf(&b, "#   %s\n", oneLine(l))
 			}
 		}
 	}

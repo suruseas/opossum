@@ -1,0 +1,46 @@
+[
+  {
+    "configuration": {
+      "creationDate": "2025-11-03T13:41:57Z",
+      "descriptor": {
+        "digest": "sha256:798ab84d9f266936b034ab11c4d04a2b8e4b441884c5aa7d17ac951eefdf742a",
+        "mediaType": "application/vnd.docker.distribution.manifest.list.v2+json",
+        "size": 743
+      },
+      "name": "docker.io/redis/redis-stack-server:latest"
+    },
+    "id": "798ab84d9f266936b034ab11c4d04a2b8e4b441884c5aa7d17ac951eefdf742a",
+    "variants": [
+      {
+        "config": {
+          "architecture": "arm64",
+          "config": {
+            "Cmd": [
+              "/entrypoint.sh"
+            ],
+            "Env": [
+              "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+              "REDISBLOOM_ARGS=",
+              "REDISEARCH_ARGS=",
+              "REDISJSON_ARGS=",
+              "REDISTIMESERIES_ARGS=",
+              "REDIS_ARGS="
+            ],
+            "Labels": {
+              "org.opencontainers.image.ref.name": "ubuntu",
+              "org.opencontainers.image.version": "22.04"
+            }
+          },
+          "created": "2025-11-03T13:41:57.630560824Z",
+          "os": "linux"
+        },
+        "digest": "sha256:75cb09fe427163df4ba306b8d9668ac6af75555d88e3145171bb0324a57b00c1",
+        "platform": {
+          "architecture": "arm64",
+          "os": "linux"
+        },
+        "size": 267460182
+      }
+    ]
+  }
+]

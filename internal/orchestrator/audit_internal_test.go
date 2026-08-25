@@ -120,10 +120,32 @@ func TestAuditReportRendering(t *testing.T) {
 	var sb bytes.Buffer
 	r.WriteSummary(&sb)
 	s := sb.String()
-	for _, want := range []string{"exit 0", "added", "out.txt", "changed", "src.go", "api.anthropic.com:443", "via proxy"} {
+	for _, want := range []string{"exit 0", "out.txt", "src.go", "api.anthropic.com:443", "via proxy"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("summary missing %q, got:\n%s", want, s)
 		}
+	}
+	// The counts, in their own words, with three different numbers. Three ints of
+	// the same type sit next to each other on one format call, and asking whether
+	// "added" and "changed" appear says nothing about which number went with
+	// which. The numbers have to differ from each other or the check cannot see
+	// the swap: with one changed and one added, exchanging them reads the same.
+	counted := &AuditReport{Files: AuditFiles{
+		Observed:  true,
+		Workspace: "/w",
+		Changes: []workspace.FileChange{
+			{Kind: workspace.Changed, Path: "a"},
+			{Kind: workspace.Changed, Path: "b"},
+			{Kind: workspace.Changed, Path: "c"},
+			{Kind: workspace.Added, Path: "d"},
+			{Kind: workspace.Added, Path: "e"},
+			{Kind: workspace.Deleted, Path: "f"},
+		},
+	}}
+	var cb bytes.Buffer
+	counted.WriteSummary(&cb)
+	if want := "3 changed, 2 added, 1 deleted under /w"; !strings.Contains(cb.String(), want) {
+		t.Errorf("summary should say %q, got:\n%s", want, cb.String())
 	}
 	// An unobserved dimension says so (never blank).
 	r2 := &AuditReport{Service: "agent", Egress: AuditEgress{Observed: false, Reason: "not routed through a proxy"}}

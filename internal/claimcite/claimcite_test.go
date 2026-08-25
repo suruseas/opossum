@@ -432,6 +432,100 @@ func TestTheDocumentedReportMatchesTheRealOne(t *testing.T) {
 	}
 }
 
+// A release folds the fragments into a version's section and deletes them, and
+// until now nothing read a word of what it left behind. That was the whole
+// lifetime of the check: a sentence had one chance to be looked at, while its
+// fragment existed, and none afterwards.
+//
+// So the published sections are read too. Everything released since this check
+// existed went through it as a fragment, so this is mostly a second pair of eyes
+// on text that arrives some other way — a hand edit, a release tool that folds
+// something it should not. What it also does is put a number on the sentence that
+// was published before the check existed, rather than leaving it out of sight.
+func TestWhatWasPublishedNamesItsRunsToo(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join(repoRoot(t), "CHANGELOG.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range unexemptedClaims(t, string(b)) {
+		t.Errorf("%s — published text cannot be edited, so this has to be right before it goes out", f)
+	}
+}
+
+// unexemptedClaims is the check itself: what the published text claims without
+// naming a run, minus what was already out when this check was written.
+func unexemptedClaims(t *testing.T, doc string) []claimcite.Finding {
+	t.Helper()
+	known := knownRuns(t)
+	var out []claimcite.Finding
+	for _, f := range claimcite.Check("CHANGELOG.md", doc, known) {
+		if publishedBeforeThisCheck[strings.TrimSpace(f.Sentence)] {
+			continue
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
+// publishedBeforeThisCheck is the one sentence that was already out when this
+// check was written. A published section is the record of what shipped and is not
+// edited afterwards, so it stays — named here rather than skipped in silence.
+//
+// The claim itself was true; what it lacked was anywhere to look. The run behind
+// it is in this repository (`pg17-external-volume-lostfound.txt`), and the entry
+// simply predates the habit of saying so.
+var publishedBeforeThisCheck = map[string]bool{
+	"opossum now clears `lost+found` out of the volumes it creates, so a compose file that writes `pgdata:/var/lib/postgresql/data` works here as it does on Docker, with no need to move `PGDATA` into a subdirectory of the mount": true,
+}
+
+// The repository is expected to be clean, so the check above says nothing about
+// whether it can see what it is looking for. This does: a released section with a
+// claim in it that nobody exempted has to be reported. Without this, widening the
+// exemption to everything would pass — there is only one finding today, and it is
+// the exempt one.
+func TestAClaimInAPublishedSectionIsReported(t *testing.T) {
+	const doc = `# Changelog
+
+## [Unreleased]
+
+## [1.0.0] - 2020-01-01
+
+### Fixed
+
+- A host path works there now, so the mount is left alone.
+`
+	found := unexemptedClaims(t, doc)
+	if len(found) != 1 {
+		t.Fatalf("a claim published with nothing behind it should be reported once, got %d: %v", len(found), found)
+	}
+
+	// …and the one sentence that predates the check is still let through, so this
+	// is measuring the exemption too, not just the reporting.
+	if got := unexemptedClaims(t, exemptedSentence(t)); len(got) != 0 {
+		t.Errorf("the sentence that was published before this check should still pass, got %v", got)
+	}
+}
+
+func exemptedSentence(t *testing.T) string {
+	t.Helper()
+	for s := range publishedBeforeThisCheck {
+		return s
+	}
+	t.Fatal("nothing is exempt, so the exemption cannot be measured")
+	return ""
+}
+
+// An exemption nobody needs is an exemption that hides the next one. Each entry
+// has to be a sentence the check actually reports.
+func TestEveryExemptionIsOneTheCheckWouldOtherwiseReport(t *testing.T) {
+	known := knownRuns(t)
+	for sentence := range publishedBeforeThisCheck {
+		if len(claimcite.Check("x.md", sentence, known)) == 0 {
+			t.Errorf("this is exempt but would pass anyway; it is not carrying its weight: %q", sentence)
+		}
+	}
+}
+
 // The fragments in this repository have to pass, or the check is one nobody can
 // turn on. This is the ratchet: a new fragment that reports a measurement has to
 // name its run. Fragments are enumerated by the loader the release uses, so

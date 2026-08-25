@@ -69,8 +69,14 @@ func TestEnsureBindDirsFailsWhenTheSourceCannotBeMade(t *testing.T) {
 	// already shipped that bug once, telling the user to `rmdir` the service name
 	// (see the note next to codeBindFilePlaceholder). A format string with two
 	// same-typed arguments will take that shape again.
-	if want := "`mkdir -p " + src + "`"; !strings.Contains(err.Error(), want) {
-		t.Errorf("the fix should be %s, got: %v", want, err)
+	// The whole line, not the command out of it: `Contains` on "`mkdir -p <src>`"
+	// is satisfied by a line that goes on to say something else entirely, and
+	// this is the line a person will copy. The first line is not pinned here —
+	// it ends in whatever the OS said about the failure.
+	want := "  the container cannot start without it — create it yourself (`mkdir -p " + src +
+		"`) or fix the parent directory's permissions, then run `opossum up` again"
+	if got, n := lineStarting(err.Error(), "  the container"); n != 1 || got != want {
+		t.Errorf("the line with the fix on it is not what it should be (%d lines start with it).\n got: %q\nwant: %q", n, got, want)
 	}
 	if !strings.Contains(err.Error(), `"svc"`) {
 		t.Errorf("the error should name the service, got: %v", err)

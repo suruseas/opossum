@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -23,6 +24,7 @@ import (
 	"github.com/suruseas/opossum/internal/compose"
 	"github.com/suruseas/opossum/internal/orchestrator"
 	"github.com/suruseas/opossum/internal/runtime"
+	"github.com/suruseas/opossum/internal/suitedir"
 )
 
 // fakeShimInspect returns a Runtime whose `inspect` prints out and exits with
@@ -107,11 +109,18 @@ var testBaseDir string
 var fakeShimBin string
 
 func TestMain(m *testing.M) {
-	d, err := os.MkdirTemp("", "opossum-orch-test-")
+	d, err := suitedir.Make("opossum-orch-test-")
 	if err != nil {
 		panic(err)
 	}
 	testBaseDir = d
+	// Supervisor state — pid files, logs, stop markers — goes here rather than
+	// into the home directory of whoever ran `go test`. Twenty-eight tests in
+	// this package already set it themselves and three say in a comment why; one
+	// that also writes state did not, and wrote into a real home. Tests that want
+	// their own still set it, and this is only the floor.
+	os.Setenv("XDG_STATE_HOME", filepath.Join(d, "state"))
+
 	fakeShimBin = filepath.Join(d, "fakeshim")
 	if out, err := exec.Command("go", "build", "-o", fakeShimBin, "./testdata/fakeshim").CombinedOutput(); err != nil {
 		os.RemoveAll(d)
@@ -1655,21 +1664,30 @@ func TestImagesListsBuiltAndPulled(t *testing.T) {
 	if err := orchestrator.New(imageProject(), rt, "opossum", &out).Images(); err != nil {
 		t.Fatalf("Images: %v", err)
 	}
-	// Scan per line so PRESENT is tied to the right service.
-	var web, db string
-	for _, l := range strings.Split(out.String(), "\n") {
-		switch {
-		case strings.HasPrefix(l, "web"):
-			web = l
-		case strings.HasPrefix(l, "db"):
-			db = l
+	// Column by column. Tying the values to the line is not enough: every cell
+	// here is a string, so a row with `built` and `yes` in each other's columns
+	// satisfies a `Contains` for each of them separately.
+	lines := nonEmptyLines(out.String())
+	if len(lines) != 3 {
+		t.Fatalf("want a header and two rows, got %d lines:\n%s", len(lines), out.String())
+	}
+	wantHeader := []string{"SERVICE", "IMAGE", "SOURCE", "PRESENT"}
+	if h := columns(lines[0]); !reflect.DeepEqual(h, wantHeader) {
+		t.Errorf("header = %v, want %v", h, wantHeader)
+	}
+	for _, want := range [][]string{
+		{"web", "demo-web:latest", "built", "yes"},
+		{"db", "postgres:16", "pulled", "no"},
+	} {
+		var got []string
+		for _, l := range lines[1:] {
+			if c := columns(l); len(c) > 0 && c[0] == want[0] {
+				got = c
+			}
 		}
-	}
-	if !strings.Contains(web, "demo-web:latest") || !strings.Contains(web, "built") || !strings.Contains(web, "yes") {
-		t.Errorf("built image present locally should show built + yes, got %q", web)
-	}
-	if !strings.Contains(db, "postgres:16") || !strings.Contains(db, "pulled") || !strings.Contains(db, "no") {
-		t.Errorf("pulled image absent locally should show pulled + no, got %q", db)
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s row = %v, want %v", want[0], got, want)
+		}
 	}
 }
 
@@ -2005,21 +2023,53 @@ func TestPsReportsInspectedIP(t *testing.T) {
 		t.Fatalf("Ps: %v", err)
 	}
 	got := out.String()
-	// PORTS and STATUS columns are present in the header.
-	if !strings.Contains(got, "PORTS") || !strings.Contains(got, "STATUS") {
-		t.Errorf("ps header should include PORTS and STATUS, got:\n%s", got)
+	// Column by column, not value by value. Every column here is a string, so
+	// `Contains` for each one on its own is satisfied by a row that has them all
+	// in the wrong order — a `ps` whose IP and PORTS are swapped reads as normal
+	// and sends anyone using it to the wrong place. Measured: fifteen ways to
+	// swap two of these six columns, and the version before this let every one
+	// of them through.
+	wantHeader := []string{"SERVICE", "CONTAINER", "IMAGE", "IP", "PORTS", "STATUS"}
+	wantRow := []string{"db", "db.demo.opossum", "postgres:16", "192.168.64.10", "0.0.0.0:8080->8080/tcp", "running"}
+	lines := nonEmptyLines(got)
+	if len(lines) != 2 {
+		t.Fatalf("want a header and one row, got %d lines:\n%s", len(lines), got)
 	}
-	if !strings.Contains(got, "192.168.64.10") {
-		t.Errorf("ps should show the inspected IP, got:\n%s", got)
+	if h := columns(lines[0]); !reflect.DeepEqual(h, wantHeader) {
+		t.Errorf("header = %v, want %v", h, wantHeader)
 	}
-	// PORTS is rendered docker-ps style from inspect's publishedPorts.
-	if !strings.Contains(got, "0.0.0.0:8080->8080/tcp") {
-		t.Errorf("ps should render published ports, got:\n%s", got)
+	if r := columns(lines[1]); !reflect.DeepEqual(r, wantRow) {
+		t.Errorf("row = %v, want %v", r, wantRow)
 	}
-	// STATUS comes from status.state, not from IP inference.
-	if !strings.Contains(got, "db.demo.opossum") || !strings.Contains(got, "running") {
-		t.Errorf("ps should show container name and running status, got:\n%s", got)
+}
+
+// columns splits a line of a rendered table back into its cells. tabwriter has
+// already turned the tabs into padding, so the separator is a run of two or more
+// spaces — single spaces belong to the cells (`47MiB / 1GiB`, `0.0.0.0:80->80/tcp,
+// 0.0.0.0:443->443/tcp`).
+//
+// An empty cell is dropped rather than returned as "", so a row that begins with
+// one comes back short. Every want below is the full row, so a lost cell changes
+// the length and fails — except the `total` line in the host table, which really
+// does start empty and is compared as two cells.
+func columns(line string) []string {
+	var out []string
+	for _, c := range regexp.MustCompile(`\s{2,}`).Split(strings.TrimRight(line, " \t"), -1) {
+		if c = strings.TrimSpace(c); c != "" {
+			out = append(out, c)
+		}
 	}
+	return out
+}
+
+func nonEmptyLines(s string) []string {
+	var out []string
+	for _, l := range strings.Split(s, "\n") {
+		if strings.TrimSpace(l) != "" {
+			out = append(out, l)
+		}
+	}
+	return out
 }
 
 func TestPsHidesMissingContainers(t *testing.T) {
@@ -3032,22 +3082,46 @@ func TestStatsHost(t *testing.T) {
 	if err := o.StatsHost(nil); err != nil {
 		t.Fatalf("StatsHost: %v", err)
 	}
-	s := out.String()
-	for _, want := range []string{"305MiB", "340MiB"} { // each mapped host footprint
-		if !strings.Contains(s, want) {
-			t.Errorf("host footprint %s should render, got:\n%s", want, s)
+	// Row by row, column by column. The guest view and the host view are two
+	// strings side by side, and asking whether each number appears somewhere is
+	// satisfied by a table that has them in each other's columns — which is the
+	// one way this table can lie that matters, since the whole point is telling
+	// the two views apart.
+	lines := nonEmptyLines(out.String())
+	// The header and the row count too: gathering rows by name alone says
+	// nothing about a row that appeared from nowhere, and leaves a missing row
+	// reporting as an empty slice with no hint of why.
+	wantHeader := []string{"SERVICE", "GUEST MEM", "HOST FOOTPRINT"}
+	if len(lines) != 6 {
+		t.Fatalf("want a header, three services, a total and the footnote, got %d lines:\n%s",
+			len(lines), out.String())
+	}
+	if h := columns(lines[0]); !reflect.DeepEqual(h, wantHeader) {
+		t.Errorf("header = %v, want %v", h, wantHeader)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(lines[5]), "HOST FOOTPRINT is") {
+		t.Errorf("the footnote that says where the host number comes from is not last:\n%s", out.String())
+	}
+	// In order, rather than looked up by name. Looking up by the first cell
+	// cannot describe a row whose first cell moved: every such swap came back as
+	// `row = []`, which says a row is missing when it is really in the wrong
+	// shape. Comparing position by position also pins the order, which is what
+	// anyone reading two of these tables side by side relies on.
+	//
+	// The last row is the total, whose first cell is empty in the output, so it
+	// comes back as two cells.
+	want := [][]string{
+		{"cache", "47MiB / 1GiB", "—"}, // no host mapping
+		{"db", "47MiB / 1GiB", "340MiB"},
+		{"web", "47MiB / 1GiB", "305MiB"},
+		// The total is the exact sum of the mapped footprints only (305+340=645),
+		// not a double-count and not inflated by the unmapped cache.
+		{"total", "645MiB"},
+	}
+	for i, w := range want {
+		if got := columns(lines[i+1]); !reflect.DeepEqual(got, w) {
+			t.Errorf("row %d = %v, want %v", i+1, got, w)
 		}
-	}
-	if !strings.Contains(s, "1GiB") { // guest limit from the stats snapshot
-		t.Errorf("guest limit should render, got:\n%s", s)
-	}
-	if !strings.Contains(s, "—") { // cache couldn't be mapped
-		t.Errorf("an unmapped service should render an em dash, got:\n%s", s)
-	}
-	// The total is the exact sum of the mapped footprints only (305+340=645), not a
-	// double-count and not inflated by the unmapped cache.
-	if !strings.Contains(s, "total") || !strings.Contains(s, "645MiB") {
-		t.Errorf("total should be the exact sum of mapped footprints (645MiB), got:\n%s", s)
 	}
 }
 
@@ -4030,5 +4104,24 @@ func TestUpIsQuietWhenSeedingWorks(t *testing.T) {
 	}
 	if s := out.String(); strings.Contains(s, "OPSM-108") {
 		t.Errorf("seeding succeeded, so there is nothing to report:\n%s", s)
+	}
+}
+
+// Nothing in this package writes into the state directory of whoever ran the
+// tests. Three tests in here set XDG_STATE_HOME themselves and say why in a
+// comment; a fourth (TestStopStopsInReverseWithoutRemoving, through Stop →
+// MarkStopped) did not, and left a directory under a real home. Saying it once,
+// here, is what makes the fourth one impossible rather than merely discouraged.
+func TestThisPackageDoesNotWriteToTheRealStateDirectory(t *testing.T) {
+	state := os.Getenv("XDG_STATE_HOME")
+	if state == "" {
+		t.Fatal("XDG_STATE_HOME is unset, so anything here that writes supervisor state lands in the home directory of whoever ran it")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home directory to compare against")
+	}
+	if rel, rerr := filepath.Rel(home, state); rerr == nil && !strings.HasPrefix(rel, "..") {
+		t.Errorf("XDG_STATE_HOME is %s, inside the home directory %s", state, home)
 	}
 }

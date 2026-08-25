@@ -1089,7 +1089,21 @@ func adaptProject(stderr io.Writer, o *orchestrator.Orchestrator, dryRun bool) (
 	if len(composeFiles) != 0 {
 		// Explain the no-op: the user asked for the migration and would otherwise
 		// see nothing at all happen.
-		if _, changes := o.PlanOverlay(); len(changes) > 0 {
+		//
+		// The second run is not offered for findings an overlay is never written
+		// for. That much holds wherever the reader is standing: it is a property of
+		// the findings, and the same test decides it here and on the writing path.
+		//
+		// What that second run does with the project as a whole is a different
+		// question, and not one to answer from here. It may write nothing — an
+		// overlay already there, a compose file under a name discovery does not
+		// look for, --dry-run again — or it may write plenty, because -f reads the
+		// file it was given while discovery reads what it finds, override files
+		// included, and the two do not see the same project. Both directions are
+		// #518. Neither is claimed here.
+		body, changes := o.PlanOverlay()
+		switch {
+		case hasActionable(changes):
 			fmt.Fprintf(stderr, "opossum: found %d change(s) this project needs, but -f was given — "+
 				"an overlay is only merged when opossum discovers the compose file itself. "+
 				"Re-run without -f to have them written, or apply them by hand:\n", len(changes))
@@ -1097,6 +1111,18 @@ func adaptProject(stderr io.Writer, o *orchestrator.Orchestrator, dryRun bool) (
 			// path there are none. A reader told to apply changes by hand has to be
 			// able to see which.
 			reportEntries(stderr, changes)
+		case len(changes) > 0:
+			// No second run is offered for these: an overlay holding only them is
+			// never written, with or without -f, so the run the reader was being
+			// sent back for had nothing of theirs to write down. Whether it would
+			// write something else is not something this can see, and it is not
+			// what the reader was told to go and get.
+			fmt.Fprintf(stderr, "opossum: found %d thing(s) in this project that no compose change can fix. "+
+				"An overlay is never written for these alone, so here is what one would have said:\n", len(changes))
+			reportEntries(stderr, changes)
+			if !reportNoteProse(stderr, "", body) {
+				fmt.Fprintln(stderr, "opossum: the lines above are all of it.")
+			}
 		}
 		return nil, nil
 	}
@@ -1137,7 +1163,7 @@ func adaptProject(stderr io.Writer, o *orchestrator.Orchestrator, dryRun bool) (
 	// — and it would make every command print the "merging an overlay" notice for
 	// a file that changes nothing. The notes are still reported on stderr.
 	if !hasActionable(changes) {
-		reportNotesOnly(stderr, changes)
+		reportNotesOnly(stderr, body, changes)
 		return nil, nil
 	}
 	if dryRun {
@@ -1341,12 +1367,82 @@ func hasActionable(changes []orchestrator.Adaptation) bool {
 }
 
 // reportNotesOnly says what opossum found when there is nothing to write.
-func reportNotesOnly(stderr io.Writer, changes []orchestrator.Adaptation) {
+//
+// The summary line names the thing; the body says what happens and what to do
+// instead, and for a note that body exists nowhere else. Written into the overlay
+// it would be read; not written, it was gone — a note reached the reader as one
+// line, and which notes those were depended on whether some other service in the
+// project happened to need a real change.
+func reportNotesOnly(stderr io.Writer, body string, changes []orchestrator.Adaptation) {
 	fmt.Fprintf(stderr, "opossum: nothing to fix or suggest, but %d thing(s) here can't be fixed by a compose change:\n", len(changes))
 	for _, c := range changes {
 		fmt.Fprintf(stderr, "opossum:   [%s] %s\n", c.Code, c.Summary)
 	}
-	fmt.Fprintln(stderr, "opossum: no overlay was written (it would only hold comments).")
+	if !reportNoteProse(stderr, "opossum: no overlay was written (it would only hold comments), so here is what it would have said:", body) {
+		fmt.Fprintln(stderr, "opossum: no overlay was written (it would only hold comments).")
+	}
+}
+
+// reportNoteProse reads the notes out of the overlay text nobody is getting, and
+// says so first. It reports whether it found anything to read: with nothing
+// recognisable in the body there is nothing to offer, and the caller's summaries
+// are the whole of what the reader gets.
+func reportNoteProse(stderr io.Writer, offer, body string) bool {
+	prose := strings.TrimRight(noteProse(body), "\n")
+	if prose == "" {
+		return false
+	}
+	if offer != "" {
+		fmt.Fprintln(stderr, offer)
+	}
+	fmt.Fprintln(stderr)
+	for _, line := range strings.Split(prose, "\n") {
+		if line == "" {
+			// The gap between two notes is a gap, not two spaces.
+			fmt.Fprintln(stderr)
+			continue
+		}
+		fmt.Fprintf(stderr, "  %s\n", line)
+	}
+	fmt.Fprintln(stderr)
+	return true
+}
+
+// noteProse is the notes' own words, taken out of the overlay text: the header
+// that explains the file's three kinds of entry is about a file nobody is
+// getting. It starts at the first note and returns nothing if there is none,
+// so a body that changes shape goes quiet rather than spilling itself.
+func noteProse(body string) string {
+	const entry = "[opossum note]"
+	var out []string
+	for _, line := range strings.Split(body, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "# ──") {
+			continue
+		}
+		// The comment marks are the overlay's, for prose that has to survive being
+		// pasted into YAML. On screen they are noise. The doubled "$" goes with
+		// them: it is there so compose reads the text as the literal the user
+		// wrote, and nothing here is going through compose.
+		trimmed = strings.TrimPrefix(strings.TrimPrefix(trimmed, "#"), " ")
+		trimmed = strings.ReplaceAll(trimmed, "$$", "$")
+		switch {
+		case !strings.HasPrefix(trimmed, entry):
+			// Anything ahead of the first note is the file talking about itself:
+			// the section's subheading says what the section holds, and there is
+			// no file to have sections in.
+			if len(out) == 0 {
+				continue
+			}
+		case len(out) > 0:
+			// One note ends where the next begins. In the file the "# " column
+			// keeps them apart; on screen that column is gone, so without this the
+			// notes run together into one block.
+			out = append(out, "")
+		}
+		out = append(out, trimmed)
+	}
+	return strings.Join(out, "\n")
 }
 
 // reportEntries prints entries grouped by what opossum is claiming.

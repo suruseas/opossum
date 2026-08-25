@@ -24,6 +24,42 @@ func loadErr(t *testing.T, body string) string {
 	return err.Error()
 }
 
+// The three messages that frame a load failure all begin by naming the file, and
+// each is built from a format with the path and the decoder's own error next to
+// each other. Swapping those two compiles, and the phrases the table below reads
+// are all in the fixed middle — so the version that drops the file name out of
+// its slot and glues it to the end of the YAML error passes. Measured: it passed
+// the whole repository.
+//
+// Not the whole message: the middle is go-yaml's wording, which is not this
+// project's to pin. What is pinned is the file name in the place the sentence
+// promises it.
+func TestErrMsgNamesTheFileFirst(t *testing.T) {
+	for _, tc := range []struct{ name, body, then string }{
+		{
+			name: "a value of the wrong shape",
+			body: "services:\n  app:\n    image: app\nvolumes:\n  data: ${NOPE}\n",
+			then: " parsed, but a value is not the shape that field takes:",
+		},
+		{
+			name: "a real syntax mistake",
+			body: "services:\n  app:\n   image: app\n  bad\n",
+			then: " is not valid YAML: ",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeTemp(t, tc.body)
+			_, err := Load(path)
+			if err == nil {
+				t.Fatal("expected a load error, got nil")
+			}
+			if want := "compose file " + path + tc.then; !strings.HasPrefix(err.Error(), want) {
+				t.Errorf("the message should open with %q, got:\n%s", want, err.Error())
+			}
+		})
+	}
+}
+
 func TestErrMsgInvalidYAML(t *testing.T) {
 	// A malformed compose file (bad indentation) is the most-hit failure — the
 	// message must frame it as invalid YAML and point at the fix, not just dump the
@@ -41,8 +77,13 @@ services:
     image: web
     secrets: [dbpass]
 `)
-	if !strings.Contains(s, "undefined secret") || !strings.Contains(s, "top-level secrets:") {
-		t.Errorf("undefined-secret error should say how to declare it, got: %s", s)
+	// The whole message. It names a service and a secret, both strings, both fed
+	// to `%q` — and phrases from the middle read neither, so swapping the two
+	// leaves this green while the message names the wrong thing.
+	want := `service "web" references undefined secret "dbpass" — declare it under ` +
+		"top-level secrets: with a file:, or remove the reference"
+	if s != want {
+		t.Errorf("undefined-secret error =\n %q\nwant %q", s, want)
 	}
 }
 
@@ -53,8 +94,10 @@ services:
     image: web
     depends_on: [db]
 `)
-	if !strings.Contains(s, "unknown service") || !strings.Contains(s, "depends_on") {
-		t.Errorf("unknown-dependency error should say how to fix it, got: %s", s)
+	want := `service "web" depends on unknown service "db" — define "db" under ` +
+		"services: or remove it from depends_on"
+	if s != want {
+		t.Errorf("unknown-dependency error =\n %q\nwant %q", s, want)
 	}
 }
 

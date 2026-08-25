@@ -1,8 +1,10 @@
 package compose
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -28,9 +30,15 @@ func TestDiscover(t *testing.T) {
 		t.Errorf("Discover precedence = %q, %v; want compose.yaml", got, err)
 	}
 
-	// Nothing found -> an error that names what it looked for.
-	if _, err := Discover(t.TempDir()); err == nil {
-		t.Error("Discover should error when no compose file is present")
+	// Nothing found -> an error that names what it looked for. The comment said
+	// that before the check did: `err == nil` reads neither the directory nor
+	// the list, and both are strings on one format call, so swapping them cost
+	// nothing.
+	empty := t.TempDir()
+	_, err := Discover(empty)
+	want := fmt.Sprintf("no compose file found in %q (looked for %s)", empty, strings.Join(DefaultFileNames, ", "))
+	if err == nil || err.Error() != want {
+		t.Errorf("Discover on an empty directory = %v, want %s", err, want)
 	}
 }
 

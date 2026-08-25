@@ -448,6 +448,48 @@ func (r *Runtime) ImageEnv(ref string) (map[string]string, bool) {
 	return env, true
 }
 
+// ImageWorkingDir returns the directory an image starts its process in, and
+// whether the image could be asked at all.
+//
+// A container that reports `chown: .:` has named a directory — its own working
+// one — and nothing else in the log says where that is. The image does: this is
+// the same question as ImageEnv, asked of a different field, and the same rule
+// applies. An image that declares no working directory answers with "" and ok
+// true, because "told us nothing" is not "was not there".
+//
+// What it declares is where the process starts, which is a fact about the image
+// and not a prediction about what the process does there. Callers should use it
+// to resolve a path the container itself named, not to decide what the container
+// will touch.
+func (r *Runtime) ImageWorkingDir(ref string) (string, bool) {
+	out, _, err := r.captureSplitQuery("image", "inspect", ref)
+	if err != nil {
+		return "", false
+	}
+	var images []struct {
+		Variants []struct {
+			Config struct {
+				Config struct {
+					WorkingDir string `json:"WorkingDir"`
+				} `json:"config"`
+			} `json:"config"`
+		} `json:"variants"`
+	}
+	if err := json.Unmarshal([]byte(out), &images); err != nil {
+		return "", false
+	}
+	// Variants are the same image for different machines; the first one that
+	// declares a working directory answers for all of them, as with ImageEnv.
+	for _, img := range images {
+		for _, v := range img.Variants {
+			if d := strings.TrimSpace(v.Config.Config.WorkingDir); d != "" {
+				return d, true
+			}
+		}
+	}
+	return "", true
+}
+
 // DeleteImage removes an image, best-effort (--force ignores a missing image),
 // for `down --rmi`.
 func (r *Runtime) DeleteImage(ref string) {

@@ -1818,3 +1818,76 @@ func TestChownRecordSurvivesAnInterruptedWrite(t *testing.T) {
 		t.Errorf("a write that could not complete must leave the record as it was, got %+v", got)
 	}
 }
+
+// The other three notes' bodies, word for word — the same treatment the PGDATA
+// note has had since the eleven defects that made it necessary. Until this test
+// there was a note held to the word and a note held to a phrase or two, and the
+// difference did not follow from anything: truncating either of these bodies to
+// its first line left every package in this repository green, and left a reader
+// with "Why: Apple container is not the Docker daemon and exposes no socket, so a"
+// and nothing after it. What the note says is now a decision, not a clause that
+// can go missing.
+//
+// One project, one golden: the whole Notes section is compared, so a note added
+// here without its own line in this file fails, and so does a line added between
+// two of them.
+func TestTheUnfixableNotesAreWordForWordWhatWeMeanToSay(t *testing.T) {
+	body := `services:
+  app:
+    image: alpine:3
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+  sup:
+    image: alpine:3
+    restart: on-failure
+  usb:
+    image: alpine:3
+    volumes:
+      - /dev/ttyUSB0:/dev/ttyUSB0
+`
+	overlay, changes := planWithImage(t, body, "")
+	want := strings.Join([]string{
+		`# ── Notes ───────────────────────────────────────────────────────────────`,
+		`# Nothing to change for these: the compose file can't express a fix.`,
+		`# [opossum note] service "app": mounts the Docker socket, which Apple container does not have`,
+		"# Why: Apple container is not the Docker daemon and exposes no socket, so a",
+		`#   tool that drives Docker through it cannot work here at all. There is no`,
+		`#   compose change that fixes this.`,
+		`# What to expect: drop the service, or run it against a real Docker daemon elsewhere.`,
+		"# [opossum note] service \"sup\": uses `restart: on-failure`, which opossum can only approximate",
+		"# Why: `on-failure` means restart only if the service failed. Apple container",
+		`#   does not report a container's exit code, so a crash and a clean exit look`,
+		`#   the same from outside. opossum treats any exit as a failure, retries a few`,
+		"#   times and then stops — rather than restarting a service that may have",
+		"#   finished on purpose. `always` and `unless-stopped` are honoured exactly.",
+		"# What to expect: if this service is meant to keep running, `restart: always` says so",
+		`#   exactly. If it is meant to finish, another service can wait for it with`,
+		"#   `depends_on: {condition: service_completed_successfully}`, which also",
+		`#   excludes it from supervision.`,
+		`# [opossum note] service "usb": mounts the host path /dev/ttyUSB0, which is a device or session socket`,
+		`# Why: Each container is its own VM, so host devices and session sockets (X11,`,
+		`#   PulseAudio, /dev/dri) are not reachable from inside it. The mount will`,
+		`#   exist but have nothing behind it.`,
+		`# What to expect: expect this service's device-dependent features not to work; there is no`,
+		`#   compose change that grants a VM access to the host's devices.`,
+	}, "\n")
+	if got := noteBlockOf(t, overlay); got != want {
+		t.Errorf("the notes are not what this file says they should be\n got:\n%s\nwant:\n%s", got, want)
+	}
+
+	// The summary lines too: when the notes are all there is, no overlay is
+	// written and these are what stands next to the body on the terminal.
+	wantSummaries := map[string]string{
+		"app": `mounts the Docker socket, which Apple container does not have`,
+		"sup": "uses `restart: on-failure`, which opossum can only approximate",
+		"usb": `mounts the host path /dev/ttyUSB0, which is a device or session socket`,
+	}
+	if len(changes) != len(wantSummaries) {
+		t.Fatalf("three unfixable things, %d planned: %+v", len(changes), changes)
+	}
+	for _, c := range changes {
+		if want := wantSummaries[c.Service]; c.Summary != want {
+			t.Errorf("service %q: the summary is not what this file says it should be\n got: %s\nwant: %s", c.Service, c.Summary, want)
+		}
+	}
+}

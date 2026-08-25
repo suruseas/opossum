@@ -61,12 +61,20 @@ func TestEnsureBindDirsSaysWhenAFileBecameADirectory(t *testing.T) {
 	// The recovery step is a delete, so the path it names has to be the one on the
 	// host — not the container target, and not (as the first version of this had it)
 	// the service name. Asserting that `rmdir` is followed by something is what let
-	// that ship; the path itself is the thing to pin.
-	if want := "rmdir " + filepath.Join(base, "mongodb-init-replica-set.js"); !strings.Contains(s, want) {
-		t.Errorf("the warning should say %q, got:\n%s", want, s)
-	}
-	if !strings.Contains(s, "opossum up") {
-		t.Errorf("the warning should say how to carry on, got:\n%s", s)
+	// that ship; and asserting that `rmdir <path>` appears is satisfied by
+	// `rmdir <path>/..`, which deletes the directory above. The line is pinned
+	// whole, built from the path this test made.
+	src := filepath.Join(base, "mongodb-init-replica-set.js")
+	want := "warning: [OPSM-107] service \"mongo\" mounts " + src +
+		" at /docker-entrypoint-initdb.d/mongodb-init-replica-set.js, which names a file — but " +
+		"nothing was there, and a bind mount needs its source to exist, so opossum created a " +
+		"directory (docker compose does the same). If that path is meant to be a file, the " +
+		"service will find a directory where it expects one and carry on without it — an init " +
+		"script won't run, a config won't be read — so remove the empty directory (`rmdir " +
+		src + "`), put the real file there, and run `opossum up` again. If it is meant to be a " +
+		"directory (`conf.d`, `.ssh`), there is nothing to do."
+	if got, n := lineStarting(s, "warning:"); n != 1 || got != want {
+		t.Errorf("the warning is not what it should be (%d lines start with `warning:`).\n got: %q\nwant: %q", n, got, want)
 	}
 	// The name is the only evidence, so a directory legitimately called `conf.d` or
 	// `.ssh` reaches here too. The instruction has to stay inside that condition and
