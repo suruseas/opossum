@@ -203,6 +203,11 @@ func TestNoUncodedWarnings(t *testing.T) {
 // error must all TEACH why the runtime needs starting (not just name the command),
 // so an agent that reads "doesn't start on demand" won't loop. Guards the #271
 // requirement that the reason text ships in every runtime-not-running message.
+//
+// Since those three messages are pinned whole below, no change to the code alone
+// can fail this without failing that. What is left to it is the other direction:
+// someone updating the golden to match a message they just edited. This is what
+// says the reason may not leave in the course of that.
 func TestRuntimeMessagesExplainWhy(t *testing.T) {
 	const why = "doesn't start on demand"
 	cases := map[string]string{
@@ -216,6 +221,53 @@ func TestRuntimeMessagesExplainWhy(t *testing.T) {
 		}
 		if !strings.Contains(msg, "OPSM-40") {
 			t.Errorf("%s must carry an OPSM code, got: %s", name, msg)
+		}
+	}
+}
+
+// The three runtime-not-running messages, word for word.
+//
+// TestRuntimeMessagesExplainWhy above asks whether each one carries the reason
+// and a code. Both of those are Contains, and a message with the code and the
+// reason exchanged still carries both — the swap puts the explanation where the
+// code belongs and the reader gets `[opossum drives Apple's...] ... OPSM-405`.
+// A mutation sweep found the exchange in all three, and every one of them left
+// this repository green.
+//
+// These are what a person reads when nothing is working, so what they say is the
+// product. Pinned whole, in one place, so that a sentence added to one sibling
+// and not the others fails here rather than being noticed by a user.
+func TestTheRuntimeMessagesAreWordForWordWhatWeMeanToSay(t *testing.T) {
+	// The clause all three share. Written once here because it is written once
+	// there: a copy that drifted in one message would read as three explanations
+	// where there is one.
+	const why = "opossum drives Apple's `container` CLI, which manages the VM through a background " +
+		"service (apiserver) that doesn't start on demand, so it needs starting after a reboot " +
+		"or a `container system stop`."
+	cases := map[string]struct{ got, want string }{
+		"ErrRuntimeStopped": {ErrRuntimeStopped().Error(),
+			"[OPSM-405] the `container` system isn't running. " + why +
+				" Start it with `container system start` (or run `opossum doctor`); opossum starts " +
+				"it for you on a mutating command unless OPOSSUM_NO_AUTO_START is set"},
+		"NoticeRuntimeAutoStart": {NoticeRuntimeAutoStart(),
+			"[OPSM-406] the container runtime isn't running — starting it now " +
+				"(`container system start`). " + why},
+		"ErrRuntimeAutoStartFailed": {ErrRuntimeAutoStartFailed(fmt.Errorf("boom")).Error(),
+			"[OPSM-405] the `container` system isn't running and opossum couldn't start it " +
+				"(`container system start` failed: boom). " + why +
+				" Try starting it yourself, or run `opossum doctor`"},
+	}
+	// A golden that can be made smaller can be made to pass. Deleting one case
+	// and exchanging that message's own arguments puts the hole straight back,
+	// with every remaining row green. The test thirty lines below refuses to run
+	// on an empty list for the same reason; this is the same rule counted.
+	if len(cases) != 3 {
+		t.Fatalf("%d messages pinned, and there are three: the runtime is stopped, opossum is "+
+			"starting it, opossum could not", len(cases))
+	}
+	for name, c := range cases {
+		if c.got != c.want {
+			t.Errorf("%s is not what this file says it should be\n got: %s\nwant: %s", name, c.got, c.want)
 		}
 	}
 }

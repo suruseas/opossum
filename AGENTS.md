@@ -92,7 +92,7 @@ is **0 on success, non-zero on any error** (see Exit codes).
 | `watch` | sync host file changes into containers per `develop.watch`; runs until Ctrl-C (start with `up` first) |
 | `images` | each service's image, whether opossum builds it, whether it's present |
 | `config [--services]` | validate and print the resolved compose (interpolation + env_file applied), listing ignored fields |
-| `doctor` | diagnose the environment (runtime, DNS domain, outbound network, builder memory, reclaimable storage, stack-memory estimate); non-zero exit if any check fails |
+| `doctor` | diagnose the environment (runtime, DNS domain, outbound network, builder memory, reclaimable storage, networks nothing is running on, stack-memory estimate); non-zero exit if any check fails |
 | `ws snapshot [name]` / `ws ls` / `ws rollback <name>` / `ws rm <name>…` / `ws prune` | snapshot and roll back a workspace directory (`--path`, default `./work`) via APFS copy-on-write clones: near-instant, ~no extra disk. `rollback` saves the current state first (reversible). `rm` deletes named snapshots; `prune` removes auto-saves (`--keep N`, `--all`). Non-APFS → full-copy fallback (reported). Snapshots live in `.opossum-snapshots/` beside the workspace. Touches no runtime — works without `container` |
 
 ## Compose dialect: supported / ignored / rejected

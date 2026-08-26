@@ -67,3 +67,47 @@ func TestSupervisorStateDirCannotEscape(t *testing.T) {
 		}
 	}
 }
+
+// The one line `up` prints when it leaves a watcher behind, word for word.
+//
+// Nothing read this line at all. A mutation sweep exchanged the three strings it
+// is built from — the code, the services, the log path — and all three exchanges
+// left this repository green, which would have printed `[web, worker] watching
+// OPSM-408 for `restart:“ to everyone who ran `up`.
+//
+// It is the only notice a user gets about a background process they did not ask
+// for by name, so every clause in it is load-bearing: what is running, how to
+// stop it, where to read it, and how to have refused it.
+func TestTheSupervisorNoticeIsWordForWordWhatWeMeanToSay(t *testing.T) {
+	const rest = " for `restart:` — a small supervisor is now running for this project. " +
+		"`opossum down` stops it, `opossum ps` shows it, and it logs to /tmp/x.log. " +
+		"Start with --no-supervisor (or OPOSSUM_NO_SUPERVISOR=1) to skip it."
+	// One service as well as two. A width on the services verb — `%-8s`, which
+	// audit.go uses two files away — pads a short name and leaves a long one
+	// alone, so a list that is always long is a golden that cannot see it.
+	for _, c := range []struct {
+		services []string
+		want     string
+	}{
+		{[]string{"web", "worker"}, "[OPSM-408] watching web, worker" + rest},
+		{[]string{"web"}, "[OPSM-408] watching web" + rest},
+	} {
+		// A project name that cannot appear in the notice by accident: named
+		// "demo", the check below would also fire on a log path like
+		// /tmp/demo.log, and report a notice naming the project when nothing had
+		// changed but the fixture.
+		got := NoticeSupervisorStarted("zzz-never-in-this-line", c.services, "/tmp/x.log")
+		if got != c.want {
+			t.Errorf("the supervisor notice is not what this file says it should be\n got: %s\nwant: %s", got, c.want)
+		}
+		// The project name is taken and not used. Said here rather than left for
+		// the next reader to work out from the format string: callers compute it
+		// (`up` passes o.Project.Name) and the line says "this project" without
+		// naming it. Pinning the text first makes changing that a decision rather
+		// than a slip.
+		if strings.Contains(got, "zzz-never-in-this-line") {
+			t.Errorf("the notice does not name the project today; if that changed, this file "+
+				"has to say so first:\n%s", got)
+		}
+	}
+}

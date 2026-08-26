@@ -62,6 +62,14 @@ func TestOffenseFlagsBuildArtifacts(t *testing.T) {
 		// is fine wherever users would look for it.
 		{"a script users are meant to run", "examples/run-demo.sh", 900, []byte("#!/bin/sh\n"), ""},
 		{"a directory that merely starts the same way", "scripts-for-users/x.sh", 900, []byte("#!/bin/sh\n"), ""},
+		// A driver written to see what a new tool printed, with the shell in the
+		// repository root. It compiled, it was not named like a throwaway, and it
+		// made the module's root a `package main` — which is what `go install
+		// <module>@latest` installs under the product's name.
+		{"a driver left at the top", "sweepgen.go", 700, []byte("package main\n"), "top of the repository"},
+		{"one that is not even main", "notes.go", 300, []byte("package notes\n"), "top of the repository"},
+		{"the same name one level down", "cmd/opossum/main.go", 40_000, []byte("package main\n"), ""},
+		{"the module file, which is not Go source", "go.mod", 400, []byte("module github.com/suruseas/opossum\n"), ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -241,6 +249,11 @@ func TestNoRuleIsStricterAboutCaseThanTheFileSystem(t *testing.T) {
 		{"compose at the top", "compose.yaml", "Compose.yaml"},
 		{"runtime state", ".opossum/mcp/db.json", ".Opossum/mcp/db.json"},
 		{"a throwaway name", "zz_tmp.go", "ZZ_TMP.go"},
+		// This one's reason differs from the rest — the go tool does tell the
+		// spellings apart, and the uppercase one builds nothing — but the
+		// answer is the same, and it is here so that a later change of mind
+		// about it has to be a change to this table.
+		{"a Go file at the top", "sweepgen.go", "SWEEPGEN.GO"},
 	} {
 		t.Run(tc.rule, func(t *testing.T) {
 			lower := repohygiene.Offense(tc.lower, 40, []byte("x"))

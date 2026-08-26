@@ -116,14 +116,26 @@ func TestAuditReportRendering(t *testing.T) {
 	if back.ExitCode != 0 || len(back.Files.Changes) != 2 || !back.Egress.Observed {
 		t.Errorf("round-tripped report lost data: %+v", back)
 	}
-	// Human summary names the changes and the destination.
+	// The human summary, word for word.
+	//
+	// Asking whether each name appears says nothing about where it appears. A
+	// mutation sweep exchanged the service with the command on the first line,
+	// and the kind of a change with its path on every line under "files:", and
+	// both left this repository green — printing "Audit of ` claude -p x`agent"
+	// and "out.txt  added" to someone reading what an agent did to their files.
 	var sb bytes.Buffer
 	r.WriteSummary(&sb)
-	s := sb.String()
-	for _, want := range []string{"exit 0", "out.txt", "src.go", "api.anthropic.com:443", "via proxy"} {
-		if !strings.Contains(s, want) {
-			t.Errorf("summary missing %q, got:\n%s", want, s)
-		}
+	wantSummary := strings.Join([]string{
+		"Audit of `agent` claude -p x — exit 0",
+		"  files:  1 changed, 1 added, 0 deleted under /proj/work",
+		"    added    out.txt",
+		"    changed  src.go",
+		"  egress: 1 destination(s) (via proxy): api.anthropic.com:443",
+		"  resources: unobserved (not captured)",
+		"",
+	}, "\n")
+	if got := sb.String(); got != wantSummary {
+		t.Errorf("the summary is not what this file says it should be\n got:\n%s\nwant:\n%s", got, wantSummary)
 	}
 	// The counts, in their own words, with three different numbers. Three ints of
 	// the same type sit next to each other on one format call, and asking whether
@@ -147,11 +159,53 @@ func TestAuditReportRendering(t *testing.T) {
 	if want := "3 changed, 2 added, 1 deleted under /w"; !strings.Contains(cb.String(), want) {
 		t.Errorf("summary should say %q, got:\n%s", want, cb.String())
 	}
-	// An unobserved dimension says so (never blank).
-	r2 := &AuditReport{Service: "agent", Egress: AuditEgress{Observed: false, Reason: "not routed through a proxy"}}
-	var sb2 bytes.Buffer
-	r2.WriteSummary(&sb2)
-	if !strings.Contains(sb2.String(), "unobserved (not routed through a proxy)") {
-		t.Errorf("summary must mark unobserved egress with its reason, got:\n%s", sb2.String())
+	// The other two ways each line comes out, also whole.
+	//
+	// Three reports cover what WriteSummary can print: something happened,
+	// nothing happened, nothing was watched. Pinning only the first left the
+	// other two saying whatever they liked — an unobserved `files:` line printed
+	// the reason belonging to a different dimension and nothing here noticed,
+	// which is the same defect this test was just extended to catch one line up.
+	for name, c := range map[string]struct {
+		r    *AuditReport
+		want []string
+	}{
+		"nothing was watched": {
+			&AuditReport{
+				Service: "agent", Command: nil, ExitCode: 0,
+				Files:     AuditFiles{Observed: false, Reason: "no workspace bind mount"},
+				Egress:    AuditEgress{Observed: false, Reason: "not routed through a proxy"},
+				Resources: AuditSection{Reason: "not captured"},
+			},
+			[]string{
+				"Audit of `agent` — exit 0",
+				"  files:  unobserved (no workspace bind mount)",
+				"  egress: unobserved (not routed through a proxy)",
+				"  resources: unobserved (not captured)",
+				"",
+			},
+		},
+		"nothing happened": {
+			&AuditReport{
+				Service: "agent", Command: []string{"sh"}, ExitCode: 1,
+				Files:     AuditFiles{Observed: true, Workspace: "/w"},
+				Egress:    AuditEgress{Observed: true, Via: "proxy"},
+				Resources: AuditSection{Reason: "not captured"},
+			},
+			[]string{
+				"Audit of `agent` sh — exit 1",
+				"  files:  no changes under /w",
+				"  egress: no outbound connections (via proxy)",
+				"  resources: unobserved (not captured)",
+				"",
+			},
+		},
+	} {
+		var b bytes.Buffer
+		c.r.WriteSummary(&b)
+		if want := strings.Join(c.want, "\n"); b.String() != want {
+			t.Errorf("%s: the summary is not what this file says it should be\n got:\n%s\nwant:\n%s",
+				name, b.String(), want)
+		}
 	}
 }

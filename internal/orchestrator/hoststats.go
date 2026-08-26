@@ -167,7 +167,7 @@ func (o *Orchestrator) StatsHost(services []string) error {
 			total += b
 			mapped = true
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\n", svc, gm, hm)
+		row(w, svc, gm, hm)
 	}
 	if mapped {
 		fmt.Fprintf(w, "\ttotal\t%s\n", humanBytes(total))

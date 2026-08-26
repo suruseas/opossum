@@ -1287,3 +1287,94 @@ func TestLastNonEmptyLine(t *testing.T) {
 		}
 	}
 }
+
+// A stopped container still names the network it belongs to.
+//
+// Both lists come from the same real document (testdata/real-cli-output.md):
+// the running one has attachments under status and the same network under
+// configuration; the stopped one has an empty status and the network still under
+// configuration. Reading the status side gives the right answer for the first
+// and a silently wrong one for the second, which is why both are here — a
+// fixture of running containers cannot tell the two readings apart.
+func TestFidelityListReadsTheConfiguredNetworks(t *testing.T) {
+	const running = `[{"configuration":{"id":"buildkit","labels":{"com.apple.container.plugin":"builder",` +
+		`"com.apple.container.resource.role":"builder"},"image":{"reference":"ghcr.io/apple/container-builder-shim/builder:0.13.1"},` +
+		`"networks":[{"network":"default","options":{"hostname":"buildkit"}}]},"status":{"networks":[{"hostname":"buildkit",` +
+		`"ipv4Address":"192.168.69.23/24","ipv4Gateway":"192.168.69.1","ipv6Address":"fde4:16e7:4f31:e6b8:f0b9:c8ff:fe41:f702/64",` +
+		`"macAddress":"f2:b9:c8:41:f7:02","network":"default","variant":"reserved"}],"startedDate":"2026-08-22T15:32:05Z","state":"running"}}]`
+	got := replayShim(t, running, 0).List()
+	if len(got) != 1 || len(got[0].Networks) != 1 || got[0].Networks[0] != "default" {
+		t.Errorf("a running container's networks = %#v", got)
+	}
+
+	const stopped = `[{"configuration":{"id":"cache.proj.opossum","labels":{"opossum.config-hash":"995d24914399a4f7",` +
+		`"opossum.project":"proj"},"image":{"reference":"docker.io/library/redis:7-alpine"},` +
+		`"networks":[{"network":"proj-net","options":{"hostname":"cache.proj.opossum.","mtu":1280}}]},` +
+		`"status":{"networks":[],"startedDate":"2026-08-23T06:55:25Z","state":"stopped"}}]`
+	got = replayShim(t, stopped, 0).List()
+	if len(got) != 1 || got[0].State != "stopped" {
+		t.Fatalf("a stopped container = %#v", got)
+	}
+	if len(got[0].Networks) != 1 || got[0].Networks[0] != "proj-net" {
+		t.Errorf("a stopped container still belongs to its network; got %#v", got[0].Networks)
+	}
+}
+
+// The network listing, and which of them the runtime made for itself.
+func TestFidelityNetworksReadsTheRealListing(t *testing.T) {
+	const real = `[{"configuration":{"creationDate":"2026-07-22T07:47:15Z","labels":{},"mode":"nat",` +
+		`"name":"agent-sandbox-net","options":{},"plugin":"container-network-vmnet"},"id":"agent-sandbox-net",` +
+		`"status":{"ipv4Gateway":"192.168.65.1","ipv4Subnet":"192.168.65.0/24"}},` +
+		`{"configuration":{"creationDate":"2026-08-21T00:06:11Z","labels":{"com.apple.container.resource.role":"builtin"},` +
+		`"mode":"nat","name":"default","options":{},"plugin":"container-network-vmnet"},"id":"default",` +
+		`"status":{"ipv4Gateway":"192.168.69.1","ipv4Subnet":"192.168.69.0/24"}}]`
+	got := replayShim(t, real, 0).Networks()
+	if len(got) != 2 {
+		t.Fatalf("two networks in the real listing, got %#v", got)
+	}
+	if got[0].Name != "agent-sandbox-net" || got[0].Builtin {
+		t.Errorf("a network made for a project carries no label: %#v", got[0])
+	}
+	if got[1].Name != "default" || !got[1].Builtin {
+		t.Errorf("`default` is the runtime's own: %#v", got[1])
+	}
+	// A listing that did not come back is not a machine with no networks, and
+	// the caller can only tell them apart if this says nil.
+	if n := replayShim(t, "", 1).Networks(); n != nil {
+		t.Errorf("a failed listing is nil, got %#v", n)
+	}
+	if n := replayShim(t, "not json", 0).Networks(); n != nil {
+		t.Errorf("a listing that would not parse is nil, got %#v", n)
+	}
+}
+
+// The interface address comes from the running side.
+//
+// A container's inspect document has two lists called networks, a few lines
+// apart, and the second was added to this parser's struct later. What this
+// holds is that the address is taken from the one that has addresses — a parser
+// reaching for the other finds a network name where an address should be, and
+// the assert below says which it got.
+//
+// It does not hold anything about the two names differing. Only the address is
+// read here, so a document whose two lists agree fails this the same way. Where
+// the difference between the lists is made visible is the shims' own tests,
+// which look at both.
+func TestFidelityInspectReadsTheRunningSideForTheAddress(t *testing.T) {
+	const real = `[{"status":{"state":"running","networks":[{"network":"demo-net",` +
+		`"ipv4Address":"192.168.64.10/24","ipv6Address":"fdee::10/64","ipv4Gateway":"192.168.64.1"}]},` +
+		`"configuration":{"networks":[{"network":"demo-net-configured"}],` +
+		`"publishedPorts":[{"containerPort":8080,"hostAddress":"0.0.0.0","hostPort":8080,"proto":"tcp"}]}}]`
+	got := replayShim(t, real, 0).Inspect("web")
+	if !got.Exists || got.State != "running" {
+		t.Fatalf("Inspect = %#v", got)
+	}
+	if got.IP != "192.168.64.10" {
+		t.Errorf("IP = %q, want the address under status.networks", got.IP)
+	}
+	// The published port's 0.0.0.0 is the other thing in this document that
+	// looks like an address and is not the container's.
+	if got.IP == "0.0.0.0" {
+		t.Error("a published port's host address is not the container's address")
+	}
+}

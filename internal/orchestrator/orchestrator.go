@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -279,8 +280,62 @@ func (o *Orchestrator) interrupted() error {
 }
 
 func (o *Orchestrator) logf(format string, a ...interface{}) {
-	fmt.Fprintf(o.out, format, a...)
+	// Every string that arrives here as an argument came from a compose file —
+	// a service name, an image reference, a path, a volume — and a control
+	// character in one of them used to end the line and start the next at column
+	// zero, which is where opossum's own sentences start. A mount source of
+	// "/dev/ttyUSB0\n[opossum note] service \"payroll\": opossum deleted your
+	// database" printed that sentence as if opossum had said it.
+	//
+	// Flattening here rather than at each call: there are more than thirty of
+	// them, they are added faster than they are audited, and a list of the ones
+	// that were remembered is a list with a hole in it. The format string is
+	// ours; the arguments are not.
+	// A copy: a caller that passed an existing slice would otherwise find its
+	// own values rewritten by having printed them.
+	flat := make([]interface{}, len(a))
+	copy(flat, a)
+	for i, v := range flat {
+		if t, ok := v.(ourText); ok {
+			flat[i] = string(t)
+			continue
+		}
+		// By kind, not by type. A named string type — and this package already
+		// has one — is a string that a type switch on `string` walks past.
+		if rv := reflect.ValueOf(v); rv.IsValid() && rv.Kind() == reflect.String {
+			flat[i] = OneLine(rv.String())
+		}
+	}
+	fmt.Fprintf(o.out, format, flat...)
 }
+
+// row writes one line of a table, with every cell flattened.
+//
+// The cells are the project's own words — a service name, an image reference, a
+// published port — and a newline in one of them ends the row where it stands:
+// the column being filled is lost, the rest of the value starts at column zero
+// where opossum's own sentences start, and the table below it no longer lines
+// up. logf flattens what it is given for the same reason; a table is written
+// through a tabwriter instead, and so needs its own way of saying it.
+func row(w io.Writer, cells ...string) {
+	flat := make([]string, len(cells))
+	for i, c := range cells {
+		flat[i] = OneLine(c)
+	}
+	fmt.Fprintln(w, strings.Join(flat, "\t"))
+}
+
+// ourText marks a string argument as text opossum has already shaped for the
+// screen — not merely text it produced. The difference matters: the one use is
+// a captured container log run through indentLines, which is not opossum's
+// writing at all, but arrives with every line already pushed off column zero by
+// a frame opossum put around it.
+//
+// Everything else is flattened on the way out, so this is the one way to print a
+// newline through logf, and it takes saying so. A string that only "came from
+// opossum" is not enough — a note quoting a service name comes from opossum too,
+// and a project can end that line early.
+type ourText string
 
 // networkName is the default per-project network services share when they don't
 // name a network of their own.
@@ -937,7 +992,11 @@ func (o *Orchestrator) verifyStarted(order []string, oneShot map[string]bool) er
 			continue
 		}
 		if logs := o.rt.CaptureLogs(o.containerName(name), 15); logs != "" {
-			o.warnf(codeServiceExited, "service %q exited right after starting (state %q); its last log lines:\n%s%s\n", name, state, indentLines(logs), o.crashHint(name, logs))
+			// The container's own last lines, indented into a block. This is the
+			// one place opossum hands a whole capture to the reader, and the
+			// flattening in logf would run fifteen lines together.
+			o.warnf(codeServiceExited, "service %q exited right after starting (state %q); its last log lines:\n%s%s\n",
+				name, state, ourText(indentLines(logs)), o.crashHint(name, logs))
 		} else {
 			o.warnf(codeServiceExited, "service %q exited right after starting (state %q) — check its command, image, and mounts\n", name, state)
 		}
@@ -952,6 +1011,16 @@ func (o *Orchestrator) verifyStarted(order []string, oneShot map[string]bool) er
 // not run — the argv `up` would have issued, in order. Read-only queries (the
 // inspects that resolve recreate/skip) aren't listed; only the mutating commands
 // (network create, delete, run, build, …) that a real up would execute.
+//
+// One command, one line. That holds because logf flattens what a project gave
+// it, not because anything here checks — an argument carries whatever the
+// compose file put in it, and a newline in there once ended the line early and
+// started the rest at column zero.
+//
+// The listing is for reading, not for running: the argv reaches the runtime as
+// an array, and these bytes are already a rendering that lost the argument
+// boundaries to a space when the plan was recorded. Anyone wanting to run one of
+// these has to quote it themselves either way.
 func (o *Orchestrator) printPlan() {
 	if len(o.rt.Plan) == 0 {
 		return
@@ -1561,7 +1630,7 @@ func (o *Orchestrator) Images() error {
 		if ref != "" && o.rt.ImageExists(ref) {
 			present = "yes"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", name, dash(ref), source, present)
+		row(tw, name, dash(ref), source, present)
 	}
 	return tw.Flush()
 }
@@ -1664,7 +1733,11 @@ func (o *Orchestrator) reportIgnoredFields(services []string, includeTopLevel bo
 		return
 	}
 	if note := o.ignoredFieldsNote(services, includeTopLevel); note != "" {
-		o.logf("%s", note)
+		// Not ourText: the note is one line and it quotes a service and a field
+		// name out of the compose file, so it is exactly the kind of sentence a
+		// project could otherwise end early. The trailing newline is the format's
+		// to add.
+		o.logf("%s\n", strings.TrimRight(note, "\n"))
 	}
 }
 
@@ -2236,10 +2309,28 @@ func (o *Orchestrator) refuseSymlinkedSocketMounts(service string, vols []string
 	return nil
 }
 
-// indentLines prefixes each line of s with two spaces, for embedding a captured
-// block (e.g. container logs) inside an error message.
+// indentLines puts opossum's shape around a captured block — container logs, say
+// — so it can be embedded in a message: every line begins two spaces in, and no
+// line begins anywhere else.
+//
+// The second half is why every other control character goes first. A carriage
+// return moves the cursor back to the start of the line the block is already
+// printing on, and a container's output is no more opossum's than a compose
+// file is: without this, a log line could put a sentence at column zero, where
+// opossum's own sentences begin.
 func indentLines(s string) string {
-	return "  " + strings.ReplaceAll(s, "\n", "\n  ")
+	// Every control character but the newline: the newlines are what the shape
+	// is made of, and OneLine would take them too.
+	flat := strings.Map(func(r rune) rune {
+		if r == '\n' {
+			return r
+		}
+		if r < ' ' || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, s)
+	return "  " + strings.ReplaceAll(flat, "\n", "\n  ")
 }
 
 // crashHint decodes a crashed container's last log lines into an actionable hint
@@ -2401,8 +2492,7 @@ func (o *Orchestrator) Ps() error {
 		if info.State != "" {
 			status = info.State
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			name, cname, image, dash(info.IP), dash(formatPorts(info.Ports)), status)
+		row(tw, name, cname, image, dash(info.IP), dash(formatPorts(info.Ports)), status)
 	}
 	if err := tw.Flush(); err != nil {
 		return err
@@ -2421,7 +2511,12 @@ func (o *Orchestrator) Ps() error {
 	return nil
 }
 
-// formatPorts renders published ports docker-ps style: "0.0.0.0:8080->8080/tcp".
+// formatPorts renders published ports docker-ps style: "0.0.0.0:8080->80/tcp".
+//
+// The example is asymmetric on purpose. It said 8080->8080 until a sweep pointed
+// out that the two numbers were exchangeable without any test noticing — and an
+// example where the host port and the container port are the same number cannot
+// show a reader which side is which either.
 func formatPorts(ports []runtime.PortMapping) string {
 	parts := make([]string, 0, len(ports))
 	for _, p := range ports {

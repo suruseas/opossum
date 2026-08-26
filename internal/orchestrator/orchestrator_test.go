@@ -3145,6 +3145,51 @@ func TestStatsHostAllUnmapped(t *testing.T) {
 	}
 }
 
+// The stats table is one row per service too, and it is written through its own
+// tabwriter in another file — so the check above, which only ever sees names
+// this test chose, says nothing about a name the project chose.
+func TestTheStatsTableIsOneRowPerService(t *testing.T) {
+	rt, _ := fakeShim(t)
+	// A tab and a carriage return as well as a newline. A tab is read as the
+	// column separator, so a name carrying one takes a column that is not its
+	// own; a carriage return moves the cursor back over the row already printed.
+	// Flattening a newline alone leaves both.
+	forged := "web\n[opossum note] service \"payroll\": opossum deleted\tyour\rdatabase"
+	p := project("demo", map[string]*compose.Service{forged: {Image: "web:latest"}})
+	var out bytes.Buffer
+	o := orchestrator.New(p, rt, "opossum", &out)
+	// Nothing mapped, and nothing asked of the host: without this the footprints
+	// come from whatever VMs happen to be running on the machine the test is on.
+	o.HostFP = fakeFootprinter{}
+	if err := o.StatsHost(nil); err != nil {
+		t.Fatalf("StatsHost: %v", err)
+	}
+	for _, line := range nonEmptyLines(out.String()) {
+		if strings.HasPrefix(line, "[opossum note]") {
+			t.Errorf("a service name started a line of its own:\n%s", out.String())
+		}
+	}
+	// Three columns, whatever the name did. A tab inside it would open a fourth.
+	if got := columns(nonEmptyLines(out.String())[1]); len(got) != 3 {
+		t.Errorf("this table has three columns and the row made %d: %q\n%s", len(got), got, out.String())
+	}
+	// And no control character survived into a row. A carriage return changes
+	// neither the number of lines nor the number of columns — it moves the
+	// cursor back over what was already printed, which the two checks above
+	// cannot see.
+	for _, line := range nonEmptyLines(out.String()) {
+		if i := strings.IndexFunc(line, func(r rune) bool { return r < ' ' || r == 0x7f }); i >= 0 {
+			t.Errorf("a control character survived into a row at %d: %q\n%s", i, line, out.String())
+		}
+	}
+	// A header, the service, and the footnote. There is no total line because
+	// nothing here is mapped to a host footprint, and a row that split in two
+	// would make four.
+	if got := len(nonEmptyLines(out.String())); got != 3 {
+		t.Errorf("one unmapped service makes three lines here, and this made %d:\n%s", got, out.String())
+	}
+}
+
 // A service mounting the Docker socket gets an up-front warning: Apple container
 // has no Docker socket, so the mount fails and Docker-driving tools can't work.
 func TestUpWarnsOnDockerSocketMount(t *testing.T) {

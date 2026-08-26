@@ -1292,7 +1292,26 @@ type inspectResult struct {
 				} `json:"volume"`
 			} `json:"type"`
 		} `json:"mounts"`
+		// The networks the container will join. Not the same list as the one
+		// under status: that one is the attachments a running container has, and
+		// is empty while it is stopped, while this one is what it was configured
+		// with and stays. Anything asking "what is on this network" has to read
+		// this one, or every stopped project looks like it is on nothing.
+		Networks []struct {
+			Network string `json:"network"`
+		} `json:"networks"`
 	} `json:"configuration"`
+}
+
+// networkNames returns the networks this container is configured to join.
+func (res inspectResult) networkNames() []string {
+	var out []string
+	for _, n := range res.Configuration.Networks {
+		if n.Network != "" {
+			out = append(out, n.Network)
+		}
+	}
+	return out
 }
 
 // volumeNames returns the named volumes this container mounts (empty for bind
@@ -1311,10 +1330,11 @@ func (res inspectResult) volumeNames() []string {
 
 // ContainerSummary is one entry from `container ls -a`.
 type ContainerSummary struct {
-	Name    string
-	State   string
-	Labels  map[string]string
-	Volumes []string // named volumes this container mounts (for attach-conflict decode)
+	Name     string
+	State    string
+	Labels   map[string]string
+	Volumes  []string // named volumes this container mounts (for attach-conflict decode)
+	Networks []string // the networks it is configured to join, whether or not it is running
 }
 
 // List returns every container (running or not) with its name, state, and labels,
@@ -1331,10 +1351,11 @@ func (r *Runtime) List() []ContainerSummary {
 	summaries := make([]ContainerSummary, 0, len(results))
 	for _, res := range results {
 		summaries = append(summaries, ContainerSummary{
-			Name:    res.Configuration.ID,
-			State:   res.Status.State,
-			Labels:  res.Configuration.Labels,
-			Volumes: res.volumeNames(),
+			Name:     res.Configuration.ID,
+			State:    res.Status.State,
+			Labels:   res.Configuration.Labels,
+			Volumes:  res.volumeNames(),
+			Networks: res.networkNames(),
 		})
 	}
 	return summaries
@@ -1416,4 +1437,47 @@ func trimMask(addr string) string {
 		return addr[:i]
 	}
 	return addr
+}
+
+// networkListResult is the shape of `container network ls --format json`.
+type networkListResult struct {
+	Configuration struct {
+		Name   string            `json:"name"`
+		Labels map[string]string `json:"labels"`
+	} `json:"configuration"`
+}
+
+// NetworkSummary is one entry from `container network ls`.
+type NetworkSummary struct {
+	Name string
+	// Builtin is true for the networks the runtime made for itself rather than
+	// for a project — `default`, which the image builder sits on. The runtime
+	// marks them with a label; nothing created for a project carries it.
+	Builtin bool
+}
+
+// builtinRoleLabel is what the runtime puts on the resources it made for itself.
+const builtinRoleLabel = "com.apple.container.resource.role"
+
+// Networks returns every network the runtime knows about.
+//
+// It returns nil when the listing could not be had, which a caller cannot tell
+// from "there are none" — the same shape List has, and for the same reason: the
+// callers of both are reporting on a machine, and a machine with no networks is
+// not a thing that happens while the runtime is up.
+func (r *Runtime) Networks() []NetworkSummary {
+	out, err := r.capture("network", "ls", "--format", "json")
+	if err != nil {
+		return nil
+	}
+	var results []networkListResult
+	if err := json.Unmarshal([]byte(out), &results); err != nil {
+		return nil
+	}
+	summaries := make([]NetworkSummary, 0, len(results))
+	for _, res := range results {
+		_, builtin := res.Configuration.Labels[builtinRoleLabel]
+		summaries = append(summaries, NetworkSummary{Name: res.Configuration.Name, Builtin: builtin})
+	}
+	return summaries
 }

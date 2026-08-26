@@ -235,10 +235,24 @@ func (d dataDirDecision) explain() []string {
 	}
 }
 
-// oneLine keeps a value from an image or a compose file inside the line it is
+// OneLine keeps a value from an image or a compose file inside the line it is
 // written on: a stray newline in either would carry YAML out of a comment block
-// and cost the whole overlay.
-func oneLine(s string) string {
+// and cost the whole overlay, and on screen it would put the rest of the value
+// at column zero, where opossum's own sentences start.
+//
+// Exported for the command that prints what this package produces, which needs
+// the same rule and must not carry a second copy of it.
+//
+// Every control character becomes a space — the value keeps its length and stays
+// readable, and it can no longer end the line it was written on. That matters
+// wherever opossum's own words and a project's words share a screen: a line
+// break puts the rest of the value at column zero, where opossum's sentences
+// start, and a project can write a sentence in opossum's voice.
+//
+// Not to be confused with the oneLine in internal/mutate, which collapses runs
+// of whitespace for a markdown cell. Same name, different promise: this one
+// changes no character that was already printable.
+func OneLine(s string) string {
 	return strings.Map(func(r rune) rune {
 		if r < ' ' || r == 0x7f {
 			return ' '
@@ -284,7 +298,7 @@ func (o *Orchestrator) postgresDataDirFor(svc *compose.Service) dataDirDecision 
 	// initialised is no longer where it will.
 	// The value ends up in a comment block, so it is kept on its line — the service's
 	// as much as the image's, and this one wins over the image's.
-	if p := strings.TrimRight(oneLine(servicePGDATA(svc)), "/"); p != "" {
+	if p := strings.TrimRight(OneLine(servicePGDATA(svc)), "/"); p != "" {
 		// The image still answers for what its entrypoint does; only the path is the
 		// service's. Asking costs one inspect, remembered per image.
 		return dataDirDecision{path: p, source: pgdataRead, byService: true}
@@ -310,7 +324,7 @@ func (o *Orchestrator) imageDataDir(svc *compose.Service) dataDirDecision {
 	if !ok {
 		return dataDirDecision{path: postgresDataDir, source: pgdataUnreachable}
 	}
-	if p := strings.TrimRight(oneLine(env["PGDATA"]), "/"); p != "" {
+	if p := strings.TrimRight(OneLine(env["PGDATA"]), "/"); p != "" {
 		// The value comes from the image and ends up in a comment block, so it is
 		// kept on its line: a stray newline would carry YAML into the overlay and
 		// cost the whole file.
@@ -607,7 +621,7 @@ func (o *Orchestrator) notePGDATAHalfMissing(name string, svc *compose.Service, 
 		fact = "Whether it lands in this mount therefore cannot be read here either."
 	}
 	return serviceAdaptation{
-		Adaptation: Adaptation{Service: name, Code: string(codeDataDirNotThisMount), Summary: oneLine(what), Kind: "note"},
+		Adaptation: Adaptation{Service: name, Code: string(codeDataDirNotThisMount), Summary: OneLine(what), Kind: "note"},
 		class:      classNote,
 		comment: noteBlock(
 			fmt.Sprintf("%s service %q: %s left as a bind mount.", noteMarker, esc(name), esc(target)),
@@ -639,7 +653,7 @@ func (o *Orchestrator) noteUnfixable(name string, svc *compose.Service) []servic
 	var out []serviceAdaptation
 	note := func(code diagCode, what string, why, next []string) {
 		out = append(out, serviceAdaptation{
-			Adaptation: Adaptation{Service: name, Code: string(code), Summary: oneLine(what)},
+			Adaptation: Adaptation{Service: name, Code: string(code), Summary: OneLine(what)},
 			class:      classNote,
 			comment:    noteBlock(fmt.Sprintf("%s service %q: %s", noteMarker, esc(name), esc(what)), why, next),
 		})
@@ -709,7 +723,7 @@ func isHostDevicePath(src string) bool {
 
 // noteBlock renders a note: what it is, why nothing can be done, and what to
 // expect instead. Notes carry no YAML, so they end at "What to expect".
-// Every line goes through oneLine. The heading is where a raw path or service
+// Every line goes through OneLine. The heading is where a raw path or service
 // name arrives from the compose file, and a newline in one of them would end the
 // comment and start a line of its own: in the file that line is loose YAML; on
 // screen, where the notes are read out without their comment marks, it is a note
@@ -718,13 +732,13 @@ func isHostDevicePath(src string) bool {
 // knowing.
 func noteBlock(what string, why, expect []string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "# %s\n", oneLine(what))
+	fmt.Fprintf(&b, "# %s\n", OneLine(what))
 	section := func(label string, lines []string) {
 		for i, l := range lines {
 			if i == 0 {
-				fmt.Fprintf(&b, "# %s: %s\n", label, oneLine(l))
+				fmt.Fprintf(&b, "# %s: %s\n", label, OneLine(l))
 			} else {
-				fmt.Fprintf(&b, "#   %s\n", oneLine(l))
+				fmt.Fprintf(&b, "#   %s\n", OneLine(l))
 			}
 		}
 	}

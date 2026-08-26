@@ -6,6 +6,19 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-08-26
+
+### Added
+
+- `opossum doctor` now reports the networks nothing is running on. Apple `container` keeps a `container-network-vmnet` process resident for every network that exists, so a project whose `down` never ran goes on costing memory until someone removes it — and across many short sessions those accumulate unseen. The check separates the networks with no containers at all from the ones a stopped container still names, since the second may be a project you mean to start again; it offers to remove only the first kind, and removes nothing on its own. It does not claim to know who a network belongs to: one created by `opossum up`, one declared `external: true`, and one you made by hand look alike from here. The `--format json` report carries it as `leftover-networks`. The report's name column is now as wide as its widest name, so every check's detail still lines up.
+
+### Fixed
+
+- The lines opossum prints while working on a project now stay on the line they started on, whatever the compose file put in a service name, an image reference, a path, or a volume. A value containing a newline used to end its line early and continue at column zero — where opossum's own messages start — so a compose file could print a sentence that read as opossum reporting something it had never done.
+- A failure now stays on the lines opossum gave it. An error message is built from a format opossum wrote and values a project supplied — a service name, a path, the runtime's own output — and a newline in one of those used to end the line and continue at column zero, where the message itself starts, so a compose file could put a sentence there and have it read as opossum reporting something. Messages that are deliberately more than one line keep their continuations; the two that used to begin a line at the margin — the advice under a host-port conflict and the hint after a failed build — now begin two spaces in, along with anything quoted from the runtime.
+- `ps`, `images`, and `stats` now print one row per service, whatever the compose file called them. A service name containing a newline used to split its own row: the column being filled was lost, the rest of the name started at column zero — where opossum's own messages start — and every row below it stopped lining up. A tab did the same quietly, by opening a column of its own. The list of workspace snapshots is printed another way and is not covered yet.
+- The last log lines of a crashed container are now quoted with their control characters replaced by spaces. A carriage return in a container's output moved the cursor back to the start of the line the block was printing on, and an escape sequence could move it further — up into what opossum had just written about the crash — so a log line could appear where opossum's own messages begin and be read as opossum reporting something it had never done. The cost is that a log indented with tabs loses that indentation, and colour codes are shown as the characters they are.
+
 ## [0.23.1] - 2026-08-26
 
 ### Fixed
@@ -972,7 +985,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.23.1...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.24.0...HEAD
+[0.24.0]: https://github.com/suruseas/opossum/compare/v0.23.1...v0.24.0
 [0.23.1]: https://github.com/suruseas/opossum/compare/v0.23.0...v0.23.1
 [0.23.0]: https://github.com/suruseas/opossum/compare/v0.22.1...v0.23.0
 [0.22.1]: https://github.com/suruseas/opossum/compare/v0.22.0...v0.22.1

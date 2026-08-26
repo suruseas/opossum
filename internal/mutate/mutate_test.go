@@ -5,7 +5,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -153,8 +155,12 @@ func newFake(t *testing.T, files map[string]string) *fakeRunner {
 			f.mu.Unlock()
 			current, _ := f.get("x.go")
 			if args[0] == "vet" {
-				// vet writes plain text, as the real one does.
-				return "", "x.go:3:2: undefined: gone", boolErr(f.vetFails[current])
+				// vet writes plain text, as the real one does — and it names the
+				// package it is about on a line of its own before it says
+				// anything else. Without that line the shim's output is what a
+				// bare tail of the capture would also produce, so a run that
+				// stopped dropping the headers would look identical here.
+				return "", "# example.com/p\nvet: ./x.go:3:2: undefined: gone", boolErr(f.vetFails[current])
 			}
 			if f.testDies[current] {
 				// A panic reaches the -json stream as Output events, not as plain
@@ -224,6 +230,12 @@ func TestAMutationThatDoesNotCompileIsNotEvidence(t *testing.T) {
 	}
 	if got[0].Detail == "" {
 		t.Error("the build error should be kept — 'did not compile' with no reason leaves nothing to act on")
+	}
+	// And kept the way the table wants it: the reason, without the line that
+	// only names the package. Taking the tail of the capture would pass every
+	// check above and put "# example.com/p" in front of the reason.
+	if want := "vet: ./x.go:3:2: undefined: gone"; got[0].Detail != want {
+		t.Errorf("Detail = %q, want %q — the sweep should hand the table the reason, not the capture", got[0].Detail, want)
 	}
 }
 
@@ -660,8 +672,9 @@ func TestTheReportMakesASurvivorImpossibleToMiss(t *testing.T) {
 	if !strings.Contains(out, "| SURVIVED |") {
 		t.Errorf("the outcome column must say SURVIVED, not something a reader scans past:\n%s", out)
 	}
-	if !strings.Contains(out, "invisible to the suite") {
-		t.Errorf("a survivor must say so in words, not by an empty cell:\n%s", out)
+	if !strings.Contains(out, "**none — this defect is invisible to the suite**") {
+		t.Errorf("a survivor must say so in words, and in the bold that makes the cell "+
+			"impossible to skim past — the words alone were all this checked:\n%s", out)
 	}
 	if !strings.Contains(out, "not evidence") {
 		t.Errorf("a mutation that did not compile must not read as a result:\n%s", out)
@@ -674,12 +687,34 @@ func TestTheReportMakesASurvivorImpossibleToMiss(t *testing.T) {
 // A name with a pipe in it would end the column early and shift every cell after
 // it — the table is markdown, and it is read by people.
 func TestTheReportSurvivesAPipeInAName(t *testing.T) {
-	out := Report([]Result{{Mutation: Mutation{Name: "a|b"}, Outcome: Survived}})
-	if strings.Contains(out, "| a|b |") {
-		t.Errorf("the pipe should be escaped:\n%s", out)
+	out := Report([]Result{
+		{Mutation: Mutation{Name: "a|b"}, Outcome: Survived},
+		// Every cell this table builds from something an author or a toolchain
+		// wrote: the mutation name, the test names, and the detail carried by a
+		// survivor, by a run that named nobody, and by one that would not build.
+		// The last two are quoted from `go test` and `go vet`, which nobody
+		// chooses the wording of and which arrive with pipes and line breaks in
+		// them.
+		{Mutation: Mutation{Name: "m"}, Outcome: Caught, Killers: []string{"TestA|B", "TestC"}},
+		{Mutation: Mutation{Name: "m"}, Outcome: Survived, Detail: "reach|unknown"},
+		{Mutation: Mutation{Name: "m"}, Outcome: Inconclusive, Detail: "panic|timeout"},
+		{Mutation: Mutation{Name: "m"}, Outcome: Broken, Detail: "vet: a.go:1:1: bad|worse\nvet: b.go:2:2: also"},
+	})
+	// A header, its rule, and one row per result. A detail that broke out of its
+	// row would make more; a row that vanished would make fewer.
+	if want := 2 + 5; len(strings.Split(strings.TrimRight(out, "\n"), "\n")) != want {
+		t.Errorf("%d lines, and this table is a header, a rule and five rows:\n%s",
+			len(strings.Split(strings.TrimRight(out, "\n"), "\n")), out)
 	}
-	if !strings.Contains(out, `a\|b`) {
-		t.Errorf("the name should still be readable:\n%s", out)
+	for _, raw := range []string{"| a|b |", "TestA|B", "reach|unknown", "panic|timeout", "bad|worse"} {
+		if strings.Contains(out, raw) {
+			t.Errorf("the pipe in %q should be escaped:\n%s", raw, out)
+		}
+	}
+	for _, escaped := range []string{`a\|b`, `TestA\|B`, `reach\|unknown`, `panic\|timeout`, `bad\|worse`} {
+		if !strings.Contains(out, escaped) {
+			t.Errorf("%s should still be readable:\n%s", escaped, out)
+		}
 	}
 }
 
@@ -1154,5 +1189,348 @@ func TestTheNoteNamesOnlyWhatWasMeasured(t *testing.T) {
 				t.Errorf("note = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// The tally is the half of the report that a pull request quotes as a sentence,
+// so it is pinned word for word: a number that moved, a category that vanished,
+// or a note that stopped explaining itself all read as prose and all change what
+// the reader believes was measured.
+func TestTheTallyIsWordForWordWhatWeMeanToSay(t *testing.T) {
+	// The two killers are named so that ordering them by how much they caught and
+	// ordering them alphabetically disagree. Named the other way round, a tally
+	// that had stopped counting at all would still print these two rows in this
+	// order and this golden would not notice.
+	// Two orderings are being pinned here, and both need inputs that can tell
+	// their sorted and unsorted forms apart.
+	//
+	// The rows arrive worst-outcome-first so that listing the categories in the
+	// order they were first seen and listing them in the order the outcomes are
+	// declared give different sentences. Written the other way round — caught
+	// first, as a passing sweep tends to come out — the sort is a line this
+	// golden cannot see, which is how the same oversight survived once already in
+	// the column below.
+	//
+	// The killers are named so that ordering them by how much they caught and
+	// ordering them alphabetically disagree, and one of them carries a pipe: a
+	// name that ends its column early shifts every cell after it, and the table
+	// is markdown read by people.
+	got := Tally([]Result{
+		{Mutation: Mutation{Name: "a field is deleted"}, Outcome: Broken},
+		{Mutation: Mutation{Name: "the wait is gone"}, Outcome: Survived},
+		{Mutation: Mutation{Name: "the wire is cut"}, Outcome: Caught, Killers: []string{"TestWire|Cut", "TestAnswer"}},
+		{Mutation: Mutation{Name: "the second look never happens"}, Outcome: Caught, Killers: []string{"TestWire|Cut"}},
+	})
+	want := strings.Join([]string{
+		"",
+		"**4 mutations: 2 caught, 1 SURVIVED, 1 did not compile.**",
+		"",
+		"| test | mutations it caught |",
+		"|---|---|",
+		`| TestWire\|Cut | 2 |`,
+		"| TestAnswer | 1 |",
+		"",
+		"Each row counts the mutations that test failed on; a mutation two tests caught appears in both rows.",
+		"",
+	}, "\n")
+	if got != want {
+		t.Errorf("the tally is not what this file says it should be\n got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// The reason this exists is that a total and a breakdown written separately can
+// disagree. They cannot here, and this is the test that says so: every result
+// contributes to exactly one category, so the categories add to the count of
+// results whatever the results are.
+func TestTheTallysPartsAddUpToItsTotal(t *testing.T) {
+	for name, rs := range map[string][]Result{
+		// One result: the sentence changes shape there, and a shape that stopped
+		// carrying a total would take this check with it.
+		"one":            {{Outcome: Caught, Killers: []string{"T"}}},
+		"nothing caught": {{Outcome: Survived}, {Outcome: Survived}, {Outcome: Broken}},
+		"all four kinds": {
+			{Outcome: Caught, Killers: []string{"T"}}, {Outcome: Survived},
+			{Outcome: Broken}, {Outcome: Inconclusive}, {Outcome: Caught, Killers: []string{"U"}},
+		},
+		// A kind this file made up, twice over: whatever the results are means
+		// results this function has no name for, and those have to add up too.
+		"kinds nobody named": {
+			{Outcome: Caught, Killers: []string{"T"}}, {Outcome: Outcome(91)},
+			{Outcome: Outcome(92)}, {Outcome: Outcome(91)},
+		},
+	} {
+		// Subtests, so that a set that comes back malformed does not take the
+		// remaining sets with it: which inputs were measured is the thing this
+		// test is claiming.
+		t.Run(name, func(t *testing.T) {
+			line := regexp.MustCompile(`\*\*(\d+) mutations?: ([^*]+)\.\*\*`).FindStringSubmatch(Tally(rs))
+			if line == nil {
+				t.Fatalf("no total in the tally for %d results:\n%s", len(rs), Tally(rs))
+			}
+			total, err := strconv.Atoi(line[1])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if total != len(rs) {
+				t.Errorf("the tally counted %d of %d results", total, len(rs))
+			}
+			sum := 0
+			for _, part := range strings.Split(line[2], ", ") {
+				n, err := strconv.Atoi(strings.Fields(part)[0])
+				if err != nil {
+					t.Fatalf("%q does not start with a number", part)
+				}
+				sum += n
+			}
+			if sum != total {
+				t.Errorf("the parts of %q add to %d, not %d — a total and a breakdown that disagree "+
+					"is the accident this function exists to make impossible", line[0], sum, total)
+			}
+		})
+	}
+}
+
+// Which assertion caught a mutation is the thing the author gets wrong when
+// writing it out by hand: thirteen mutations were once described as guarded by
+// one golden when two of them were guarded by a different check in the same test.
+// A mutation two tests caught belongs under both, and saying otherwise would
+// under-report one of them.
+func TestTheTallyCountsAMutationUnderEveryTestThatCaughtIt(t *testing.T) {
+	got := Tally([]Result{
+		{Outcome: Caught, Killers: []string{"TestGolden", "TestSummary"}},
+		{Outcome: Caught, Killers: []string{"TestGolden"}},
+	})
+	if !strings.Contains(got, "| TestGolden | 2 |") {
+		t.Errorf("a test that caught both should say 2:\n%s", got)
+	}
+	if !strings.Contains(got, "| TestSummary | 1 |") {
+		t.Errorf("a test that caught one should say 1:\n%s", got)
+	}
+	if !strings.Contains(got, "appears in both rows") {
+		t.Errorf("the double count has to explain itself, or the column reads as a partition:\n%s", got)
+	}
+}
+
+// A sweep that stopped before it measured anything must not print a sentence
+// with a number in it. "0 mutations" reads like a sweep that ran and found
+// nothing to say.
+func TestTheTallyOfNothingSaysNothing(t *testing.T) {
+	if got := Tally(nil); got != "" {
+		t.Errorf("Tally(nil) = %q, want nothing at all", got)
+	}
+}
+
+// "1 mutations" in a sentence a pull request quotes. The plural is pinned here
+// because the singular reaches the report through a branch nothing in this
+// package was reading: the end-to-end test in cmd caught it, at forty times the
+// cost, and only because a sweep of one happens to be what it runs.
+func TestTheTallyCountsOneMutationInTheSingular(t *testing.T) {
+	if got := Tally([]Result{{Outcome: Survived}}); !strings.Contains(got, "**1 mutation: 1 SURVIVED.**") {
+		t.Errorf("one is not mutations:\n%s", got)
+	}
+	if got := Tally([]Result{{Outcome: Survived}, {Outcome: Survived}}); !strings.Contains(got, "**2 mutations:") {
+		t.Errorf("two are:\n%s", got)
+	}
+}
+
+// The counting is done by walking the results, not by asking after each kind of
+// outcome in turn, and this is the test that says so: a kind this file invents
+// on the spot has to come out in the sentence without Tally being told about it.
+//
+// Written the other way — a list of the four kinds, counted one at a time — the
+// day a fifth is added is the day the total stops matching its parts, quietly,
+// in a sentence whose whole job is that they match.
+func TestTheTallyCountsAKindItWasNeverToldAbout(t *testing.T) {
+	// Not one of the four. String() has no name for it and says so rather than
+	// reading it as the nearest one it does know.
+	const invented = Outcome(97)
+	got := Tally([]Result{
+		{Outcome: Caught, Killers: []string{"TestA"}},
+		{Outcome: invented},
+		{Outcome: invented},
+	})
+	if !strings.Contains(got, "3 mutations: 1 caught, 2 outcome 97.") {
+		t.Errorf("an outcome nobody named should still be counted and named:\n%s", got)
+	}
+	if strings.Contains(got, "inconclusive") {
+		t.Errorf("an unnamed outcome read as one of the four is the quiet way to be wrong:\n%s", got)
+	}
+	// The named one still has its name. Splitting it out of the default is what
+	// made the line above possible, and it left nothing saying the word had
+	// survived the split.
+	if got := Inconclusive.String(); got != "inconclusive" {
+		t.Errorf("Inconclusive.String() = %q, want the word the table has always used", got)
+	}
+}
+
+// The table above names no test against anything that is not caught — it puts
+// "none", or "n/a" and a reason, in that cell — so a killer counted from one of
+// those rows would put a test in this column that no row names. Sweep never
+// builds one; Tally is exported and Result is a plain struct, so nothing but
+// this stops it.
+func TestTheTallyIgnoresKillersNoRowAboveNames(t *testing.T) {
+	got := Tally([]Result{
+		{Outcome: Caught, Killers: []string{"TestReal"}},
+		{Outcome: Survived, Killers: []string{"TestImpossible"}},
+		{Outcome: Broken, Killers: []string{"TestImpossible"}},
+	})
+	if strings.Contains(got, "TestImpossible") {
+		t.Errorf("the table says nothing caught those, and this must not disagree:\n%s", got)
+	}
+	if !strings.Contains(got, "| TestReal | 1 |") {
+		t.Errorf("the caught row still counts:\n%s", got)
+	}
+}
+
+// A sweep where nothing was caught has no column to print, and a header with no
+// rows under it reads like a measurement that came back empty rather than one
+// that had nothing to measure.
+func TestTheTallyPrintsNoColumnWhenNothingWasCaught(t *testing.T) {
+	got := Tally([]Result{{Outcome: Survived}, {Outcome: Broken}})
+	if strings.Contains(got, "| test |") {
+		t.Errorf("no test caught anything, so there is no column:\n%s", got)
+	}
+	if !strings.Contains(got, "2 mutations: 1 SURVIVED, 1 did not compile.") {
+		t.Errorf("the counts are still owed:\n%s", got)
+	}
+}
+
+// The table and the counts under it are one report, and a reader takes a test
+// named in one of them as named by both. They read a single rule about which
+// rows carry killers; written out twice, the two copies drifted apart and the
+// comment describing the table was wrong about the table.
+func TestTheTableAndTheTallyNameTheSameTests(t *testing.T) {
+	rs := []Result{
+		{Mutation: Mutation{Name: "the wire is cut"}, Outcome: Caught, Killers: []string{"TestReal"}},
+		// Killers on rows the table does not credit: Sweep never builds these,
+		// but Result is a plain struct and both of these functions are exported,
+		// so nothing else stops one of them from counting a name the other hides.
+		{Mutation: Mutation{Name: "the wait is gone"}, Outcome: Survived, Killers: []string{"TestGhost"}},
+		{Mutation: Mutation{Name: "something new"}, Outcome: Outcome(97), Killers: []string{"TestGhost"}},
+	}
+	report, tally := Report(rs), Tally(rs)
+	for _, name := range []string{"TestReal", "TestGhost"} {
+		if strings.Contains(report, name) != strings.Contains(tally, name) {
+			t.Errorf("%s is in one half of this report and not the other:\n%s%s", name, report, tally)
+		}
+	}
+	if !strings.Contains(report, "TestReal") {
+		t.Errorf("the row that was caught still names its killer:\n%s", report)
+	}
+	if strings.Contains(report, "TestGhost") {
+		t.Errorf("a row the table does not credit must not name a test anyway:\n%s", report)
+	}
+	if !strings.Contains(report, "an outcome this table has no name for") {
+		t.Errorf("an outcome the table cannot name has to say so, not fall through:\n%s", report)
+	}
+}
+
+// A mutation that would not build says why, in the table.
+//
+// The reason was captured all along and printed only in the running log. A table
+// pasted into a pull request said "it did not compile" and stopped — on the row
+// where a reader most needs the next step, because nothing about the tests was
+// measured there.
+func TestTheReportSaysWhyAMutationWouldNotBuild(t *testing.T) {
+	out := Report([]Result{{
+		Mutation: Mutation{Name: "the type stops matching"},
+		Outcome:  Broken,
+		Detail:   "vet: ./m.go:3:28: cannot use \"forty-two\" (untyped string constant) as int value",
+	}})
+	if !strings.Contains(out, "cannot use") || !strings.Contains(out, "m.go:3:28") {
+		t.Errorf("the row should carry what vet said:\n%s", out)
+	}
+	if !strings.Contains(out, "not evidence") {
+		t.Errorf("and still say that nothing was measured:\n%s", out)
+	}
+	// The two sit in one cell, so something has to join them. Checked on both
+	// sides: a dash where there is a reason, and none where there is not. Only
+	// the second half was checked at first, and a check for what is absent
+	// passes just as well when the thing is absent everywhere.
+	if !strings.Contains(out, "not evidence: no test ran — vet:") {
+		t.Errorf("the reason is joined to the row, not dropped beside it:\n%s", out)
+	}
+	// A capture that came back empty is not a reason. The row should read as one
+	// sentence either way, not as a dangling dash.
+	bare := Report([]Result{{Mutation: Mutation{Name: "x"}, Outcome: Broken}})
+	if strings.Contains(bare, "—") {
+		t.Errorf("nothing to add, nothing added:\n%s", bare)
+	}
+}
+
+// What `go vet` prints when it will not build begins by naming the package it
+// is about — one line, and a second for the test build when the package has
+// tests. Then it names the problem. The package lines are noise in a cell.
+func TestWhyItWouldNotBuildDropsThePackageHeaders(t *testing.T) {
+	const vet = "# example.com/m\n# [example.com/m]\nvet: ./m.go:3:28: undefined: nosuchthing"
+	got := whyItWouldNotBuild(vet)
+	if strings.HasPrefix(got, "#") || strings.Contains(got, "\n#") {
+		t.Errorf("the package headers are not the reason: %q", got)
+	}
+	if !strings.Contains(got, "undefined: nosuchthing") {
+		t.Errorf("the reason is: %q", got)
+	}
+	// A hash inside a line is not a header. The rule is what a header is — a
+	// line that begins with one — and not where the character appears, because
+	// vet quotes the source back and this repository has source with a `#` in
+	// it. Read the other way, every problem line here would be dropped and the
+	// cell would fall back to showing the headers it was written to remove.
+	quoted := whyItWouldNotBuild("# example.com/h\n" +
+		`vet: ./h.go:5:23: cannot use unreleasedHeading (untyped string constant "## [Unreleased]") as int value`)
+	if !strings.Contains(quoted, "Unreleased") {
+		t.Errorf("the problem quotes a heading; that does not make it one: %q", quoted)
+	}
+	if strings.HasPrefix(quoted, "#") {
+		t.Errorf("the header still goes: %q", quoted)
+	}
+	// Several problems reported, and all of them kept: taking the last line
+	// would read as one problem where there are three. This is the shape vet's
+	// own findings arrive in — no header at all, one line each. The first is
+	// the one to look for; the last survives "keep only the last line" too.
+	two := whyItWouldNotBuild("a.go:6:14: Printf format %d has arg s of wrong type string\n" +
+		"a.go:7:14: Printf format %s has arg n of wrong type int\n" +
+		"a.go:8:14: Printf format %q has arg f of wrong type float64")
+	for _, want := range []string{"wrong type string", "wrong type int", "wrong type float64"} {
+		if !strings.Contains(two, want) {
+			t.Errorf("three problems, three lines: %q missing from %q", want, two)
+		}
+	}
+	two = whyItWouldNotBuild("# p\nvet: ./a.go:1:1: first\nvet: ./b.go:2:2: second")
+	for _, want := range []string{"first", "second"} {
+		if !strings.Contains(two, want) {
+			t.Errorf("both problems belong in the cell, %q missing from %q", want, two)
+		}
+	}
+	// Nothing but headers: better the headers than a row that will not say why.
+	if got := whyItWouldNotBuild("# example.com/m\n# [example.com/m]"); got == "" {
+		t.Error("a row that would not build has to say something")
+	}
+}
+
+// More than three problems, and the cell says how many it is not showing.
+//
+// Cutting to the last three is a bound, and a bound that keeps quiet reads as
+// the whole answer — which is the mistake this function exists to avoid one
+// level up, where dropping the package headers was chosen over taking the last
+// line for exactly that reason.
+func TestWhyItWouldNotBuildSaysWhenItCutSomething(t *testing.T) {
+	got := whyItWouldNotBuild("a.go:1:1: first\na.go:2:2: second\na.go:3:3: third\na.go:4:4: fourth\na.go:5:5: fifth")
+	if !strings.Contains(got, "(2 more)") {
+		t.Errorf("five problems and three shown: the cell owes the reader the count, got %q", got)
+	}
+	if !strings.Contains(got, "fifth") || strings.Contains(got, "first") {
+		t.Errorf("the last three are the ones kept, got %q", got)
+	}
+	// Exactly three is not a cut.
+	if got := whyItWouldNotBuild("a:1: x\nb:2: y\nc:3: z"); strings.Contains(got, "more)") {
+		t.Errorf("nothing was cut, so nothing to say about it: %q", got)
+	}
+}
+
+// A blank line in a capture is not a problem it reported.
+func TestWhyItWouldNotBuildDropsBlankLines(t *testing.T) {
+	got := whyItWouldNotBuild("# p\n\nvet: ./a.go:1:1: only this\n\n")
+	if got != "vet: ./a.go:1:1: only this" {
+		t.Errorf("one problem, one line, got %q", got)
 	}
 }

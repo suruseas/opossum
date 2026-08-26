@@ -161,9 +161,14 @@ func (o Outcome) String() string {
 		return "SURVIVED"
 	case Broken:
 		return "did not compile"
-	default:
+	case Inconclusive:
 		return "inconclusive"
 	}
+	// An outcome this switch has never been told about. Reading it as one of the
+	// four would be the quiet kind of wrong this package refuses elsewhere:
+	// "inconclusive" names a run that happened and said nothing, and a value
+	// nobody has named here is not that.
+	return fmt.Sprintf("outcome %d", int(o))
 }
 
 // Result pairs a mutation with what happened.
@@ -172,7 +177,26 @@ type Result struct {
 	Outcome  Outcome
 	Killers  []string // the tests that failed, by name
 	Detail   string   // why, when the outcome is not a plain caught/survived
+
+	// TestOutput is everything the test run wrote, stdout and stderr together,
+	// and empty when no tests ran (a mutation that would not build). The
+	// outcome is the summary; this is the transcript it was read from, kept
+	// because a mutation can be built to say something through the run itself
+	// — a probe prints what it saw to stderr — and the outcome alone would
+	// throw those words away.
+	TestOutput string
 }
+
+// namesItsKillers says whether a row with this outcome carries the tests that
+// failed. Report prints them from this answer and Tally counts them from the
+// same one: a column naming a test that no row above names would be one report
+// disagreeing with itself, which is the accident Tally exists to make
+// impossible.
+//
+// Every other outcome puts something else in that cell — "none", "n/a", a
+// reason — and what they have in common is the only thing worth writing down
+// here: none of them names a test.
+func namesItsKillers(o Outcome) bool { return o == Caught }
 
 // Report renders the results as a markdown table, ready to paste into a pull
 // request. A mutation that survived says so in the table rather than being left
@@ -188,9 +212,15 @@ func Report(rs []Result) string {
 	var b strings.Builder
 	b.WriteString("| mutation | outcome | tests that caught it |\n|---|---|---|\n")
 	for _, r := range rs {
-		killers := strings.Join(r.Killers, ", ")
-		switch r.Outcome {
-		case Survived:
+		// Starting from "no name for it" rather than from the killers: a switch
+		// with no default printed the killers of an outcome it had never been
+		// told about, while Tally left that same name out — the two halves of one
+		// report disagreeing, in the function whose comment says they cannot.
+		killers := "n/a (an outcome this table has no name for)"
+		switch {
+		case namesItsKillers(r.Outcome):
+			killers = cell(strings.Join(r.Killers, ", "))
+		case r.Outcome == Survived:
 			killers = "**none — this defect is invisible to the suite**"
 			if r.Detail != "" {
 				// A survivor with something to add: the reach could not be measured,
@@ -198,15 +228,90 @@ func Report(rs []Result) string {
 				// than an established one. Said here, in the table, because the table
 				// is what gets pasted into a pull request — a note that only ever
 				// appears in the running log is a note nobody reads.
-				killers += " (" + oneLine(r.Detail) + ")"
+				killers += " (" + cell(r.Detail) + ")"
 			}
-		case Broken:
-			killers = "n/a (not evidence: no test ran)"
-		case Inconclusive:
-			killers = "n/a (the run named no tests: " + oneLine(r.Detail) + ")"
+		case r.Outcome == Broken:
+			// Why it would not build, in the table. The reason was captured all
+			// along and printed only in the running log, so a table pasted into
+			// a pull request said "it did not compile" and stopped — and this is
+			// the row where a reader most needs the next step, because nothing
+			// about the tests was measured.
+			killers = "n/a (not evidence: no test ran"
+			if r.Detail != "" {
+				killers += " — " + cell(r.Detail)
+			}
+			killers += ")"
+		case r.Outcome == Inconclusive:
+			killers = "n/a (the run named no tests: " + cell(r.Detail) + ")"
 		}
 		b.WriteString(fmt.Sprintf("| %s | %s | %s |\n", cell(r.Mutation.Name), r.Outcome, killers))
 	}
+	return b.String()
+}
+
+// Tally counts what the table above already contains, so that the number a pull
+// request quotes and the rows it was read from cannot disagree.
+//
+// They have disagreed. A body once carried a total of twenty-six beside a
+// breakdown that added to twenty-five, and neither number was wrong on its own —
+// nobody had added the second one up. Both halves were typed by hand beside a
+// table that already held the rows they were counting.
+//
+// The outcomes are counted by iterating the results rather than by asking after
+// each kind in turn: a kind added later shows up here without this function
+// being told about it, and the parts add to the total because every result
+// contributes to exactly one of them.
+func Tally(rs []Result) string {
+	if len(rs) == 0 {
+		return ""
+	}
+	byOutcome := map[Outcome]int{}
+	order := []Outcome{}
+	perTest := map[string]int{}
+	for _, r := range rs {
+		if _, seen := byOutcome[r.Outcome]; !seen {
+			order = append(order, r.Outcome)
+		}
+		byOutcome[r.Outcome]++
+		// The same answer the table used, not a second copy of the rule. Written
+		// out twice, one of them was wrong: this said the table printed "none"
+		// for every other outcome, and the table had no default at all.
+		if namesItsKillers(r.Outcome) {
+			for _, k := range r.Killers {
+				perTest[k]++
+			}
+		}
+	}
+	sort.Slice(order, func(i, j int) bool { return order[i] < order[j] })
+	parts := make([]string, 0, len(order))
+	for _, o := range order {
+		parts = append(parts, fmt.Sprintf("%d %s", byOutcome[o], o))
+	}
+	var b strings.Builder
+	noun := "mutations"
+	if len(rs) == 1 {
+		noun = "mutation"
+	}
+	fmt.Fprintf(&b, "\n**%d %s: %s.**\n", len(rs), noun, strings.Join(parts, ", "))
+	if len(perTest) == 0 {
+		return b.String()
+	}
+	names := make([]string, 0, len(perTest))
+	for n := range perTest {
+		names = append(names, n)
+	}
+	sort.Slice(names, func(i, j int) bool {
+		if perTest[names[i]] != perTest[names[j]] {
+			return perTest[names[i]] > perTest[names[j]]
+		}
+		return names[i] < names[j]
+	})
+	b.WriteString("\n| test | mutations it caught |\n|---|---|\n")
+	for _, n := range names {
+		fmt.Fprintf(&b, "| %s | %d |\n", cell(n), perTest[n])
+	}
+	b.WriteString("\nEach row counts the mutations that test failed on; a mutation two tests " +
+		"caught appears in both rows.\n")
 	return b.String()
 }
 

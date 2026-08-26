@@ -443,14 +443,59 @@ volumes: { shared: }
 named volume の attach は排他なので、2本目が
 `Error Domain=VZErrorDomain Code=2 "The storage device attachment is invalid."` で落ちる。
 
-## `container ls -a --format json` (初出 2026-07-15)
+## `container ls -a --format json` (初出 2026-07-15、2026-08-26 に採り直し)
 
-Array of objects; opossum's `List` reads only `configuration.id` (the container
-name), `status.state`, and `configuration.labels` — the rest is ignored.
+Array of objects; opossum's `List` reads `configuration.id` (the container
+name), `status.state`, `configuration.labels`, the named volumes under
+`configuration.mounts`, and `configuration.networks` — the rest is ignored.
+
+**`configuration.networks` and `status.networks` are not the same list.** The
+one under `status` is the attachments a *running* container has: a stopped
+container's is empty. The one under `configuration` is what it was set up with
+and stays. Anything asking "what is sitting on this network" has to read the
+configuration side, or every stopped project looks like it is on nothing.
+
+Both below are from one `container ls -a --format json` on 2026-08-26, split
+into one object each and cut down (nothing was written by hand). Kept:
+`configuration.id`, `configuration.labels`, `configuration.networks`,
+`image.reference`, and the whole of `status` — the last because the difference
+between a running entry and a stopped one is what its `networks` holds. Cut:
+`initProcess`, `resources`, `platform`, `creationDate`, `capAdd`, `dns` and
+their like, and also `configuration.mounts`, which `List` does read but which
+has a section of its own further down. A running one:
 
 ```json
-[{"configuration":{"id":"probe.hgtest-sst9.opossum","labels":{},"image":{"reference":"docker.io/library/alpine:3.20"},"dns":{"domain":"opossum","searchDomains":["hgtest-sst9.opossum"]}},"status":{"state":"running"}}]
+[{"configuration":{"id":"buildkit","labels":{"com.apple.container.plugin":"builder","com.apple.container.resource.role":"builder"},"image":{"reference":"ghcr.io/apple/container-builder-shim/builder:0.13.1"},"networks":[{"network":"default","options":{"hostname":"buildkit"}}]},"status":{"networks":[{"hostname":"buildkit","ipv4Address":"192.168.69.23/24","ipv4Gateway":"192.168.69.1","ipv6Address":"fde4:16e7:4f31:e6b8:f0b9:c8ff:fe41:f702/64","macAddress":"f2:b9:c8:41:f7:02","network":"default","variant":"reserved"}],"startedDate":"2026-08-22T15:32:05Z","state":"running"}}]
 ```
+
+And a stopped one from the same listing — an empty `status.networks` beside a
+`configuration.networks` that still names the network:
+
+```json
+[{"configuration":{"id":"cache.proj.opossum","labels":{"opossum.config-hash":"995d24914399a4f7","opossum.project":"proj"},"image":{"reference":"docker.io/library/redis:7-alpine"},"networks":[{"network":"proj-net","options":{"hostname":"cache.proj.opossum.","mtu":1280}}]},"status":{"networks":[],"startedDate":"2026-08-23T06:55:25Z","state":"stopped"}}]
+```
+
+## `container network ls --format json` (初出 2026-08-26)
+
+Array of objects; opossum's `Networks` reads `configuration.name` and
+`configuration.labels`.
+
+Two of the five this machine had on 2026-08-26, picked for the difference
+between them; the other three look like the first. Every field of the two is
+here — unlike the container listing above, these objects are small.
+
+The runtime marks what it made for itself with
+`com.apple.container.resource.role: builtin` — `default`, the network the image
+builder sits on. Nothing created for a project carries a label at all, so an
+empty `labels` is the ordinary case rather than a missing field.
+
+```json
+[{"configuration":{"creationDate":"2026-07-22T07:47:15Z","labels":{},"mode":"nat","name":"agent-sandbox-net","options":{},"plugin":"container-network-vmnet"},"id":"agent-sandbox-net","status":{"ipv4Gateway":"192.168.65.1","ipv4Subnet":"192.168.65.0/24"}},{"configuration":{"creationDate":"2026-08-21T00:06:11Z","labels":{"com.apple.container.resource.role":"builtin"},"mode":"nat","name":"default","options":{},"plugin":"container-network-vmnet"},"id":"default","status":{"ipv4Gateway":"192.168.69.1","ipv4Subnet":"192.168.69.0/24"}}]
+```
+
+The `plugin` field names the process the runtime runs for the network:
+`container-network-vmnet`, one per network, resident for as long as the network
+exists.
 
 ## `container volume ls` (初出 2026-07-15)
 

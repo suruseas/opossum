@@ -322,6 +322,25 @@ func TestVerifyStartedFlagsCrash(t *testing.T) {
 	}
 }
 
+// The capture is a block, and it has to arrive as one.
+//
+// This is the only place opossum hands a whole capture to the reader, and the
+// flattening that stops a project from forging a line would run fifteen of them
+// together into something nobody can read. The test above uses a one-line log,
+// so it went on passing while that happened.
+func TestVerifyStartedKeepsTheCrashLogOnItsOwnLines(t *testing.T) {
+	var out bytes.Buffer
+	o := New(webProject(), inspectShim(t, stoppedInspect, "first line\nsecond line\nthird line"), "", &out)
+	if err := o.verifyStarted([]string{"web"}, map[string]bool{}); err == nil {
+		t.Fatal("a crashed service should fail the up")
+	}
+	for _, want := range []string{"\n  first line\n", "\n  second line\n", "\n  third line\n"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("the captured log should keep %q on a line of its own, got:\n%s", strings.TrimSpace(want), out.String())
+		}
+	}
+}
+
 func TestVerifyStartedSkipsOneShot(t *testing.T) {
 	// A completed-target (one-shot) is *supposed* to exit — never flag it.
 	o := New(webProject(), inspectShim(t, stoppedInspect, "done"), "", &bytes.Buffer{})
@@ -387,5 +406,33 @@ func TestUpRollsBackOnBringUpFailure(t *testing.T) {
 	}
 	if !strings.Contains(log, "stop ") {
 		t.Errorf("a bring-up failure must roll back (expected a `stop`), got invocations:\n%s", log)
+	}
+}
+
+// The capture is the container's, not opossum's. The shape indentLines gives the
+// block is what lets it be marked ourText and skip the flattening in logf, so
+// the shaping has to be the whole of what it promises.
+//
+// One of each kind that moves the cursor, because the scan below is general and
+// the log is not: a character this fixture does not carry is a character nothing
+// checks. A carriage return goes back to the start of the line the block is
+// printing on; an escape sequence goes further — ESC[2A is two lines up, into
+// what opossum wrote about the crash. The second is the stronger of the two and
+// was the one left out.
+func TestVerifyStartedTakesTheControlCharactersOutOfTheCrashLog(t *testing.T) {
+	var out bytes.Buffer
+	logs := "boot ok\r[opossum note] service \"payroll\": deleted\tyour database" +
+		"\x1b[2A[opossum note] and this one climbs\x7f\x00\v\b"
+	o := New(webProject(), inspectShim(t, stoppedInspect, logs), "", &out)
+	if err := o.verifyStarted([]string{"web"}, map[string]bool{}); err == nil {
+		t.Fatal("a crashed service should fail the up")
+	}
+	for i, line := range strings.Split(strings.TrimRight(out.String(), "\n"), "\n") {
+		if j := strings.IndexFunc(line, func(r rune) bool { return r != '\n' && (r < ' ' || r == 0x7f) }); j >= 0 {
+			t.Errorf("a control character survived into line %d at %d: %q\n%s", i, j, line, out.String())
+		}
+	}
+	if !strings.Contains(out.String(), "boot ok [opossum note]") {
+		t.Errorf("the log should still read as one line with a space where the return was:\n%s", out.String())
 	}
 }

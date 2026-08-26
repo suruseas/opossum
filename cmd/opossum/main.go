@@ -345,7 +345,7 @@ func doctorCmd() *cobra.Command {
 	var format string
 	cmd := &cobra.Command{
 		Use:   "doctor",
-		Short: "Diagnose the environment for common problems (runtime, DNS, network, builder, memory)",
+		Short: "Diagnose the environment for common problems (runtime, DNS, network, builder, storage, leftover networks, memory)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			rt := runtime.New()
 			rt.Verbose = verbose
@@ -406,11 +406,65 @@ func killCmd() *cobra.Command {
 	return cmd
 }
 
-func main() {
-	if err := newRootCmd().Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, "opossum: "+err.Error())
-		os.Exit(1)
+func main() { os.Exit(runCLI(os.Args[1:], os.Stdout, os.Stderr)) }
+
+// runCLI is main with its writers and its exit code handed to it, so that what
+// main does with a failure can be run by a test. Without the seam the only
+// thing covering this line is that someone read it.
+func runCLI(args []string, out, errOut io.Writer) int {
+	root := newRootCmd()
+	root.SetOut(out)
+	root.SetErr(errOut)
+	root.SetArgs(args)
+	if err := root.Execute(); err != nil {
+		fmt.Fprintln(errOut, "opossum: "+quoted(err.Error()))
+		return 1
 	}
+	return 0
+}
+
+// quoted keeps a failure on the lines opossum gave it.
+//
+// An error message is built from a format opossum wrote and values a project
+// supplied — a service name, an image reference, a path, the runtime's own
+// output. A newline in one of those values used to end the line and start the
+// rest at column zero, which is where the message itself starts: a compose file
+// could put a sentence there and have it read as opossum reporting something.
+//
+// What is kept is not "one line" — twenty-six of these messages are deliberately
+// more than one, and they carry a second line of advice. What is kept is that
+// only the first line begins at the margin. Eighteen of the twenty-six already
+// indent every continuation, so for them this changes nothing; five print a
+// value on the next line and now show it indented, which is what quoting it
+// looks like. Three end a line at the margin themselves, and one of those three
+// is opossum's — the advice under a host-port conflict, which moves in by two.
+//
+// Two of the messages opossum writes for itself move, not one: the port advice
+// above, and the build hint, which reaches the format as a value and so counts
+// among the five. Both read better indented; the point of saying so is that
+// "the runtime's own output" does not describe all five. Every other control character
+// becomes a space, because a carriage return moves the cursor back over the
+// line already written and changes neither the number of lines nor what any of
+// them contain.
+//
+// Counted from the syntax, not by searching the text: a grep for the escape
+// misses the messages that put it on a Go continuation line, which is five of
+// the twenty-six and two of the three.
+//
+// Done here rather than at the two hundred places that build an error: a list of
+// the ones that were remembered is a list with a hole in it.
+func quoted(msg string) string {
+	var b strings.Builder
+	for i, line := range strings.Split(msg, "\n") {
+		if i > 0 {
+			b.WriteString("\n")
+			if !strings.HasPrefix(line, "  ") {
+				b.WriteString("  ")
+			}
+		}
+		b.WriteString(orchestrator.OneLine(line))
+	}
+	return b.String()
 }
 
 func upCmd() *cobra.Command {

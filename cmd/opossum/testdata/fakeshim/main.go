@@ -6,6 +6,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -113,6 +114,26 @@ func main() {
 			fmt.Println("started")
 		}
 	case "network":
+		// `network ls --format json` is how doctor finds the networks nothing is
+		// running on. $NETWORK_LS is the JSON document to answer with; empty
+		// means the machine has only the runtime's own `default`, which is the
+		// shape of a machine nobody has left anything on.
+		if arg(1) == "ls" {
+			// Without `--format json` the real CLI prints a table, and a caller
+			// that forgets the flag gets something no JSON parser will read.
+			// Printing JSON either way would make forgetting it invisible here
+			// and a silent nothing on a real machine.
+			if !hasFlag("--format", "json") {
+				fmt.Println("NETWORK  SUBNET")
+				return
+			}
+			if doc := os.Getenv("NETWORK_LS"); doc != "" {
+				fmt.Println(doc)
+			} else {
+				fmt.Println(`[{"configuration":{"name":"default","labels":{"com.apple.container.resource.role":"builtin"}}}]`)
+			}
+			return
+		}
 		if arg(1) == "create" {
 			fmt.Println(arg(2))
 		}
@@ -134,6 +155,25 @@ func main() {
 				os.Exit(1)
 			}
 		}
+	case "ls":
+		// `ls -a --format json` is the container listing. $CONTAINER_LS is the
+		// JSON document to answer with; empty means no containers. The `-a` is
+		// what makes stopped ones appear, so a caller that drops it gets a
+		// listing with only the running ones — the same wrong answer as reading
+		// the running attachments, and the reason this shim honours the flag
+		// instead of ignoring it.
+		if !hasFlag("--format", "json") {
+			fmt.Println("ID  IMAGE  OS  ARCH  STATE")
+			return
+		}
+		doc := os.Getenv("CONTAINER_LS")
+		if doc == "" {
+			doc = "[]"
+		}
+		if !hasArg("-a") {
+			doc = onlyRunning(doc)
+		}
+		fmt.Println(doc)
 	case "volume":
 		// `volume ls` is a table whose first column is the name; opossum reads it to
 		// decide whether a volume exists. $VOLUME_LS is that table.
@@ -199,7 +239,7 @@ func main() {
 		if state == "" {
 			state = "running"
 		}
-		fmt.Printf(`[{"status":{"state":"%s","networks":[{"ipv4Address":"192.168.66.9/24"}]},"configuration":{"labels":{%s},"publishedPorts":[{"containerPort":80,"hostAddress":"0.0.0.0","hostPort":8080,"proto":"tcp"}]}}]`+"\n", state, labels)
+		fmt.Printf(`[{"status":{"state":"%s","networks":[{"ipv4Address":"192.168.66.9/24"}]},"configuration":{"labels":{%s},"networks":[{"network":"demo-net-configured"}],"publishedPorts":[{"containerPort":80,"hostAddress":"0.0.0.0","hostPort":8080,"proto":"tcp"}]}}]`+"\n", state, labels)
 	case "stats":
 		// `stats --no-stream --format json <names…>` returns a guest-view JSON array.
 		jsonForm := false
@@ -243,4 +283,46 @@ func main() {
 			}
 		}
 	}
+}
+
+// onlyRunning drops the stopped entries from a container listing, which is what
+// the real `container ls` does without `-a`.
+func onlyRunning(doc string) string {
+	var entries []map[string]any
+	if err := json.Unmarshal([]byte(doc), &entries); err != nil {
+		return doc
+	}
+	kept := []map[string]any{}
+	for _, e := range entries {
+		st, _ := e["status"].(map[string]any)
+		if st != nil && st["state"] == "running" {
+			kept = append(kept, e)
+		}
+	}
+	b, err := json.Marshal(kept)
+	if err != nil {
+		return doc
+	}
+	return string(b)
+}
+
+// hasArg reports whether the invocation carried this word.
+func hasArg(want string) bool {
+	for _, a := range os.Args[1:] {
+		if a == want {
+			return true
+		}
+	}
+	return false
+}
+
+// hasFlag reports whether the invocation carried `name value`, which is how the
+// real CLI takes `--format json`.
+func hasFlag(name, value string) bool {
+	for i, a := range os.Args[1:] {
+		if a == name && i+2 < len(os.Args) && os.Args[i+2] == value {
+			return true
+		}
+	}
+	return false
 }

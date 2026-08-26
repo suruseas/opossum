@@ -72,18 +72,75 @@ func TestResolveMCPToolForms(t *testing.T) {
 	}
 }
 
+// What a bad entry says, word for word.
+//
+// Asking only whether an error came back says nothing about which of the two
+// names it put where. A mutation sweep exchanged the entry with the service name
+// in both of these messages and left this repository green, and the message is
+// the whole of what the user gets: `opossum up` stops, and this line is how they
+// find out which tool reference is wrong.
+//
+// The entries with a port or a path on them are why this can see the exchange at
+// all. In a bare "nope" the entry and the service name are the same string, and
+// swapping one for the other prints the same message — a fixture that can only
+// be written one way is a fixture that reads every way as correct.
 func TestResolveMCPToolErrors(t *testing.T) {
 	o := newMCPOrch(mcpProject())
-	for _, bad := range []string{
-		"nope",          // unknown service
-		"multi",         // ambiguous port (2 published)
-		"noport",        // no published port
-		"=http://x/mcp", // empty name
-		"name=",         // empty url
-	} {
-		if _, _, err := o.resolveMCPTool(bad); err == nil {
-			t.Errorf("entry %q should be an error", bad)
+	cases := map[string]string{
+		"nope":          `MCP tool "nope" refers to unknown service "nope"`,
+		"nope:8080":     `MCP tool "nope:8080" refers to unknown service "nope"`,
+		"nope/mcp":      `MCP tool "nope/mcp" refers to unknown service "nope"`,
+		"multi":         `MCP tool "multi": service publishes 2 ports, so the port is ambiguous — write multi:PORT to be explicit`,
+		"multi/api":     `MCP tool "multi/api": service publishes 2 ports, so the port is ambiguous — write multi:PORT to be explicit`,
+		"noport":        `MCP tool "noport": service publishes 0 ports, so the port is ambiguous — write noport:PORT to be explicit`,
+		"=http://x/mcp": `invalid MCP tool "=http://x/mcp": expected name=url`,
+		"name=":         `invalid MCP tool "name=": expected name=url`,
+		":8080":         `invalid MCP tool ":8080": name is empty`,
+	}
+	// A table that can be made smaller can be made to pass: drop the rows that
+	// carry a port or a path and the exchange this exists to catch goes back to
+	// printing the same message. Counting the rows is not enough to say that —
+	// nine entries with no port among them would pass a count and see nothing —
+	// so what is counted is the property those rows have.
+	if len(cases) != 9 {
+		t.Fatalf("%d entries pinned, and there are nine", len(cases))
+	}
+	sep := 0
+	for bad := range cases {
+		if i := strings.IndexAny(bad, ":/"); i > 0 {
+			sep++
 		}
+	}
+	if sep < 3 {
+		t.Fatalf("%d entries name a service and then say more about it, and it takes those for "+
+			"the entry and the service name to be different strings at all", sep)
+	}
+	for bad, want := range cases {
+		_, _, err := o.resolveMCPTool(bad)
+		if err == nil {
+			t.Errorf("entry %q should be an error", bad)
+			continue
+		}
+		if err.Error() != want {
+			t.Errorf("entry %q is not what this file says it should be\n got: %s\nwant: %s", bad, err, want)
+		}
+	}
+}
+
+// Two entries that resolve to the same tool name, in the words the user gets.
+//
+// `buildMCPConfig` refuses it — a map would otherwise keep whichever came last,
+// silently, and the agent inside would talk to a server the compose file does
+// not obviously name. Nothing read this message, so the name it reports could
+// have been either entry's.
+func TestBuildMCPConfigRefusesADuplicateName(t *testing.T) {
+	o := newMCPOrch(mcpProject("terraform-http", "terraform-http:9999"))
+	_, err := o.buildMCPConfig(o.Project.Services["agent"])
+	if err == nil {
+		t.Fatal("two entries resolving to one name should be refused")
+	}
+	if want := `duplicate MCP tool name "terraform-http"`; err.Error() != want {
+		t.Errorf("the message is not what this file says it should be\n got: %s\nwant: %s", err, want)
 	}
 }
 

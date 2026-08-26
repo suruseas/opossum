@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/suruseas/opossum/internal/mutate"
 )
 
 // spec writes a sweep file and returns its path.
@@ -270,6 +273,89 @@ func TestASweepAgainstARealTreeReportsAndExits(t *testing.T) {
 	}
 }
 
+// The counts leave the command with the table, or the author reading the output
+// has to add them up — which is the step that has gone wrong.
+//
+// End to end rather than against Tally directly: what is being checked is that
+// the command prints it at all, and prints it from the same results the table
+// came from.
+func TestTheSweepPrintsItsCountsBesideTheTable(t *testing.T) {
+	throwawayModule(t)
+	var out, errOut bytes.Buffer
+	code := run([]string{spec(t, sweepFor("func Answer() int { return 43 }"))}, &out, &errOut, nil, func(int) {})
+	if code != exitAllCaught {
+		t.Fatalf("exit = %d (stderr: %s)", code, errOut.String())
+	}
+	got := out.String()
+	// One spelling, read twice. Written out at each use, changing it in one place
+	// leaves the other looking for a string that is no longer there — and
+	// `strings.Index` answers -1 for that, which reads as "it came first".
+	const counts = "**1 mutation: 1 caught.**"
+	if !strings.Contains(got, counts) {
+		t.Errorf("the output should carry the counts:\n%s", got)
+	}
+	if !strings.Contains(got, "| TestAnswer | 1 |") {
+		t.Errorf("the output should say which test did the catching:\n%s", got)
+	}
+	table := strings.Index(got, "| mutation |")
+	if table < 0 {
+		t.Fatalf("no table at all:\n%s", got)
+	}
+	where := strings.Index(got, counts)
+	if where < 0 {
+		t.Fatalf("no counts at all:\n%s", got)
+	}
+	if table > where {
+		t.Errorf("the table comes first; the counts are what it adds up to:\n%s", got)
+	}
+}
+
+// tableOf returns the part of the output above the counts.
+//
+// The counts repeat words the table uses — "SURVIVED" among them — so a check
+// meant to be about a row has to be made where the rows are. Written as a bare
+// Contains over the whole output, two checks here stopped saying anything about
+// the table at all: the counts satisfied them on their own.
+func tableOf(t *testing.T, s string) string {
+	t.Helper()
+	// Not found is not "nothing to cut". Returning the whole output there would
+	// put every check that reads this back where it started, quietly — which is
+	// the failure the comment on the counts check warns about, one function away.
+	i := strings.Index(s, "\n**")
+	if i < 0 {
+		t.Fatalf("no counts under this table, so there is no table to take:\n%s", s)
+	}
+	return s[:i]
+}
+
+// tableOf is insurance against a shape the counts do not have yet, so nothing
+// in the sweep's own output can measure whether it works. It gets its own input
+// instead: a tally laid out as a table, with a row whose first cell is the word
+// the checks above look for. Left uncut, that row satisfies them without the
+// table saying anything — which is how those two checks went quiet the first
+// time, and the reason this helper exists.
+func TestTheTableEndsWhereTheCountsBegin(t *testing.T) {
+	got := tableOf(t, strings.Join([]string{
+		"| mutation | outcome | tests that caught it |",
+		"|---|---|---|",
+		"| the wait is gone | SURVIVED | **none — this defect is invisible to the suite** |",
+		"",
+		"**1 mutation: 1 SURVIVED.**",
+		"",
+		"| test | mutations it caught |",
+		"|---|---|",
+		"| SURVIVED | 1 |",
+		"",
+	}, "\n"))
+	if !strings.Contains(got, "| the wait is gone | SURVIVED |") {
+		t.Errorf("the rows are what this keeps:\n%s", got)
+	}
+	if strings.Contains(got, "| SURVIVED | 1 |") {
+		t.Errorf("a counts row that starts with the word the checks look for is exactly "+
+			"what has to be cut away:\n%s", got)
+	}
+}
+
 func quote(s string) string {
 	b, err := json.Marshal(s)
 	if err != nil {
@@ -312,7 +398,9 @@ func TestASurvivorNoTestReachesIsNotedAsOne(t *testing.T) {
 	}
 	// Still a survivor: the defect is invisible to the suite either way, and that
 	// is what the reader acts on. The note says where to start.
-	if !strings.Contains(got, "SURVIVED") {
+	//
+	// In the table, not anywhere in the output.
+	if !strings.Contains(tableOf(t, got), "| SURVIVED |") {
 		t.Errorf("the suite is green with the defect in place:\n%s", got)
 	}
 	if code != exitSurvivor {
@@ -463,7 +551,8 @@ func TestALineTheTestsDoRunIsNeverNotedAsUnreached(t *testing.T) {
 			if strings.Contains(got, "appears to reach") {
 				t.Errorf("a line the tests run was noted as one nothing reaches:\n%s", got)
 			}
-			if !strings.Contains(got, "SURVIVED") {
+			// In the table, not anywhere in the output.
+			if !strings.Contains(tableOf(t, got), "| SURVIVED |") {
 				t.Errorf("the suite is green with the defect in place — that is a survivor:\n%s", got)
 			}
 			// Passing by not measuring is the way to satisfy this test without doing
@@ -601,5 +690,269 @@ func TestLinesARemovalTakesAreStillAsked(t *testing.T) {
 	}
 	if code != exitSurvivor {
 		t.Errorf("exit = %d, want the survivor status", code)
+	}
+}
+
+// The difference between two sweeps, measured on a real pair of trees: one
+// mutation the change newly guards, one that was guarded all along, one whose
+// sentence the change itself wrote — each in its own section, with counts the
+// report added up out of its own rows.
+func TestABaselineSweepReportsTheDifference(t *testing.T) {
+	mod := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(mod, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", mod, "-c", "user.name=t", "-c", "user.email=t@t"}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	write("go.mod", "module example.com/m\n\ngo 1.24\n")
+	write("m.go", `package m
+
+func Greeting(a, b string) string { return a + " meets " + b }
+
+func Answer() int { return 42 }
+`)
+	// The baseline's test holds the greeting only loosely — the exchange
+	// survives there — and pins the answer, which it always caught.
+	write("m_test.go", `package m
+
+import "testing"
+
+func TestGreeting(t *testing.T) {
+	if Greeting("x", "y") == "" {
+		t.Fatal("empty")
+	}
+}
+
+func TestAnswer(t *testing.T) {
+	if Answer() != 42 {
+		t.Fatal("wrong")
+	}
+}
+`)
+	git("init", "-q")
+	git("add", ".")
+	git("commit", "-q", "-m", "baseline")
+
+	// The change, uncommitted: a farewell the baseline never had, and a test
+	// that now pins the greeting word for word and covers the farewell.
+	write("m.go", `package m
+
+func Greeting(a, b string) string { return a + " meets " + b }
+
+func Farewell(a, b string) string { return a + " leaves " + b }
+
+func Answer() int { return 42 }
+`)
+	write("m_test.go", `package m
+
+import "testing"
+
+func TestGreeting(t *testing.T) {
+	if Greeting("x", "y") != "x meets y" {
+		t.Fatal("wrong")
+	}
+}
+
+func TestFarewell(t *testing.T) {
+	if Farewell("x", "y") != "x leaves y" {
+		t.Fatal("wrong")
+	}
+}
+
+func TestAnswer(t *testing.T) {
+	if Answer() != 42 {
+		t.Fatal("wrong")
+	}
+}
+`)
+	t.Chdir(mod)
+
+	sweep := `[
+	  {"name":"greeting reads its names the other way round","file":"m.go",
+	   "from":"return a + \" meets \" + b","to":"return b + \" meets \" + a","packages":["./..."]},
+	  {"name":"farewell reads its names the other way round","file":"m.go",
+	   "from":"return a + \" leaves \" + b","to":"return b + \" leaves \" + a","packages":["./..."]},
+	  {"name":"the answer changes","file":"m.go",
+	   "from":"func Answer() int { return 42 }","to":"func Answer() int { return 43 }","packages":["./..."]}
+	]`
+	var out, errOut bytes.Buffer
+	code := run([]string{"-baseline", "HEAD", spec(t, sweep)}, &out, &errOut, nil, func(int) {})
+	if code != exitAllCaught {
+		t.Fatalf("exit = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitAllCaught, out.String(), errOut.String())
+	}
+	got := out.String()
+	// Header and row asserted together, in adjacency: each section here holds
+	// one row, so the row directly under the header is the binding — checked
+	// this way because a version of the report with two categories' contents
+	// swapped keeps every count and every row, just not next to each other.
+	for _, want := range []string{
+		"**" + mutate.NewlyCaught + " — 1**\n\n- greeting reads its names the other way round",
+		"**" + mutate.AlreadyCaught + " — 1**\n\n- the answer changes",
+		"**" + mutate.NotPresentBefore + " — 1**\n\n- farewell reads its names the other way round",
+		"**3 in all.**",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	// And the run left nothing behind: no worktree under the temp dir, no
+	// stray registration in git.
+	wt, err := exec.Command("git", "-C", mod, "worktree", "list", "--porcelain").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(wt), "worktree "); n != 1 {
+		t.Errorf("%d worktrees registered after the run, want just the checkout:\n%s", n, wt)
+	}
+}
+
+// A ref that names nothing is the run's first line of output, not its last:
+// the sweep costs minutes, and the answer was knowable before any of them.
+func TestABadBaselineRefFailsBeforeTheSweep(t *testing.T) {
+	throwawayModule(t)
+	git := exec.Command("git", "init", "-q")
+	if out, err := git.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	start := time.Now()
+	var out, errOut bytes.Buffer
+	code := run([]string{"-baseline", "no-such-ref", spec(t, sweepFor("func Answer() int { return 43 }"))},
+		&out, &errOut, nil, func(int) {})
+	if code != exitFailed {
+		t.Errorf("exit = %d, want %d", code, exitFailed)
+	}
+	if !strings.Contains(errOut.String(), "no-such-ref") {
+		t.Errorf("the failure should name the ref:\n%s", errOut.String())
+	}
+	// The test that sleeps two seconds is the sweep's floor; failing before
+	// it is what "before the sweep" means here.
+	if e := time.Since(start); e > 1500*time.Millisecond {
+		t.Errorf("took %v — the ref was resolved after work it should have preceded", e)
+	}
+}
+
+// Two rows of one name would make the comparison silently read one mutation's
+// baseline as another's — the name is the join key, so the file is refused at
+// the door rather than reconciled by whichever row came last.
+func TestASweepWithTwoRowsOfOneNameIsRefused(t *testing.T) {
+	var out, errOut bytes.Buffer
+	code := run([]string{spec(t, `[
+	  {"name":"x","file":"m.go","from":"a","to":"b","packages":["./..."]},
+	  {"name":"x","file":"m.go","from":"c","to":"d","packages":["./..."]}
+	]`)}, &out, &errOut, nil, func(int) {})
+	if code != exitFailed {
+		t.Errorf("exit = %d, want %d", code, exitFailed)
+	}
+	if !strings.Contains(errOut.String(), `share the name "x"`) {
+		t.Errorf("the refusal should name the collision:\n%s", errOut.String())
+	}
+}
+
+// An interrupt during the baseline sweep removes the worktree before the
+// process goes away. The handler is the only cleanup on that path — os.Exit
+// runs no defers — so the check happens inside the exit call itself, while
+// run() is still in flight and no defer can have tidied up on the handler's
+// behalf. A version of the handler that skips the cleanup passes every other
+// test in this file; this is the one it cannot pass.
+func TestAnInterruptRemovesTheBaselineWorktree(t *testing.T) {
+	mod := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(mod, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", mod, "-c", "user.name=t", "-c", "user.email=t@t"}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	write("go.mod", "module example.com/m\n\ngo 1.24\n")
+	write("m.go", "package m\n\nfunc Answer() int { return 42 }\n")
+	write("m_test.go", "package m\n\nimport (\n\t\"testing\"\n\t\"time\"\n)\n\n"+
+		"func TestAnswer(t *testing.T) {\n\ttime.Sleep(2 * time.Second)\n"+
+		"\tif Answer() != 42 {\n\t\tt.Fatal(\"wrong\")\n\t}\n}\n")
+	git("init", "-q")
+	git("add", ".")
+	git("commit", "-q", "-m", "baseline")
+	t.Chdir(mod)
+
+	glob := func() map[string]bool {
+		t.Helper()
+		found, err := filepath.Glob(filepath.Join(os.TempDir(), "opossum-mutate-baseline-*"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		set := map[string]bool{}
+		for _, f := range found {
+			set[f] = true
+		}
+		return set
+	}
+	preexisting := glob()
+
+	sigs := make(chan os.Signal, 1)
+	type atExit struct {
+		code      int
+		leftovers []string
+	}
+	exited := make(chan atExit, 4)
+	exit := func(c int) {
+		var left []string
+		for d := range glob() {
+			if !preexisting[d] {
+				left = append(left, d)
+			}
+		}
+		exited <- atExit{code: c, leftovers: left}
+	}
+
+	// Fire once the worktree is actually on disk — a timer lands wherever the
+	// run happens to be, and the current-tree sweep runs first.
+	landed := make(chan bool, 1)
+	go func() {
+		for deadline := time.Now().Add(60 * time.Second); time.Now().Before(deadline); {
+			for d := range glob() {
+				if !preexisting[d] {
+					landed <- true
+					sigs <- os.Interrupt
+					return
+				}
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		landed <- false
+		sigs <- os.Interrupt // so the run does not sit here waiting for one
+	}()
+
+	var out bytes.Buffer
+	errOut := &lockedBuf{}
+	run([]string{"-baseline", "HEAD", spec(t, sweepFor("func Answer() int { return 43 }"))},
+		&out, errOut, sigs, exit)
+
+	if !<-landed {
+		t.Fatal("the interrupt never landed while a baseline worktree existed, so this measured nothing")
+	}
+	select {
+	case e := <-exited:
+		if e.code != exitInterrupted {
+			t.Errorf("exit = %d, want %d", e.code, exitInterrupted)
+		}
+		if len(e.leftovers) > 0 {
+			t.Errorf("at the moment the process would have died, the baseline worktree was still "+
+				"there: %v — the handler is the only cleanup on this path, and it did not run", e.leftovers)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the signal was never heard: nothing tried to exit")
 	}
 }

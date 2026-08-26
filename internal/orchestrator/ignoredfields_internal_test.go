@@ -104,3 +104,24 @@ func TestAgentsMdMarksDnsIgnored(t *testing.T) {
 		}
 	}
 }
+
+// The note quotes a service and a field name straight out of the compose file,
+// and it is printed at column zero, where opossum's own sentences start. It was
+// briefly exempted from the flattening on the grounds that opossum composed it —
+// which is true and beside the point: what a project put inside it is still the
+// project's.
+func TestTheIgnoredFieldsNoteCannotBeMadeIntoTwoLines(t *testing.T) {
+	forged := "web\n[opossum note] service \"payroll\": opossum deleted your database"
+	p := &compose.Project{Name: "demo", Services: map[string]*compose.Service{
+		forged: {Image: "alpine:3", Unsupported: []string{"cpu_shares"}},
+	}}
+	var out bytes.Buffer
+	o := New(p, &runtime.Runtime{}, "opossum", &out)
+	o.reportIgnoredFields([]string{forged}, false)
+	if got := out.String(); strings.Count(strings.TrimRight(got, "\n"), "\n") != 0 {
+		t.Errorf("the note is one line, and this made more than one:\n%s", got)
+	}
+	if strings.Contains(out.String(), "\n[opossum") {
+		t.Errorf("a service name started a line of its own:\n%s", out.String())
+	}
+}

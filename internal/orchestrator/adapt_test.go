@@ -1891,3 +1891,159 @@ func TestTheUnfixableNotesAreWordForWordWhatWeMeanToSay(t *testing.T) {
 		}
 	}
 }
+
+// suggestionBlockOf returns the Suggestions section, whole — the same shape as
+// noteBlockOf, and for the same reason. From the section header rather than from
+// the first marker, because a line added just above a suggestion reaches the same
+// reader.
+func suggestionBlockOf(t *testing.T, overlay string) string {
+	t.Helper()
+	i := strings.Index(overlay, "# \u2500\u2500 Suggestions")
+	if i < 0 {
+		t.Fatalf("no suggestion in this overlay:\n%s", overlay)
+	}
+	var out []string
+	for _, line := range strings.Split(overlay[i:], "\n") {
+		if !strings.HasPrefix(line, "#") {
+			break
+		}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n")
+}
+
+// The Suggestions section, word for word.
+//
+// The Notes section has had this since the day a note's body could go missing
+// without anything saying so. The Suggestions section did not, and a mutation
+// sweep of adapt.go found what that cost: thirteen ways to exchange two of the
+// strings a suggestion is built from — a service name for a volume name, a host
+// path for a container path, a section label for the sentence written under it —
+// and every one of them left this repository green. Eleven of the thirteen build
+// the commented block; the other two build the summary that goes to the terminal,
+// which is why both are read here.
+//
+// A suggestion that names the wrong path is worse than no suggestion: it is
+// written into the user's compose.opossum.yaml and read later, away from
+// whatever made it.
+//
+// One project, one golden, and both kinds of suggestion inside it: a line added
+// between two of these fails, and so does a suggestion that grows a sentence.
+//
+// Thirteen more exchanges of the same kind survive in adapt.go, in the summaries
+// and comments for the changes opossum did apply. Nothing here reads those.
+func TestTheSuggestionsAreWordForWordWhatWeMeanToSay(t *testing.T) {
+	dir := t.TempDir()
+	// Both kinds of suggestion in one project, because the section is what this
+	// pins: a service that died chowning a bind mount, and a pair that cannot both
+	// attach the same named volume. A golden over only one of them leaves the other
+	// half of the section with nothing reading it.
+	path := writeFile(t, dir, "compose.yaml", `services:
+  blog:
+    image: ghost:6-alpine
+    volumes:
+      - ./content:/var/lib/ghost/content
+  web:
+    image: busybox
+    volumes:
+      - shared:/srv
+  worker:
+    image: busybox
+    volumes:
+      - shared:/srv
+volumes:
+  shared: {}
+`)
+	p, err := compose.Load(path)
+	if err != nil {
+		t.Fatalf("loading test compose: %v", err)
+	}
+	o := New(p, nil, "opossum", io.Discard)
+	o.crashHint("blog", "chown: changing ownership of '/var/lib/ghost/content': Operation not permitted")
+	overlay, changes := o.PlanOverlay()
+
+	// The summaries too, in the same test and from the same run: they are what
+	// stands on the terminal, and they are built from the same names by their own
+	// format call. The Notes test does this for its own three; this one had
+	// nothing reading it at all.
+	wantSummaries := map[string]string{
+		"blog":   `service "blog" died taking ownership of /var/lib/ghost/content; a named volume can be chowned, a bind mount cannot`,
+		"web":    `service "web" shares named volume "shared" with 1 other service(s); a bind mount would let them all run`,
+		"worker": `service "worker" shares named volume "shared" with 1 other service(s); a bind mount would let them all run`,
+	}
+	if len(changes) != len(wantSummaries) {
+		t.Fatalf("three suggestions, %d planned: %+v", len(changes), changes)
+	}
+	for _, c := range changes {
+		want, ok := wantSummaries[c.Service]
+		if !ok {
+			t.Errorf("a suggestion for %q, which this file does not expect: %s", c.Service, c.Summary)
+			continue
+		}
+		if c.Summary != want {
+			t.Errorf("service %q: the summary is not what this file says it should be\n got: %s\nwant: %s",
+				c.Service, c.Summary, want)
+		}
+	}
+
+	want := strings.Join([]string{
+		`# ── Suggestions ─────────────────────────────────────────────────────────`,
+		`# opossum did NOT make these changes: each alters what the project means, so`,
+		"# the call is yours. Uncommenting a whole block applies it (the `services:`",
+		`# line included — this file is merged like any compose file).`,
+		`# services:`,
+		`#   # [opossum suggestion — NOT APPLIED] service "web": mount the shared data from a host directory instead of the named volume "shared".`,
+		`#   # Why: Apple container attaches a named volume to one container at a time, so`,
+		`#   #   "web" and "worker" cannot all run while they share "shared" — whichever starts`,
+		`#   #   first gets it and the rest fail to attach. Diagnostic: OPSM-102.`,
+		`#   #   A host directory is shareable, so a bind mount lets them all mount it.`,
+		`#   #   NOT APPLIED, because it changes what the project means: the data moves out`,
+		`#   #   of the runtime's storage onto the Mac, and that directory's contents and`,
+		`#   #   permissions become yours to manage. A database's data directory in`,
+		`#   #   particular should NOT be moved this way — it needs to be chownable.`,
+		`#   # To apply: uncomment the block for every service sharing "shared" (all of them,`,
+		"#   #   or none), create the directory, then `opossum up`. `opossum ps`",
+		`#   #   should show them all running.`,
+		`#   # To ignore: delete this block. Nothing here is in effect until you uncomment it.`,
+		`#   web:`,
+		`#     volumes:`,
+		`#       - ./shared:/srv`,
+		`#   # [opossum suggestion — NOT APPLIED] service "worker": mount the shared data from a host directory instead of the named volume "shared".`,
+		`#   # Why: Apple container attaches a named volume to one container at a time, so`,
+		`#   #   "web" and "worker" cannot all run while they share "shared" — whichever starts`,
+		`#   #   first gets it and the rest fail to attach. Diagnostic: OPSM-102.`,
+		`#   #   A host directory is shareable, so a bind mount lets them all mount it.`,
+		`#   #   NOT APPLIED, because it changes what the project means: the data moves out`,
+		`#   #   of the runtime's storage onto the Mac, and that directory's contents and`,
+		`#   #   permissions become yours to manage. A database's data directory in`,
+		`#   #   particular should NOT be moved this way — it needs to be chownable.`,
+		`#   # To apply: uncomment the block for every service sharing "shared" (all of them,`,
+		"#   #   or none), create the directory, then `opossum up`. `opossum ps`",
+		`#   #   should show them all running.`,
+		`#   # To ignore: delete this block. Nothing here is in effect until you uncomment it.`,
+		`#   worker:`,
+		`#     volumes:`,
+		`#       - ./shared:/srv`,
+		`#   # [opossum suggestion — NOT APPLIED] service "blog": use a named volume for /var/lib/ghost/content instead of the host path "./content".`,
+		`#   # Why: This is not a guess. That container started, tried to take ownership of`,
+		`#   #   /var/lib/ghost/content, and exited: Apple container bind mounts are`,
+		`#   #   host-owned and cannot be chowned from inside. A named volume can.`,
+		`#   #   Diagnostic: OPSM-105.`,
+		`#   #   NOT APPLIED, because it moves where the data lives. Today it is on the`,
+		`#   #   Mac at ./content and you can open it; afterwards it`,
+		`#   #   is inside a volume that only the runtime manages. Anything already in`,
+		`#   #   that directory stays where it is and the service stops seeing it.`,
+		"#   # To apply: uncomment this block, then `opossum up` again. To keep the data on the",
+		`#   #   Mac instead, run the service as the user that owns the directory`,
+		"#   #   (`user:` in the compose file) so it has nothing to chown.",
+		`#   # To ignore: delete this block. Nothing here is in effect until you uncomment it.`,
+		`#   blog:`,
+		`#     volumes:`,
+		`#       - blog-content:/var/lib/ghost/content`,
+		`# volumes:`,
+		`#   blog-content: {}`,
+	}, "\n")
+	if got := suggestionBlockOf(t, overlay); got != want {
+		t.Errorf("the suggestions are not what this file says they should be\n got:\n%s\nwant:\n%s", got, want)
+	}
+}

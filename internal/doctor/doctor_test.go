@@ -9,14 +9,20 @@ import (
 	"testing"
 
 	"github.com/suruseas/opossum/internal/compose"
+	"github.com/suruseas/opossum/internal/runtime"
 )
 
 // mock is a fake Runner returning canned output per top-level `container` command.
 type mock struct {
 	status, builder, probe, df string
+	nets                       []runtime.NetworkSummary
+	ctrs                       []runtime.ContainerSummary
 	statusErr                  bool
 	dns                        bool
 }
+
+func (m mock) List() []runtime.ContainerSummary   { return m.ctrs }
+func (m mock) Networks() []runtime.NetworkSummary { return m.nets }
 
 func (m mock) Output(args ...string) (string, error) {
 	if len(args) == 0 {
@@ -173,7 +179,7 @@ func TestRunJSONShape(t *testing.T) {
 	if !rep.Healthy {
 		t.Errorf("healthy field should be true; got %+v", rep)
 	}
-	wantIDs := []string{"runtime", "dns", "network", "builder", "storage", "memory"}
+	wantIDs := []string{"runtime", "dns", "network", "builder", "storage", "leftover-networks", "memory"}
 	if len(rep.Checks) != len(wantIDs) {
 		t.Fatalf("got %d checks, want %d: %+v", len(rep.Checks), len(wantIDs), rep.Checks)
 	}

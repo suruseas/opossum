@@ -300,7 +300,7 @@ func (r *Runner) one(m Mutation) (res Result, err error) {
 	// all, and reading the resulting red as "the suite caught it" is how a
 	// mutation with no evidence behind it ends up in a pull request.
 	if vetOut, vetErr, buildErr := r.Go(append([]string{"vet"}, m.Packages...)...); buildErr != nil {
-		return Result{Mutation: m, Outcome: Broken, Detail: lastLines(vetOut+vetErr, 3)}, nil
+		return Result{Mutation: m, Outcome: Broken, Detail: whyItWouldNotBuild(vetOut + vetErr)}, nil
 	}
 	// Instrumented the same way the baseline was. Coverage costs time, and a
 	// baseline measured in a cheaper configuration than the runs it vouches for is
@@ -312,16 +312,17 @@ func (r *Runner) one(m Mutation) (res Result, err error) {
 		args = append(args, "-cover", coverPkg)
 	}
 	testOut, testErrOut, testErr := r.Go(append(args, m.Packages...)...)
+	transcript := testOut + testErrOut
 	killers := Failures(testOut)
 	switch {
 	case len(killers) > 0:
-		return Result{Mutation: m, Outcome: Caught, Killers: killers}, nil
+		return Result{Mutation: m, Outcome: Caught, Killers: killers, TestOutput: transcript}, nil
 	case testErr != nil:
 		// Red, but nobody is named: a panic, a package-level timeout, a toolchain
 		// that could not start. Whatever it was, it is not "the suite is fine
 		// with this defect" — and the mutations worth writing here are the ones
 		// most likely to hang.
-		return Result{Mutation: m, Outcome: Inconclusive, Detail: whyItDied(testOut, testErrOut)}, nil
+		return Result{Mutation: m, Outcome: Inconclusive, Detail: whyItDied(testOut, testErrOut), TestOutput: transcript}, nil
 	}
 	// Nothing failed. That reads as "the suite is fine with this defect" — but it
 	// reads the same way when no test runs the line at all, and those are opposite
@@ -339,7 +340,7 @@ func (r *Runner) one(m Mutation) (res Result, err error) {
 	// Written as a note beside the survivor, never as the outcome. A note that is
 	// wrong leaves a reader looking at a survivor with a misleading hint; an
 	// outcome that is wrong sends them to find out why live code is dead.
-	return Result{Mutation: m, Outcome: Survived, Detail: r.reachNote(m, original)}, nil
+	return Result{Mutation: m, Outcome: Survived, Detail: r.reachNote(m, original), TestOutput: transcript}, nil
 }
 
 // reachNote says what the baseline's coverage had to say about the lines this
@@ -612,4 +613,42 @@ func lastLines(s string, n int) string {
 		lines = lines[len(lines)-n:]
 	}
 	return strings.Join(lines, "\n")
+}
+
+// whyItWouldNotBuild keeps the lines of a failed vet that say something, which
+// means dropping the ones that only name the package.
+//
+// `go vet` announces the package it is about with lines beginning `#` — one, or
+// two when the package has tests — and then prints the lines naming the file,
+// the position and the problem. Kept whole, a table cell reads
+// "# example.com/m # [example.com/m] vet: ./m.go:3:28: undefined: x", and the
+// part a reader needs is at the end. Dropped, it reads as the sentence it is.
+//
+// The rule is what the headers are, not where they sit. Taking the last line
+// would work for a build that failed to type-check — vet stops at the first of
+// those, whether the problems are in one file or three — and would be wrong for
+// vet's own findings, which come several at a time and carry no header at all.
+//
+// More than three lines are cut to the last three and said to be cut, because a
+// cell that quietly drops the first problem is the mistake this function was
+// written to avoid, one level up.
+func whyItWouldNotBuild(s string) string {
+	var kept []string
+	for _, line := range strings.Split(strings.TrimRight(s, "\n"), "\n") {
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.TrimSpace(line) != "" {
+			kept = append(kept, line)
+		}
+	}
+	if len(kept) == 0 {
+		// Nothing but headers, or nothing at all. Better the headers than a
+		// mutation that says it would not build and will not say why.
+		return lastLines(s, 3)
+	}
+	if len(kept) > 3 {
+		return "(" + strconv.Itoa(len(kept)-3) + " more) " + strings.Join(kept[len(kept)-3:], "\n")
+	}
+	return strings.Join(kept, "\n")
 }

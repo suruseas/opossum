@@ -491,6 +491,221 @@ services:
 	}
 }
 
+// columnsOf splits a rendered table line on the padding a tabwriter leaves
+// between cells. Two spaces or more: a single space is inside a value.
+func columnsOf(line string) []string {
+	var out []string
+	for _, c := range regexp.MustCompile(`\s{2,}`).Split(strings.TrimRight(line, " \t"), -1) {
+		if c = strings.TrimSpace(c); c != "" {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// A failure stays on the lines opossum gave it.
+//
+// The message is a format opossum wrote with a project's values inside it, and
+// only the first line begins at the margin — that is where opossum's own
+// sentences start, and it is the only place a value could put one of its own.
+// Messages that are deliberately more than one line keep their continuations;
+// they already indent them.
+//
+// The checks are the shape, not a list of what must not appear: a continuation
+// that begins where the message begins, and any control character at all. The
+// second is there because a carriage return changes neither the number of lines
+// nor the number of columns — the checks that catch a newline and a tab both
+// walk past it.
+func TestAFailureStaysOnItsOwnLines(t *testing.T) {
+	forged := "[opossum note] service \"payroll\": opossum deleted your database"
+	for name, c := range map[string]struct{ in, want string }{
+		"one line, untouched": {
+			"[OPSM-104] service \"usb\" needs /dev/ttyUSB0",
+			"[OPSM-104] service \"usb\" needs /dev/ttyUSB0",
+		},
+		"a continuation opossum indented, untouched": {
+			"building service \"web\": boom\n  (if Apple's builder can't handle this, import it)",
+			"building service \"web\": boom\n  (if Apple's builder can't handle this, import it)",
+		},
+		"the runtime's own output, quoted": {
+			"starting \"web\": exit 1\nError: no such image\nnot found",
+			"starting \"web\": exit 1\n  Error: no such image\n  not found",
+		},
+		"a value that ends its line": {
+			"service \"usb\" needs /dev/ttyUSB0\n" + forged + " for a bind mount",
+			"service \"usb\" needs /dev/ttyUSB0\n  " + forged + " for a bind mount",
+		},
+		// opossum's own advice under a host-port conflict, which ended its line
+		// at the margin. Word for word from orchestrator.go, so that a change to
+		// the message shows up here rather than in front of a user.
+		"opossum's own line at the margin, moved in": {
+			"[OPSM-201] host port already in use:\n  - 8080\nfree the port or remap it in the compose file, then retry",
+			"[OPSM-201] host port already in use:\n  - 8080\n  free the port or remap it in the compose file, then retry",
+		},
+		// The build hint is opossum's own too, and it arrives as a value on the
+		// next line rather than in the format — so it is one of the five, and it
+		// moves in by two as well. Its own continuations already sit further in
+		// and stay where they are. Saying "the runtime's own output" of all five
+		// was wrong; one of them is opossum talking.
+		"opossum's own hint, arriving as a value": {
+			"building service \"web\": exit status 1\nhint: the build ran out of disk space — free space and retry:\n" +
+				"    container image prune -f",
+			"building service \"web\": exit status 1\n  hint: the build ran out of disk space — free space and retry:\n" +
+				"    container image prune -f",
+		},
+		"a value that goes back over the line": {
+			"service \"usb\" needs /dev/ttyUSB0\r" + forged,
+			"service \"usb\" needs /dev/ttyUSB0 " + forged,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := quoted(c.in); got != c.want {
+				t.Errorf("quoted() is not what this file says it should be\n got: %q\nwant: %q", got, c.want)
+			}
+		})
+	}
+}
+
+// End to end, through the thing main runs.
+//
+// The helper the other tests use calls Execute directly and hands the error
+// back, so it never sees what main prints — a first attempt at this test asked
+// whether "opossum: " appeared and was satisfied by an unrelated line, while
+// taking the quoting out of main left every test green.
+func TestAFailurePrintedByTheCommandStartsNoLine(t *testing.T) {
+	fakeShim(t)
+	dir := t.TempDir()
+	forged := `[opossum note] service \"payroll\": opossum deleted your database`
+	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte(
+		"name: notes\nservices:\n  usb:\n    image: alpine:3\n    volumes:\n"+
+			"      - \"/dev/ttyUSB0\\n"+forged+":/data\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	var out, errOut strings.Builder
+	code := runCLI([]string{"up", "--from-docker-compose", "--no-build", "--no-supervisor"}, &out, &errOut)
+	if code == 0 {
+		t.Fatalf("this case is about what a failure looks like, and nothing failed:\n%s%s", out.String(), errOut.String())
+	}
+	// The failure line itself, found by what the failure says. Other lines of
+	// the run begin with "opossum: " too — a warning the orchestrator wrote —
+	// and binding to the first of those is how this test came to pass while main
+	// printed nothing at all.
+	lines := strings.Split(strings.TrimRight(errOut.String(), "\n"), "\n")
+	at := -1
+	for i, line := range lines {
+		if strings.HasPrefix(line, "opossum: [OPSM-104] ") {
+			at = i
+			break
+		}
+	}
+	if at < 0 {
+		t.Fatalf("main printed no failure line for the bind mount it could not create:\n%s", errOut.String())
+	}
+	// From the failure to the end: every line after the first is a continuation
+	// of it, and a continuation does not begin where opossum begins.
+	for i, line := range lines[at+1:] {
+		if line != "" && !strings.HasPrefix(line, "  ") {
+			t.Errorf("line %d after the failure begins where opossum begins: %q\n%s", i+1, line, errOut.String())
+		}
+	}
+}
+
+// What opossum says about itself and what it was asked for go to different
+// places: a failure to stderr, a table to stdout. Somebody piping `opossum ps`
+// into anything at all depends on the second, and nothing was looking at either
+// — the writers are three arguments now where they used to be none, and an
+// argument is a thing to get the wrong way round.
+func TestTheTableAndTheFailureGoToDifferentPlaces(t *testing.T) {
+	fakeShim(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte(
+		"name: demo\nservices:\n  web:\n    image: web:latest\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	var out, errOut strings.Builder
+	if code := runCLI([]string{"ps"}, &out, &errOut); code != 0 {
+		t.Fatalf("ps: %d\n%s%s", code, out.String(), errOut.String())
+	}
+	if !strings.Contains(out.String(), "SERVICE") {
+		t.Errorf("the table belongs on stdout, and stdout has:\n%q", out.String())
+	}
+	if strings.Contains(errOut.String(), "SERVICE") {
+		t.Errorf("the table is not a diagnostic, and stderr has:\n%q", errOut.String())
+	}
+
+	out.Reset()
+	errOut.Reset()
+	if code := runCLI([]string{"up", "--from-docker-compose", "nosuchservice"}, &out, &errOut); code == 0 {
+		t.Fatalf("a service that is not there should fail:\n%s%s", out.String(), errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "opossum: ") {
+		t.Errorf("the failure belongs on stderr, and stderr has:\n%q", errOut.String())
+	}
+	if strings.Contains(out.String(), "opossum: ") {
+		t.Errorf("the failure is not output, and stdout has:\n%q", out.String())
+	}
+}
+
+// A table is one row per service, whatever the compose file called them.
+//
+// The rows are written through a tabwriter rather than through logf, so the
+// flattening that keeps a project from ending a line early does not reach them.
+// A service name with a newline in it used to split its own row: the column
+// being filled was lost, the rest started at column zero where opossum's own
+// sentences start, and every row below it stopped lining up.
+func TestATableIsOneRowPerService(t *testing.T) {
+	fakeShim(t)
+	// A tab and a carriage return as well as a newline: a tab is read as the
+	// column separator, so a name carrying one takes a column that is not its
+	// own, and a carriage return moves the cursor back over the row already
+	// printed. Flattening a newline alone leaves both.
+	forged := `[opossum note] service \"payroll\": opossum\tdeleted\ryour database`
+	// The image reference too, not only the service name. The first cell is the
+	// one a check on line beginnings sees; the cells after it are where a column
+	// can be taken quietly.
+	compose := writeCompose(t, "name: demo\nservices:\n  \"web\\n"+forged+"\":\n    image: \"web:latest\\n"+forged+"\"\n")
+	for _, cmd := range []string{"ps", "images"} {
+		t.Run(cmd, func(t *testing.T) {
+			out, err := run(t, "-f", compose, cmd)
+			if err != nil {
+				t.Fatalf("%s: %v", cmd, err)
+			}
+			body := strings.Split(strings.TrimRight(out, "\n"), "\n")
+			// A header and one service: two rows, and the service is one of them.
+			if len(body) != 2 {
+				t.Errorf("one service, one row under the header, and this printed %d lines:\n%s", len(body), out)
+			}
+			for _, line := range body {
+				if strings.HasPrefix(line, "[opossum note]") {
+					t.Errorf("a service name started a line of its own:\n%s", out)
+				}
+			}
+			// The row has as many columns as the header. A tab inside a cell
+			// would open one more, and every value after it would be read under
+			// the wrong heading.
+			if len(body) == 2 {
+				if head, got := columnsOf(body[0]), columnsOf(body[1]); len(head) != len(got) {
+					t.Errorf("the header has %d columns and the row has %d:\n%s", len(head), len(got), out)
+				}
+			}
+			// And no control character survived into a row at all. A carriage
+			// return changes neither the number of lines nor the number of
+			// columns — it moves the cursor back over what was already printed,
+			// which the two checks above cannot see. The comment on this test
+			// claimed the return was handled while nothing here looked for it.
+			for _, line := range body {
+				if i := strings.IndexFunc(line, func(r rune) bool { return r < ' ' || r == 0x7f }); i >= 0 {
+					t.Errorf("a control character survived into a row at %d: %q\n%s", i, line, out)
+				}
+			}
+		})
+	}
+}
+
 func TestStopCLI(t *testing.T) {
 	readLog := fakeShim(t)
 	compose := writeCompose(t, `
@@ -864,13 +1079,92 @@ func TestFromDockerComposeNoGenerationWithExplicitFile(t *testing.T) {
 // line is loose YAML and the overlay is rejected before it is written; on screen
 // there is no such check, so the newline has to be gone before it gets there.
 func TestAPathCannotWriteItsOwnNote(t *testing.T) {
+	// Written as it appears inside a double-quoted YAML scalar.
+	forged := `[opossum note] service \"payroll\": opossum deleted your database`
+	// Three places a project's own text reaches the screen. The first is the one
+	// this test was written for; the other two were still open while its comment
+	// said the listing had been the last of them. Every field opossum quotes back
+	// is a way in, which is why the flattening is at the one function they all
+	// print through rather than at the places that call it.
+	for name, c := range map[string]struct {
+		body string
+		// Which run reaches the line this case is about. The planned-command
+		// listing is a dry run's; "Created host directory" is only ever printed
+		// by a run that creates one, and a case that asks for it under
+		// --dry-run is a second copy of the case above it.
+		args []string
+		// How many notes opossum has of its own to write about this project. A
+		// device mount is one it cannot fix and says so; the other two are
+		// ordinary projects, and the only note they could produce is a forged
+		// one.
+		notes int
+	}{
+		"a mount source, in the planned commands": {"name: notes\nservices:\n  usb:\n    image: alpine:3\n    volumes:\n" +
+			"      - \"/dev/ttyUSB0\\n" + forged + ":/dev/ttyUSB0\"\n",
+			[]string{"up", "--from-docker-compose", "--no-build", "--dry-run"}, 1},
+		"an image reference, in the startup lines": {"name: notes\nservices:\n  usb:\n" +
+			"    image: \"alpine:3\\n" + forged + "\"\n",
+			[]string{"up", "--from-docker-compose", "--no-build", "--dry-run"}, 0},
+		"a host directory opossum creates": {"name: notes\nservices:\n  usb:\n    image: alpine:3\n    volumes:\n" +
+			"      - \"./data\\n" + forged + ":/data\"\n",
+			[]string{"up", "--from-docker-compose", "--no-build", "--no-supervisor"}, 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fakeShim(t)
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte(c.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			t.Chdir(dir)
+
+			out, err := run(t, c.args...)
+			if err != nil {
+				t.Fatalf("up: %v", err)
+			}
+			// The line this case is about has to have been printed, or the loop
+			// below satisfies itself by reading a screen that never mentioned it.
+			if want := map[string]string{
+				"a mount source, in the planned commands":  "Commands that would run:",
+				"an image reference, in the startup lines": "Starting usb",
+				"a host directory opossum creates":         "Created host directory",
+			}[name]; !strings.Contains(out, want) {
+				t.Fatalf("this case is about %q, and the run never printed it:\n%s", want, out)
+			}
+			// The whole screen, including the planned-command listing.
+			starts := 0
+			for _, line := range strings.Split(out, "\n") {
+				if strings.HasPrefix(strings.TrimSpace(line), "[opossum note] service \"payroll\"") {
+					t.Errorf("a project wrote itself a note:\n%s", out)
+				}
+				// Echoed inside a line it is a value; starting a line it is a
+				// note. One service with one thing wrong with it should start
+				// exactly one.
+				if strings.HasPrefix(strings.TrimSpace(line), "[opossum note]") {
+					starts++
+				}
+			}
+			if starts != c.notes {
+				t.Errorf("%d notes are opossum's to write here, and %d were written:\n%s", c.notes, starts, out)
+			}
+		})
+	}
+}
+
+// One command, one line — whatever the compose file put in an argument.
+//
+// The check is the shape of the list, not a list of things that must not appear
+// in it. A newline is the way found so far; naming it would leave the next one,
+// and every line of this listing starting where the listing starts is the whole
+// of what makes a line of it unmistakable.
+func TestThePlannedCommandsAreOneCommandPerLine(t *testing.T) {
 	fakeShim(t)
 	dir := t.TempDir()
-	// Written as it appears inside the double-quoted YAML scalar below.
-	forged := `[opossum note] service \"payroll\": opossum deleted your database`
+	// A mount source that ends its own line and starts a new one at column zero,
+	// where opossum's own sentences start.
 	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte(
 		"name: notes\nservices:\n  usb:\n    image: alpine:3\n    volumes:\n"+
-			"      - \"/dev/ttyUSB0\\n"+forged+":/dev/ttyUSB0\"\n"), 0o644); err != nil {
+			"      - \"/dev/ttyUSB0\\n[opossum note] service \\\"payroll\\\": opossum deleted "+
+			"your database:/dev/ttyUSB0\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(dir)
@@ -879,42 +1173,28 @@ func TestAPathCannotWriteItsOwnNote(t *testing.T) {
 	if err != nil {
 		t.Fatalf("up: %v", err)
 	}
-	// The whole screen, not just the read-out: the summary lines quote the path
-	// back too. (The planned-command listing further down still breaks argv
-	// across lines — that is #512, and it is not opossum speaking there.)
-	starts := 0
-	for _, line := range screenWithoutCommands(out) {
-		if strings.HasPrefix(strings.TrimSpace(line), "[opossum note] service \"payroll\"") {
-			t.Errorf("a path wrote itself a note:\n%s", out)
-		}
-		// Echoed inside a line it is a path; starting a line it is a note. One
-		// service with one thing wrong with it should start exactly one.
-		if strings.HasPrefix(strings.TrimSpace(line), "[opossum note]") {
-			starts++
-		}
-	}
-	if starts != 1 {
-		t.Errorf("one service, one thing wrong with it, one note, got %d in:\n%s", starts, out)
-	}
-}
-
-// screenWithoutCommands is everything opossum says in its own voice — the part
-// of a dry run that lists the argv it would hand the runtime is quoting, and
-// still splits an argument that holds a newline (#512).
-func screenWithoutCommands(out string) []string {
-	var kept []string
-	skipping := false
+	listed, inList := 0, false
 	for _, line := range strings.Split(out, "\n") {
 		switch {
 		case strings.HasPrefix(line, "Commands that would run:"):
-			skipping = true
-		case skipping && strings.TrimSpace(line) == "":
-			skipping = false
-		case !skipping:
-			kept = append(kept, line)
+			inList = true
+		case inList && strings.TrimSpace(line) == "":
+			inList = false
+		case inList:
+			listed++
+			if !strings.HasPrefix(line, "  ") {
+				t.Errorf("a line of the listing does not start where the listing starts:\n%q\nin:\n%s", line, out)
+			}
 		}
 	}
-	return kept
+	// Exactly three, not at least three. A listing that never started would
+	// satisfy the loop above by looking at nothing; a fourth line would mean an
+	// argument had grown the listing a command of its own — the other half of
+	// what a newline in there does, and the half a check on line beginnings
+	// cannot see, because the forged line can begin with two spaces too.
+	if listed != 3 {
+		t.Errorf("%d commands listed, and this project creates a network, deletes, and runs:\n%s", listed, out)
+	}
 }
 
 // The same path, doubled: the overlay escapes "$" so compose reads the text as
@@ -5323,5 +5603,143 @@ func killProbe(t *testing.T, pidFile, project string) {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// doctor reports the networks nothing is running on, all the way through the
+// real command against the shim.
+//
+// The check was written and measured a level down, where the classification
+// lives. What only this level can say is whether the command reaches it at all:
+// the two listings it needs are ones the shim did not answer when the check was
+// added, and a shim that cannot answer turns every run into "unavailable" —
+// which is a passing check, and reads like a clean machine to anyone skimming.
+func TestDoctorReportsTheNetworksNothingIsRunningOn(t *testing.T) {
+	fakeShim(t)
+	t.Setenv("NETWORK_LS", `[{"configuration":{"name":"gone-net","labels":{}}},`+
+		`{"configuration":{"name":"sleeping-net","labels":{}}},`+
+		`{"configuration":{"name":"default","labels":{"com.apple.container.resource.role":"builtin"}}}]`)
+	// One stopped container, on one of the two. Its status carries no
+	// attachments — that is what a stopped container looks like — so a run that
+	// read the running side would call both networks empty.
+	t.Setenv("CONTAINER_LS", `[{"configuration":{"id":"db.sleeping.opossum","networks":[{"network":"sleeping-net"}]},`+
+		`"status":{"networks":[],"state":"stopped"}}]`)
+
+	root := newRootCmd()
+	var out strings.Builder
+	root.SetOut(&out)
+	root.SetErr(io.Discard)
+	root.SetArgs([]string{"doctor", "--format", "json"})
+	_ = root.Execute() // the environment may be unhealthy for other reasons; this is about one check
+
+	var rep struct {
+		Checks []struct{ ID, Status, Detail, Fix string } `json:"checks"`
+	}
+	if err := json.Unmarshal([]byte(out.String()), &rep); err != nil {
+		t.Fatalf("doctor --format json: %v\n%s", err, out.String())
+	}
+	var got struct{ ID, Status, Detail, Fix string }
+	for _, c := range rep.Checks {
+		if c.ID == "leftover-networks" {
+			got = c
+		}
+	}
+	if got.ID == "" {
+		t.Fatalf("no leftover-networks check in the report:\n%s", out.String())
+	}
+	if strings.Contains(got.Detail, "unavailable") {
+		t.Fatalf("the shim could not answer, so nothing was measured: %q", got.Detail)
+	}
+	if got.Status != "warn" {
+		t.Errorf("one network has nothing on it at all; status = %q\n%s", got.Status, got.Detail)
+	}
+	if !strings.Contains(got.Detail, "1 with no containers at all (gone-net)") {
+		t.Errorf("detail = %q", got.Detail)
+	}
+	if !strings.Contains(got.Detail, "1 holding only stopped containers (sleeping-net)") {
+		t.Errorf("the stopped container still holds its network; detail = %q", got.Detail)
+	}
+	if strings.Contains(got.Fix, "sleeping-net") {
+		t.Errorf("the offer names only what nothing is on: %q", got.Fix)
+	}
+}
+
+// The shim honours the flags that change what a listing contains.
+//
+// Every check in this file that says "a caller who dropped `-a` would be caught"
+// rests on the shim noticing. Nothing was checking the shim: loosening its flag
+// reading to always-true takes those guards away and leaves every test green,
+// which is the quiet kind of green this whole change is about. The shell shim
+// next door got a test of its own; this is the one the tests actually drive.
+func TestTheShimHonoursTheListingFlags(t *testing.T) {
+	fakeShim(t)
+	const doc = `[{"configuration":{"id":"cache.proj.opossum","networks":[{"network":"proj-net"}]},` +
+		`"status":{"networks":[],"state":"stopped"}},` +
+		`{"configuration":{"id":"web.live.opossum","networks":[{"network":"live-net"}]},` +
+		`"status":{"networks":[{"network":"live-net"}],"state":"running"}}]`
+	t.Setenv("CONTAINER_LS", doc)
+
+	run := func(t *testing.T, args ...string) string {
+		t.Helper()
+		out, err := exec.Command(fakeShimBin, args...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("%v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	var got []struct {
+		Configuration struct{ ID string } `json:"configuration"`
+	}
+	decode := func(t *testing.T, out string) []string {
+		t.Helper()
+		got = got[:0]
+		if err := json.Unmarshal([]byte(out), &got); err != nil {
+			t.Fatalf("not a listing: %v\n%s", err, out)
+		}
+		var names []string
+		for _, g := range got {
+			names = append(names, g.Configuration.ID)
+		}
+		return names
+	}
+
+	// With -a, both. Without it, only what is running — which is what the real
+	// CLI does, and what makes a caller who forgot the flag wrong here too.
+	if names := decode(t, run(t, "ls", "-a", "--format", "json")); len(names) != 2 {
+		t.Errorf("ls -a lists the stopped one too, got %v", names)
+	}
+	if names := decode(t, run(t, "ls", "--format", "json")); len(names) != 1 || names[0] != "web.live.opossum" {
+		t.Errorf("without -a, only the running one, got %v", names)
+	}
+	// The same request the other way round is the same request.
+	if names := decode(t, run(t, "ls", "--format", "json", "-a")); len(names) != 2 {
+		t.Errorf("the flag is a flag, not a position, got %v", names)
+	}
+	// Without --format json, not JSON — a caller who forgot it must fail here
+	// the way it would on a machine.
+	for _, args := range [][]string{{"ls", "-a"}, {"network", "ls"}} {
+		if out := run(t, args...); strings.HasPrefix(out, "[") {
+			t.Errorf("%v answered JSON with no --format json:\n%s", args, out)
+		}
+	}
+	// And the inspect document carries both lists called networks, holding
+	// different names, so that reading the wrong one shows.
+	var insp []struct {
+		Status struct {
+			Networks []struct{ Network string } `json:"networks"`
+		} `json:"status"`
+		Configuration struct {
+			Networks []struct{ Network string } `json:"networks"`
+		} `json:"configuration"`
+	}
+	out := run(t, "inspect", "web")
+	if err := json.Unmarshal([]byte(out), &insp); err != nil {
+		t.Fatalf("inspect: %v\n%s", err, out)
+	}
+	if len(insp) != 1 || len(insp[0].Status.Networks) != 1 || len(insp[0].Configuration.Networks) != 1 {
+		t.Fatalf("inspect should carry both lists: %s", out)
+	}
+	if a, b := insp[0].Status.Networks[0].Network, insp[0].Configuration.Networks[0].Network; a == b {
+		t.Errorf("both lists hold %q, so this fixture cannot show which one a parser read", a)
 	}
 }

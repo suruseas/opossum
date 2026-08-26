@@ -71,6 +71,15 @@ type check struct {
 type Runner interface {
 	Output(args ...string) (string, error)
 	DNSDomainExists(domain string) bool
+	// List and Networks return nil when the listing could not be had, which is
+	// not the same as an empty machine. A check that reads either has to say
+	// which, and a check that reads both has to have both: with one of them
+	// missing the answer is not partial, it is confidently wrong.
+	// They are here rather than being parsed from Output because the shape of
+	// what the CLI prints belongs to internal/runtime, where the recorded real
+	// output and the fake shim are held to each other.
+	List() []runtime.ContainerSummary
+	Networks() []runtime.NetworkSummary
 }
 
 var _ Runner = (*runtime.Runtime)(nil)
@@ -100,7 +109,7 @@ type Report struct {
 func runChecks(rt Runner, dnsDomain string, project *compose.Project, hostMemMB int) []check {
 	checks := []check{checkRuntime(rt)}
 	if checks[0].status != fail { // pointless to probe further if the runtime is down
-		checks = append(checks, checkDNS(rt, dnsDomain), checkNetwork(rt), checkBuilder(rt), checkStorage(rt))
+		checks = append(checks, checkDNS(rt, dnsDomain), checkNetwork(rt), checkBuilder(rt), checkStorage(rt), checkLeftoverNetworks(rt))
 	}
 	if project != nil {
 		checks = append(checks, checkMemory(project, hostMemMB))
@@ -113,11 +122,23 @@ func runChecks(rt Runner, dnsDomain string, project *compose.Project, hostMemMB 
 func Run(w io.Writer, rt Runner, dnsDomain string, project *compose.Project, hostMemMB int) bool {
 	checks := runChecks(rt, dnsDomain, project, hostMemMB)
 
+	// The name column is as wide as the widest name, and the continuation lines
+	// are indented to match it. A constant width was here before, and the first
+	// check whose name outgrew it pushed its own detail one column right of
+	// everyone else's while the fix line stayed put. What a table is for is that
+	// the eye can run down it.
+	width := 0
+	for _, c := range checks {
+		if n := len([]rune(c.name)); n > width {
+			width = n
+		}
+	}
 	allOK := true
 	for _, c := range checks {
-		fmt.Fprintf(w, "%s %-8s %s\n", c.status.icon(), c.name, c.detail)
+		fmt.Fprintf(w, "%s %-*s %s\n", c.status.icon(), width, c.name, c.detail)
 		if c.fix != "" {
-			fmt.Fprintf(w, "            ↳ %s\n", c.fix)
+			// Two for the icon and its space, then the name column and its space.
+			fmt.Fprintf(w, "%s↳ %s\n", strings.Repeat(" ", width+4), c.fix)
 		}
 		if c.status == fail {
 			allOK = false

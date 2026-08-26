@@ -289,7 +289,7 @@ opossum mirrors the common `docker compose` subcommands, delegating each to the
 | `build [service…]` | ✅ | build images for services with `build:` |
 | `pull [service…]` | ✅ | pull images for services with `image:` |
 | `import [service…]` | ✅ (extra) | copy a service's Docker-built image into `container`'s store, so `up` skips the rebuild |
-| `doctor` | ✅ (extra) | diagnose the environment (runtime, DNS domain, outbound network, build VM memory, reclaimable storage, stack memory estimate); prints ✅/⚠️/❌ + a one-line fix each. `--format json` emits machine-readable `{healthy, checks[]}` for scripts/agents; a failed check exits non-zero in either format |
+| `doctor` | ✅ (extra) | diagnose the environment (runtime, DNS domain, outbound network, build VM memory, reclaimable storage, networks nothing is running on, stack memory estimate); prints ✅/⚠️/❌ + a one-line fix each. `--format json` emits machine-readable `{healthy, checks[]}` for scripts/agents; a failed check exits non-zero in either format |
 | `cp <src> <dst>` | ✅ | copy files between a service's container and the host (each path is a host path or `service:path`), like `docker compose cp` |
 | `watch` | ✅ | watch each service's `develop.watch` paths and act on changes (like `docker compose watch`): `sync` copies files in, `rebuild` rebuilds + recreates, `sync+restart` copies + restarts; runs until Ctrl-C. Start the stack with `up` first |
 | `start [service…]` | ✅ | start existing (stopped) containers |

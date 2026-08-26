@@ -117,6 +117,36 @@ var rootComposeNames = []string{
 	"compose.opossum.yaml", "compose.opossum.yml",
 }
 
+// isRootGo reports whether p is a Go file at the top of the tree.
+//
+// The module has no package at its root: everything it builds is under cmd/ or
+// internal/, and `go list .` says so. A .go file here is therefore always
+// something left behind — and the shape it takes is the same as the compose one
+// above. A driver written to try a new tool out, the shell back in the repository
+// root rather than a temp directory, `git add -A`.
+//
+// Worse than an ordinary stray, for the same reason the compose file was: it is
+// not inert. A `package main` at the top of the module is what
+// `go install github.com/suruseas/opossum@latest` installs, under the name
+// `opossum`. The release build names ./cmd/opossum explicitly and is unaffected,
+// so nothing goes red — the scratch simply becomes the product for anyone who
+// installs it the ordinary way.
+//
+// Only the top level: a name with a directory in front of it cannot equal a bare
+// one, which is what keeps cmd/opossum/main.go out of this.
+//
+// Compared without case, like the other rules here, but for a reason of its own
+// and worth writing down rather than borrowing. Elsewhere the argument is that
+// the file system does not tell the spellings apart, so whichever is tracked is
+// the one that gets read. That does not hold here: the go tool matches `.go`
+// exactly, and a tracked SWEEPGEN.GO builds nothing (`go list .` answers "no Go
+// files"). What holds instead is that on a file system which does not
+// distinguish them, the inert spelling is one keystroke from the live one, and
+// the change of case is a rename this one will not force anybody to make.
+func isRootGo(p string) bool {
+	return strings.HasSuffix(strings.ToLower(p), ".go") && !strings.Contains(p, "/")
+}
+
 // isRootCompose reports whether p is one of them, at the top of the tree.
 //
 // Comparing the whole path is what keeps this to the top level: a name with a
@@ -228,6 +258,17 @@ func Offense(p string, size int64, head []byte) string {
 			"reader runs.\n"+
 			"  Remove it (`git rm --cached %s`). Examples belong in examples/; a file for trying "+
 			"something belongs in a temp directory.", p, p)
+	}
+	if isRootGo(p) {
+		return fmt.Sprintf("%s is a Go file at the top of the repository, and nothing is built "+
+			"from here — every package this module has lives under cmd/ or internal/.\n"+
+			"  These arrive from trying a tool out: a small driver written to see what something "+
+			"prints, with the shell in the repository root rather than a temp directory, and "+
+			"`git add -A` sweeping it up. It is worse than an ordinary stray, because a "+
+			"`package main` here is what `go install <module>@latest` installs under the "+
+			"product's name. The release build names ./cmd/opossum, so nothing turns red.\n"+
+			"  Remove it (`git rm --cached %s`). A program worth keeping belongs under cmd/; "+
+			"one written to try something belongs in a temp directory.", p, p)
 	}
 	if underMaintainerDir(p) {
 		return fmt.Sprintf("%s is maintainer-only tooling, and maintainer-only tooling is not tracked.\n"+
