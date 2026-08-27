@@ -887,19 +887,18 @@ func TestAnInterruptRemovesTheBaselineWorktree(t *testing.T) {
 	git("commit", "-q", "-m", "baseline")
 	t.Chdir(mod)
 
-	glob := func() map[string]bool {
-		t.Helper()
-		found, err := filepath.Glob(filepath.Join(os.TempDir(), "opossum-mutate-baseline-*"))
-		if err != nil {
-			t.Fatal(err)
+	ownTemp(t)
+	preexisting := baselineDirs(t)
+	// Same reason as the other interrupt test: the assertions below are what
+	// reports a handler that did not run, and the removal here is what keeps a
+	// failure from being handed to the next test as its own leftover.
+	t.Cleanup(func() {
+		for d := range baselineDirs(t) {
+			if !preexisting[d] {
+				_ = os.RemoveAll(d)
+			}
 		}
-		set := map[string]bool{}
-		for _, f := range found {
-			set[f] = true
-		}
-		return set
-	}
-	preexisting := glob()
+	})
 
 	sigs := make(chan os.Signal, 1)
 	type atExit struct {
@@ -909,7 +908,7 @@ func TestAnInterruptRemovesTheBaselineWorktree(t *testing.T) {
 	exited := make(chan atExit, 4)
 	exit := func(c int) {
 		var left []string
-		for d := range glob() {
+		for d := range baselineDirs(t) {
 			if !preexisting[d] {
 				left = append(left, d)
 			}
@@ -922,7 +921,7 @@ func TestAnInterruptRemovesTheBaselineWorktree(t *testing.T) {
 	landed := make(chan bool, 1)
 	go func() {
 		for deadline := time.Now().Add(60 * time.Second); time.Now().Before(deadline); {
-			for d := range glob() {
+			for d := range baselineDirs(t) {
 				if !preexisting[d] {
 					landed <- true
 					sigs <- os.Interrupt
@@ -954,5 +953,283 @@ func TestAnInterruptRemovesTheBaselineWorktree(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("the signal was never heard: nothing tried to exit")
+	}
+}
+
+// What the cleanup says afterwards, pinned word for word per state. The
+// verdict is the path's final existence, not the steps' returns — so the
+// silent cases are as much the contract as the loud ones: nothing made means
+// nothing to say, and gone-without-complaint means gone.
+func TestTheLeftoverReportSaysExactlyWhatTheLookFound(t *testing.T) {
+	present := t.TempDir()
+	gone := filepath.Join(t.TempDir(), "never-made")
+	for _, tc := range []struct {
+		name    string
+		path    string
+		reasons []string
+		want    string // "" = silence
+	}{
+		{"nothing was made", "", []string{"an error that must not print"}, ""},
+		{"gone with no complaints", gone, nil, ""},
+		{"gone but a step complained", gone, []string{"git worktree prune: exit status 128"},
+			"mutate: the baseline worktree is gone, but its removal reported: git worktree prune: exit status 128\n" +
+				"  (`git worktree prune` reconciles metadata a removed directory leaves behind)\n"},
+		{"still there, with the reason", present, []string{"remove " + present + ": permission denied"},
+			"mutate: the baseline worktree was not removed and is still at " + present + "\n" +
+				"  (remove " + present + ": permission denied)\n" +
+				"  take it back by hand: rm -rf \"" + present + "\" && git worktree prune\n"},
+		{"still there, and no step objected", present, nil,
+			"mutate: the baseline worktree was not removed and is still at " + present + "\n" +
+				"  (no step reported an error, and yet it is still there — something recreated it, " +
+				"or a removal claimed more than it did)\n" +
+				"  take it back by hand: rm -rf \"" + present + "\" && git worktree prune\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			reportLeftover(&out, "baseline worktree", tc.path, tc.reasons)
+			if out.String() != tc.want {
+				t.Errorf("said:\n%q\nwant:\n%q", out.String(), tc.want)
+			}
+		})
+	}
+}
+
+// The report is wired to the real cleanup: a removal that fails leaves the
+// run saying where the leftover is and how to take it back, on stderr, before
+// the run returns. Injected through the removeAll seam, because a removal the
+// test cannot make fail only ever exercises the runs that never needed the
+// report.
+func TestACleanupThatFailsSaysWhereTheLeftoverIs(t *testing.T) {
+	mod := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(mod, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", mod, "-c", "user.name=t", "-c", "user.email=t@t"}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	write("go.mod", "module example.com/m\n\ngo 1.24\n")
+	write("m.go", "package m\n\nfunc Answer() int { return 42 }\n")
+	write("m_test.go", "package m\n\nimport \"testing\"\n\n"+
+		"func TestAnswer(t *testing.T) {\n\tif Answer() != 42 {\n\t\tt.Fatal(\"wrong\")\n\t}\n}\n")
+	git("init", "-q")
+	git("add", ".")
+	git("commit", "-q", "-m", "baseline")
+	t.Chdir(mod)
+
+	realRemove := removeAll
+	var kept string
+	removeAll = func(path string) error {
+		kept = path
+		return errors.New("injected: this removal does not remove")
+	}
+	t.Cleanup(func() {
+		removeAll = realRemove
+		if kept != "" {
+			_ = os.RemoveAll(kept)
+		}
+	})
+
+	var out, errOut bytes.Buffer
+	code := run([]string{"-baseline", "HEAD", spec(t, sweepFor("func Answer() int { return 43 }"))},
+		&out, &errOut, nil, func(int) {})
+	if code != exitAllCaught {
+		t.Fatalf("exit = %d, want %d — the sweep itself succeeded; only the cleanup failed\nstderr:\n%s",
+			code, exitAllCaught, errOut.String())
+	}
+	said := errOut.String()
+	if kept == "" {
+		t.Fatal("the injected removal was never asked, so this measured nothing")
+	}
+	if !strings.Contains(said, "was not removed and is still at "+kept) {
+		t.Errorf("the run should name the leftover and its path, said:\n%s", said)
+	}
+	if !strings.Contains(said, "injected: this removal does not remove") {
+		t.Errorf("the run should carry the reason the removal gave, said:\n%s", said)
+	}
+	if !strings.Contains(said, "take it back by hand") {
+		t.Errorf("the run should hand the reader the way out, said:\n%s", said)
+	}
+}
+
+// A worktree's directory and its registration can part ways — remove the
+// directory by hand and git still lists it, and that stale listing refuses
+// the next `git worktree add` at the path. The helper speaks exactly when
+// the listing survives the directory, and falls silent once pruned.
+func TestAStaleWorktreeListingIsReported(t *testing.T) {
+	mod := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", mod, "-c", "user.name=t", "-c", "user.email=t@t"}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(mod, "f.txt"), []byte("f\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git("init", "-q")
+	git("add", ".")
+	git("commit", "-q", "-m", "base")
+	tree := filepath.Join(t.TempDir(), "tree")
+	git("worktree", "add", "-q", tree, "HEAD")
+	// Resolved while it exists — the helper's contract, because git answers
+	// in resolved paths and a removed directory can no longer be asked.
+	if r, err := filepath.EvalSymlinks(tree); err == nil {
+		tree = r
+	}
+	if err := os.RemoveAll(tree); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	reportStaleListing(&out, mod, "baseline worktree", tree)
+	want := "mutate: the baseline worktree's directory is gone, but git still lists it at " + tree + "\n" +
+		"  (`git worktree prune` clears a registration whose directory has been removed)\n"
+	if out.String() != want {
+		t.Errorf("with the stale listing, said:\n%q\nwant:\n%q", out.String(), want)
+	}
+
+	git("worktree", "prune")
+	out.Reset()
+	reportStaleListing(&out, mod, "baseline worktree", tree)
+	if out.String() != "" {
+		t.Errorf("after the prune there is nothing to report, said:\n%q", out.String())
+	}
+}
+
+// The directory and the registration can part ways in the other direction
+// too: everything under the parent is gone, and yet git still lists the
+// worktree — the shape a removal racing a recreation leaves behind, and a
+// stale listing refuses the next `git worktree add` at that path without
+// saying why. Recreated at the seam: by the time the seam is asked, the
+// worktree has been unregistered, so re-registering it and removing only the
+// directory is exactly that end state. Every step returns nil — the run must
+// speak from what it sees, not from what it was told.
+func TestAGoneDirectoryWithAStaleListingIsStillReported(t *testing.T) {
+	mod := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(mod, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", mod, "-c", "user.name=t", "-c", "user.email=t@t"}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	write("go.mod", "module example.com/m\n\ngo 1.24\n")
+	write("m.go", "package m\n\nfunc Answer() int { return 42 }\n")
+	write("m_test.go", "package m\n\nimport \"testing\"\n\n"+
+		"func TestAnswer(t *testing.T) {\n\tif Answer() != 42 {\n\t\tt.Fatal(\"wrong\")\n\t}\n}\n")
+	git("init", "-q")
+	git("add", ".")
+	git("commit", "-q", "-m", "baseline")
+	t.Chdir(mod)
+
+	realRemove := removeAll
+	var staleTree string
+	removeAll = func(path string) error {
+		tree := filepath.Join(path, "tree")
+		git("worktree", "add", "-q", "--detach", tree, "HEAD")
+		staleTree = tree
+		return realRemove(path)
+	}
+	t.Cleanup(func() {
+		removeAll = realRemove
+		git("worktree", "prune")
+	})
+
+	var out, errOut bytes.Buffer
+	code := run([]string{"-baseline", "HEAD", spec(t, sweepFor("func Answer() int { return 43 }"))},
+		&out, &errOut, nil, func(int) {})
+	if code != exitAllCaught {
+		t.Fatalf("exit = %d, want %d\nstderr:\n%s", code, exitAllCaught, errOut.String())
+	}
+	said := errOut.String()
+	if staleTree == "" {
+		t.Fatal("the seam was never asked, so this measured nothing")
+	}
+	if !strings.Contains(said, "directory is gone, but git still lists it at "+staleTree) {
+		t.Errorf("the run should notice the stale listing, said:\n%s", said)
+	}
+	if !strings.Contains(said, "git worktree prune") {
+		t.Errorf("the run should hand the reader the prune, said:\n%s", said)
+	}
+	if strings.Contains(said, "was not removed") {
+		t.Errorf("the directory did go — the leftover report has nothing to say, said:\n%s", said)
+	}
+}
+
+// The reasons the report carries come from the steps that failed — including
+// git's own sentences, which are the most informative ones. Injected through
+// the gitOut seam: worktree remove and prune both refuse, everything else
+// passes through, so the run otherwise proceeds as itself. With remove never
+// run, the registration survives the directory — the report must carry both
+// git sentences and still notice the stale listing.
+func TestTheReportCarriesWhatTheGitStepsSaid(t *testing.T) {
+	mod := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(mod, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", mod, "-c", "user.name=t", "-c", "user.email=t@t"}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	write("go.mod", "module example.com/m\n\ngo 1.24\n")
+	write("m.go", "package m\n\nfunc Answer() int { return 42 }\n")
+	write("m_test.go", "package m\n\nimport \"testing\"\n\n"+
+		"func TestAnswer(t *testing.T) {\n\tif Answer() != 42 {\n\t\tt.Fatal(\"wrong\")\n\t}\n}\n")
+	git("init", "-q")
+	git("add", ".")
+	git("commit", "-q", "-m", "baseline")
+	t.Chdir(mod)
+
+	realGitOut := gitOut
+	gitOut = func(dir string, args ...string) (string, error) {
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "remove" {
+			return "", errors.New("injected: remove refuses")
+		}
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "prune" {
+			return "", errors.New("injected: prune refuses too")
+		}
+		return realGitOut(dir, args...)
+	}
+	t.Cleanup(func() {
+		gitOut = realGitOut
+		cmd := exec.Command("git", "-C", mod, "worktree", "prune")
+		_ = cmd.Run()
+	})
+
+	var out, errOut bytes.Buffer
+	code := run([]string{"-baseline", "HEAD", spec(t, sweepFor("func Answer() int { return 43 }"))},
+		&out, &errOut, nil, func(int) {})
+	if code != exitAllCaught {
+		t.Fatalf("exit = %d, want %d\nstderr:\n%s", code, exitAllCaught, errOut.String())
+	}
+	said := errOut.String()
+	if !strings.Contains(said, "injected: remove refuses") {
+		t.Errorf("the report should carry what worktree remove said, said:\n%s", said)
+	}
+	if !strings.Contains(said, "injected: prune refuses too") {
+		t.Errorf("the report should carry what prune said, said:\n%s", said)
+	}
+	if !strings.Contains(said, "directory is gone, but git still lists it at ") {
+		t.Errorf("with remove never run, the registration outlives the directory, said:\n%s", said)
 	}
 }

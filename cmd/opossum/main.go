@@ -1171,8 +1171,8 @@ func adaptProject(stderr io.Writer, o *orchestrator.Orchestrator, dryRun bool) (
 			// sent back for had nothing of theirs to write down. Whether it would
 			// write something else is not something this can see, and it is not
 			// what the reader was told to go and get.
-			fmt.Fprintf(stderr, "opossum: found %d thing(s) in this project that no compose change can fix. "+
-				"An overlay is never written for these alone, so here is what one would have said:\n", len(changes))
+			fmt.Fprintf(stderr, "opossum: found %d thing(s) %s. An overlay is never written for "+
+				"these alone, so here is what one would have said:\n", len(changes), orchestrator.NoteFrame)
 			reportEntries(stderr, changes)
 			if !reportNoteProse(stderr, "", body) {
 				fmt.Fprintln(stderr, "opossum: the lines above are all of it.")
@@ -1400,7 +1400,7 @@ func reportOverlay(stderr io.Writer, verb string, changes []orchestrator.Adaptat
 		}
 	}
 	if len(noted) > 0 {
-		fmt.Fprintf(stderr, "opossum: %d note(s) about things a compose change can't fix:\n", len(noted))
+		fmt.Fprintf(stderr, "opossum: %d note(s) about things %s:\n", len(noted), orchestrator.NoteFrame)
 		for _, c := range noted {
 			fmt.Fprintf(stderr, "opossum:   [%s] %s\n", c.Code, c.Summary)
 		}
@@ -1428,7 +1428,7 @@ func hasActionable(changes []orchestrator.Adaptation) bool {
 // line, and which notes those were depended on whether some other service in the
 // project happened to need a real change.
 func reportNotesOnly(stderr io.Writer, body string, changes []orchestrator.Adaptation) {
-	fmt.Fprintf(stderr, "opossum: nothing to fix or suggest, but %d thing(s) here can't be fixed by a compose change:\n", len(changes))
+	fmt.Fprintf(stderr, "opossum: nothing to fix or suggest, but %d thing(s) %s:\n", len(changes), orchestrator.NoteFrame)
 	for _, c := range changes {
 		fmt.Fprintf(stderr, "opossum:   [%s] %s\n", c.Code, c.Summary)
 	}
@@ -1504,7 +1504,7 @@ func reportEntries(stderr io.Writer, changes []orchestrator.Adaptation) {
 	label := map[string]string{
 		"applied":    "change(s) opossum would apply",
 		"suggestion": "suggestion(s) — NOT applied; they change what the project means",
-		"note":       "note(s) about things a compose change can't fix",
+		"note":       "note(s) about things " + orchestrator.NoteFrame,
 	}
 	for _, kind := range []string{"applied", "suggestion", "note"} {
 		var got []orchestrator.Adaptation

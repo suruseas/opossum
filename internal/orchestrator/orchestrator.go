@@ -2231,15 +2231,38 @@ func (o *Orchestrator) initdbNotEmptyHint(svcName string, svc *compose.Service, 
 }
 
 // warnDockerSocket warns when a service mounts the Docker daemon socket. Apple
-// `container` has no Docker socket to expose, so the mount fails at runtime with
-// an opaque virtiofs error — surface the real reason up front. (Tools like
-// Portainer that talk to Docker over the socket can't work here.)
+// `container` has none to expose: it runs these containers over XPC, so nothing
+// here answers on that path about them. Something else may — where the path is a
+// symlink something put it there, and if it is listening a container started here
+// can reach it — and then a tool mounting this socket to watch its neighbours
+// (Portainer, Traefik) is shown a different set instead of nothing at all.
+//
+// It used to say the mount fails at runtime. It does not: bind-mounting a host
+// socket works, and #614 has the measurement.
 func (o *Orchestrator) warnDockerSocket(name string, svc *compose.Service) {
 	for _, v := range svc.Volumes {
+		// Deliberately not isDockerSocketMount: this reads the mount as written,
+		// which is wider in two ways that matter.
+		//
+		// A named volume called `docker.sock-vol` counts here and not there.
+		// And an anonymous volume — `- /var/run/docker.sock`, which names a
+		// container path and no host path — counts here and never reaches the
+		// shared predicate at all, because splitMount refuses it. That second
+		// difference predates the predicate; the two callers have disagreed
+		// about anonymous volumes for as long as both have existed.
+		//
+		// A third difference is new: a directory called `docker.sock.d/` counts
+		// here and not there, because the shared predicate now reads the last
+		// path element. On that input opossum says opposite things about one
+		// socket. Narrowing this to match would also change which mounts warn at
+		// all, and there is no eval behind either behaviour — so the decision
+		// lives in #599 instead of being settled as a side effect here.
 		if strings.Contains(v, "docker.sock") {
-			o.warnf(codeDockerSocket, "service %q mounts the Docker socket (%s), but Apple `container` "+
-				"has no Docker daemon socket to share — the container can't reach Docker, and "+
-				"the mount will fail. Tools that drive Docker over its socket don't work here.\n", name, v)
+			o.warnf(codeDockerSocket, "service %q mounts the Docker socket (%s), which does not "+
+				"answer for the containers here. Apple `container` runs them, and it has no socket "+
+				"to share; if a Docker daemon answers on that path, it is a different one and knows "+
+				"a different set. A tool that wants this socket in order to watch its neighbours will "+
+				"be told about theirs.\n", name, v)
 			return
 		}
 	}
@@ -2295,6 +2318,14 @@ func (o *Orchestrator) refuseSymlinkedSocketMounts(service string, vols []string
 			continue
 		}
 		resolved, _ := filepath.EvalSymlinks(src)
+		// The same way out whatever the socket is. A Docker socket used to get
+		// a different one, on the reading that mounting what the link points at
+		// could not help because Apple container has no daemon behind it. That
+		// was wrong in exactly the case that produces the message: the name is
+		// a symlink on the machines that have Docker Desktop, and a container
+		// started here reaches the daemon through the resolved path — measured.
+		// What is worth saying about that daemon belongs with the note that
+		// speaks about Docker, not here, where the reader may not have one.
 		hint := ""
 		if resolved != "" {
 			hint = fmt.Sprintf("\n  mounting %s — what the link points at — works, so that is the way out "+

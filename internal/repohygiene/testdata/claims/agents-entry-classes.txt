@@ -1,0 +1,13 @@
+- Entries come in three classes, each with a **stable marker** to grep for:
+  - `# [opossum --from-docker-compose]` — **applied**. In effect; this is what made
+    the project run.
+  - `# [opossum suggestion — NOT APPLIED]` — a concrete change opossum will not make
+    for you, written out but **commented**. It alters what the project means (where
+    data lives, how services share it). Uncomment the whole block to apply it; the
+    block is self-contained, including any `volumes:` declaration it needs.
+  - `# [opossum note]` — **something opossum writes no YAML for** (`OPSM-204` a
+    Docker socket mount, `OPSM-106` a host device or session socket, `OPSM-409`
+    `restart: on-failure`, `OPSM-111` a Postgres data dir left as a bind mount).
+    Whether you can do anything about it yourself is the note's own business, and
+    each one says so where there is something to say. Recorded so the failure
+    isn't a mystery. Notes carry no YAML, so there is nothing to uncomment.

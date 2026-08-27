@@ -34,10 +34,12 @@ import (
 // the other way round. Every case is run twice, once with a dozen runner names
 // set, and the two have to agree. The workflow is parsed as YAML: its top level
 // may hold only `name`, `on` and `jobs`; `on` must carry an unnarrowed
-// `pull_request`; the job may hold only `if`, `runs-on` and `steps`, with its one
-// condition pinned; the first step must be `actions/checkout@v4` with nothing but
-// `fetch-depth: 0`; the second may hold only `name`, `env` and `run`. The exit
-// status is read, and so is what it printed.
+// `pull_request`; the `ci` job may hold only `runs-on`, `env` and `steps`, its
+// env pinned to GOTOOLCHAIN=local; the first step must be `actions/checkout@v4`
+// with nothing but `fetch-depth: 0`; the gate step is found by its name,
+// exactly once, may hold only `name`, `if`, `env` and `run`, and its one
+// condition — every pull request, even after an earlier step failed — is
+// pinned. The exit status is read, and so is what it printed.
 //
 // **The invariant.** Every package the released binary links — including any under
 // a testdata/ directory, and the files chosen by the platform .goreleaser.yaml
@@ -158,14 +160,67 @@ func TestTheChangelogGateAsksForANoteAboutEverythingThatShips(t *testing.T) {
 	}
 }
 
+// The folded job's two standing promises, read from the YAML. First: no step
+// may quietly ignore its own failure — `continue-on-error` on a checking step
+// turns its red into the job's green, and with everything in one job there is
+// no second check mark to disagree. The one exception is named: the goreleaser
+// validation has carried it since before the fold, deliberately, for a
+// deprecation notice. Second: the stable gate runs even when the go.mod
+// section failed. "One red, one green" says the two compilers disagree; "one
+// red, one skipped" says nothing — the contrast is the reason the second
+// section exists, and the `if` that preserves it is one word to delete.
+func TestTheFoldedJobKeepsItsPromises(t *testing.T) {
+	root := repoRoot(t)
+	b, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "ci.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var top map[string]any
+	if err := yaml.Unmarshal(b, &top); err != nil {
+		t.Fatalf("reading the workflow: %v", err)
+	}
+	jobs, _ := top["jobs"].(map[string]any)
+	job, _ := jobs["ci"].(map[string]any)
+	steps, _ := job["steps"].([]any)
+	if len(steps) == 0 {
+		t.Fatal("no `ci` job steps; the promises this reads live there")
+	}
+	var gateIfs []string
+	for i, s := range steps {
+		m, _ := s.(map[string]any)
+		name, _ := m["name"].(string)
+		if _, has := m["continue-on-error"]; has && name != "validate .goreleaser.yaml" {
+			t.Errorf("step %d (%q) carries continue-on-error: its red would read as the job's "+
+				"green, and this job is the only check mark there is", i, name)
+		}
+		if run, _ := m["run"].(string); strings.TrimSpace(run) == "make test" {
+			cond, _ := m["if"].(string)
+			gateIfs = append(gateIfs, cond)
+		}
+	}
+	// The count is gatematch's question; the conditions are this one's.
+	if len(gateIfs) == 2 {
+		if gateIfs[0] != "" {
+			t.Errorf("the first gate step runs on %q; the go.mod section leads, and a condition "+
+				"there is a way for the leading compiler to be skipped", gateIfs[0])
+		}
+		if gateIfs[1] != "${{ !cancelled() }}" {
+			t.Errorf("the second gate step runs on %q, not %q — without it, a red first section "+
+				"turns \"one red, one green\" into \"one red, one skipped\", and the contrast the "+
+				"section exists for is gone", gateIfs[1], "${{ !cancelled() }}")
+		}
+	}
+}
+
 // The gate has to be one that can turn a build red. This part reads the file
 // rather than running anything, and knows only the two ways of neutering a job
 // that live in it.
 func TestTheChangelogGateCanStillFailTheBuild(t *testing.T) {
-	// readGate is where this lives now: the job may hold `if`, `runs-on` and
-	// `steps` and nothing else, and the one condition it may carry is pinned. A
-	// `continue-on-error`, a `needs`, a third step, a step-level `if` — each is a
-	// key that is not on the list, and the list is what fails.
+	// readGate is where this lives now: the job may hold `runs-on`, `env` and
+	// `steps` and nothing else, and the one condition the gate step may carry
+	// is pinned. A `continue-on-error`, a `needs`, a job-level `if`, an extra
+	// key on the gate step — each is a key that is not on the list, and the
+	// list is what fails.
 	readGate(t, repoRoot(t))
 }
 
@@ -255,29 +310,62 @@ func readGate(t *testing.T, root string) gate {
 	// others.
 	allowed(t, "the workflow", top, "name", "on", "jobs")
 	on, _ := top["on"].(map[string]any)
-	if _, ok := on["pull_request"]; !ok {
+	// Two triggers, both pinned. The pull_request types are the billing
+	// decision written as structure: a draft's opening and its pushes are
+	// free, marking it ready is the request for attestation, and
+	// `synchronize` is absent on purpose — its presence billed every review
+	// round. A type added or removed here changes when the gate runs, which
+	// is exactly the kind of change that must be taught, not discovered.
+	// The dispatch trigger is the release's one manual main-tree run.
+	allowed(t, "the triggers", on, "pull_request", "workflow_dispatch")
+	pr, ok := on["pull_request"].(map[string]any)
+	if !ok {
 		t.Fatalf("the workflow's triggers are %v; this check knows the gate as something that runs on a pull request", on)
 	}
-	if sub, ok := on["pull_request"].(map[string]any); ok && len(sub) > 0 {
-		t.Fatalf("the pull_request trigger is narrowed with %v; a path or type filter can stop the gate running for exactly the changes it is about", sub)
+	allowed(t, "the pull_request trigger", pr, "types")
+	types, _ := pr["types"].([]any)
+	if len(types) != 3 || types[0] != "opened" || types[1] != "ready_for_review" || types[2] != "synchronize" {
+		t.Fatalf("the pull_request types are %v; this check knows [opened, ready_for_review, "+
+			"synchronize] — opened for a pull request born ready, ready_for_review as the "+
+			"request for attestation, and synchronize so the attestation follows the head "+
+			"(the draft skip is what keeps a draft's pushes free; drop synchronize and a "+
+			"push after the ready mark leaves the green pointing at some other tree)", types)
+	}
+	if _, ok := on["workflow_dispatch"]; !ok {
+		t.Fatal("no workflow_dispatch trigger; the release's final main-tree run has no way in")
+	}
+	if sub, ok := on["workflow_dispatch"].(map[string]any); ok && len(sub) > 0 {
+		t.Fatalf("the workflow_dispatch trigger carries %v; inputs are a way to make the manual "+
+			"run something other than the workflow as written", sub)
 	}
 	jobs, _ := top["jobs"].(map[string]any)
-	job, ok := jobs["changelog-fragment"].(map[string]any)
+	job, ok := jobs["ci"].(map[string]any)
 	if !ok {
-		t.Fatal("no changelog-fragment job in the workflow; this check no longer finds it")
+		t.Fatal("no `ci` job in the workflow; the gate lives among its steps and this check no longer finds it")
 	}
-	// What a job here may say. `needs:` is not on the list, and neither is
-	// anything else that decides whether it runs: a job that can be skipped is a
-	// gate that can be skipped.
-	allowed(t, "the job", job, "if", "runs-on", "steps")
-	cond, _ := job["if"].(string)
-	if cond != "github.event_name == 'pull_request'" {
-		t.Fatalf("the job runs on %q; this check knows one condition, and a different one may mean it never runs", cond)
+	// What the job may say, and the one skip it may make. The job-level `if`
+	// exists to make drafts free, and its exact text is pinned because every
+	// other condition is a way for the gate to not run on something that can
+	// merge — a draft cannot, GitHub refuses that natively, so skipping it
+	// skips nothing the gate is for. On workflow_dispatch the event has no
+	// pull_request, the expression is empty, !empty is true, and the manual
+	// run goes ahead. The environment the job hands every script is pinned
+	// for the same reason the keys are: a variable added here reaches the
+	// gate's script too, and this check would be running that script without
+	// it.
+	allowed(t, "the job", job, "if", "runs-on", "env", "steps")
+	if jobIf, _ := job["if"].(string); jobIf != "${{ !github.event.pull_request.draft }}" {
+		t.Fatalf("the job runs on %q; this check knows one skip — drafts, which cannot merge — "+
+			"and a different condition may skip something that can", jobIf)
+	}
+	jobEnv, _ := job["env"].(map[string]any)
+	if len(jobEnv) != 1 || jobEnv["GOTOOLCHAIN"] != "local" {
+		t.Fatalf("the job hands every script env %v; this check knows GOTOOLCHAIN=local and nothing else", jobEnv)
 	}
 
 	steps, _ := job["steps"].([]any)
-	if len(steps) != 2 {
-		t.Fatalf("the job has %d steps; this check reads the second one as the gate and would be reading the wrong script", len(steps))
+	if len(steps) == 0 {
+		t.Fatal("the job has no steps")
 	}
 	checkout, _ := steps[0].(map[string]any)
 	allowed(t, "the checkout step", checkout, "uses", "with")
@@ -295,8 +383,28 @@ func readGate(t *testing.T, root string) gate {
 	if d, ok := with["fetch-depth"].(int); !ok || d != 0 {
 		t.Fatalf("the checkout asks for fetch-depth %v; the gate diffs two revisions, and a shallow clone is one that may not have them", with["fetch-depth"])
 	}
-	step, _ := steps[1].(map[string]any)
-	allowed(t, "the gate step", step, "name", "env", "run")
+	// The gate is found by its name, exactly once. Among the many steps of a
+	// single job, position cannot locate it, and a second step under the same
+	// name would leave this check reading whichever one it happened to take.
+	const gateName = "a shipped change needs a changelog.d fragment"
+	var step map[string]any
+	found := 0
+	for _, s := range steps[1:] {
+		m, _ := s.(map[string]any)
+		if n, _ := m["name"].(string); n == gateName {
+			step = m
+			found++
+		}
+	}
+	if found != 1 {
+		t.Fatalf("found %d steps named %q; the gate is one step, and this check reads exactly it", found, gateName)
+	}
+	allowed(t, "the gate step", step, "name", "if", "env", "run")
+	cond, _ := step["if"].(string)
+	if cond != "${{ !cancelled() && github.event_name == 'pull_request' }}" {
+		t.Fatalf("the gate step runs on %q; this check knows one condition — on every pull request, "+
+			"even when an earlier step failed — and a different one may mean it never runs", cond)
+	}
 
 	g := gate{condition: cond, env: map[string]string{}}
 	// The expressions this check knows how to stand in for. A fourth stops it:

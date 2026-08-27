@@ -237,11 +237,23 @@ func TestAProcessStillRunningOutOfTheLeftoverIsNamed(t *testing.T) {
 	// The command makes the directory, starts something out of it, and dies —
 	// the same order a timing-out suite dies in. The child's output goes to
 	// /dev/null so it does not hold this test open until the child is gone.
+	//
+	// And it does not die until the child is real. The look that follows the
+	// command's death finds the child by its command line, which only carries
+	// the directory once the script has exec'd — a child still between fork
+	// and exec is invisible to it, and on a saturated machine the command's
+	// exit used to win that race (the clean-container sieve lost it about
+	// every other run). So the script's first act is to say it has started —
+	// a file only the post-exec script can write — and the command waits for
+	// that word before dying. The situation is then established, not likely.
+	ready := filepath.Join(dir, "ready")
 	t.Cleanup(func() { killUnder(dir) })
 	var out bytes.Buffer
 	code := run([]string{"sh", "-c", fmt.Sprintf(
-		"mkdir %[1]q; printf '#!/bin/sh\\nsleep 30\\n' > %[2]q; chmod +x %[2]q; %[2]q >/dev/null 2>&1 & echo $! > %[3]q",
-		dir, bin, pidFile)}, &out)
+		"mkdir %[1]q; printf '#!/bin/sh\\n: > %[4]q\\nsleep 30\\n' > %[2]q; chmod +x %[2]q; "+
+			"%[2]q >/dev/null 2>&1 & echo $! > %[3]q; "+
+			"n=0; while [ $n -lt 400 ] && [ ! -e %[4]q ]; do sleep 0.01; n=$((n+1)); done",
+		dir, bin, pidFile, ready)}, &out)
 
 	// Read before anything else is asserted: if the child was never there, this
 	// case looked at an empty world and every check below passes for the wrong

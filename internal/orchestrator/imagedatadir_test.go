@@ -789,7 +789,7 @@ func TestTheNoteIsWordForWordWhatWeMeanToSay(t *testing.T) {
 	overlay, changes := planWithImage(t, readable, "../../testdata/image-inspect/postgres17.json")
 	wantReadable := strings.Join([]string{
 		`# ── Notes ───────────────────────────────────────────────────────────────`,
-		`# Nothing to change for these: the compose file can't express a fix.`,
+		`# These are things opossum writes no YAML for.`,
 		`# [opossum note] service "db": /var/lib/postgresql/data left as a bind mount.`,
 		`# Why: The data directory is the one this service sets: PGDATA=/srv/elsewhere.`,
 		`#   The cluster this service will write does not land in /var/lib/postgresql/data.`,
@@ -815,7 +815,7 @@ func TestTheNoteIsWordForWordWhatWeMeanToSay(t *testing.T) {
 	overlay, changes = planWithImage(t, fromEnv, "../../testdata/image-inspect/postgres18.json")
 	wantFromEnv := strings.Join([]string{
 		`# ── Notes ───────────────────────────────────────────────────────────────`,
-		`# Nothing to change for these: the compose file can't express a fix.`,
+		`# These are things opossum writes no YAML for.`,
 		`# [opossum note] service "db": /var/lib/postgresql/data left as a bind mount.`,
 		`# Why: This service passes PGDATA in from the environment, so where its cluster`,
 		`#   goes cannot be read here; /var/lib/postgresql/18/docker is what the image declares.`,

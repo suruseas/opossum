@@ -77,7 +77,7 @@ The remaining failures are not one problem. Arm B, by kind:
 | Ran completely | 78 | — |
 | Started, then every service exited | 40 | The image's own prerequisites are unmet — secrets, config files, a database that was never initialised. Not an orchestration failure |
 | A published host port was already taken | 9 | Something else on the Mac holds it |
-| Mounts the Docker socket | 8 | Apple `container` has no equivalent; opossum refuses before starting anything |
+| Mounts the Docker socket | 8 | nothing here answers on that path about these containers; where the path is a symlink to a socket `opossum` refuses before starting anything |
 | Some services ran, some didn't | 7 | Usually one service in the stack hitting one of the rows below |
 | A data directory is a bind mount | 4 + 3 | Refused up front, or discovered on the first start |
 | A network declared `external: true` doesn't exist | 2 | Create it first, or drop the declaration |
@@ -171,8 +171,11 @@ each marked:
   opossum watched happen — a container that died taking ownership of a bind mount,
   a named volume two running services both need — never because a directory looked
   like it might one day hold data.
-- **note** — nothing to change: the compose file can't express a fix (a Docker
-  socket mount, a host device). Recorded so the failure isn't a mystery. Notes carry no YAML, so there's nothing to uncomment.
+- **note** — something opossum writes no YAML for (`OPSM-204` a Docker socket
+  mount, `OPSM-106` a host device or session socket, `OPSM-409`
+  `restart: on-failure`, `OPSM-111` a Postgres data dir left as a bind mount).
+  Recorded so the failure isn't a mystery. Notes carry no YAML, so there's
+  nothing to uncomment.
 
 Each entry says what it's about and why (with the diagnostic code); applied entries
 add how to check it and how to undo it, suggestions add how to apply or ignore
@@ -333,7 +336,8 @@ features aren't supported. The detailed rationale for each is in
 - **DB data dirs**: a volume is its own ext4 filesystem here, so it arrives holding `lost+found` where Docker's arrives empty — and Postgres's `initdb` refuses a data directory that isn't empty. opossum **removes `lost+found` from the volumes it creates**, so a plain `pgdata:/var/lib/postgresql/data` works as it does on Docker. A volume opossum did not create (made by an older opossum, by `container volume create`, or by another project) still has it: `up` then reports Postgres's own refusal with `OPSM-101` and what to do about it. (MySQL/MariaDB tolerate the mount point either way.)
 - **DB data dirs can't be bind-mounted** (use a **named volume**): Apple `container`'s bind mounts are host-owned (virtiofs) and can't be `chown`ed from inside the container, so a DB image (MySQL/Postgres/…) that chowns its data directory fails to start with `chown: … Operation not permitted`. A named volume *is* chownable, so mount the data directory from one. Self-host composes that put data under a bind-mounted `/mnt/docker-volumes/<svc>/…` (a Linux-host convention) hit this on macOS — when a DB crashes this way, `up` points at the fix.
 - **Build context**: Apple's builder can't read a context under `/private/tmp` or a symlinked directory — build from a real path under your home dir (`up` warns).
-- **Won't run at all**: composes that need Linux-host kernel access (WireGuard's `NET_ADMIN` + `/lib/modules`) — Apple `container` doesn't provide it (also true of Docker Desktop for the host-path cases). Tools that drive Docker through `/var/run/docker.sock` (e.g. Portainer) also can't manage opossum's containers: bind-mounting a host Unix socket into a container *does* work now (since `container` 1.1.0), but Apple `container` exposes no Docker-compatible daemon socket — it talks to the host over XPC — so the mount has nothing on the other end.
+- **Won't run at all**: composes that need Linux-host kernel access (WireGuard's `NET_ADMIN` + `/lib/modules`) — Apple `container` doesn't provide it (also true of Docker Desktop for the host-path cases).
+- **Won't manage *these* containers**: tools that drive Docker through `/var/run/docker.sock` (e.g. Portainer). Apple `container` exposes no Docker-compatible daemon socket of its own — it talks to the host over XPC — so nothing here answers on that path about the containers it runs. The mount itself is not the obstacle: bind-mounting a host Unix socket into a container *does* work (since `container` 1.1.0), and a Docker daemon was reached that way from inside a container on 2026-08-27. That is the one socket that has been measured here; what a session socket mount (X11, PulseAudio) reaches is a separate question, and has not been measured — see **OPSM-106**. What puts a symlink at that name varies — Docker Desktop does; Rancher Desktop and OrbStack do when given administrative access; colima leaves it to you — and one merely installed answers nothing — so what you get, if anything answers, is that daemon's containers, not opossum's.
 - **cgroup-sensitive JVM images (e.g. Elasticsearch 7.x)**: the container's bundled JDK reads the host cgroup to size the heap, and Apple `container`'s VM doesn't expose the cgroup mount the way it expects — the process crashes at launch with `CgroupInfo.getMountPoint() … null` before any config applies (`ES_JAVA_OPTS`/`JAVA_TOOL_OPTIONS` don't help; observed on Elasticsearch 7.16 and 7.17). `opossum ps` shows such a service as `stopped`; check `opossum logs <svc>`. This is a runtime/JDK–VM incompatibility, not an opossum limitation.
 - **Not parsed**: `configs`, `extends`, and the map form of `external`.
 

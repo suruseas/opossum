@@ -879,9 +879,9 @@ func uncommentSuggestions(body string) string {
 	return strings.Join(out, "\n")
 }
 
-// Problems opossum can't fix are recorded rather than left for the user to
-// rediscover — and they carry no YAML, so nothing can be uncommented into effect.
-func TestPlanOverlayNotesUnfixable(t *testing.T) {
+// Problems opossum records rather than leaving the user to rediscover them —
+// and they carry no YAML, so nothing can be uncommented into effect.
+func TestPlanOverlayNotes(t *testing.T) {
 	body, changes := planFor(t, `
 name: demo
 services:
@@ -944,7 +944,14 @@ volumes:
 		}
 	}
 	// The header must teach the reader what the three markers mean.
-	for _, want := range []string{"applied. This is live", "uncomment to apply", "nothing to change"} {
+	// Spelled out rather than read from the constants the header is built from:
+	// a want that reads the same value the code writes agrees with any wording,
+	// including a wrong one. These are the lines a reader meets.
+	for _, want := range []string{
+		"— applied. This is live.",
+		"— written out but commented; uncomment to apply.",
+		"— things opossum writes no YAML for; recorded so",
+	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the header should explain the classes; missing %q", want)
 		}
@@ -1824,14 +1831,14 @@ func TestChownRecordSurvivesAnInterruptedWrite(t *testing.T) {
 // there was a note held to the word and a note held to a phrase or two, and the
 // difference did not follow from anything: truncating either of these bodies to
 // its first line left every package in this repository green, and left a reader
-// with "Why: Apple container is not the Docker daemon and exposes no socket, so a"
+// with "Why: Apple container runs these, and it has no socket to share. If a Docker"
 // and nothing after it. What the note says is now a decision, not a clause that
 // can go missing.
 //
 // One project, one golden: the whole Notes section is compared, so a note added
 // here without its own line in this file fails, and so does a line added between
 // two of them.
-func TestTheUnfixableNotesAreWordForWordWhatWeMeanToSay(t *testing.T) {
+func TestTheNotesAreWordForWordWhatWeMeanToSay(t *testing.T) {
 	body := `services:
   app:
     image: alpine:3
@@ -1848,12 +1855,16 @@ func TestTheUnfixableNotesAreWordForWordWhatWeMeanToSay(t *testing.T) {
 	overlay, changes := planWithImage(t, body, "")
 	want := strings.Join([]string{
 		`# ── Notes ───────────────────────────────────────────────────────────────`,
-		`# Nothing to change for these: the compose file can't express a fix.`,
-		`# [opossum note] service "app": mounts the Docker socket, which Apple container does not have`,
-		"# Why: Apple container is not the Docker daemon and exposes no socket, so a",
-		`#   tool that drives Docker through it cannot work here at all. There is no`,
-		`#   compose change that fixes this.`,
-		`# What to expect: drop the service, or run it against a real Docker daemon elsewhere.`,
+		`# These are things opossum writes no YAML for.`,
+		`# [opossum note] service "app": mounts the Docker socket, which does not answer for the containers here`,
+		"# Why: Apple container runs these, and it has no socket to share. If a Docker",
+		`#   daemon answers on that path it is a different one, and it knows a`,
+		`#   different set: a service that wants this socket in order to watch its`,
+		`#   neighbours will be told about theirs.`,
+		"# What to expect: if you meant that daemon, keep the mount — though a bind whose source",
+		`#   is a symlink to a socket is refused before anything starts, and the`,
+		`#   refusal says what to write instead.`,
+		`#   If you meant these containers, nothing here answers for them.`,
 		"# [opossum note] service \"sup\": uses `restart: on-failure`, which opossum can only approximate",
 		"# Why: `on-failure` means restart only if the service failed. Apple container",
 		`#   does not report a container's exit code, so a crash and a clean exit look`,
@@ -1865,25 +1876,35 @@ func TestTheUnfixableNotesAreWordForWordWhatWeMeanToSay(t *testing.T) {
 		"#   `depends_on: {condition: service_completed_successfully}`, which also",
 		`#   excludes it from supervision.`,
 		`# [opossum note] service "usb": mounts the host path /dev/ttyUSB0, which is a device or session socket`,
-		`# Why: Each container is its own VM, so host devices and session sockets (X11,`,
-		`#   PulseAudio, /dev/dri) are not reachable from inside it. The mount will`,
-		`#   exist but have nothing behind it.`,
-		`# What to expect: expect this service's device-dependent features not to work; there is no`,
-		`#   compose change that grants a VM access to the host's devices.`,
+		`# Why: Each container is its own VM. A device node cannot be handed to one:`,
+		`#   /dev/dri and the like arrive as a path with nothing behind them. A`,
+		`#   session socket (X11, PulseAudio) is mounted as a path too, and what`,
+		`#   would answer on it is the host's own session; whether anything useful`,
+		`#   comes through here has not been measured.`,
+		`# What to expect: expect this service's device-dependent features not to work; no compose`,
+		`#   change grants a VM access to the host's devices.`,
 	}, "\n")
 	if got := noteBlockOf(t, overlay); got != want {
 		t.Errorf("the notes are not what this file says they should be\n got:\n%s\nwant:\n%s", got, want)
 	}
 
+	// The heading above them says opossum writes no YAML for these. Three kinds
+	// of note stand under it here, and the heading is only true if none of them
+	// put a services: block in the file — the sentence has to be checked against
+	// the file, not only against the words it was written from.
+	if strings.Contains(overlay, "\nservices:") {
+		t.Errorf("the notes were introduced as things opossum writes no YAML for, and one of them wrote some:\n%s", overlay)
+	}
+
 	// The summary lines too: when the notes are all there is, no overlay is
 	// written and these are what stands next to the body on the terminal.
 	wantSummaries := map[string]string{
-		"app": `mounts the Docker socket, which Apple container does not have`,
+		"app": `mounts the Docker socket, which does not answer for the containers here`,
 		"sup": "uses `restart: on-failure`, which opossum can only approximate",
 		"usb": `mounts the host path /dev/ttyUSB0, which is a device or session socket`,
 	}
 	if len(changes) != len(wantSummaries) {
-		t.Fatalf("three unfixable things, %d planned: %+v", len(changes), changes)
+		t.Fatalf("three notes, %d planned: %+v", len(changes), changes)
 	}
 	for _, c := range changes {
 		if want := wantSummaries[c.Service]; c.Summary != want {

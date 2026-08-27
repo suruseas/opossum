@@ -1,0 +1,1 @@
+- `OPSM-204` — a service mounts `docker.sock`, which does not answer for the containers here.

@@ -1266,8 +1266,16 @@ func TestMinusFDoesNotSendTheReaderBackForNothing(t *testing.T) {
 
 	// Notes only: nothing here is fixable by a compose change.
 	dir := t.TempDir()
+	// The host side is a path that is not on this machine. What makes this a note
+	// is the name — opossum reads `docker.sock` on either end of the mount — and
+	// the note has to read the same whether or not Docker is installed on the
+	// host running the eval. With the real /var/run/docker.sock, a machine with
+	// Docker Desktop resolves it to a live socket and the pre-flight refuses the
+	// up before any note is reached (OPSM-109), which is correct behaviour and
+	// has nothing to do with what this test is about.
+	sock := filepath.Join(dir, "absent", "docker.sock")
 	if err := os.WriteFile(filepath.Join(dir, "mine.yaml"), []byte(
-		"name: notes\nservices:\n  app:\n    image: alpine:3\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n"+
+		"name: notes\nservices:\n  app:\n    image: alpine:3\n    volumes:\n      - "+sock+":/var/run/docker.sock\n"+
 			"  usb:\n    image: alpine:3\n    volumes:\n      - /dev/ttyUSB0:/dev/ttyUSB0\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -1285,14 +1293,14 @@ func TestMinusFDoesNotSendTheReaderBackForNothing(t *testing.T) {
 	// leaves the rest of the sentence free to say anything, and the count is the
 	// half a reader checks against the list below it.
 	const because = "An overlay is never written for these alone"
-	want := "opossum: found 2 thing(s) in this project that no compose change can fix. " + because +
+	want := "opossum: found 2 thing(s) opossum writes no YAML for. " + because +
 		", so here is what one would have said:"
 	if !strings.Contains(out, want) {
 		t.Errorf("the reader should be told how many and why, got:\n%s\nwant a line: %s", out, want)
 	}
 	// And since the second run would not deliver them either, they are delivered
 	// here — the same words the overlay would have held.
-	if !strings.Contains(out, "exposes no socket") || !strings.Contains(out, "PulseAudio") {
+	if !strings.Contains(out, "does not answer for the containers here") || !strings.Contains(out, "PulseAudio") {
 		t.Errorf("the notes' own words should reach the reader on this path too:\n%s", out)
 	}
 	// With the codes, which only the summary lines carry: the bodies name the
@@ -1305,8 +1313,10 @@ func TestMinusFDoesNotSendTheReaderBackForNothing(t *testing.T) {
 
 	// The other side: one fixable thing, and dropping -f really does write it.
 	fixable := t.TempDir()
+	// The same absent host path as above, for the same reason.
 	if err := os.WriteFile(filepath.Join(fixable, "mine.yaml"), []byte(
-		"name: fix\nservices:\n  app:\n    image: alpine:3\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n"+
+		"name: fix\nservices:\n  app:\n    image: alpine:3\n    volumes:\n      - "+
+			filepath.Join(fixable, "absent", "docker.sock")+":/var/run/docker.sock\n"+
 			"  db:\n    image: postgres:16\n    volumes:\n      - ./pgdata:/var/lib/postgresql/data\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -1326,7 +1336,7 @@ func TestMinusFDoesNotSendTheReaderBackForNothing(t *testing.T) {
 
 	// One note, not two. Two notes is the shape where "the notes" and "the last
 	// note" are the same thing, and a count that starts at the wrong number reads
-	// the same in both — a project with exactly one unfixable thing is the one
+	// the same in both — a project with exactly one note is the one
 	// this whole path exists for.
 	single := t.TempDir()
 	if err := os.WriteFile(filepath.Join(single, "mine.yaml"), []byte(
@@ -1344,9 +1354,9 @@ func TestMinusFDoesNotSendTheReaderBackForNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("up: %v", err)
 	}
-	if !strings.Contains(out, "opossum: found 1 thing(s) in this project that "+"no compose change can fix. "+because) ||
+	if !strings.Contains(out, "opossum: found 1 thing(s) opossum writes no YAML for. "+because) ||
 		!strings.Contains(out, "`always` and `unless-stopped` are honoured exactly") {
-		t.Errorf("one unfixable thing is still one the reader has to hear about:\n%s", out)
+		t.Errorf("one note is still one the reader has to hear about:\n%s", out)
 	}
 
 	// What this does not cover, so that reading it is not mistaken for reading
@@ -1362,7 +1372,7 @@ func TestMinusFDoesNotSendTheReaderBackForNothing(t *testing.T) {
 // uncomment — so an overlay does hold it, and sending the reader back for a run
 // that writes one is right. The question this asks is the same one the writing
 // path asks, and asking a narrower one here (only applied changes count) would
-// tell a project of suggestions that nothing can be done about them.
+// tell a project of suggestions that opossum was writing no YAML for them.
 func TestMinusFStillOffersTheSecondRunForSuggestions(t *testing.T) {
 	fakeShim(t)
 	dir := t.TempDir()
@@ -1379,8 +1389,8 @@ func TestMinusFStillOffersTheSecondRunForSuggestions(t *testing.T) {
 	if !strings.Contains(out, "Re-run without -f") {
 		t.Errorf("an overlay holds a suggestion, so the run that writes one is worth offering:\n%s", out)
 	}
-	if strings.Contains(out, "no compose change can fix") {
-		t.Errorf("these are suggestions, not things nothing can be done about:\n%s", out)
+	if strings.Contains(out, "opossum writes no YAML for") {
+		t.Errorf("these are suggestions — opossum writes the YAML, commented:\n%s", out)
 	}
 }
 
@@ -1388,7 +1398,7 @@ func TestMinusFStillOffersTheSecondRunForSuggestions(t *testing.T) {
 // overlay gets written to hold it. Both the writing path and the -f advice ask
 // the same question to decide, and a version of that question that only counted
 // applied changes would take a project of suggestions down the notes path — an
-// overlay that never gets written, and advice calling them unfixable.
+// overlay that never gets written, and advice saying no YAML was written.
 func TestASuggestionIsSomethingToWriteDown(t *testing.T) {
 	fakeShim(t)
 	dir := t.TempDir()
@@ -1408,8 +1418,8 @@ func TestASuggestionIsSomethingToWriteDown(t *testing.T) {
 	if !strings.Contains(out, "would write compose.opossum.yaml") {
 		t.Errorf("a suggestion is worth a file — it is the thing the reader uncomments:\n%s", out)
 	}
-	if strings.Contains(out, "no overlay was written") || strings.Contains(out, "no compose change can fix") {
-		t.Errorf("these are suggestions, not things nothing can be done about:\n%s", out)
+	if strings.Contains(out, "no overlay was written") || strings.Contains(out, "opossum writes no YAML for") {
+		t.Errorf("these are suggestions — opossum writes the YAML, commented:\n%s", out)
 	}
 }
 
@@ -1425,11 +1435,19 @@ func TestANoteReachesTheReaderWhenNoOverlayIsWritten(t *testing.T) {
 	// no actionable entry. Three and not one, and not two: with one note "the
 	// notes" and "the note" are the same thing, and with two "the second" and
 	// "the last" are — a middle note is the only one that is neither.
-	const notes = "  app:\n    image: alpine:3\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n" +
+	dir := t.TempDir()
+	// The host side is a path that is not on this machine. What makes this a note
+	// is the name — opossum reads `docker.sock` on either end of the mount — and
+	// the note has to read the same whether or not Docker is installed on the
+	// host running the eval. With the real /var/run/docker.sock, a machine with
+	// Docker Desktop resolves it to a live socket and the pre-flight refuses the
+	// up before any note is reached (OPSM-109), which is correct behaviour and
+	// has nothing to do with what this test is about.
+	notes := "  app:\n    image: alpine:3\n    volumes:\n      - " +
+		filepath.Join(dir, "absent", "docker.sock") + ":/var/run/docker.sock\n" +
 		"  sup:\n    image: alpine:3\n    restart: on-failure\n" +
 		"  usb:\n    image: alpine:3\n    volumes:\n      - /dev/ttyUSB0:/dev/ttyUSB0\n"
 
-	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte("name: notes\nservices:\n"+notes), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -1461,7 +1479,7 @@ func TestANoteReachesTheReaderWhenNoOverlayIsWritten(t *testing.T) {
 		want = append(want, trimmed)
 	}
 	if n := countPrefixed(want, "[opossum note]"); n != len(changes) || n != 3 {
-		t.Fatalf("three unfixable things, %d planned and %d written up:\n%s", len(changes), n, body)
+		t.Fatalf("three notes, %d planned and %d written up:\n%s", len(changes), n, body)
 	}
 
 	t.Chdir(dir)
@@ -2406,8 +2424,98 @@ func TestFromDockerComposeNotesOnlyWritesNoOverlay(t *testing.T) {
 	if _, serr := os.Stat(filepath.Join(dir, "compose.opossum.yaml")); serr == nil {
 		t.Error("a notes-only finding must not write an overlay")
 	}
-	if !strings.Contains(out, "can't be fixed by a compose change") {
+	if !strings.Contains(out, "thing(s) opossum writes no YAML for") {
 		t.Errorf("the note should still be reported, got:\n%s", out)
+	}
+}
+
+// Every line that names a note, spelled out. Four of them go to the terminal and
+// each is assembled from a fragment and a count, so reading the fragment back is
+// not reading the line: `1 things` got past a suite that compared against the
+// fragment, because the fragment was right and the sentence was not.
+//
+// The wording is written here rather than read from the code for the same reason
+// it is written out in the documents: this is where it is read as a sentence.
+func TestEveryLineThatNamesANoteIsWordForWord(t *testing.T) {
+	fakeShim(t)
+
+	// Notes and nothing else: no overlay is written, so these two lines are the
+	// whole of what the reader gets.
+	only := t.TempDir()
+	if err := os.WriteFile(filepath.Join(only, "compose.yaml"), []byte(
+		"name: only\nservices:\n  sup:\n    image: alpine:3\n    restart: on-failure\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(only)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	out, err := run(t, "up", "--from-docker-compose", "--no-build", "--no-supervisor")
+	if err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	if want := "opossum: nothing to fix or suggest, but 1 thing(s) opossum writes no YAML for:"; !strings.Contains(out, want) {
+		t.Errorf("the notes-only report is not what this file says it should be:\n%s\nwant a line: %s", out, want)
+	}
+
+	// An overlay with all three classes in it: the note line here is a different
+	// one, printed beside the changes that were written.
+	mixed := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(mixed, "pg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mixed3 := []byte(`
+name: mixed
+services:
+  db:
+    image: postgres:16
+    volumes:
+      - ./pg:/var/lib/postgresql/data
+  web:
+    image: nginx
+    volumes:
+      - shared:/srv
+  worker:
+    image: busybox
+    volumes:
+      - shared:/srv
+  sup:
+    image: alpine:3
+    restart: on-failure
+volumes:
+  shared: {}
+`)
+	if err := os.WriteFile(filepath.Join(mixed, "compose.yaml"), mixed3, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(mixed)
+	const noteLine = "opossum: 1 note(s) about things opossum writes no YAML for:"
+	out, err = run(t, "up", "--from-docker-compose", "--no-build", "--no-supervisor")
+	if err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	if !strings.Contains(out, noteLine) {
+		t.Errorf("the note line beside a written overlay is not what this file says:\n%s\nwant a line: %s", out, noteLine)
+	}
+
+	// The same project with -f, in a directory of its own: nothing is written,
+	// and the entries are grouped under their own labels. A second place the line
+	// is assembled, so a second place it can go wrong. Its own directory because
+	// the run above left an overlay in that one, and a case that only passes
+	// because of what the case before it wrote is a case that reads as an
+	// accident later.
+	grouped := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(grouped, "pg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(grouped, "compose.yaml"), mixed3, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(grouped)
+	out, err = run(t, "up", "--from-docker-compose", "-f", "compose.yaml", "--no-build", "--dry-run")
+	if err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	if !strings.Contains(out, noteLine) {
+		t.Errorf("the note label in the grouped report is not what this file says:\n%s\nwant a line: %s", out, noteLine)
 	}
 }
 

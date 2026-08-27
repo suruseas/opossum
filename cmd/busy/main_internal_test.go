@@ -93,6 +93,22 @@ func TestKillingItLeavesNothingButTheCommand(t *testing.T) {
 	t.Cleanup(func() { _ = syscall.Kill(-pgid, syscall.SIGKILL) })
 
 	waitFor(t, func() bool { return len(inGroup(pgid)) >= 2 })
+	// Two in the group is not yet the situation: a child counts from fork,
+	// and one killed with its parent before exec dies holding borrowed state
+	// — the survivor question would be reading scheduler luck (the clean-
+	// container sieve, six saturated CPUs, read it wrong). The situation is
+	// the command existing as itself, and "as itself" has to mean the whole
+	// command line: a child between fork and exec shows its parent's argv,
+	// which contains the word "sleep" too — a precondition that looked for
+	// the word was the same free pass with an extra ps in it.
+	waitFor(t, func() bool {
+		for _, pid := range inGroup(pgid) {
+			if pid != cmd.Process.Pid && commandOf(t, pid) == "sleep 300" {
+				return true
+			}
+		}
+		return false
+	})
 	if err := syscall.Kill(cmd.Process.Pid, syscall.SIGKILL); err != nil {
 		t.Fatal(err)
 	}
@@ -364,6 +380,22 @@ func build(t *testing.T) string {
 	bin := filepath.Join(t.TempDir(), "busy")
 	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
 		t.Fatalf("building: %v\n%s", err, out)
+	}
+	// Run it once before anyone times it. The first run of a binary that has
+	// just been written costs what every run after it does not: the kernel has
+	// not seen these pages, and on macOS the file is checked before it is
+	// allowed to start. Measured while the rest of the suite was running, that
+	// first start took 0.46s to 1.58s where the second took 0.03s to 0.05s. It
+	// lands on the wall clock only — the same runs differ by a hundredth of a
+	// second in CPU time — so what it reaches is the two tests that read a
+	// clock, and it reaches them as time the load never spent.
+	//
+	// A long deadline rather than a short one: the command returns at once and
+	// the load stops with it, so this is over as fast either way, and a
+	// deadline that could ring first would make every build here take the path
+	// that says the load stopped before the command did.
+	if out, err := exec.Command(bin, "-n", "1", "-for", "1h", "true").CombinedOutput(); err != nil {
+		t.Fatalf("warming: %v\n%s", err, out)
 	}
 	return bin
 }

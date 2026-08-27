@@ -36,8 +36,12 @@ type Runner struct {
 	// where it is rather than sitting silent.
 	Log func(string)
 
-	// Ctx stops the toolchain when the run is being abandoned. Without it a
-	// `go test` started by this process outlives it, holding the pipes open.
+	// Ctx is meant to stop the toolchain when the run is being abandoned, and
+	// does not yet: nothing here reads it, so the `go test` below outlives an
+	// interrupt and is adopted away (#607). Set by callers who expect it to,
+	// and left set so that wiring it is a change in one place. Until then a
+	// `go test` started by this process outlives it either way, holding the
+	// pipes open — setting this does not yet change that.
 	Ctx context.Context
 
 	// mu guards the in-flight mutation, which RestorePending reads from another

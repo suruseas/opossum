@@ -1,0 +1,7 @@
+`up --from-docker-compose` **generates** that overlay when it finds a known
+incompatibility — applied fixes for `OPSM-101` (Postgres PGDATA) and `OPSM-105`
+(bind-mounted DB data dir), suggestions for `OPSM-102` (a shared named volume) and
+`OPSM-105` (an app's own data directory), notes for `OPSM-204` (Docker socket),
+`OPSM-106` (host devices), `OPSM-409` (`restart: on-failure`) and `OPSM-111` (a
+Postgres data dir left as a bind mount) — then re-resolves and starts — so migrating a docker compose project is one command.
+Facts to rely on:

@@ -113,6 +113,17 @@ container ls -a | grep hello.opossum   || echo "no hello containers"
 container network list | grep hello-net || echo "hello-net removed"
 ```
 
+**実機だけが答えを持つ主張の conformance 検査**（env-gated。実機レビューのたびに1回回す）:
+
+```sh
+make real-conformance
+```
+
+旗なしでは skip（日々のゲートは fake の領分）。**旗が立っているのに前提が欠けている
+（runtime 不在・未起動）と Fatal**——「測ったつもりで測っていない緑」を検査自身が拒む。
+現在の内容: socket 直 bind が通信まで通ること／symlink→socket が errno 95 で拒まれること
+（`OPSM-106`/`OPSM-109` の文言が立っている2つの実測。下の 2026-08-27 の記録を参照）。
+
 **build / health / completed の経路**は `compose.yaml` で確認（`container builder start` が要る）:
 
 ```sh
@@ -132,6 +143,27 @@ go run ../cmd/opossum -f compose.yaml down
 - `down`: 逆順 teardown、`<project>-net` 削除。既に無い network への再 `down` は警告を出さない（#10）。
 
 ## 実機検証の記録
+
+- **2026-08-27 — socket bind の「通る」と「使える」を分けて測った（container 1.2.2）**。
+  `OPSM-109` の助言（リンク先の socket を直接 bind する）は、これまで「マウントが通る」まで
+  しか確かめられていなかった。ホスト側（`$HOME` 配下）で unix socket を listen し、
+  `python:3.12-alpine` のコンテナ内から接続して1往復（ping→pong）を実測:
+  - **直 bind は通信まで通る**。`opossum up`（bind 指定の compose）でも `container run -v` 単体でも
+    同じ。ホスト側 listener が `ping` を受信し、コンテナ側が `reply: b'pong'` を出力。
+    → `OPSM-106` の「a host device or session socket is mounted → the mount exists with
+    nothing behind it」は **socket 一般には偽**（少なくとも `$HOME` 配下の unix socket は
+    実体つきで届く）。範囲の狭め直しは #597 で扱う。
+  - **symlink→socket の bind は 1.2.2 でも errno 95 で拒否**（1.1.0 で採った記録と同じ形）。
+    `OPSM-109` の診断（拒否の説明）は現役。
+  - **docker.sock も、解決先を bind すれば本物の dockerd に届く**（同日追試）。
+    `/var/run/docker.sock` の symlink が存在する機械には Docker Desktop がいる——その解決先
+    （`~/.docker/run/docker.sock`）をコンテナに bind し、中から HTTP `GET /version` で
+    **200 OK（`Server: Docker/29.7.2`、Docker Desktop 4.88.0）を実測**。「compose の変更では
+    直らない」という現行の案内（`OPSM-109` の docker 分岐）は、この形の機械では偽。
+    ただし届く先はホストの Docker Desktop のエンジンであって、opossum が起動した世界ではない
+    ——文言の直し方はこの但し書きごと #597 の続きで扱う。
+  - 最初の2点（直 bind の疎通／symlink の拒否）は env-gated の conformance 検査（`internal/orchestrator` の
+    `TestARealSocketBindCarriesTraffic` / `TestARealSymlinkToASocketIsStillRefused`）として固定。
 
 - **2026-08-21 — container 1.2.2 での初レビュー（補間クラスタ ＋ v0.20.0 の3本）**。
   実機で確かめたのは、fake が原理的に答えられない層——**コンテナに実際に届いた環境変数**。

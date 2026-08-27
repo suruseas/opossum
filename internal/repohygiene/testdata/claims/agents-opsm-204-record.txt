@@ -1,0 +1,8 @@
+  It used to say something else for a `docker.sock`: that mounting the resolved
+  path could not help, because Apple container is not the Docker daemon. The
+  first half is true and the second does not follow. Where that path is a
+  symlink something put it there — which of them, and whether anything is
+  listening, varies — and on 2026-08-27 a container started here was measured
+  reaching a Docker daemon through one. So the special case is gone, and
+  what is worth saying about such a daemon — that it is not the one running these
+  containers — is said by `OPSM-204` instead, once, and only if one answers.

@@ -5,143 +5,150 @@ name: ci
 # cheap. The real-`container` layer needs macOS 26 on Apple silicon with nested
 # virtualization, which GitHub-hosted runners don't provide; that layer is
 # verified on real hardware (see docs/real-runtime-review.md).
+#
+# One job, on purpose. Actions bills each job separately, one-minute minimum,
+# rounded up — split across four jobs this workflow did 216 seconds of work and
+# billed seven minutes, two of them for six seconds of checks. Folded into one
+# job the bill tracks the work. The cost is wall-clock (the two compilers used
+# to run in parallel) and a single check mark on the PR — which failing step it
+# was is in the step names.
+# Pull requests at the moment they claim to be ready — and nowhere else.
+# Of the two things this run used to provide, a clean machine is now the
+# push-time sieve's job (`make sieve`, a fresh Linux container on the
+# developer's own metal, run by the pre-push hook), and what cannot move
+# there is the attestation: a green that someone other than whoever ran it
+# can verify. The account has 2,000 free minutes a month; this file spends
+# them on the one thing only it can do.
+#
+# Structurally free while drafted, structurally current once ready. Running
+# on every push billed every review round — the measured median was two runs
+# per pull request with a top of ten — so a draft's pushes cost nothing (the
+# job skips them) and the local sieve owns that ground. Marking the request
+# ready is the request for attestation, and from that moment `synchronize`
+# runs again on each push: a green that stops following the head is a green
+# about some other tree, which is the one thing attestation must never be.
+# Push fixes as a draft; a push while ready spends a run to keep the
+# attestation honest. No trigger for pushes to main: its tree is the squash
+# of a head already attested. `workflow_dispatch` stays, for the one
+# main-tree run a release cuts a tag over.
 on:
-  push:
-    branches: [main]
   pull_request:
+    types: [opened, ready_for_review, synchronize]
+  workflow_dispatch:
 
 jobs:
-  # Two toolchains, because some of what this code reads changes between them.
-  # Coverage is recorded per block, and which lines and columns a block spans is
-  # the compiler's business: between Go 1.26 and 1.27 the block for a `case`
-  # clause moved off the `case` line onto the one after it. Code that reads a
-  # profile — the mutation sweep does, to say whether the tests reach a line —
-  # answers differently on either side of that, and three such faults reached the
-  # branch as "green here, red on CI" or, worse, as a wrong answer only CI ever
-  # produced.
-  #
-  # `stable` alone left which compiler this runs on to the release schedule. The
-  # version go.mod asks for is the floor the module claims to work on; stable is
-  # what people who just installed Go will have. Running both means a difference
-  # between them is a red build rather than something found later by whoever
-  # happened to be on the other one.
-  test:
+  ci:
+    # A draft is work still under the local sieve; marking it ready is the
+    # request for attestation. `opened` fires for drafts too, and this is what
+    # makes opening one free. On workflow_dispatch the event carries no
+    # pull_request, the expression comes back empty, and !empty is true — the
+    # manual main-tree run a release asks for goes ahead.
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
-    # The compiler this job installed is the compiler it uses. Left to itself, go
-    # reads the `toolchain` line in go.mod and downloads a different one — so the
-    # lane set up with the version go.mod asks for would quietly build with
-    # something else, and both lanes could end up on the same compiler while the
-    # matrix went on reporting two green jobs.
+    # The compiler each section installed is the compiler it uses. Left to
+    # itself, go reads the `toolchain` line in go.mod and downloads a different
+    # one — so the section set up with the version go.mod asks for would
+    # quietly build with something else, and both sections could end up on the
+    # same compiler while the log went on naming two.
     env:
       GOTOOLCHAIN: local
-    strategy:
-      # Both are reported. A failure on one is a real failure, and cancelling the
-      # other would hide whether it is a difference between the two or a fault in
-      # the code itself — which is the first thing anyone will want to know.
-      fail-fast: false
-      matrix:
-        go: [gomod, stable]
     steps:
       - uses: actions/checkout@v4
-      # Every lane has to be one this file knows how to set up and check. The two
-      # below, and the two assertions further down, all name their lane as a
-      # literal — so a lane added or renamed without touching them installs no
-      # particular Go, runs on whatever the runner came with, and checks nothing,
-      # while the other lane's assertion goes on passing. It would be green, and
-      # it would be measuring one compiler twice.
-      - name: this lane is one of the ones set up below
-        if: matrix.go != 'gomod' && matrix.go != 'stable'
-        run: |
-          echo "No setup or check in this file matches the lane '${{ matrix.go }}',"
-          echo "so it would run on whatever Go the runner happens to have and say"
-          echo "nothing about it. Give it a setup step and a version assertion, or"
-          echo "take it out of the matrix."
-          exit 1
-      # And there have to be two of them. The lane that says the two compilers
-      # differ can only say it from the stable lane; drop that lane — an `exclude`
-      # is enough — and the claim is never made by anybody, while what is left is
-      # one green job on one compiler. Knowing that every lane present is a known
-      # one says nothing about the ones that are missing.
+        with:
+          # Full history: the changelog-fragment step three-dot diffs against
+          # the PR base, and a shallow clone has no base to diff against.
+          fetch-depth: 0
+
+      # ---- the version go.mod asks for -----------------------------------
       #
-      # This counts lanes, not distinct lanes, and the difference is not academic:
-      # `go: [gomod, gomod]` was tried here and produced two jobs, a job-total of
-      # two, and a green run on a single compiler. Nothing below notices, because
-      # every check is written for the lane it names and the missing one simply
-      # never speaks. Closing that would take a guard that reads this file's own
-      # matrix, which is a worse thing to depend on than the two names being
-      # written once each. So it is said here instead: the lanes have to be two
-      # different ones, and only a person reading this is checking that.
-      - name: there are still two lanes
-        run: |
-          echo "this matrix has ${{ strategy.job-total }} lane(s)"
-          if [ "${{ strategy.job-total }}" != "2" ]; then
-            echo "This matrix exists to run the tests on two compilers and to say"
-            echo "out loud that they are two. Both halves of that live in the lanes"
-            echo "themselves, so a matrix of any other size leaves part of it"
-            echo "unsaid. If a third compiler is worth testing, give it a setup"
-            echo "step and a version assertion and change this number on purpose."
-            exit 1
-          fi
-      # Two steps rather than one with the version computed: setup-go takes the
-      # version and the file it reads it from as separate inputs, and what it does
-      # when both are given, or when one is given empty, is not something this
-      # should be relying on.
+      # Two compilers, because some of what this code reads — and writes —
+      # changes between them. Coverage block boundaries moved between Go 1.26
+      # and 1.27 and the mutation sweep answers differently on either side;
+      # gofmt's own output changed too, and a shape both versions format the
+      # same is the only shape that stays green here. The version go.mod asks
+      # for is the floor the module claims to work on; stable is what people
+      # who just installed Go will have.
+      #
+      # Two setup-go steps rather than one with the version computed: setup-go
+      # takes the version and the file it reads it from as separate inputs, and
+      # what it does when both are given, or when one is given empty, is not
+      # something this should be relying on.
       - uses: actions/setup-go@v5
-        if: matrix.go == 'gomod'
         with:
           go-version-file: go.mod
-      - uses: actions/setup-go@v5
-        if: matrix.go == 'stable'
-        with:
-          go-version: stable
-      - name: which go
-        run: go version
-      # The whole point of the two lanes is that they are two compilers. When the
-      # version go.mod asks for catches up with stable — it has been raised three
-      # times already, once to get `go vet` to pass — they become the same one,
-      # and the matrix goes on being green while protecting nothing. Nobody would
-      # notice: two passing jobs look exactly like two passing jobs.
-      # Two halves of one claim, each checked where it can be seen. Here: the
-      # compiler this lane installed is the one go.mod asks for. Below, in the
-      # other lane: what go.mod asks for is not the current release. Together they
-      # say the two lanes are different compilers, without either job having to
-      # learn what the other one got.
-      #
-      # This half is not a formality. setup-go reads the `go` directive with a
-      # pattern of its own that wants a literal space, so a tab or a leading space
-      # — both of which the go tool accepts — leave it with nothing; and with
-      # nothing it installs nothing, falls back to whatever Go the runner image
-      # happens to carry, and says so in an info line rather than a warning. That
-      # lane would then be running a version it never claimed, under the name of
-      # the one it did, with everything downstream looking right.
-      - name: this lane is the compiler go.mod asks for
-        if: matrix.go == 'gomod'
+      # Not a formality. setup-go reads the `go` directive with a pattern of
+      # its own that wants a literal space, so a tab or a leading space — both
+      # of which the go tool accepts — leave it with nothing; and with nothing
+      # it installs nothing, falls back to whatever Go the runner image happens
+      # to carry, and says so in an info line rather than a warning. This
+      # section would then be testing a version nobody chose, under the name of
+      # the one it did.
+      - name: this section runs the compiler go.mod asks for
         run: |
+          go version
           want="$(go mod edit -json | jq -r '.Go // empty' | cut -d. -f1,2)"
           here="$(go version | awk '{print $3}' | sed 's/^go//' | cut -d. -f1,2)"
-          echo "go.mod asks for $want; this lane is running $here"
+          echo "go.mod asks for $want; this section is running $here"
           if [ -z "$want" ] || [ -z "$here" ]; then
             echo "Could not read one of the two versions, so whether they agree is"
             echo "unknown — and unknown is not the same as fine."
             exit 1
           fi
           if [ "$want" != "$here" ]; then
-            echo "This lane exists to build with the version go.mod asks for, and it"
-            echo "is running something else. The usual cause is setup-go failing to"
-            echo "read the directive — it wants a literal space after \`go\`, where the"
-            echo "go tool also takes a tab or a leading space — and quietly falling"
-            echo "back to whatever Go the runner image carries. This lane would then"
-            echo "be testing a version nobody chose, under the name of one nobody ran."
+            echo "This section exists to build with the version go.mod asks for, and"
+            echo "it is running something else. The usual cause is setup-go failing"
+            echo "to read the directive — it wants a literal space after \`go\`, where"
+            echo "the go tool also takes a tab or a leading space — and quietly"
+            echo "falling back to whatever Go the runner image carries."
             exit 1
           fi
-      - name: the other lane is not this one
-        if: matrix.go == 'stable'
+      - name: gofmt (go.mod version)
         run: |
-          # Read through the go tool, not with a pattern of our own: it accepts a
-          # tab after the directive, and leading space before it, and a pattern
-          # that misses those comes back empty — which would compare equal to
-          # nothing and pass. Whatever cannot be read is a failure here, because
-          # passing on an unread version is the shape of accident this step is for.
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"; echo "$unformatted"; exit 1
+          fi
+      - name: go vet (go.mod version)
+        run: go vet ./...
+      - name: build (go.mod version)
+        run: go build ./...
+      # The same command people run before pushing, not a restatement of it.
+      # While this was written out twice, the two copies drifted apart in both
+      # directions: the leftovers check guarded local runs only — and the runs
+      # nobody watches are exactly where a leaked directory dies unseen — while
+      # this line, without -count=1, could restore test results from a cache
+      # frozen weeks earlier and report packages it never ran. One definition,
+      # in the Makefile, and a check in internal/repohygiene that this file
+      # still points at it — once per compiler, and at nothing else.
+      - name: test (go.mod version, the same gate as `make test`)
+        run: make test
+
+      # ---- the current release -------------------------------------------
+      #
+      # This section, and everything after it, runs even when the section
+      # above failed. Folding the jobs was about the bill; whether both
+      # compilers report is about information: "one red, one green" says the
+      # two versions disagree, "both red" says the change is broken — and a
+      # section that never ran turns that reading into "one red, one unknown".
+      # The gofmt divergence between 1.26 and 1.27 was diagnosed from exactly
+      # that contrast, the night before this file was folded.
+      - uses: actions/setup-go@v5
+        if: ${{ !cancelled() }}
+        with:
+          go-version: stable
+      # When the two sections run the same compiler, everything they exist to
+      # catch — coverage boundaries moving, gofmt changing its mind — cannot
+      # show up in a green run. In the matrix this claim took two half-checks
+      # in two jobs that could not see each other; in one job it is a single
+      # comparison.
+      - name: stable is a different compiler than go.mod asks for
+        if: ${{ !cancelled() }}
+        run: |
+          # Read through the go tool, not with a pattern of our own: it accepts
+          # a tab after the directive, and leading space before it, and a
+          # pattern that misses those comes back empty — which would compare
+          # equal to nothing and pass.
+          go version
           floor="$(go mod edit -json | jq -r '.Go // empty' | cut -d. -f1,2)"
           here="$(go version | awk '{print $3}' | sed 's/^go//' | cut -d. -f1,2)"
           echo "go.mod asks for $floor; stable is $here"
@@ -151,41 +158,38 @@ jobs:
             exit 1
           fi
           if [ "$floor" = "$here" ]; then
-            echo "Both lanes of this matrix are Go $here, so it is running the same"
-            echo "compiler twice. What it exists to catch — the coverage block"
-            echo "boundaries moving between releases — cannot show up in a green run"
-            echo "like this one. The older lane follows go.mod, so this means the"
-            echo "version go.mod asks for has caught up with the current release:"
-            echo "either give the matrix a floor that is genuinely older, or drop it"
-            echo "and say here why it is no longer needed."
+            echo "Both sections of this job are Go $here, so it is running the same"
+            echo "compiler twice. The older section follows go.mod, so this means"
+            echo "the version go.mod asks for has caught up with the current"
+            echo "release: either give it a floor that is genuinely older, or drop"
+            echo "the second section and say here why it is no longer needed."
             exit 1
           fi
-      - name: gofmt
+      - name: gofmt (stable)
+        if: ${{ !cancelled() }}
         run: |
           unformatted="$(gofmt -l .)"
           if [ -n "$unformatted" ]; then
             echo "These files need gofmt:"; echo "$unformatted"; exit 1
           fi
-      - name: go vet
+      - name: go vet (stable)
+        if: ${{ !cancelled() }}
         run: go vet ./...
-      - name: build
+      - name: build (stable)
+        if: ${{ !cancelled() }}
         run: go build ./...
-      - name: test (race + coverage)
-        run: go test ./... -race -cover
+      - name: test (stable, the same gate as `make test`)
+        if: ${{ !cancelled() }}
+        run: make test
 
-  # A user-facing change without a changelog fragment is a release note that will
-  # be missing. The check runs only on pull requests, where there is a base to
-  # diff against, and only complains about changes to shipped code — tests, docs
-  # and the repo's own tooling don't need an entry. Put `[skip changelog]` in the
-  # PR body for the rare shipped change that genuinely has nothing to announce.
-  changelog-fragment:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      # ---- a user-facing change carries a changelog fragment -------------
+      #
+      # Only on pull requests, where there is a base to diff against; only
+      # about shipped code — tests, docs and the repo's own tooling don't need
+      # an entry. Put `[skip changelog]` in the PR body for the rare shipped
+      # change that genuinely has nothing to announce.
       - name: a shipped change needs a changelog.d fragment
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
@@ -230,18 +234,14 @@ jobs:
           echo "put [skip changelog] in the PR body."
           exit 1
 
-  release-config:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: stable
+      # ---- the release configuration still parses ------------------------
       - uses: goreleaser/goreleaser-action@v6
+        if: ${{ !cancelled() }}
         with:
           install-only: true
           version: "~> v2"
       - name: validate .goreleaser.yaml
+        if: ${{ !cancelled() }}
         # The Homebrew formula config is valid and releases fine; goreleaser only
         # flags it as using a soft-deprecated property. Keep the check visible but
         # don't fail CI on the deprecation notice.

@@ -1,0 +1,5 @@
+- **note** — something opossum writes no YAML for (`OPSM-204` a Docker socket
+  mount, `OPSM-106` a host device or session socket, `OPSM-409`
+  `restart: on-failure`, `OPSM-111` a Postgres data dir left as a bind mount).
+  Recorded so the failure isn't a mystery. Notes carry no YAML, so there's
+  nothing to uncomment.

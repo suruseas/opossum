@@ -1,0 +1,48 @@
+#!/bin/sh
+# Refuses a push whose tree does not pass the gate in a clean environment.
+#
+# The sieve is the push-time half of what CI used to do twice over: a fresh
+# container gives it an empty $HOME, an empty /tmp and no leftover processes,
+# so the "leaves something behind" class of failure — invisible on a lived-in
+# machine — shows up here, before a push, instead of spending one of the
+# month's CI minutes. What stays with CI is the half a local run cannot
+# provide: a green that someone other than whoever ran it can verify. That
+# runs once per pull request, on the head that merges.
+#
+# Minutes, not a second — deliberately, and only at push. The commit hook
+# stays fast so nobody learns --no-verify; a push is rarer, already the moment
+# of handing work over, and the alternative was waiting on the same suite in
+# CI anyway.
+#
+# Install with: git config core.hooksPath .githooks
+
+# git hands the refs being pushed on stdin. A push that only deletes remote
+# refs carries no tree at all, so there is nothing to sieve; and the sieve
+# always reads HEAD, so when a pushed ref is some other commit the sieve's
+# green is about the wrong tree — said out loud rather than discovered later.
+deletes_only=yes
+zero=0000000000000000000000000000000000000000
+head_sha="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+while read -r _local_ref local_sha _remote_ref _remote_sha; do
+	[ "$local_sha" = "$zero" ] && continue
+	deletes_only=no
+	if [ "$local_sha" != "$head_sha" ]; then
+		echo "pre-push: pushing $local_sha, but the sieve reads HEAD ($head_sha) —" >&2
+		echo "  its verdict is about a different tree. Check out what you are pushing" >&2
+		echo "  before trusting this run." >&2
+	fi
+done
+if [ "$deletes_only" = "yes" ]; then
+	exit 0
+fi
+
+if ! docker info >/dev/null 2>&1; then
+	echo "pre-push: the sieve needs the Docker daemon, and it is not answering." >&2
+	echo "  Start Docker and push again. Pushing with --no-verify skips the clean-" >&2
+	echo "  environment check entirely — the pull request's one CI run becomes the" >&2
+	echo "  first place a leftover could be seen, and it exists for attestation," >&2
+	echo "  not for finding these." >&2
+	exit 1
+fi
+
+exec make sieve

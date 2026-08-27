@@ -64,6 +64,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -71,9 +72,11 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/suruseas/opossum/internal/mutate"
 )
@@ -93,11 +96,6 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, sigs, os.Exit))
 }
 
-// run is main without the process. Everything that decides an exit status lives
-// here so it can be tested; main only supplies the real streams, signals, and the
-// way out. `exit` is a parameter for the same reason the signal channel is: the
-// interrupt path is the one that was wrong, so it has to be reachable from a
-// test.
 // interruptMessage says what an interrupt actually did. Saying "the file has been
 // put back" when no file was ever written tells the author something that did not
 // happen — and with a baseline run in front of the sweep, the likeliest moment to
@@ -114,6 +112,11 @@ func interruptMessage(restored bool, err error) string {
 	}
 }
 
+// run is main without the process. Everything that decides an exit status lives
+// here so it can be tested; main only supplies the real streams, signals, and the
+// way out. `exit` is a parameter for the same reason the signal channel is: the
+// interrupt path is the one that was wrong, so it has to be reachable from a
+// test.
 func run(args []string, stdout, stderr io.Writer, sigs <-chan os.Signal, exit func(int)) int {
 	fs := flag.NewFlagSet("mutate", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -145,10 +148,21 @@ func run(args []string, stdout, stderr io.Writer, sigs <-chan os.Signal, exit fu
 			return exitFailed
 		}
 	}
-	// The toolchain is a child process; abandoning the run has to take it with us,
-	// or a `go test` outlives this command holding the pipes open.
+	// Meant to take the toolchain with us: a `go test` that outlives this command
+	// holds the pipes open. It does not yet — the runner never reads this, so the
+	// child survives the interrupt and is adopted away (#607). Kept because two
+	// other places do read it — making the baseline tree, and deciding below
+	// whether an interrupt is in flight — and because the wiring that makes the
+	// first sentence true is one line in the runner.
 	ctx, stopToolchain := context.WithCancel(context.Background())
 	defer stopToolchain()
+
+	// started says an interrupt is being handled; handlerDone says the handling
+	// is over. Two rather than one because the question below is "is the
+	// handler on its way", and the context only answers "has the toolchain been
+	// stopped" — which the handler does a step later, leaving a window where a
+	// run could return out from under a handler that had already begun.
+	started, handlerDone := make(chan struct{}), make(chan struct{})
 	r := mutate.NewRunner(cwd)
 	r.Ctx = ctx
 
@@ -174,6 +188,26 @@ func run(args []string, stdout, stderr io.Writer, sigs <-chan os.Signal, exit fu
 	}
 	defer runCleanup()
 
+	// Once an interrupt is in flight the handler owns what happens next: it is
+	// the only thing that restores the tree and removes the baseline worktree,
+	// and it ends the process itself. Returning out from under it would hand
+	// os.Exit a status the handler did not choose and cut its removal off
+	// partway — which is how making the creation cancellable, further down,
+	// would otherwise trade one leftover for another.
+	//
+	// Registered after the cleanup above so it runs before it: whoever takes
+	// the cleanup func has to be the one that finishes it, and on this path
+	// that is the handler. Waiting here first means the deferred cleanup below
+	// finds nothing left to do rather than taking the work out from under a
+	// handler that is about to end the process.
+	defer func() {
+		select {
+		case <-started:
+			<-handlerDone
+		default:
+		}
+	}()
+
 	done := make(chan struct{})
 	go func() {
 		select {
@@ -181,6 +215,13 @@ func run(args []string, stdout, stderr io.Writer, sigs <-chan os.Signal, exit fu
 		case <-done:
 			return
 		}
+		// Both before anything that takes time. started first, so a run that
+		// reaches its own way out from here on finds the handler and waits;
+		// handlerDone deferred so that wait always ends, however this goes. In
+		// the real command exit does not come back and nobody is left to
+		// notice either one.
+		close(started)
+		defer close(handlerDone)
 		stopToolchain()
 		restored, rerr := r.RestorePending()
 		runCleanup()
@@ -201,7 +242,13 @@ func run(args []string, stdout, stderr io.Writer, sigs <-chan os.Signal, exit fu
 	if baseSHA != "" {
 		cmp, err := compareAgainst(ctx, cwd, *baseline, baseSHA, ms, results, stderr, setCleanup)
 		if err != nil {
-			fmt.Fprintln(stderr, "mutate: -baseline: "+err.Error())
+			// An interrupt reaches this as a cancelled context, and what it
+			// makes of the comparison is not news: "context canceled", or a
+			// tree the handler has already taken apart, reported as though the
+			// ref were a bad choice. The handler says the true thing.
+			if ctx.Err() == nil {
+				fmt.Fprintln(stderr, baselineFailure+err.Error())
+			}
 			return exitFailed
 		}
 		fmt.Fprint(stdout, cmp)
@@ -230,23 +277,93 @@ func run(args []string, stdout, stderr io.Writer, sigs <-chan os.Signal, exit fu
 // first long-running thing happens inside it.
 func compareAgainst(ctx context.Context, cwd, ref, sha string, ms []mutate.Mutation,
 	now []mutate.Result, stderr io.Writer, setCleanup func(func())) (string, error) {
-	parent, err := os.MkdirTemp("", "opossum-mutate-baseline-")
-	if err != nil {
-		return "", err
-	}
-	tree := filepath.Join(parent, "tree")
+	// Cleanup and creation must not overlap. Removing a directory means reading
+	// it, deleting what was read, and then asking for the directory itself; a
+	// `git worktree add` still running underneath can turn any of those steps
+	// into a removal that does not remove, and every way it can is quiet — the
+	// only report is a return value on a path whose caller is on its way to
+	// os.Exit. Taken before the handler is given anything to run, so cleanup
+	// waits for the creation rather than racing it, whenever it is asked.
+	var creating sync.Mutex
+	var parent, tree string
 	cleanup := func() {
+		creating.Lock()
+		defer creating.Unlock()
+		if parent == "" {
+			// Only reachable when the directory was never made, so there is
+			// nothing here to remove. Returning while the name is still unset
+			// would otherwise spend the one cleanup the handler gets: it takes
+			// the func before calling it, and does not put it back.
+			return
+		}
 		// Forced: the tree usually holds a half-applied mutation when this
 		// runs from the interrupt path, and asking politely would refuse.
+		//
+		// These are the last slow thing in front of ^C now that the run waits
+		// for this handler, and nothing here bounds them. A delay was tried and
+		// measured: against a git that will not exit it moved the wait by 14ms
+		// out of 8.3 seconds, because the timer it starts needs the child to
+		// have exited or the context to be done, and cleanup's context never
+		// is. It bounds the other shape — git gone, a grandchild still holding
+		// the pipes — and nothing here shows that shape happening, though
+		// neither is it ruled out. Left unbounded rather than fitted with a
+		// stopper for a case nobody has produced yet (#610).
+		var reasons []string
 		if _, err := gitOut(cwd, "worktree", "remove", "--force", tree); err != nil {
+			reasons = append(reasons, err.Error())
 			// The worktree metadata can outlive a directory that was removed
 			// out from under git; prune is the documented way to reconcile.
-			_, _ = gitOut(cwd, "worktree", "prune")
+			if _, perr := gitOut(cwd, "worktree", "prune"); perr != nil {
+				reasons = append(reasons, perr.Error())
+			}
 		}
-		os.RemoveAll(parent)
+		if err := removeAll(parent); err != nil {
+			reasons = append(reasons, err.Error())
+		}
+		// The verdict is the directory's final state, not the steps' returns.
+		// A removal can fail without an error surviving to here — the race
+		// this file closed had exactly that shape, and "something recreated
+		// it" is a shape nothing above would report. Whatever the route, a
+		// leftover the user was never told about costs them disk until they
+		// stumble on it; a leftover with its path and a way out costs them a
+		// minute.
+		reportLeftover(stderr, "baseline worktree", parent, reasons)
+		// And the registration is a leftover of its own: a directory can be
+		// gone while git still lists the worktree — produced for real, as a
+		// red, by a mutation in this file's own review. Checked only when the
+		// directory is gone; while it stands, the report above already hands
+		// the reader the prune.
+		if _, err := os.Lstat(parent); err != nil {
+			reportStaleListing(stderr, cwd, "baseline worktree", tree)
+		}
 	}
-	setCleanup(cleanup)
-	if _, err := gitOut(cwd, "worktree", "add", "--detach", tree, sha); err != nil {
+	// setCleanup is expected to store the func, not run it: this holds the lock
+	// that cleanup takes, so a caller that ran it here would wait on itself.
+	//
+	// Both before the directory exists. Registering first would leave an
+	// instant where the handler holds a cleanup that finds no name yet, spends
+	// it, and lets whatever is created next go unremoved; taking the lock first
+	// means any cleanup from here on waits and finds the name. An interrupt
+	// that arrives before this line finds nothing registered, which is the same
+	// as anywhere else in the run that has not made anything yet.
+	if err := func() error {
+		creating.Lock()
+		defer creating.Unlock()
+		setCleanup(cleanup)
+		made, err := os.MkdirTemp("", "opossum-mutate-baseline-")
+		if err != nil {
+			return err
+		}
+		// Resolved while it exists, so the name kept here is the one git will
+		// print: `git worktree list` answers in resolved paths, and on macOS
+		// $TMPDIR reaches the same directory through a symlink. After the
+		// removal there is no directory left to ask.
+		if r, rerr := filepath.EvalSymlinks(made); rerr == nil {
+			made = r
+		}
+		parent, tree = made, filepath.Join(made, "tree")
+		return addWorktree(ctx, cwd, tree, sha)
+	}(); err != nil {
 		return "", err
 	}
 	applicable, fresh, ambiguous, err := mutate.Applicable(ms, func(p string) ([]byte, bool, error) {
@@ -263,8 +380,7 @@ func compareAgainst(ctx context.Context, cwd, ref, sha string, ms []mutate.Mutat
 	if len(applicable) > 0 {
 		rb := mutate.NewRunner(tree)
 		// The same ctx as the main runner, so the day cancellation reaches
-		// the toolchain it reaches both trees — a second runner without it
-		// would be the one run an interrupt cannot stop.
+		// the toolchain (#607) it reaches both trees rather than only one.
 		rb.Ctx = ctx
 		rb.Log = func(s string) { fmt.Fprintln(stderr, "baseline tree: "+s) }
 		before, err = rb.Sweep(applicable)
@@ -283,13 +399,138 @@ func compareAgainst(ctx context.Context, cwd, ref, sha string, ms []mutate.Mutat
 	return mutate.CompareReport(ref+" ("+short+")", now, before, fresh, ambiguous), nil
 }
 
+// removeAll is a variable for the same reason addWorktree is: the report
+// below exists for the runs where removal fails, and a test that cannot make
+// removal fail is a test of the runs that never needed the report.
+var removeAll = os.RemoveAll
+
+// reportStaleListing speaks when git still lists a worktree whose directory
+// is gone. The two can part ways: `git worktree remove` under a dead context
+// leaves the registration while the directory falls to the later RemoveAll —
+// and a stale registration silently refuses the next `git worktree add` at
+// that path. Called only once the directory is known gone; while it stands,
+// the leftover report already hands the reader the prune. tree must be the
+// resolved path — the form git prints — because with the directory gone
+// there is nothing left here to resolve.
+func reportStaleListing(stderr io.Writer, cwd, what, tree string) {
+	out, err := gitOut(cwd, "worktree", "list", "--porcelain")
+	// A whole porcelain line, not a substring: another worktree's path could
+	// carry this one's as a prefix.
+	if err != nil || !slices.Contains(strings.Split(out, "\n"), "worktree "+tree) {
+		return
+	}
+	fmt.Fprintf(stderr, "mutate: the %s's directory is gone, but git still lists it at %s\n"+
+		"  (`git worktree prune` clears a registration whose directory has been removed)\n", what, tree)
+}
+
+// reportLeftover says what the cleanup left, where, and how to take it back —
+// or nothing, when nothing was left. The verdict comes from looking, not from
+// the error values: reasons carries whatever the steps did report, and a
+// leftover with no reason at all is said in those words rather than dressed
+// up, because "no step objected and yet it is still there" is exactly the
+// observation the next investigation starts from.
+func reportLeftover(stderr io.Writer, what, path string, reasons []string) {
+	if path == "" {
+		return
+	}
+	if _, err := os.Lstat(path); err != nil {
+		// Gone. A step may still have complained on the way — metadata git
+		// has to reconcile, say — and that is worth one small line, not the
+		// leftover report.
+		if len(reasons) > 0 {
+			fmt.Fprintf(stderr, "mutate: the %s is gone, but its removal reported: %s\n"+
+				"  (`git worktree prune` reconciles metadata a removed directory leaves behind)\n",
+				what, strings.Join(reasons, "; "))
+		}
+		return
+	}
+	why := "no step reported an error, and yet it is still there — something recreated it, " +
+		"or a removal claimed more than it did"
+	if len(reasons) > 0 {
+		why = strings.Join(reasons, "; ")
+	}
+	// rm before prune: prune only reaps registrations whose directory is
+	// gone, so the other order leaves a stale entry that silently refuses
+	// the next `git worktree add` at this path.
+	fmt.Fprintf(stderr, "mutate: the %s was not removed and is still at %s\n"+
+		"  (%s)\n"+
+		"  take it back by hand: rm -rf %q && git worktree prune\n", what, path, why, path)
+}
+
+// addWorktree makes the baseline worktree. It is a variable so a test can hold
+// one creation in flight and interrupt exactly there: the window where cleanup
+// and creation overlap is the one that leaves a directory behind.
+var addWorktree = func(ctx context.Context, cwd, tree, sha string) error {
+	// Under the run's context, so the interrupt that cancels it also ends this.
+	// Without that, cleanup waiting for creation to finish would wait as long
+	// as a stuck disk takes — turning "^C is not instant" into "^C never
+	// returns", which is worse than the leftover it was meant to prevent.
+	_, err := gitOutCtx(ctx, cwd, "worktree", "add", "--detach", tree, sha)
+	return err
+}
+
 // gitOut runs git in dir and hands back trimmed stdout; an error carries what
 // git said, because "exit status 128" on its own sends someone to run the same
 // command by hand to hear the actual sentence.
-func gitOut(dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
+//
+// A variable for the same reason removeAll is: cleanup collects what these
+// commands report, and a test that cannot make them fail is a test of the
+// runs that had nothing to collect.
+var gitOut = func(dir string, args ...string) (string, error) {
+	// Background on purpose: cleanup runs after the interrupt has cancelled the
+	// run's context, and exec.CommandContext will not even start under one that
+	// is already done. The directory would still go — cleanup removes it
+	// whatever git says — but the worktree git has registered for it would
+	// stay, and the next `git worktree list` here would name a tree that is no
+	// longer on disk. And no delay on the pipes: these callers read what git
+	// said, and a delay can cut that short. The one caller that asks for a
+	// delay reads nothing.
+	return git(context.Background(), 0, dir, args...)
+}
+
+// baselineFailure opens the line a failed comparison writes. Named because two
+// tests turn on whether it is there: one that an interrupt does not produce it,
+// one that anything else does.
+const baselineFailure = "mutate: -baseline: "
+
+// interruptWaitDelay bounds how long git is given to let go of the pipes it
+// handed out, whether or not anyone cancelled it. Cancelling reaches git itself
+// at once, but the output is read until everyone holding those pipes is gone,
+// and git hands them to its own children: a `post-checkout` hook, an fsmonitor,
+// the auto-gc it leaves running behind it. Two shapes reach this. An interrupt
+// during a creation that a hook is holding: without a bound the run took over
+// twenty seconds to come back, with it a fifth of a second, nearly all of which
+// is this. And no interrupt at all — git finished, a child of its own did not —
+// where without a bound the read simply waits, and with it the command is
+// reported as the success it was.
+const interruptWaitDelay = 200 * time.Millisecond
+
+// gitOutCtx is gitOut under a caller's context, for the one command that has to
+// be interruptible: making the baseline tree.
+//
+// The answer it hands back can be short. A delay that expires closes the pipes
+// where they are, and this reports that as success because the command itself
+// succeeded — which is right for a caller that does not read the answer, and
+// wrong for one that does. `gitOut` is the one to add commands to.
+func gitOutCtx(ctx context.Context, dir string, args ...string) (string, error) {
+	return git(ctx, interruptWaitDelay, dir, args...)
+}
+
+func git(ctx context.Context, waitDelay time.Duration, dir string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.WaitDelay = waitDelay
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
+	// A delay that expires is not a failed command. It says git finished and
+	// something it handed a pipe to has not let go — a hook that backgrounded
+	// itself, an fsmonitor, an auto-gc. The command did what it was asked and
+	// only the reading was cut short, which is why the caller that asks for a
+	// delay is the one that does not read the answer. Reported as a failure,
+	// this turned a worktree that had just been made correctly into a failed
+	// comparison, with git's own success message as the reason.
+	if errors.Is(err, exec.ErrWaitDelay) {
+		err = nil
+	}
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
 		if msg == "" {

@@ -69,11 +69,44 @@ are written in English, inside a code fence as much as outside one.
 ```sh
 gofmt -l .        # must be empty
 go vet ./...
-make test         # the regression gate: what CI runs, with -race and -cover
+make test         # the regression gate: the exact command CI runs
 ```
 
 Behaviour-changing pull requests get an independent review before merge, and the
 review's findings are recorded on the PR.
+
+### The push runs the gate again, somewhere clean
+
+The pre-push hook feeds a bundle of `HEAD` into a fresh Linux container and
+runs `make test` there (`make sieve` runs the same thing by hand). A container
+that did not exist a minute ago has an empty `$HOME`, an empty `/tmp` and no
+processes left over from anything — so the class of failure that only shows on
+a clean machine shows up here, before the push. The tree goes in as committed:
+an uncommitted fix in your working tree cannot make the sieve green for a push
+that does not include it, and nothing a test writes survives the container.
+
+The sieve needs the Docker daemon running; the hook refuses, and says so,
+when it is not. What the sieve does not run is the current Go release — it
+uses the version go.mod asks for, and the second compiler is half of what the
+pull request's CI run exists to check.
+
+### When CI runs, and what it is for
+
+CI runs when a pull request stops being a draft — opening it ready, or
+marking it ready for review — and again on any push made while it is ready,
+so the green always describes the head that would merge. That is the run to
+point at: a green that someone other than whoever ran the tests can verify.
+Pushes to a draft cost nothing and are covered by the sieve; push fixes as a
+draft, and treat a push while ready as deliberately spending a run to keep
+the attestation current.
+
+Before merging, compare the CI run's commit with the pull request's head all
+the same — they must be the same commit, or the green belongs to a tree that
+is not the one merging.
+
+There is no CI on pushes to main. A release runs the workflow once by hand
+(`gh workflow run ci.yml --ref main`) before its tag, which covers everything
+that reached main since the last run.
 
 ### A commit the tree cannot be built from
 
@@ -125,11 +158,23 @@ if a test had started a supervisor, a process still running out of it. The
 in-suite check is the one thing that could have named that process, and on this
 path it never speaks.
 
-`make test` therefore runs the suite through a second look from the outside:
+`make test` therefore runs the suite through a second look from the outside —
+in two steps, as the Makefile writes them (`$$` is make's spelling of `$`):
 
 ```sh
-go run ./cmd/noleftovers go test ./... -race -cover
+go run ./cmd/noleftovers go test $$(go list ./... | grep -v '/cmd/busy$$') -race -cover -count=1
+go run ./cmd/noleftovers go test ./cmd/busy -race -cover -count=1
 ```
+
+cmd/busy runs last, alone, because it measures how much CPU the machine can
+give and `go test ./...` runs packages in parallel — beside its neighbours,
+the measuring package was measuring them. The second line starts on a machine
+the first has just finished with.
+
+`-count=1` keeps the gate from answering out of Go's test cache. The cache is
+sound about code, but a test that fails on environment passes by not running,
+and a cached `ok` reads exactly like one that ran. On the gate, "green" means
+"ran, just now, and passed" — the cache is welcome everywhere else.
 
 Out here the test binary's death is only an exit status. It takes the set of
 `opossum-*` entries in `$TMPDIR` before and after, reports anything new, names
@@ -199,8 +244,10 @@ What it does not catch:
   but only when something was left, since that is the only time it prints at all.
   `make` only tells zero from non-zero, so the gate is unaffected — a script
   reading `make test`'s status is not.
-- **`make cover` and the commit hook**, which do not go through it, and CI,
-  which is tracked separately.
+- **`make cover` and the commit hook**, which do not go through it. CI does:
+  its test job runs `make test` itself, so the runner — where a leaked
+  directory is thrown away with the machine and nobody ever sees it — gets the
+  same look from outside as a local run.
 
 ### Making the machine busy on purpose
 

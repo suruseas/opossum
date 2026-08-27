@@ -1,0 +1,1 @@
+- `OPSM-106` — a host device or session socket is mounted (a per-container VM has no route to a device node).

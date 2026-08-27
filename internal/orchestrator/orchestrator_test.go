@@ -3191,23 +3191,38 @@ func TestTheStatsTableIsOneRowPerService(t *testing.T) {
 }
 
 // A service mounting the Docker socket gets an up-front warning: Apple container
-// has no Docker socket, so the mount fails and Docker-driving tools can't work.
+// has none of its own, so nothing here answers on that path about these
+// containers. The mount itself is not the problem — see the warning's own words
+// below, which this holds to the letter.
 func TestUpWarnsOnDockerSocketMount(t *testing.T) {
 	rt, _ := fakeShim(t)
+	mount := filepath.Join(t.TempDir(), "absent", "docker.sock") + ":/var/run/docker.sock"
 	p := project("demo", map[string]*compose.Service{
 		// A path that is not on this machine: the warning is about what the compose
 		// file says, and has to read the same whether or not Docker is installed on
 		// the host running the eval. (When the path really is a symlink to a socket,
-		// the up is refused outright — TestUpRefusesASymlinkedSocketMount.)
+		// the up is refused outright — TestUpRefusesASymlinkedSocketMount, and
+		// TestTheWayOutDoesNotDependOnWhoOwnsTheSocket for the way out it offers.)
 		"portainer": {Image: "portainer/portainer-ce",
-			Volumes: []string{filepath.Join(t.TempDir(), "absent", "docker.sock") + ":/var/run/docker.sock"}},
+			Volumes: []string{mount}},
 	})
 	var out bytes.Buffer
 	if err := orchestrator.New(p, rt, "opossum", &out).Up(true); err != nil {
 		t.Fatalf("Up: %v", err)
 	}
-	if !strings.Contains(out.String(), "[OPSM-204]") || !strings.Contains(out.String(), "docker.sock") || !strings.Contains(out.String(), "no Docker daemon socket") {
-		t.Errorf("mounting the Docker socket should warn with code OPSM-204, got:\n%s", out.String())
+	// The whole line, not a phrase of it. Truncating this warning to its first
+	// sentence left every package in this repository green while it carried the
+	// only statement opossum makes about what does answer on that path — and
+	// that statement is the one the reader acts on. The note beside it is held
+	// word for word for the same reason; this one was not, and the difference
+	// did not follow from anything.
+	want := fmt.Sprintf("warning: [OPSM-204] service %q mounts the Docker socket (%s), which does not "+
+		"answer for the containers here. Apple `container` runs them, and it has no socket "+
+		"to share; if a Docker daemon answers on that path, it is a different one and knows "+
+		"a different set. A tool that wants this socket in order to watch its neighbours will "+
+		"be told about theirs.\n", "portainer", mount)
+	if got := out.String(); !strings.Contains(got, want) {
+		t.Errorf("the warning is not what this file says it should be\n got: %s\nwant: %s", got, want)
 	}
 }
 
@@ -3315,14 +3330,18 @@ func socketAt(t *testing.T) (path string, dir string) {
 // a bind source" and refused mounts that work.
 func TestUpRefusesASymlinkedSocketMount(t *testing.T) {
 	sock, dir := socketAt(t)
-	link := filepath.Join(dir, "docker.sock")
+	// Not a Docker socket, though it no longer matters which: the refusal and
+	// the way out are the same for any of them, which
+	// TestTheWayOutDoesNotDependOnWhoOwnsTheSocket covers. This one is about
+	// the general case, so it uses a socket with no special meaning.
+	link := filepath.Join(dir, "S.gpg-agent")
 	if err := os.Symlink(sock, link); err != nil {
 		t.Fatal(err)
 	}
 
 	rt, log := fakeShim(t)
 	p := project("demo", map[string]*compose.Service{
-		"ci": {Image: "someci", Volumes: []string{link + ":/var/run/docker.sock"}},
+		"ci": {Image: "someci", Volumes: []string{link + ":/run/user/1000/gnupg/S.gpg-agent"}},
 	})
 	var out bytes.Buffer
 	err := orchestrator.New(p, rt, "opossum", &out).Up(true)

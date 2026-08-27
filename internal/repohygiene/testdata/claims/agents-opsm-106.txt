@@ -1,0 +1,7 @@
+- **`[OPSM-106]` … a host device or session socket is mounted** → each container is
+  its own VM, and a device node cannot be handed to one: `/dev/*` arrives as a path
+  with nothing behind it, and no compose change grants a VM access to the host's
+  devices. A session socket (X11, PulseAudio) is mounted as a path too, and what
+  would answer on it is the host's own session; whether anything useful comes
+  through here has not been measured. Recorded as a note in
+  `compose.opossum.yaml`.

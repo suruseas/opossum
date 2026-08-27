@@ -247,9 +247,12 @@ file than by a section of this README.
 Honestly, and in one place: opossum needs **macOS 26** (container-to-container
 networking depends on it — on macOS 15 this kind of orchestration isn't possible).
 It implements a subset of the Compose specification, and refuses rather than
-guesses when a field would change what your project means — `docker.sock` mounts
-have no equivalent and are rejected up front. A named volume can only be attached
-to one running container at a time, which is Apple `container`'s constraint, not a
+guesses when a field would change what your project means. A `docker.sock` mount
+is a separate matter: the runtime refuses any bind whose source is a symlink to a
+socket, whoever owns it. `up` warns about the rest, because nothing here answers
+on that path about these containers. A named volume
+can only be attached to one running container at a time, which is Apple
+`container`'s constraint, not a
 choice. Swarm/`deploy` beyond `resources.limits`, `configs`, and `extends` are
 ignored, and `opossum config` tells you which fields in your file were skipped.
 

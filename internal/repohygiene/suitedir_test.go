@@ -297,9 +297,11 @@ func TestItSkipsItselfAndNothingElse(t *testing.T) {
 
 func TestEverySuiteThatBuildsUnderTMPDIRGoesThroughSuitedir(t *testing.T) {
 	want := map[string]struct{}{
-		"cmd/opossum/main_test.go":                   {},
-		"internal/orchestrator/orchestrator_test.go": {},
-		"internal/runtime/runtime_test.go":           {},
+		"cmd/mutate/interruptduringadd_test.go":            {},
+		"cmd/opossum/main_test.go":                         {},
+		"internal/orchestrator/orchestrator_test.go":       {},
+		"internal/orchestrator/realruntime_socket_test.go": {},
+		"internal/runtime/runtime_test.go":                 {},
 	}
 
 	root := repoRoot(t)

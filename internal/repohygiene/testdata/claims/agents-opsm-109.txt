@@ -1,0 +1,8 @@
+- **`[OPSM-109]` … `symlink to a socket, which this runtime refuses`** (pre-flight) →
+  a socket reached by its own path mounts fine, and a symlink to a file or a
+  directory mounts fine; it is the combination that fails. The mount is the
+  problem, not who owns the socket — where Docker Desktop is installed,
+  `/var/run/docker.sock` has exactly this shape, and so do agent sockets like
+  `~/.gnupg/S.gpg-agent`. **What it says next is the same for all of them**: the
+  message names the resolved path and says to mount that instead. Whether the
+  service can then reach it is a separate question — compare `OPSM-106`.

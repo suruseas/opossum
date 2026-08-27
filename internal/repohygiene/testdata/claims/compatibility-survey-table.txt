@@ -1,0 +1,11 @@
+| Outcome | Projects | What it is |
+|---|---|---|
+| Ran completely | 78 | — |
+| Started, then every service exited | 40 | The image's own prerequisites are unmet — secrets, config files, a database that was never initialised. Not an orchestration failure |
+| A published host port was already taken | 9 | Something else on the Mac holds it |
+| Mounts the Docker socket | 8 | nothing here answers on that path about these containers; where the path is a symlink to a socket `opossum` refuses before starting anything |
+| Some services ran, some didn't | 7 | Usually one service in the stack hitting one of the rows below |
+| A data directory is a bind mount | 4 + 3 | Refused up front, or discovered on the first start |
+| A network declared `external: true` doesn't exist | 2 | Create it first, or drop the declaration |
+| Timed out at 120s | 3 | See above |
+| Other single cases | 2 | A missing bind source; a dependency that exited before becoming healthy |

@@ -43,8 +43,9 @@ out. (Only auto-merged when no `-f` is given, same as the standard override.)
 `up --from-docker-compose` **generates** that overlay when it finds a known
 incompatibility — applied fixes for `OPSM-101` (Postgres PGDATA) and `OPSM-105`
 (bind-mounted DB data dir), suggestions for `OPSM-102` (a shared named volume) and
-`OPSM-105` (an app's own data directory), notes for `OPSM-204` (Docker socket) and
-`OPSM-106` (host devices) — then re-resolves and starts — so migrating a docker compose project is one command.
+`OPSM-105` (an app's own data directory), notes for `OPSM-204` (Docker socket),
+`OPSM-106` (host devices), `OPSM-409` (`restart: on-failure`) and `OPSM-111` (a
+Postgres data dir left as a bind mount) — then re-resolves and starts — so migrating a docker compose project is one command.
 Facts to rely on:
 
 - Entries come in three classes, each with a **stable marker** to grep for:
@@ -54,9 +55,12 @@ Facts to rely on:
     for you, written out but **commented**. It alters what the project means (where
     data lives, how services share it). Uncomment the whole block to apply it; the
     block is self-contained, including any `volumes:` declaration it needs.
-  - `# [opossum note]` — **nothing to change**; the compose file can't express a fix
-    (a Docker socket mount, a host device). Recorded so the failure isn't a mystery.
-    Notes carry no YAML, so there is nothing to uncomment.
+  - `# [opossum note]` — **something opossum writes no YAML for** (`OPSM-204` a
+    Docker socket mount, `OPSM-106` a host device or session socket, `OPSM-409`
+    `restart: on-failure`, `OPSM-111` a Postgres data dir left as a bind mount).
+    Whether you can do anything about it yourself is the note's own business, and
+    each one says so where there is something to say. Recorded so the failure
+    isn't a mystery. Notes carry no YAML, so there is nothing to uncomment.
 - Each entry carries a fixed comment shape for its class, always starting with what
   it is about and a **Why** that cites the diagnostic code (cross-referable to the
   tables above). Applied entries then give **Verify** / **If this still fails** /
@@ -207,15 +211,36 @@ list; codes are add-only and never change meaning.
   service passes `PGDATA` in from the environment, opossum cannot read which line
   you are in and says so instead of guessing; set `PGDATA` in the compose file if
   you want it to reason about this.
-- **`[OPSM-204]` … `mounts the Docker socket … Apple container has no Docker daemon
-  socket`** → the service needs Docker (e.g. Portainer); it can't work here. Remove
-  the `docker.sock` mount or run that tool differently.
+- **`[OPSM-204]` … `mounts the Docker socket, which does not answer for the
+  containers here`** → Apple container runs them and has no socket to share. The
+  mount itself is not the obstacle: bind-mounting a host socket works, and a
+  Docker daemon was reached that way from inside a container on 2026-08-27.
+  That is the one that has been measured; what a session socket mount reaches
+  here has not been (`OPSM-106`). What puts a symlink at that name varies (Docker
+  Desktop does; Rancher Desktop and OrbStack do when given administrative access;
+  colima leaves it to you) and one merely installed answers nothing, so the
+  message says *if* a daemon answers there.
+  What none of them will do is answer about these containers — a tool mounting
+  this socket to watch its neighbours (Portainer, Traefik) is given a different
+  set, if anything answers at all. Whether to keep the mount depends on which
+  daemon was meant.
 - **`[OPSM-109]` … `symlink to a socket, which this runtime refuses`** (pre-flight) →
-  mount what the link points at instead: the error names the resolved path, and a
-  socket reached by its own path mounts fine. A symlink to a file or a directory is
-  fine too — it is the combination that fails. Where Docker Desktop is installed,
-  `/var/run/docker.sock` has exactly this shape, but so do agent sockets like
-  `~/.gnupg/S.gpg-agent`; the mount is the problem, not who owns the socket.
+  a socket reached by its own path mounts fine, and a symlink to a file or a
+  directory mounts fine; it is the combination that fails. The mount is the
+  problem, not who owns the socket — where Docker Desktop is installed,
+  `/var/run/docker.sock` has exactly this shape, and so do agent sockets like
+  `~/.gnupg/S.gpg-agent`. **What it says next is the same for all of them**: the
+  message names the resolved path and says to mount that instead. Whether the
+  service can then reach it is a separate question — compare `OPSM-106`.
+
+  It used to say something else for a `docker.sock`: that mounting the resolved
+  path could not help, because Apple container is not the Docker daemon. The
+  first half is true and the second does not follow. Where that path is a
+  symlink something put it there — which of them, and whether anything is
+  listening, varies — and on 2026-08-27 a container started here was measured
+  reaching a Docker daemon through one. So the special case is gone, and
+  what is worth saying about such a daemon — that it is not the one running these
+  containers — is said by `OPSM-204` instead, once, and only if one answers.
 - **`[OPSM-201]` … `host port already in use: <port>`** → free the host port or remap
   it in the compose file. On macOS, port 53 is taken by mDNSResponder. Usually a pre-flight
   refusal, but the same code arrives on a `→` line under a failed start when the port is
@@ -317,9 +342,11 @@ list; codes are add-only and never change meaning.
   `opossum ps` shows the port actually published; write `"<host>:<container>"` in the
   compose file to pin one. An explicit mapping is never moved (that's `OPSM-201`).
 - **`[OPSM-106]` … a host device or session socket is mounted** → each container is
-  its own VM, so `/dev/*`, an X11 socket or a PulseAudio socket on the host is not
-  reachable from inside it. The mount exists with nothing behind it; no compose
-  change grants a VM access to the host's devices. Recorded as a note in
+  its own VM, and a device node cannot be handed to one: `/dev/*` arrives as a path
+  with nothing behind it, and no compose change grants a VM access to the host's
+  devices. A session socket (X11, PulseAudio) is mounted as a path too, and what
+  would answer on it is the host's own session; whether anything useful comes
+  through here has not been measured. Recorded as a note in
   `compose.opossum.yaml`.
 - **`[OPSM-107]` … mounts a path that names a file, so a directory was created** → a bind
   mount needs its source to exist, so a missing one is created; a directory is the only
@@ -413,7 +440,7 @@ Every `[OPSM-NNN]` opossum can emit (add-only; grouped 1xx storage / 2xx network
 - `OPSM-103` — a named volume is already attached to another running container (cross-project VZError).
 - `OPSM-104` — couldn't create a bind mount's host source (permissions, or a symlink whose target is gone); fatal.
 - `OPSM-105` — a database data directory is a bind mount (host-owned, can't be chowned).
-- `OPSM-106` — a host device or session socket is mounted (a per-container VM can't reach it).
+- `OPSM-106` — a host device or session socket is mounted (a per-container VM has no route to a device node).
 - `OPSM-107` — a bind mount names a file that doesn't exist, so a directory stands in its place.
 - `OPSM-108` — a fresh volume couldn't be filled from the image, or cleared of ext4's `lost+found` (no shell in it to run either with).
 - `OPSM-109` — a bind source is a symlink to a socket, which the runtime refuses to mount.
@@ -423,7 +450,7 @@ Every `[OPSM-NNN]` opossum can emit (add-only; grouped 1xx storage / 2xx network
   the start failed on it.
 - `OPSM-202` — the DNS domain isn't registered (no bare-name discovery).
 - `OPSM-203` — an internal network: no internet egress and no name resolution.
-- `OPSM-204` — a service mounts `docker.sock` (Apple container has no Docker socket).
+- `OPSM-204` — a service mounts `docker.sock`, which does not answer for the containers here.
 - `OPSM-205` — a network declared `external: true` doesn't exist (pre-flight; create it or drop `external`).
 - `OPSM-206` — a container-only port's mirrored host port was taken; opossum published on a free port.
 - `OPSM-301` — build context under `/private/tmp` (the builder VM can't read it).

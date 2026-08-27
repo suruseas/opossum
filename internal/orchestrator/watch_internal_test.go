@@ -387,3 +387,56 @@ func TestRebuildServiceLeavesDependenciesAlone(t *testing.T) {
 		}
 	}
 }
+
+// The line `watch` prints when it starts, word for word.
+//
+// Four values side by side and nothing but their order to say which is which:
+// the host directory being watched, the action, the service, and the path
+// inside the container. A sweep found all six exchanges between them invisible.
+// Reversed, the arrow points from the container into the host — the opposite of
+// what watch does — and it still reads as a sentence about watching.
+//
+// This is the line a person reads to check that watch is looking at what they
+// meant. Nothing was reading it.
+//
+// Every value is distinct on purpose: the action is not the service, the host
+// directory is not the target, and none of them is a prefix of another.
+func TestWatchSaysWhatItIsWatchingWordForWord(t *testing.T) {
+	rt, _ := watchShim(t)
+	dir := t.TempDir()
+	other := t.TempDir()
+	// Two rules, because the contract is one line per rule and one rule cannot
+	// show that. Announcing only the first leaves a watched path the reader was
+	// never told about — and the whole point of this line is that they can check
+	// what watch is looking at.
+	p := &compose.Project{Name: "demo", Services: map[string]*compose.Service{
+		"frontend": {Name: "frontend", Image: "app", Develop: &compose.Develop{
+			Watch: []compose.WatchRule{
+				{Action: "sync", Path: dir, Target: "/srv/www"},
+				{Action: "rebuild", Path: other, Target: "/srv/assets"},
+			},
+		}},
+	}}
+	var out bytes.Buffer
+	o := New(p, rt, "opossum", &out)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- o.Watch(ctx) }()
+	// No waiting for the line to appear. Watch prints it while registering the
+	// targets, before it reaches the select it can be cancelled in, so returning
+	// from Watch is what says the write finished. A poll loop reading the buffer
+	// while the other goroutine writes it is a data race, and the gate runs with
+	// -race — the first version of this test had one.
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("watch: %v", err)
+	}
+
+	// Both lines, in the order the rules were written, and nothing else.
+	want := "watching " + dir + " (sync → frontend:/srv/www)\n" +
+		"watching " + other + " (rebuild → frontend:/srv/assets)\n"
+	if out.String() != want {
+		t.Errorf("got  %q\nwant %q", out.String(), want)
+	}
+}

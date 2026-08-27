@@ -269,10 +269,13 @@ stdout stays clean for `| jq`.
    `.env` and whatever lives under `./work` are *inside* the blast radius by
    design — the boundary is around the rest of your Mac, not around those.
 2. **No true nesting.** The VM has no `/dev/kvm`, so the agent can't run Apple
-   `container` (or a nested VM) from inside — a task that shells out to
-   `container`/`docker` won't work here.
-3. **No host Docker bridge.** There's no `docker.sock` to mount in; handing the
-   agent the host's Docker would defeat the whole isolation, so it's a non-goal.
+   `container` (or a nested VM) from inside. Nothing is wired to a daemon here
+   either, so a task that shells out to `container`/`docker` has nothing to
+   drive — see 4 for what the guest would need if one were.
+3. **No host Docker bridge.** Apple `container` has no `docker.sock` of its own,
+   and handing the agent the host's — which a container here can reach, given a
+   path that something is listening on — would defeat the whole isolation, so
+   it's a non-goal.
 4. **A dockerd *inside* the VM (containers-in-VM) is feasible but not wired here.**
    The guest has cgroup v2, overlayfs, and `--cap-add ALL` available — the pieces
    a rootful dockerd needs — but running one is left as future work.

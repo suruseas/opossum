@@ -6,6 +6,18 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.24.1] - 2026-08-28
+
+### Changed
+
+- The note for a mounted host device or session socket (`OPSM-106`) no longer says a session socket is unreachable. A device node still cannot be handed to a per-container VM and arrives as a path with nothing behind it. For a session socket the note now says what is known: it is mounted as a path, what would answer on it is the host's own session, and whether anything useful comes through has not been measured here.
+- The line `opossum up --from-docker-compose` prints above its notes now says what is true of all of them — `opossum writes no YAML for` these, which is why there is nothing to uncomment — instead of claiming no compose change could fix them. That was true of some notes and false of others: a Docker socket mount has a way out, and the note has said so since the wording was corrected.
+
+### Fixed
+
+- The note `opossum up --from-docker-compose` writes for a Docker socket mount now looks at the file name rather than anywhere in the path, so `docker.sock.d/S.gpg-agent` and `my-docker.sock` no longer collect one.
+- What `opossum` says about a `docker.sock` mount no longer claims the mount cannot help. Where that path is a symlink something put it there, and a container started here was measured reaching a Docker daemon through what the link points at on 2026-08-27 — though which of them put it there, and whether anything is listening, varies. The refusal for a symlinked socket now offers the same way out whoever owns the socket, and the note and the warning say the thing that is actually worth knowing: the daemon answering there is not the one running these containers, so a tool mounting this socket to watch its neighbours is given a different set if one answers at all. The earlier wording came from reading rather than measuring, and was wrong in exactly the situation that produces it.
+
 ## [0.24.0] - 2026-08-26
 
 ### Added
@@ -985,7 +997,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.24.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.24.1...HEAD
+[0.24.1]: https://github.com/suruseas/opossum/compare/v0.24.0...v0.24.1
 [0.24.0]: https://github.com/suruseas/opossum/compare/v0.23.1...v0.24.0
 [0.23.1]: https://github.com/suruseas/opossum/compare/v0.23.0...v0.23.1
 [0.23.0]: https://github.com/suruseas/opossum/compare/v0.22.1...v0.23.0
