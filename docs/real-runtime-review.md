@@ -119,10 +119,29 @@ container network list | grep hello-net || echo "hello-net removed"
 make real-conformance
 ```
 
-旗なしでは skip（日々のゲートは fake の領分）。**旗が立っているのに前提が欠けている
-（runtime 不在・未起動）と Fatal**——「測ったつもりで測っていない緑」を検査自身が拒む。
+旗なしでは skip（日々のゲートは fake の領分）。**旗が立っているのに前提が欠けていると
+Fatal**——「測ったつもりで測っていない緑」を検査自身が拒む。前提は runtime のもの
+（`container` 不在・未起動・image が引けない）だけでなく、daemon の測定については
+daemon のものも入る：文書上の名前が解決しないマシン、解決しても誰も答えないマシンでは
+**赤になる**（Docker を入れていないマシンでこの target が赤になるのはこのため）。
 現在の内容: socket 直 bind が通信まで通ること／symlink→socket が errno 95 で拒まれること
-（`OPSM-106`/`OPSM-109` の文言が立っている2つの実測。下の 2026-08-27 の記録を参照）。
+（下の 2026-08-27 の記録を参照）／`/var/run/docker.sock` の解決先を bind して **Docker daemon が
+答えること**（`TestARealDockerDaemonAnswersThroughABoundSocket`、下の 2026-08-28 の記録）。測っているのは **socket ファイルそのものの bind** で、
+listener は `net.Listen("unix", …)` の汎用 socket。
+
+`OPSM-109` は3つのことを言う——拒否（errno 95）・境界（socket を自分のパスで、あるいは
+symlink をファイルやディレクトリへ向けてマウントするのは通る）・逃げ道（リンク先を直接
+bind すれば動く）。この検査が覆うのは、拒否（`TestARealSymlinkToASocketIsStillRefused`）と、
+「socket を自分のパスで」（`TestARealSocketBindCarriesTraffic`）——後者は逃げ道が指す形でも
+あるので、逃げ道もここで覆われている。境界の残りは：symlink→ディレクトリが下の
+2026-08-21 の記録にあり、**symlink→ファイルはこの文書に記録が無い**（container 1.1.0 の
+測定が `internal/orchestrator/orchestrator_test.go` のコメントに残っているだけ）。
+
+`OPSM-106` が当たるパス——`isHostDevicePath` の前置一致（`/dev/`・`/tmp/.X11-unix`・
+`/run/user/`・`/run/pulse`・`/var/run/dbus`）——で同じことが起きるかは**測っていない**。
+前置一致なので、ディレクトリ（`/tmp/.X11-unix`）も socket ファイル
+（`/run/user/<uid>/pulse/native`）も当たる。後者は測ったものと同じ形に見えるが、
+試してはいない。
 
 **build / health / completed の経路**は `compose.yaml` で確認（`container builder start` が要る）:
 
@@ -144,6 +163,36 @@ go run ../cmd/opossum -f compose.yaml down
 
 ## 実機検証の記録
 
+- **2026-08-28 — 「daemon に届いた」を、走るもので測り直した（container 1.2.2）**。
+  公開文書の「a Docker daemon was reached that way from inside a container」は、2026-08-27 の
+  手書きの記録だけを根拠にしていた。既存の conformance が測っていたのは自前の listener との
+  ping/pong ——**汎用の unix socket が通ること**で、daemon については何も言っていない。
+
+  `TestARealDockerDaemonAnswersThroughABoundSocket` として固定した。`/var/run/docker.sock` を
+  `filepath.EvalSymlinks` で解決し（この機械では `~/.docker/run/docker.sock`）、その解決先を
+  コンテナに bind して中から `GET /_ping` を投げる。
+
+  判定は `HTTP/1.0 200 OK` と **`Api-Version:` ヘッダの両方**で、daemon を名指すのは後者。
+  そのパスに普通の HTTP サーバを置いても 200 は返る——それは「何かが答えた」であって、
+  文書が言っている「*daemon* に届いた」より弱い。**200 だけでは足りない**、が正しく、
+  200 を見ていない、ではない。
+  ホストで先に生バイト列を測って、`HTTP/1.0 200 OK` に続く `Api-Version: 1.55` を確認してある。
+
+  **変異2件で、赤にできることを確かめた**（どちらも実機で実行）:
+
+  | 当てた変異 | 結果 |
+  |---|---|
+  | 文書上の名前を、200 は返すが Engine API ではない socket に向ける | **赤**（`reply: b'HTTP/1.0 200 OK…'` が出たうえで `Api-Version:` の判定が落ちた＝コンテナは届いていて、判定だけが区別した） |
+  | その socket の listener を落とし、ファイルだけ残す | **赤**（bind の前に「解決はするが誰も答えない」で Fatal） |
+
+  **この検査は 2026-08-28 に実機で緑になった**（`container` 1.2.2、macOS 26。同じ run で
+  既存の2本も緑）。`AGENTS.md` と `docs/compatibility.md` の日付を 2026-08-27 から
+  2026-08-28 へ動かした根拠はこの run で、上の変異はその同じ木に当てたもの。
+
+  前提の扱いはこのファイルの他の検査に揃えた——旗が立っているのに daemon が居なければ
+  **skip ではなく Fatal**。文書自身が「入れただけでは何も答えない」と書いているので、
+  測る側が同じ基準を自分に課さないと筋が通らない。
+
 - **2026-08-27 — socket bind の「通る」と「使える」を分けて測った（container 1.2.2）**。
   `OPSM-109` の助言（リンク先の socket を直接 bind する）は、これまで「マウントが通る」まで
   しか確かめられていなかった。ホスト側（`$HOME` 配下）で unix socket を listen し、
@@ -152,18 +201,22 @@ go run ../cmd/opossum -f compose.yaml down
     同じ。ホスト側 listener が `ping` を受信し、コンテナ側が `reply: b'pong'` を出力。
     → `OPSM-106` の「a host device or session socket is mounted → the mount exists with
     nothing behind it」は **socket 一般には偽**（少なくとも `$HOME` 配下の unix socket は
-    実体つきで届く）。範囲の狭め直しは #597 で扱う。
-  - **symlink→socket の bind は 1.2.2 でも errno 95 で拒否**（1.1.0 で採った記録と同じ形）。
+    実体つきで届く）。範囲は #615 で狭め直した——note は device node と session socket を
+    分けて書き、session socket について何か通るかは測っていない、と言うようになった。
+  - **symlink→socket の bind は 1.2.2 でも `errno 95` で拒否**（1.1.0 で採った記録と同じ形）。
     `OPSM-109` の診断（拒否の説明）は現役。
   - **docker.sock も、解決先を bind すれば本物の dockerd に届く**（同日追試）。
-    `/var/run/docker.sock` の symlink が存在する機械には Docker Desktop がいる——その解決先
+    `/var/run/docker.sock` の symlink は、この機械では Docker Desktop が置いていた——その解決先
     （`~/.docker/run/docker.sock`）をコンテナに bind し、中から HTTP `GET /version` で
-    **200 OK（`Server: Docker/29.7.2`、Docker Desktop 4.88.0）を実測**。「compose の変更では
-    直らない」という現行の案内（`OPSM-109` の docker 分岐）は、この形の機械では偽。
+    **200 OK（`Server: Docker/29.7.2`、Docker Desktop 4.88.0）を実測**。当時の案内
+    （`OPSM-109` の docker 分岐が言っていた「compose の変更では直らない」）は、この形の
+    機械では偽だった。その分岐は #615 で削除され、拒否は socket の持ち主を見なくなっている。
     ただし届く先はホストの Docker Desktop のエンジンであって、opossum が起動した世界ではない
-    ——文言の直し方はこの但し書きごと #597 の続きで扱う。
+    ——文言はこの但し書きごと #615 で直した。
   - 最初の2点（直 bind の疎通／symlink の拒否）は env-gated の conformance 検査（`internal/orchestrator` の
     `TestARealSocketBindCarriesTraffic` / `TestARealSymlinkToASocketIsStillRefused`）として固定。
+    3点目（daemon に届くこと）はこの日は手で測っただけで、走るものが無かった——2026-08-28 に
+    `TestARealDockerDaemonAnswersThroughABoundSocket` として固定した（上の記録）。
 
 - **2026-08-21 — container 1.2.2 での初レビュー（補間クラスタ ＋ v0.20.0 の3本）**。
   実機で確かめたのは、fake が原理的に答えられない層——**コンテナに実際に届いた環境変数**。
@@ -386,11 +439,19 @@ opossum 自身が書いた compose ではなく、**他リポジトリの本物�
     container で提供されない。→ **カーネル機能/特権 cap/Linux ホストパスに依存する compose は Mac（Apple container）
     では動かない**（Docker Desktop on Mac でも同種の制約）。opossum は未対応フィールドを警告し失敗を正しく伝える。
 - **portainer（inspection）**: `command: -H unix:///var/run/docker.sock` ＋ `/var/run/docker.sock` の bind mount＝
-  **Docker socket 前提**で、Apple container にはアーキ的に非適用（docker socket が無い）。
+  **Docker socket 前提**で、当時の結論は「Apple container にはアーキ的に非適用（docker socket が無い）」。
+
+  2026-08-27 に分かったこと（上の記録）。*これらの*コンテナについて答えるものが無いのは
+  変わらないが、理由は socket の不在ではなく XPC で話すこと。そしてこの compose は
+  **そもそもマウントで止まる**——`/var/run/docker.sock` が socket への symlink である機械
+  （Docker Desktop の入った Mac がそう）では `OPSM-109` が起動前に拒否し、`OPSM-204` の
+  警告までたどり着かない。リンク先を直接 bind すればホストの daemon には届くが、届く先は
+  別の集合だ、というのが `OPSM-204` の言い分。
 - **知見（第2弾）**: opossum は「動かせないもの」も**誠実に扱う** — 未対応 runtime フィールド（cap_add/sysctls/
   devices/privileged）は警告し、存在しない host パスの bind は明確にエラー伝播。動かない主因は (a) #57 の
   postgres named-volume（頻出・要 PGDATA 回避）、(b) Linux カーネル/特権/docker-socket 依存（Apple container の
-  範囲外）で、いずれも opossum のバグではない。
+  範囲外）で、いずれも opossum のバグではない。docker-socket の部分は 2026-08-27 に狭まった
+  ——上の portainer の項を参照。
 - **nextcloud-postgres（`docker/awesome-compose`, クラウドストレージ, 無改変）**: nextcloud＋postgres。gitea 同様
   db が `db_data:/var/lib/postgresql/data` を使い **#57 に的中→db stopped**。nextcloud web は `localhost:80` → 200。
   **#103（datadir 警告）を実 app で実証**: up 時に `warning: service "db": a named volume mounted at

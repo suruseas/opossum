@@ -46,7 +46,8 @@ drifting quietly.
 
 A check reads these fragments and reports a sentence that says a container did
 something — a host path works at this mount, an image starts and leaves a
-directory alone — with nothing saying where that was seen. It looks like this:
+directory alone, something answered on the far side of a mount, a round trip was
+measured — with nothing saying where that was seen. It looks like this:
 
 ```
 485-postgres18-layout.added.md: "…a host path works there…" says "a host path
@@ -82,3 +83,38 @@ example: nobody upgrading opossum can see them, so they get no entry.
 
 `go run ./cmd/changelog release X.Y.Z` folds the fragments into a
 `## [X.Y.Z] - <date>` section and deletes them. Releases are cut by a human.
+
+Before folding, hold each fragment up against the version people are upgrading
+from — the section below `[Unreleased]` in `CHANGELOG.md`. A fragment says what
+changed; what a reader can see is the difference from there. To read forward from
+that point, find the commit that wrote the section:
+
+```sh
+git log --oneline -S'## [0.24.1]' -- CHANGELOG.md | tail -1
+```
+
+Searching for the heading rather than taking the newest commit that touched the
+file: every fragment added since then touched it too, by way of `make changelog`.
+The fragments are written against whatever main held on the day, not against what
+shipped.
+
+One cycle produced three sentences that failed this, in two shapes.
+
+Two described something that was made and unmade inside the cycle. One took away
+a special case that had been added a few commits earlier, so nothing about it had
+ever been released — that one got out, and is in `## [0.24.1]`. The other said a
+count no longer misread `1 things`, where the version below had never printed it
+wrong; that one was caught. Neither has a second fragment to contradict: the
+fragment is alone, and true on the day it was written.
+
+The third said a warning was unchanged while another fragment in the same set
+described changing it. That is the only pair that cancels, and the only one of the
+three that reading the fragments side by side would have found.
+
+No test asks this question. The ones nearest to it check that `[Unreleased]`
+matches the fragments, that a fragment is well formed and written in English, that
+a sentence reporting a measurement names its run, and that a fragment's entry is
+not already sitting in a published section — that last one reads the sections
+below, but for the same words appearing twice, not for whether a change can be
+seen from down there. `CONTRIBUTING.md` has the mechanics of cutting a release;
+this is the reading to do before running them.

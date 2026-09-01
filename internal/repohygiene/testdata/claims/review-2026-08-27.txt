@@ -1,0 +1,24 @@
+- **2026-08-27 — socket bind の「通る」と「使える」を分けて測った（container 1.2.2）**。
+  `OPSM-109` の助言（リンク先の socket を直接 bind する）は、これまで「マウントが通る」まで
+  しか確かめられていなかった。ホスト側（`$HOME` 配下）で unix socket を listen し、
+  `python:3.12-alpine` のコンテナ内から接続して1往復（ping→pong）を実測:
+  - **直 bind は通信まで通る**。`opossum up`（bind 指定の compose）でも `container run -v` 単体でも
+    同じ。ホスト側 listener が `ping` を受信し、コンテナ側が `reply: b'pong'` を出力。
+    → `OPSM-106` の「a host device or session socket is mounted → the mount exists with
+    nothing behind it」は **socket 一般には偽**（少なくとも `$HOME` 配下の unix socket は
+    実体つきで届く）。範囲は #615 で狭め直した——note は device node と session socket を
+    分けて書き、session socket について何か通るかは測っていない、と言うようになった。
+  - **symlink→socket の bind は 1.2.2 でも `errno 95` で拒否**（1.1.0 で採った記録と同じ形）。
+    `OPSM-109` の診断（拒否の説明）は現役。
+  - **docker.sock も、解決先を bind すれば本物の dockerd に届く**（同日追試）。
+    `/var/run/docker.sock` の symlink は、この機械では Docker Desktop が置いていた——その解決先
+    （`~/.docker/run/docker.sock`）をコンテナに bind し、中から HTTP `GET /version` で
+    **200 OK（`Server: Docker/29.7.2`、Docker Desktop 4.88.0）を実測**。当時の案内
+    （`OPSM-109` の docker 分岐が言っていた「compose の変更では直らない」）は、この形の
+    機械では偽だった。その分岐は #615 で削除され、拒否は socket の持ち主を見なくなっている。
+    ただし届く先はホストの Docker Desktop のエンジンであって、opossum が起動した世界ではない
+    ——文言はこの但し書きごと #615 で直した。
+  - 最初の2点（直 bind の疎通／symlink の拒否）は env-gated の conformance 検査（`internal/orchestrator` の
+    `TestARealSocketBindCarriesTraffic` / `TestARealSymlinkToASocketIsStillRefused`）として固定。
+    3点目（daemon に届くこと）はこの日は手で測っただけで、走るものが無かった——2026-08-28 に
+    `TestARealDockerDaemonAnswersThroughABoundSocket` として固定した（上の記録）。

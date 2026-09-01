@@ -35,7 +35,7 @@ import (
 // set, and the two have to agree. The workflow is parsed as YAML: its top level
 // may hold only `name`, `on` and `jobs`; `on` must carry an unnarrowed
 // `pull_request`; the `ci` job may hold only `runs-on`, `env` and `steps`, its
-// env pinned to GOTOOLCHAIN=local; the first step must be `actions/checkout@v4`
+// env pinned to GOTOOLCHAIN=local; the first step must be `actions/checkout@v7`
 // with nothing but `fetch-depth: 0`; the gate step is found by its name,
 // exactly once, may hold only `name`, `if`, `env` and `run`, and its one
 // condition — every pull request, even after an earlier step failed — is
@@ -372,7 +372,7 @@ func readGate(t *testing.T, root string) gate {
 	// What that step is, not just which keys it has: `uses:` is a place to run
 	// anything at all, and a step this check never executes is a step it cannot
 	// otherwise say anything about.
-	if u, _ := checkout["uses"].(string); u != "actions/checkout@v4" {
+	if u, _ := checkout["uses"].(string); u != "actions/checkout@v7" {
 		t.Fatalf("the first step uses %q; this check treats it as a plain checkout and does not run it, so anything else there is code it never sees", u)
 	}
 	// And what it is told to check out. `repository:` or `ref:` would put a

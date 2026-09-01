@@ -82,17 +82,33 @@ func TestTheClaimThatPromptedThisIsReportedFromWhereItSits(t *testing.T) {
 
 // Every phrase in the vocabulary has to be one the check actually fires on.
 // Without a case each, most of the list can be deleted with the tests still green.
+//
+// Each case names the wording it is for, and the wording found is compared. A
+// case that merely reports something is not enough: the first version of this
+// covered "reached that way" with a sentence that also said "was reached",
+// which is scanned first, so deleting "reached that way" changed nothing and
+// nothing went red. A sentence can satisfy two phrases; only one of them is
+// then being tested.
 func TestEveryWordingIsReported(t *testing.T) {
-	for _, s := range []string{
-		"Move the mount up one level: a host path works at the new place.",
-		"With the mount one level up, a bind works there.",
-		"A bind works here, unlike at the old path.",
-		"The image starts and leaves the directory alone.",
-		"The image starts and writes to the host directory.",
-		"The image leaves the mount empty and puts the cluster elsewhere.",
+	for _, c := range []struct{ verb, sentence string }{
+		{"a host path works", "Move the mount up one level: a host path works at the new place."},
+		{"works there", "With the mount one level up, a bind works there."},
+		{"works here", "A bind works here, unlike at the old path."},
+		{"starts and leaves", "The image starts and leaves the directory alone."},
+		{"starts and writes", "The image starts and writes to the host directory."},
+		{"leaves the mount empty", "The image leaves the mount empty and puts the cluster elsewhere."},
+		{"was reached", "A Docker daemon was reached from inside a container."},
+		{"reached that way", "A daemon on the host answers, and a service reached that way from inside a container."},
+		{"was measured", "The round trip was measured at the mount opossum writes."},
 	} {
-		if found := claimcite.Check("frag.md", s, knownRuns(t)); len(found) != 1 {
-			t.Errorf("%q reports something someone watched; it should be flagged, got %v", s, found)
+		found := claimcite.Check("frag.md", c.sentence, knownRuns(t))
+		if len(found) != 1 {
+			t.Errorf("%q reports something someone watched; it should be flagged once, got %v", c.sentence, found)
+			continue
+		}
+		if found[0].Verb != c.verb {
+			t.Errorf("%q is the case for %q and was reported for %q, so %q is covered by "+
+				"nothing", c.sentence, c.verb, found[0].Verb, c.verb)
 		}
 	}
 }
@@ -393,6 +409,12 @@ func TestSentencesWithoutTheWordingsAreLeftAlone(t *testing.T) {
 		// something writers work around. See the package comment.
 		"opossum now refuses to start a project whose services publish the same host port.",
 		"An unknown top-level key now fails with a message naming the key.",
+		// "can reach" and "is reachable" were in the vocabulary for an afternoon.
+		// The first sentence here is what `opossum doctor` prints; the second is
+		// how the sandbox guide describes a Mac's own services. Both are about
+		// opossum, and a changelog entry about either would have been reported.
+		"opossum doctor now reports whether containers can reach the internet and resolve DNS.",
+		"Any service the Mac exposes on 0.0.0.0 is reachable to the agent too.",
 	} {
 		if found := claimcite.Check("frag.md", s, knownRuns(t)); len(found) != 0 {
 			t.Errorf("%q describes opossum, not something someone watched, got %v", s, found)
@@ -448,7 +470,9 @@ func TestWhatWasPublishedNamesItsRunsToo(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, f := range unexemptedClaims(t, string(b)) {
-		t.Errorf("%s — published text cannot be edited, so this has to be right before it goes out", f)
+		t.Errorf("%s — published text cannot be edited, so this has to be right before it "+
+			"goes out. If it is already out, it belongs in publishedBeforeTheWordingCaught "+
+			"with which of the two kinds it is.", f)
 	}
 }
 
@@ -459,7 +483,7 @@ func unexemptedClaims(t *testing.T, doc string) []claimcite.Finding {
 	known := knownRuns(t)
 	var out []claimcite.Finding
 	for _, f := range claimcite.Check("CHANGELOG.md", doc, known) {
-		if publishedBeforeThisCheck[strings.TrimSpace(f.Sentence)] {
+		if publishedBeforeTheWordingCaught[strings.TrimSpace(f.Sentence)] {
 			continue
 		}
 		out = append(out, f)
@@ -467,15 +491,26 @@ func unexemptedClaims(t *testing.T, doc string) []claimcite.Finding {
 	return out
 }
 
-// publishedBeforeThisCheck is the one sentence that was already out when this
-// check was written. A published section is the record of what shipped and is not
-// edited afterwards, so it stays — named here rather than skipped in silence.
+// publishedBeforeTheWordingCaught is what shipped before a wording that reports
+// it was in the list. A published section is the record of what went out and is
+// not edited afterwards, so these stay — named here, with why, rather than
+// skipped in silence.
 //
-// The claim itself was true; what it lacked was anywhere to look. The run behind
-// it is in this repository (`pg17-external-volume-lostfound.txt`), and the entry
-// simply predates the habit of saying so.
-var publishedBeforeThisCheck = map[string]bool{
-	"opossum now clears `lost+found` out of the volumes it creates, so a compose file that writes `pgdata:/var/lib/postgresql/data` works here as it does on Docker, with no need to move `PGDATA` into a subdirectory of the mount": true,
+// Each entry is a debt of a different kind, and the difference is the point:
+//
+//   - The `lost+found` sentence was true and had a run behind it in this
+//     repository (`pg17-external-volume-lostfound.txt`). It predates the habit
+//     of saying so, and nothing more.
+//   - The `docker.sock` sentence went out on 2026-08-28, after this check
+//     existed, and passed because no wording here matched it. The wording is
+//     here now. What it cites is a date, and a date is not a place to look —
+//     the run behind it is a hand-written note in `docs/real-runtime-review.md`,
+//     not a file this can open. Turning that into something citable is #622;
+//     this entry stays either way, because published text is not edited. It is
+//     the record of a claim that shipped ahead of its evidence.
+var publishedBeforeTheWordingCaught = map[string]bool{
+	"opossum now clears `lost+found` out of the volumes it creates, so a compose file that writes `pgdata:/var/lib/postgresql/data` works here as it does on Docker, with no need to move `PGDATA` into a subdirectory of the mount":                       true,
+	"Where that path is a symlink something put it there, and a container started here was measured reaching a Docker daemon through what the link points at on 2026-08-27 — though which of them put it there, and whether anything is listening, varies": true,
 }
 
 // The repository is expected to be clean, so the check above says nothing about
@@ -499,19 +534,25 @@ func TestAClaimInAPublishedSectionIsReported(t *testing.T) {
 		t.Fatalf("a claim published with nothing behind it should be reported once, got %d: %v", len(found), found)
 	}
 
-	// …and the one sentence that predates the check is still let through, so this
-	// is measuring the exemption too, not just the reporting.
+	// …and a sentence that predates the wording is still let through, so this is
+	// measuring the exemption too, not just the reporting.
 	if got := unexemptedClaims(t, exemptedSentence(t)); len(got) != 0 {
 		t.Errorf("the sentence that was published before this check should still pass, got %v", got)
 	}
 }
 
+// exemptedSentence returns one particular exemption rather than whichever the
+// map hands over first, so that the test using it measures the same thing on
+// every run.
 func exemptedSentence(t *testing.T) string {
 	t.Helper()
-	for s := range publishedBeforeThisCheck {
-		return s
+	const want = "lost+found"
+	for s := range publishedBeforeTheWordingCaught {
+		if strings.Contains(s, want) {
+			return s
+		}
 	}
-	t.Fatal("nothing is exempt, so the exemption cannot be measured")
+	t.Fatalf("no exemption mentions %q, so the exemption cannot be measured", want)
 	return ""
 }
 
@@ -519,7 +560,7 @@ func exemptedSentence(t *testing.T) string {
 // has to be a sentence the check actually reports.
 func TestEveryExemptionIsOneTheCheckWouldOtherwiseReport(t *testing.T) {
 	known := knownRuns(t)
-	for sentence := range publishedBeforeThisCheck {
+	for sentence := range publishedBeforeTheWordingCaught {
 		if len(claimcite.Check("x.md", sentence, known)) == 0 {
 			t.Errorf("this is exempt but would pass anyway; it is not carrying its weight: %q", sentence)
 		}

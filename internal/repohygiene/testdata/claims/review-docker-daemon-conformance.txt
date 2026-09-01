@@ -1,0 +1,3 @@
+  `TestARealDockerDaemonAnswersThroughABoundSocket` として固定した。`/var/run/docker.sock` を
+  `filepath.EvalSymlinks` で解決し（この機械では `~/.docker/run/docker.sock`）、その解決先を
+  コンテナに bind して中から `GET /_ping` を投げる。

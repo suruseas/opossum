@@ -1,0 +1,2 @@
+- **portainer（inspection）**: `command: -H unix:///var/run/docker.sock` ＋ `/var/run/docker.sock` の bind mount＝
+  **Docker socket 前提**で、当時の結論は「Apple container にはアーキ的に非適用（docker socket が無い）」。

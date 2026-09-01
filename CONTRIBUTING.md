@@ -36,7 +36,10 @@ See [`changelog.d/README.md`](changelog.d/README.md) for the format in detail.
 
 ## Releasing
 
-Releases are cut by a human:
+Releases are cut by a human. Before running the command below, read the fragments
+against the version people are upgrading from —
+[`changelog.d/README.md`](changelog.d/README.md#releasing) says what that catches,
+and why no test does:
 
 ```sh
 go run ./cmd/changelog release X.Y.Z   # folds fragments into a version section

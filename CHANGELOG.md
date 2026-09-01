@@ -6,6 +6,12 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.24.2] - 2026-09-01
+
+### Changed
+
+- The Homebrew package is now published as a cask rather than a formula. `brew install suruseas/opossum/opossum` works as before and still pulls in Apple's `container` runtime; existing formula installs are pointed at the cask on their next `brew upgrade`. The cask clears macOS's quarantine attribute on install, so the unsigned binary runs without a Gatekeeper detour. This follows Homebrew's direction for pre-compiled binaries — the tooling that generated the old formula shape is being retired.
+
 ## [0.24.1] - 2026-08-28
 
 ### Changed
@@ -997,7 +1003,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.24.1...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.24.2...HEAD
+[0.24.2]: https://github.com/suruseas/opossum/compare/v0.24.1...v0.24.2
 [0.24.1]: https://github.com/suruseas/opossum/compare/v0.24.0...v0.24.1
 [0.24.0]: https://github.com/suruseas/opossum/compare/v0.23.1...v0.24.0
 [0.23.1]: https://github.com/suruseas/opossum/compare/v0.23.0...v0.23.1

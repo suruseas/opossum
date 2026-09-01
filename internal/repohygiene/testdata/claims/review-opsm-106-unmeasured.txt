@@ -1,0 +1,5 @@
+`OPSM-106` が当たるパス——`isHostDevicePath` の前置一致（`/dev/`・`/tmp/.X11-unix`・
+`/run/user/`・`/run/pulse`・`/var/run/dbus`）——で同じことが起きるかは**測っていない**。
+前置一致なので、ディレクトリ（`/tmp/.X11-unix`）も socket ファイル
+（`/run/user/<uid>/pulse/native`）も当たる。後者は測ったものと同じ形に見えるが、
+試してはいない。

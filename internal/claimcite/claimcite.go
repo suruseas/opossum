@@ -16,8 +16,10 @@
 //
 // The phrases are not an inventory of mistakes. One of them — "a host path works"
 // — is the wording that actually went out uncited; "starts and writes" was added
-// after a sentence using it went past this check; the rest are near neighbours,
-// picked by hand. Two things shaped the list more than recall did:
+// after a sentence using it went past this check; "was measured" after a
+// sentence using it went past and shipped; the two reaching wordings are near
+// neighbours of that one, picked by hand and kept for the reason below; the
+// rest are near neighbours too. Two things shaped the list more than recall did:
 // phrases beat single words ("works" alone catches "works out where the data
 // goes", which describes opossum, not something watched), and wordings this
 // project uses for opossum's own behaviour are left out on purpose. "refuses to
@@ -56,6 +58,11 @@
 //     prose that cites itself a sentence later is reported.
 //   - Provenance is a phrase, not a fact: "measured on a bad day" answers this
 //     check as well as a version number does.
+//   - The hedges are two exact wordings, and they grow the way the phrases do:
+//     when a sentence that withdraws its claim in the open gets reported. "has
+//     not been measured" is not among them, and adding it was considered and
+//     not done — measured against this repository it changes nothing today, and
+//     a hedge added on a guess is a way through that nobody has needed.
 package claimcite
 
 import (
@@ -72,6 +79,33 @@ var verbs = []string{
 	"a host path works", "works there", "works here",
 	"starts and leaves", "starts and writes",
 	"leaves the mount empty",
+	// Added after the docker.sock work, where the strongest sentence of the lot
+	// — a container reached a Docker daemon through a symlink's target — went
+	// past this untouched. Reaching is the other half of working: the earlier
+	// wordings are about a mount behaving, these are about something having
+	// answered on the far side of one.
+	//
+	// Past tense on purpose, and that is the whole of why these two are here and
+	// their present-tense neighbours are not. `internal/doctor` prints
+	// "containers can reach the internet and resolve DNS", and
+	// `examples/agent-sandbox/README.md` says any service a Mac exposes on
+	// 0.0.0.0 "is reachable to the agent too". Both describe opossum, and a
+	// changelog entry about either would have been reported for saying so, so
+	// "can reach" and "is reachable" were in this list for an afternoon and came
+	// out. That is the same line the rest of the list is drawn on.
+	//
+	// The past-tense pair earns its place the other way round: `AGENTS.md` and
+	// `docs/compatibility.md` both say a Docker daemon "was reached that way
+	// from inside a container on 2026-08-28". That is a report of something
+	// someone watched, written in this project's own hand. Neither file is one
+	// this check reads; that is the point. The sentence exists here, in this
+	// project's voice, and the day it is written into a fragment instead is the
+	// day this has to catch it.
+	"was reached", "reached that way",
+	// And the claim itself, whatever verb follows it. A sentence that says a
+	// thing was measured is making the one claim this package exists for, and
+	// saying so is not the same as saying where.
+	"was measured",
 }
 
 // hedges let a sentence use one of those verbs while saying it was not measured.

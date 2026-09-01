@@ -61,9 +61,14 @@ func TestSupervisorStateDirCannotEscape(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// The parent exactly, not a prefix of the path. A prefix accepts
+		// `<base>/opossumdemo` — the name joined onto the element instead of
+		// under it — which is outside the directory this keeps names inside of
+		// while reading as inside it (#522).
 		want := filepath.Join(base, "opossum")
-		if !strings.HasPrefix(filepath.Clean(dir), want) {
-			t.Errorf("project %q produced %q, which is outside %q", name, dir, want)
+		if got := filepath.Dir(filepath.Clean(dir)); got != want {
+			t.Errorf("project %q produced %q, whose parent is %q rather than %q",
+				name, dir, got, want)
 		}
 	}
 }

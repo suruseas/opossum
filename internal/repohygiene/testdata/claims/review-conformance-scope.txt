@@ -1,0 +1,9 @@
+旗なしでは skip（日々のゲートは fake の領分）。**旗が立っているのに前提が欠けていると
+Fatal**——「測ったつもりで測っていない緑」を検査自身が拒む。前提は runtime のもの
+（`container` 不在・未起動・image が引けない）だけでなく、daemon の測定については
+daemon のものも入る：文書上の名前が解決しないマシン、解決しても誰も答えないマシンでは
+**赤になる**（Docker を入れていないマシンでこの target が赤になるのはこのため）。
+現在の内容: socket 直 bind が通信まで通ること／symlink→socket が errno 95 で拒まれること
+（下の 2026-08-27 の記録を参照）／`/var/run/docker.sock` の解決先を bind して **Docker daemon が
+答えること**（`TestARealDockerDaemonAnswersThroughABoundSocket`、下の 2026-08-28 の記録）。測っているのは **socket ファイルそのものの bind** で、
+listener は `net.Listen("unix", …)` の汎用 socket。

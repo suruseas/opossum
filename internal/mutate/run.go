@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/suruseas/opossum/internal/suitedir"
 )
 
 // Runner applies mutations to real files and runs the real toolchain. Every
@@ -401,13 +403,49 @@ func (r *Runner) noteFor(file string, places []Pos) string {
 //
 // Outside the tree on purpose: written inside, a killed run would leave the file
 // behind, which is the shape of accident the tracked-file gate exists to catch.
+//
+// The name carries this process's pid, the way suitedir's directories do, and
+// for the same reason: the cleanup below is a defer, and an interrupt that
+// leaves by os.Exit runs no defers — eighteen of these files were found under
+// a $TMPDIR once, from runs interrupted by hand, and every net that looks for
+// leftovers had a reason not to see them. A file whose maker is gone is
+// reclaimed by reapStrays at the start of the next run; a file with no pid in
+// its name belongs to an older build or to somebody else, and is left where
+// it is rather than guessed about.
 func (r *Runner) profilePath() (path string, cleanup func()) {
-	f, err := os.CreateTemp("", "opossum-mutate-*.cover")
+	reapStrays(os.TempDir())
+	f, err := os.CreateTemp("", fmt.Sprintf("opossum-mutate-%d-*.cover", os.Getpid()))
 	if err != nil {
 		return "", func() {}
 	}
 	f.Close()
 	return f.Name(), func() { os.Remove(f.Name()) }
+}
+
+// reapStrays removes the cover profiles of runs that are no longer alive. It
+// runs at the start, not the end: the runs that need reclaiming are exactly
+// the ones that never reached their own cleanup, so the only place their
+// files can be collected is somebody else's beginning. Only names of the
+// shape this package writes — prefix, pid, random, suffix — are touched; a
+// live pid means a run in progress on this machine, and its file is its own.
+func reapStrays(dir string) {
+	names, err := filepath.Glob(filepath.Join(dir, "opossum-mutate-*.cover"))
+	if err != nil {
+		return
+	}
+	for _, name := range names {
+		// CutPrefix with its found checked, not TrimPrefix: the glob already
+		// anchors the family name, but a judgement this one-sided had both
+		// anchors knocked off in review with every test still green — so the
+		// prefix is asked for here too, the way suitedir's own makerOf asks.
+		rest, found := strings.CutPrefix(filepath.Base(name), "opossum-mutate-")
+		if !found {
+			continue
+		}
+		if pid, ok := suitedir.PidLeading(rest); ok && !suitedir.Alive(pid) {
+			os.Remove(name)
+		}
+	}
 }
 
 // changedPlaces is where in the file the mutation actually changes something.

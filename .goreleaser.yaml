@@ -39,12 +39,20 @@ release:
     owner: suruseas
     name: opossum
 
-# Homebrew publishing: GoReleaser generates/updates the formula in the
+# Homebrew publishing: GoReleaser generates/updates the cask in the
 # suruseas/homebrew-opossum tap on each release, so `brew install
-# suruseas/opossum/opossum` just works. Pushing to the separate tap repo needs a
-# token with write access to it (HOMEBREW_TAP_TOKEN secret) — the default
-# GITHUB_TOKEN is scoped to this repo only.
-brews:
+# suruseas/opossum/opossum` keeps working. Casks, not formulas: goreleaser
+# deprecated `brews` (its formulas wrapped pre-compiled binaries, which is
+# what casks are for). A cask carries no license stanza — the license stays
+# declared in this repository. The post-install hook clears the quarantine
+# bit the browser-less download never sets but a cautious Gatekeeper may
+# still check; the binary is unsigned, and this is the documented shape for
+# that. Pushing to the separate tap repo needs a token with write access to
+# it (HOMEBREW_TAP_TOKEN secret) — the default GITHUB_TOKEN is scoped to
+# this repo only. The tap itself needs a one-time tap_migrations.json so
+# formula users are moved to the cask on upgrade; that lives in the tap
+# repository, not here.
+homebrew_casks:
   - name: opossum
     repository:
       owner: suruseas
@@ -52,6 +60,11 @@ brews:
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     homepage: "https://github.com/suruseas/opossum"
     description: "A Docker Compose-like orchestrator for Apple's container runtime"
-    license: "MIT"
     dependencies:
-      - name: container
+      - formula: container
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/opossum"]
+          end

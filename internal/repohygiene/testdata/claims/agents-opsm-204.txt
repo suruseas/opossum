@@ -1,11 +1,10 @@
 - **`[OPSM-204]` … `mounts the Docker socket, which does not answer for the
   containers here`** → Apple container runs them and has no socket to share. The
   mount itself is not the obstacle: bind-mounting a host socket works, and a
-  Docker daemon was reached that way from inside a container on 2026-08-27.
+  Docker daemon was reached that way from inside a container on 2026-08-28.
   That is the one that has been measured; what a session socket mount reaches
-  here has not been (`OPSM-106`). What puts a symlink at that name varies (Docker
-  Desktop does; Rancher Desktop and OrbStack do when given administrative access;
-  colima leaves it to you) and one merely installed answers nothing, so the
+  here has not been (`OPSM-106`). What puts a symlink at that name varies by
+  which Docker distribution you have, and one merely installed answers nothing, so the
   message says *if* a daemon answers there.
   What none of them will do is answer about these containers — a tool mounting
   this socket to watch its neighbours (Portainer, Traefik) is given a different

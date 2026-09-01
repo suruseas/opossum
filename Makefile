@@ -54,7 +54,7 @@ test: ## run the full test suite (the regression gate)
 # guidance stands on. Not part of the gate — the daily gate is the fake's — and
 # the flag makes missing preconditions a failure rather than a skip, so a run
 # of this target either measured or is red.
-real-conformance: ## run the real-runtime conformance measurements (needs `container` running)
+real-conformance: ## run the real-runtime conformance measurements (needs `container` running, and a Docker daemon for the docker.sock one)
 	OPOSSUM_REAL_RUNTIME=1 go run ./cmd/noleftovers go test ./internal/orchestrator -run 'TestAReal' -count=1 -v
 
 cover: ## run tests with coverage

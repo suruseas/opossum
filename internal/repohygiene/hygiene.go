@@ -288,3 +288,65 @@ func Offense(p string, size int64, head []byte) string {
 	}
 	return ""
 }
+
+// EmptiedMarker is the private-use character opossum writes where a reference
+// produced nothing (internal/compose marks a substitution's empty result with
+// it so a later pass can tell "expanded to nothing" from "was never there").
+//
+// It is written into values at run time, and it is never meant to be in the
+// repository as a literal. The reason to guard that is the failure it produces:
+// a stray one in a fixture makes the code that looks for it fire, so a test
+// reaches the branch it meant to reach and passes — and only stops passing if
+// the character is ever cleaned up. That happened during #436: a probe fixture
+// carried one, the source read as plain "SECRETCANARY", and it took `od` to see
+// the extra bytes. The sweep it was in was hollow until review found it.
+//
+// The escaped spelling is not a literal and is not looked for: `"\ue000"` in
+// source is six ASCII characters. That is the distinction for this character:
+// the visible spelling is allowed and the invisible one is not. It is not a
+// rule about invisible characters in general — this looks for U+E000 and
+// nothing else, because U+E000 is the one that makes a test pass by being
+// there. Widen it when something else earns it.
+const EmptiedMarker = '\ue000'
+
+// InvisibleLiteral reports the first literal EmptiedMarker in content, naming
+// the file and the byte offset. It returns "" both when there is none and when
+// content is not text — a NUL in its head means the advice below has nothing to
+// offer, so such a file is not read for this at all. That is a narrowing worth
+// knowing at the call site: a sweep built on this reports nothing about the
+// repository's images.
+//
+// The offset is there because the character is invisible: a reader told only
+// which file has one has no way to look at it. `od` is named for the same
+// reason — a grep for something you cannot type is not much help.
+func InvisibleLiteral(p string, content []byte) string {
+	// Text only. Three bytes can turn up anywhere in a compressed image by
+	// chance — the tracked binaries here are around half a megabyte, which is
+	// roughly a one-in-thirty-five shot already, and it grows with every one
+	// added — and the advice below is meaningless for a PNG: there is no
+	// escaped spelling to write instead, so the red would have no way out. The
+	// same NUL sniff the rest of this package uses decides what is text.
+	head := content
+	if len(head) > SniffBytes {
+		head = head[:SniffBytes]
+	}
+	if bytes.IndexByte(head, 0) >= 0 {
+		return ""
+	}
+	i := bytes.IndexRune(content, EmptiedMarker)
+	if i < 0 {
+		return ""
+	}
+	line := 1 + bytes.Count(content[:i], []byte("\n"))
+	return fmt.Sprintf("%s carries a literal U+E000 — the first at byte %d (line %d) — and nothing can see it.\n"+
+		"  opossum writes that character at run time to mark where a reference produced "+
+		"nothing, so code that looks for it fires on this file's contents. A fixture "+
+		"carrying one reaches the branch it meant to test and passes for the wrong "+
+		"reason — and goes red the day someone cleans the character out.\n"+
+		"  Look at it with `LC_ALL=C od -v -c %s | sed -n '%d,%dp'` (it is the three bytes "+
+		"356 200 200; the locale matters, because od prints multibyte characters as ** "+
+		"under a UTF-8 one, and -v keeps it from folding repeated lines away). "+
+		"If the character is meant to be there, write it as the escape \\ue000, which is "+
+		"visible in a diff and is not what this looks for.",
+		p, i, line, p, 1+i/16, 2+i/16)
+}

@@ -1,27 +1,34 @@
 package orchestrator_test
 
 // The suite in this file runs against the real `container` runtime, not the
-// fake — it exists to measure the two facts this package's socket guidance
-// stands on, instead of reading them off older captures:
+// fake — it exists to measure the facts this package's socket guidance stands
+// on, instead of reading them off older captures:
 //
 //   - a bind whose source is a symlink to a socket is refused by the runtime
 //     (errno 95) — the situation the guidance triggers on;
 //   - a bind whose source is the socket itself carries traffic end to end —
-//     the way out the guidance offers.
+//     the way out the guidance offers;
+//   - a Docker daemon answers through that way out — the guidance says one
+//     was reached, and that is the strongest thing it says.
 //
-// Both were measured on `container` 1.2.2 (2026-08-27, macOS 26): the second
-// carried a ping/pong round trip between a host listener and a container.
-// Before that measurement the way out had only ever been verified to mount,
-// and a mount that exists with nothing behind it is exactly what the guidance
-// warns about elsewhere — so "mounts" and "works" had to be told apart on the
-// real thing.
+// The first two were measured on `container` 1.2.2 (2026-08-27, macOS 26): the
+// second carried a ping/pong round trip between a host listener and a
+// container. Before that measurement the way out had only ever been verified
+// to mount, and a mount that exists with nothing behind it is exactly what the
+// guidance warns about elsewhere — so "mounts" and "works" had to be told
+// apart on the real thing. The third was measured the day after, on the same
+// runtime, for the same reason one step further along: carrying bytes and
+// carrying an answer from a daemon are not the same fact either.
 //
 // Gating: without OPOSSUM_REAL_RUNTIME=1 in the environment, this file skips —
 // the daily gate belongs to the fake. With the flag set, a missing
-// precondition (no `container` binary, runtime not running, image pull
-// failing) is a FAILURE, not a skip: the flag says "measure", and a run that
-// comes back green having measured nothing is the one outcome this file must
-// not produce.
+// precondition is a FAILURE, not a skip: the flag says "measure", and a run
+// that comes back green having measured nothing is the one outcome this file
+// must not produce. That covers the runtime's own preconditions (no
+// `container` binary, runtime not running, image pull failing) and, for the
+// daemon measurement, the daemon's: a machine where the documented socket name
+// does not resolve, or resolves to something nothing answers on, cannot
+// measure the sentence that names Docker.
 
 import (
 	"context"
@@ -199,5 +206,92 @@ func TestARealSymlinkToASocketIsStillRefused(t *testing.T) {
 	if !strings.Contains(out, "errno 95") {
 		t.Errorf("refused, but not with the recorded shape (errno 95) — the diagnosis the "+
 			"guidance matches on may have moved. Output:\n%s", out)
+	}
+}
+
+// daemonMarks are the strings the answer has to carry for this to have reached
+// a Docker daemon rather than something else listening on that path.
+//
+// They are declared rather than written into the conditions below so that the
+// record can be held to them. Three rounds of review went into reading them
+// back out of the assertions instead — from calls into `strings`, then from
+// `if` conditions, then following package-level constants — and each shape was
+// escaped by writing the assertion a slightly different way, because "this is
+// the string the test decides on" is a question about where a value flows and
+// not about how the code is arranged. A declaration has no arrangement to
+// vary: weakening the measurement means editing this line, and this line is
+// what `internal/repohygiene` reads.
+//
+// The first is not a daemon's mark on its own — any HTTP server answers 200.
+// The second is: the Engine API writes its version header, and a plain server
+// on that path carries bytes without it.
+var daemonMarks = []string{"HTTP/1.0 200 OK", "Api-Version:"}
+
+// dockerSocketName is the path the guidance talks about. The measurement
+// resolves it before binding, because the way out the guidance offers is to
+// bind what the name points at rather than the name. Resolving costs nothing
+// where the name is not a link, so this does not assume it is one — which is
+// as well, since which machines put a link there is the enumeration this
+// change took out of the documents for being unmeasured.
+const dockerSocketName = "/var/run/docker.sock"
+
+// pingDaemon speaks the Engine API's cheapest call over the bound socket. The
+// request is HTTP/1.0 with no Host header on purpose: that is the smallest
+// thing a daemon answers, so a failure here is the socket's, not the request's.
+const pingDaemon = "import socket; s=socket.socket(socket.AF_UNIX); s.settimeout(10); " +
+	"s.connect('/s.sock'); s.sendall(b'GET /_ping HTTP/1.0\\r\\n\\r\\n'); " +
+	"print('reply:', s.recv(256), flush=True)"
+
+// dockerDaemonSocket resolves the documented name and returns what it points
+// at, failing loudly when this machine cannot answer the question. The
+// sentence being measured names Docker, so a machine without a running daemon
+// cannot measure it — and skipping there would hand back a green run in which
+// the strongest claim in the socket guidance went unchecked, which is the one
+// outcome this file exists to prevent.
+func dockerDaemonSocket(t *testing.T) string {
+	t.Helper()
+	target, err := filepath.EvalSymlinks(dockerSocketName)
+	if err != nil {
+		t.Fatalf("OPOSSUM_REAL_RUNTIME is set, but %s does not resolve on this machine, so the "+
+			"published sentence about reaching a Docker daemon cannot be measured here — start a "+
+			"Docker daemon or unset the flag: %v", dockerSocketName, err)
+	}
+	// Resolving is not answering: a socket left behind by a stopped daemon
+	// resolves fine and refuses every connection. The guidance says the same
+	// thing about the host ("one merely installed answers nothing"), so the
+	// measurement has to hold itself to it before blaming the container side.
+	conn, err := net.DialTimeout("unix", target, 5*time.Second)
+	if err != nil {
+		t.Fatalf("OPOSSUM_REAL_RUNTIME is set, and %s resolves to %s, but nothing answers there — "+
+			"the daemon is installed and not running: %v", dockerSocketName, target, err)
+	}
+	conn.Close()
+	return target
+}
+
+// The positive half of the socket guidance: not just that a bound socket
+// carries bytes (TestARealSocketBindCarriesTraffic measures that with a
+// listener of our own), but that the specific thing the docs claim was
+// reached — a Docker daemon, through the name the guidance names — answers
+// from inside a container.
+//
+// The assertion is the Engine API's own header, not the 200: a plain HTTP
+// server on that socket would also answer 200, and "something answered" is a
+// weaker fact than the sentence in AGENTS.md and docs/compatibility.md, which
+// says a *daemon* was reached.
+func TestARealDockerDaemonAnswersThroughABoundSocket(t *testing.T) {
+	bin := realRuntime(t)
+	target := dockerDaemonSocket(t)
+
+	out, err := run(t, bin, "run", "--rm", "-v", target+":/s.sock", clientImage, "python3", "-c", pingDaemon)
+	if err != nil {
+		t.Fatalf("binding what %s points at (%s) should start and reach the daemon, got: %v\n%s",
+			dockerSocketName, target, err, out)
+	}
+	for _, mark := range daemonMarks {
+		if !strings.Contains(out, mark) {
+			t.Errorf("the answer through the bound socket does not carry %q. The docs say a "+
+				"Docker daemon was reached; this run cannot say that. Output:\n%s", mark, out)
+		}
 	}
 }

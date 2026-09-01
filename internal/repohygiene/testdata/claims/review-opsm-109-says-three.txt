@@ -1,0 +1,7 @@
+`OPSM-109` は3つのことを言う——拒否（errno 95）・境界（socket を自分のパスで、あるいは
+symlink をファイルやディレクトリへ向けてマウントするのは通る）・逃げ道（リンク先を直接
+bind すれば動く）。この検査が覆うのは、拒否（`TestARealSymlinkToASocketIsStillRefused`）と、
+「socket を自分のパスで」（`TestARealSocketBindCarriesTraffic`）——後者は逃げ道が指す形でも
+あるので、逃げ道もここで覆われている。境界の残りは：symlink→ディレクトリが下の
+2026-08-21 の記録にあり、**symlink→ファイルはこの文書に記録が無い**（container 1.1.0 の
+測定が `internal/orchestrator/orchestrator_test.go` のコメントに残っているだけ）。
