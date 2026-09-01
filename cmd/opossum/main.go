@@ -1174,7 +1174,12 @@ func adaptProject(stderr io.Writer, o *orchestrator.Orchestrator, dryRun bool) (
 			fmt.Fprintf(stderr, "opossum: found %d thing(s) %s. An overlay is never written for "+
 				"these alone, so here is what one would have said:\n", len(changes), orchestrator.NoteFrame)
 			reportEntries(stderr, changes)
-			if !reportNoteProse(stderr, "", body) {
+			if reportNoteProse(stderr, "", body) {
+				// The prose was shown, so the up that follows need not repeat it.
+				// A headline alone (the paths above and below) is not enough — see
+				// MarkNotesReported.
+				o.MarkNotesReported(changes)
+			} else {
 				fmt.Fprintln(stderr, "opossum: the lines above are all of it.")
 			}
 		}
@@ -1217,7 +1222,11 @@ func adaptProject(stderr io.Writer, o *orchestrator.Orchestrator, dryRun bool) (
 	// — and it would make every command print the "merging an overlay" notice for
 	// a file that changes nothing. The notes are still reported on stderr.
 	if !hasActionable(changes) {
-		reportNotesOnly(stderr, body, changes)
+		if reportNotesOnly(stderr, body, changes) {
+			// Prose shown; the up that follows need not repeat it (headlines
+			// alone would not be enough — see MarkNotesReported).
+			o.MarkNotesReported(changes)
+		}
 		return nil, nil
 	}
 	if dryRun {
@@ -1427,14 +1436,18 @@ func hasActionable(changes []orchestrator.Adaptation) bool {
 // it would be read; not written, it was gone — a note reached the reader as one
 // line, and which notes those were depended on whether some other service in the
 // project happened to need a real change.
-func reportNotesOnly(stderr io.Writer, body string, changes []orchestrator.Adaptation) {
+// It reports whether the notes' prose actually reached the reader — the
+// caller uses that to stop the up from repeating what was just shown.
+func reportNotesOnly(stderr io.Writer, body string, changes []orchestrator.Adaptation) bool {
 	fmt.Fprintf(stderr, "opossum: nothing to fix or suggest, but %d thing(s) %s:\n", len(changes), orchestrator.NoteFrame)
 	for _, c := range changes {
 		fmt.Fprintf(stderr, "opossum:   [%s] %s\n", c.Code, c.Summary)
 	}
-	if !reportNoteProse(stderr, "opossum: no overlay was written (it would only hold comments), so here is what it would have said:", body) {
+	spoke := reportNoteProse(stderr, "opossum: no overlay was written (it would only hold comments), so here is what it would have said:", body)
+	if !spoke {
 		fmt.Fprintln(stderr, "opossum: no overlay was written (it would only hold comments).")
 	}
+	return spoke
 }
 
 // reportNoteProse reads the notes out of the overlay text nobody is getting, and

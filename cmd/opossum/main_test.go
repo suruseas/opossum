@@ -5851,3 +5851,254 @@ func TestTheShimHonoursTheListingFlags(t *testing.T) {
 		t.Errorf("both lists hold %q, so this fixture cannot show which one a parser read", a)
 	}
 }
+
+// mustWrite writes body to path, next to a compose file written by
+// writeCompose, so a case can bring its own env_file.
+func mustWrite(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A service nobody is running must not break the project. docker resolves
+// env_file when it needs a service's rendered environment, so a compose file
+// whose profile-gated service points at an env file that does not parse still
+// loads, still lists, and still starts everything else — measured on Docker
+// Compose v5.4.0, where `config --services`, `ps` and `logs` all succeed on
+// exactly this shape and only a full `config` with the profile active fails.
+// `up` is asked here too, on the same reasoning, though docker's was not
+// measured for it.
+//
+// opossum used to fail all of them at load, because load reads every service's
+// env_file and load is a layer below profiles (#413).
+func TestABrokenEnvFileOnAGatedServiceDoesNotBreakTheProject(t *testing.T) {
+	fakeShim(t)
+	compose := writeCompose(t, "name: demo\nservices:\n  web:\n    image: web\n"+
+		"  extra:\n    image: dbg\n    profiles: [debug]\n    env_file: [g.env]\n")
+	// The file exists and fails to expand: a missing file and an unresolvable
+	// one are the same fact to a caller, and the harder one to get right is the
+	// one that parses far enough to try.
+	mustWrite(t, filepath.Join(filepath.Dir(compose), "g.env"), "BOOM=${NOPE:?you must set NOPE}\n")
+
+	for _, args := range [][]string{{"config"}, {"config", "--services"}, {"ps"}, {"logs"}, {"up"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			out, err := run(t, append([]string{"-f", compose}, args...)...)
+			if err != nil {
+				t.Fatalf("a gated service's env_file should not reach this command: %v\n%s", err, out)
+			}
+		})
+	}
+
+	// And the gated service is still gated: `config` mirrors what `up` starts,
+	// so recording the failure instead of raising it must not be the thing that
+	// lets an inactive service through.
+	out, err := run(t, "-f", compose, "config")
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	if strings.Contains(out, "extra:") {
+		t.Errorf("the gated service is still gated, got:\n%s", out)
+	}
+}
+
+// The other side of the same line: once the profile is active the service is
+// being rendered and started, so the failure it has been holding is due. `ps`
+// stays green — it needs no environment, and docker's does not fail here either
+// (measured on Docker Compose v5.4.0: `ps`, `logs` and `config --services` all
+// succeed against an active service whose env_file does not expand).
+func TestABrokenEnvFileReachesTheCommandsThatNeedTheEnvironment(t *testing.T) {
+	fakeShim(t)
+	compose := writeCompose(t, "name: demo\nservices:\n  web:\n    image: web\n"+
+		"  extra:\n    image: dbg\n    profiles: [debug]\n    env_file: [g.env]\n")
+	mustWrite(t, filepath.Join(filepath.Dir(compose), "g.env"), "BOOM=${NOPE:?you must set NOPE}\n")
+
+	for _, tc := range []struct {
+		name    string
+		args    []string
+		wantErr bool
+	}{
+		{name: "config", args: []string{"config", "--profile", "debug"}, wantErr: true},
+		{name: "up", args: []string{"up", "--profile", "debug"}, wantErr: true},
+		// `run` starts a container too, from its own path rather than through
+		// `up`, so it needs asking separately: the two are the only places a
+		// container is born, and a guard on one of them is a guard on half.
+		{name: "run", args: []string{"run", "--no-deps", "extra", "echo", "hi"}, wantErr: true},
+		// `run --audit` reports a run's outcome as an exit code, so it is the
+		// one path where the reason can be spent without being said: the
+		// report would print `exit -1` and name neither the file nor the
+		// variable. It has to refuse before it measures anything.
+		{name: "run --audit", args: []string{"run", "--audit", "--no-deps", "extra", "echo", "hi"}, wantErr: true},
+		// `ps` and `logs` take no --profile, so the profile arrives the other
+		// way it can. Both are named in the changelog entry for this change as
+		// commands that no longer carry the failure, which is a claim about
+		// them and so gets asked here.
+		{name: "ps", args: []string{"ps"}, wantErr: false},
+		{name: "logs", args: []string{"logs"}, wantErr: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("COMPOSE_PROFILES", "debug")
+			out, err := run(t, append([]string{"-f", compose}, tc.args...)...)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("the service is being run now, so its env_file failure is due; got:\n%s", out)
+				}
+				if !strings.Contains(err.Error(), "NOPE") {
+					t.Errorf("the error should name the variable that has no value, got: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("this command needs no environment, so it should not carry the failure: %v\n%s", err, out)
+			}
+		})
+	}
+}
+
+// A command that cannot happen leaves nothing behind it. Every road here does
+// work before it needs the environment — removing orphan containers, starting
+// the service's dependencies, creating the network, building images, deleting
+// a stale container of the same name; `run --audit` also takes a workspace
+// snapshot — and a refusal after that leaves what was started running. `up`
+// rolls containers and the network back, but not an image it built, not a
+// deleted orphan, and a peer it recreated on the way is torn down by that same
+// rollback: it was running before the command and is gone after it.
+//
+// Asking only that the command fails would not see any of this: it fails
+// wherever the guard sits. What is asked here is that the fake runtime was
+// never told to start, create, build or delete anything. Each verb needs a
+// case that can produce it — a `build:` service and `--build` for the build,
+// `--remove-orphans` for the delete — or the entry reads for something the
+// suite cannot reach (#413).
+func TestACommandRefusesAnUnreadableEnvironmentBeforeStartingAnything(t *testing.T) {
+	for _, args := range [][]string{
+		{"run", "extra", "echo", "hi"},
+		{"run", "--audit", "extra", "echo", "hi"},
+		{"up"},
+		// --build is what makes a build reachable at all: without it the
+		// runtime answers that the image is there and nothing is built. The
+		// verb list below reads for `build `, and a case that cannot produce
+		// one would leave that entry checking nothing.
+		{"up", "--build"},
+		// --remove-orphans stops and deletes containers before any of this,
+		// and a delete is not taken back by the rollback.
+		{"up", "--remove-orphans"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			readLog := fakeShim(t)
+			compose := writeCompose(t, "name: demo\nservices:\n  web:\n    build: .\n"+
+				"  extra:\n    image: dbg\n    depends_on: [web]\n    env_file: [g.env]\n")
+			dir := filepath.Dir(compose)
+			mustWrite(t, filepath.Join(dir, "Dockerfile"), "FROM scratch\n")
+			mustWrite(t, filepath.Join(dir, "g.env"), "BOOM=${NOPE:?you must set NOPE}\n")
+
+			out, err := run(t, append([]string{"-f", compose}, args...)...)
+			if err == nil {
+				t.Fatalf("this service's environment cannot be read, got:\n%s", out)
+			}
+			if !strings.Contains(err.Error(), "NOPE") {
+				t.Errorf("the error should name the variable that has no value, got: %v", err)
+			}
+			// `web` is what would have been started, the network is what would
+			// have been created, `build` is what would have been paid for, and
+			// an orphan is what would have been deleted. None of them should
+			// have been.
+			for _, cmd := range readLog() {
+				for _, verb := range []string{"run ", "start ", "network create", "build ", "stop ", "delete "} {
+					if strings.HasPrefix(cmd, verb) {
+						t.Errorf("a command that was refused had already asked the runtime to %q", cmd)
+					}
+				}
+			}
+		})
+	}
+}
+
+// One run, one voice about the Docker socket. `up --from-docker-compose`
+// prints the note and then runs the up, whose warning says the same thing in
+// the same words — a screen apart, it read as two findings. Only the exact
+// repeat goes: the warning reads mounts wider than the note (the anonymous
+// volume below never reaches the note's predicate), and where it is the only
+// voice it still speaks. Which of the two readings of "a Docker socket mount"
+// is right is #599's question, and none of these cases move it.
+func TestTheDockerSocketIsSpokenAboutOnce(t *testing.T) {
+	// The sentence the note's Why and the warning share, and the entry list does
+	// not: the headline also appears in the entry list above the prose, which is
+	// a table of contents, not a second finding.
+	const claim = "and it has no socket to share"
+	bind := "services:\n  watcher:\n    image: app:1\n    volumes:\n      - \"./docker.sock:/var/run/docker.sock\"\n"
+	for name, tc := range map[string]struct {
+		compose string
+		overlay string // pre-existing compose.opossum.yaml, "" = none
+		args    []string
+		want    int
+	}{
+		"note and warning would both speak": {
+			compose: bind,
+			args:    []string{"up", "--from-docker-compose", "--no-build", "--no-supervisor"},
+			want:    1,
+		},
+		"a plain up has only the warning": {
+			compose: bind,
+			args:    []string{"up", "--no-build", "--no-supervisor"},
+			want:    1,
+		},
+		"an anonymous volume reaches only the warning": {
+			compose: "services:\n  watcher:\n    image: app:1\n    volumes:\n      - \"/var/run/docker.sock\"\n",
+			args:    []string{"up", "--from-docker-compose", "--no-build", "--no-supervisor"},
+			want:    1,
+		},
+		// The steady state of a --from-docker-compose project: the overlay is
+		// already on disk, so the run prints the note's HEADLINE only ("found
+		// more:") — and a headline is a table of contents, not a finding. The
+		// warning has to keep speaking here; the first version of this change
+		// recorded the note when it was planned rather than when it was shown,
+		// and went quiet on exactly this path.
+		"an overlay already on disk leaves the warning speaking": {
+			compose: bind,
+			overlay: "# Generated by `opossum up --from-docker-compose`.\nservices: {}\n",
+			args:    []string{"up", "--from-docker-compose", "--no-build", "--no-supervisor"},
+			want:    1,
+		},
+		// With -f the overlay is never merged, but the notes-only prose still
+		// prints (a different reporting site from the no-f path) — and having
+		// been shown, it still counts as spoken. This is the case that pins
+		// that second site's wiring; without it, unhooking the -f site leaves
+		// every other case green.
+		"with -f the prose still counts as spoken": {
+			compose: bind,
+			args:    []string{"-f", "compose.yaml", "up", "--from-docker-compose", "--no-build", "--no-supervisor"},
+			want:    1,
+		},
+		// Two services, one voice each: the note speaks for the bind mount, the
+		// warning for the anonymous volume the note's predicate cannot see. A
+		// suppression keyed any wider than the service — "a note spoke, so all
+		// warnings hush" — silences the second voice.
+		"two services keep one voice each": {
+			compose: "services:\n  ci:\n    image: app:1\n    volumes:\n      - \"./docker.sock:/var/run/docker.sock\"\n" +
+				"  anon:\n    image: app:1\n    volumes:\n      - \"/var/run/docker.sock\"\n",
+			args: []string{"up", "--from-docker-compose", "--no-build", "--no-supervisor"},
+			want: 2,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fakeShim(t)
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte("name: sockonce\n"+tc.compose), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if tc.overlay != "" {
+				if err := os.WriteFile(filepath.Join(dir, "compose.opossum.yaml"), []byte(tc.overlay), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Chdir(dir)
+			var out, errOut strings.Builder
+			runCLI(tc.args, &out, &errOut)
+			said := out.String() + errOut.String()
+			if got := strings.Count(said, claim); got != tc.want {
+				t.Errorf("the run speaks about the Docker socket %d time(s), want %d:\n%s", got, tc.want, said)
+			}
+		})
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -2066,5 +2067,142 @@ volumes:
 	}, "\n")
 	if got := suggestionBlockOf(t, overlay); got != want {
 		t.Errorf("the suggestions are not what this file says they should be\n got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// A service whose env_file could not be read gets no adaptation drawn from its
+// environment. The questions adaptService asks are all answered out of it, and
+// an unreadable env_file looks exactly like a variable nobody set — so PGDATA
+// reads as absent and the overlay sets it, over the value the user was
+// supplying at run time. That is the damage the PGDATA guard exists to
+// prevent, and the overlay outlives the run that wrote it: `up` stopping does
+// not take the file back (#413).
+//
+// What this does not say is that the service goes quiet. The notes and the
+// shared-volume suggester read volumes rather than the environment, so they
+// still speak about this service, and the two cases at the end ask them to.
+// (The chown-failure suggester reads recorded failures and is the same shape;
+// producing one takes a run, so it is not asked here.)
+func TestPlanOverlaySaysNothingAboutAServiceWhoseEnvCouldNotBeRead(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "pg.env", "PGDATA=${MY_PGDATA:?set MY_PGDATA}\n")
+	body, changes := planForIn(t, dir, `
+name: demo
+services:
+  db:
+    image: postgres:16
+    env_file: [pg.env]
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+volumes:
+  dbdata: {}
+`)
+	if len(changes) != 0 {
+		t.Errorf("the planner cannot see this service's environment, so nothing it "+
+			"concludes from one applies here; got %+v", changes)
+	}
+	if strings.Contains(body, "PGDATA") {
+		t.Errorf("the overlay would set PGDATA over one the env_file is supplying, got:\n%s", body)
+	}
+	// The same project without the unreadable file does produce the change, so
+	// this is measuring the environment being unreadable and not the shape of
+	// the compose file.
+	if _, sane := planFor(t, `
+name: demo
+services:
+  db:
+    image: postgres:16
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+volumes:
+  dbdata: {}
+`); len(sane) != 1 {
+		t.Fatalf("the control case should still plan one change, got %+v", sane)
+	}
+
+	// And the bind-mounted road, which is the other half of the same fix and a
+	// worse thing to get wrong: the swap moves where the data lives, so an
+	// overlay written about a service nobody could read leaves the host
+	// directory behind. Asking only about PGDATA would leave a guard that
+	// covers half of what the planner does and looks complete.
+	dir2 := t.TempDir()
+	writeFile(t, dir2, "pg.env", "PGDATA=${MY_PGDATA:?set MY_PGDATA}\n")
+	body2, changes2 := planForIn(t, dir2, `
+name: demo
+services:
+  db:
+    image: postgres:16
+    env_file: [pg.env]
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
+`)
+	if len(changes2) != 0 {
+		t.Errorf("a bind-mounted data dir on a service whose environment is unreadable is "+
+			"still a service nothing can be concluded about; got %+v", changes2)
+	}
+	if strings.Contains(body2, "db-data") {
+		t.Errorf("the overlay would move this service's data to a named volume on the "+
+			"strength of an environment nobody read, got:\n%s", body2)
+	}
+
+	// And the part that does not depend on the environment still comes out. A
+	// note about `restart:` or a device mount is not a conclusion drawn from
+	// anything; withholding it would make an unreadable env_file the reason a
+	// different thing went unmentioned, which is the mystery those notes exist
+	// to prevent.
+	dir3 := t.TempDir()
+	writeFile(t, dir3, "pg.env", "PGDATA=${MY_PGDATA:?set MY_PGDATA}\n")
+	_, notes := planForIn(t, dir3, `
+name: demo
+services:
+  app:
+    image: app
+    restart: on-failure
+    env_file: [pg.env]
+`)
+	var codes []string
+	for _, n := range notes {
+		codes = append(codes, n.Code)
+	}
+	if !slices.Contains(codes, "OPSM-409") {
+		t.Errorf("the restart note reads no environment, so an unreadable env_file is not "+
+			"a reason to withhold it; got %v", codes)
+	}
+	for _, n := range notes {
+		if n.Kind != "note" {
+			t.Errorf("only what reads no environment may come from a service whose "+
+				"environment is unreadable, got %+v", n)
+		}
+	}
+
+	// And the shared-volume suggester, which runs outside adaptService, still
+	// names the service. It reads volumes; an unreadable env_file tells it
+	// nothing, so withholding its advice would be withholding it for no reason.
+	dir4 := t.TempDir()
+	writeFile(t, dir4, "pg.env", "PGDATA=${MY_PGDATA:?set MY_PGDATA}\n")
+	_, shared := planForIn(t, dir4, `
+name: demo
+services:
+  a:
+    image: app
+    env_file: [pg.env]
+    volumes:
+      - shared:/data
+  b:
+    image: app
+    volumes:
+      - shared:/data
+volumes:
+  shared: {}
+`)
+	var named bool
+	for _, n := range shared {
+		if n.Service == "a" {
+			named = true
+		}
+	}
+	if !named {
+		t.Errorf("the shared-volume suggester reads volumes, not the environment, so an "+
+			"unreadable env_file is not a reason to drop this service from it; got %+v", shared)
 	}
 }

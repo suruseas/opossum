@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -37,14 +38,42 @@ services:
 	}
 }
 
+// mustLoadWithEnvFileError loads p, which is expected to load cleanly, and
+// returns the error the named service's env_file resolution recorded. It fails
+// the test when there is none: the point of these cases is that the error is
+// still produced, and only the moment it reaches the caller has moved.
+func mustLoadWithEnvFileError(t *testing.T, p, service string) error {
+	t.Helper()
+	proj, err := Load(p)
+	if err != nil {
+		t.Fatalf("load should not fail on an env_file a caller has not asked for: %v", err)
+	}
+	svc, ok := proj.Services[service]
+	if !ok {
+		t.Fatalf("no service %q in the loaded project", service)
+	}
+	env, err := svc.ResolvedEnv()
+	if err == nil {
+		t.Fatalf("service %q resolved to %v, want the env_file failure", service, env)
+	}
+	// The failure arrives further from the load than it used to, so which
+	// service it belongs to is worth more than it was and is easier to drop.
+	if !strings.Contains(err.Error(), service) {
+		t.Errorf("the failure should name the service it belongs to (%s), got: %v", service, err)
+	}
+	return err
+}
+
 func TestLoadEnvFileMissingErrors(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "compose.yaml")
 	if err := os.WriteFile(p, []byte("services:\n  web:\n    image: web\n    env_file: nope.env\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Load(p); err == nil {
-		t.Fatal("expected an error for a missing env_file")
+	// The load itself succeeds — nothing has asked for this service yet — and
+	// the failure is waiting for whoever renders or starts it.
+	if err := mustLoadWithEnvFileError(t, p, "web"); !strings.Contains(err.Error(), "nope.env") {
+		t.Errorf("the error should name the file that is missing, got: %v", err)
 	}
 }
 
@@ -72,8 +101,8 @@ func TestLoadEnvFileOptionalMissingSkipped(t *testing.T) {
 	if err := os.WriteFile(p, []byte(body2), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Load(p); err == nil {
-		t.Fatal("expected an error for a required (long-form) missing env_file")
+	if err := mustLoadWithEnvFileError(t, p, "web"); !strings.Contains(err.Error(), "absent.env") {
+		t.Errorf("the error should name the required file that is missing, got: %v", err)
 	}
 }
 
@@ -87,8 +116,9 @@ func TestLoadEnvFileLongFormRequiredDefaultsTrue(t *testing.T) {
 	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Load(p); err == nil {
-		t.Fatal("expected an error: a long-form env_file without `required` defaults to required=true")
+	if err := mustLoadWithEnvFileError(t, p, "web"); !strings.Contains(err.Error(), "absent.env") {
+		t.Errorf("a long-form env_file without `required` defaults to required=true, so an "+
+			"absent file has to be an error naming it; got: %v", err)
 	}
 }
 

@@ -65,7 +65,20 @@ Docker Compose ファイル（`docker-compose.yml`）を読み、オープンな
 brew install suruseas/opossum/opossum
 ```
 
-ビルド済みバイナリが入るので、Go ツールチェインもローカルビルドも不要です。依存として Apple の `container` ランタイムも一緒に入ります。タグ付きリリースごとに更新され、ランタイムが Apple silicon の macOS 26 を要求する関係で `darwin/arm64` のみの提供です。
+ビルド済みバイナリが入るので、Go ツールチェインもローカルビルドも不要です。依存として Apple の `container` ランタイムも一緒に入ります。v0.24.2 から tap は opossum を cask として配布しています——インストールコマンドは変わらず、バイナリは quarantine フラグ無しで届くため初回起動時の Gatekeeper の確認も出ません。タグ付きリリースごとに更新され、ランタイムが Apple silicon の macOS 26 を要求する関係で `darwin/arm64` のみの提供です。
+
+#### すでに formula（v0.7.0 以前）で入れている場合
+
+formula は自動では cask に切り替わりません。サードパーティの cask は Homebrew の信頼ゲート（Homebrew 5.1.15 以降）の内側にあるため、`brew update` は移行を告知しますが、警告で止まってインストールまでは進みません。次の4コマンドで完了させてください：
+
+```sh
+brew update
+brew trust --cask suruseas/opossum/opossum
+brew install --cask suruseas/opossum/opossum
+brew uninstall --formula --force opossum   # 旧 keg は unlink されるだけで、削除はされません
+```
+
+これで `PATH` 上の `opossum` は cask のバイナリになり、`opossum version` が現行リリースを報告します。注意点が1つ：`/opt/homebrew/bin` に手置きの `opossum`（Homebrew 管理外のファイル）があると、cask は上書きせずそこで止まります——先にそのファイルを退けてください。
 
 ### ソースから
 

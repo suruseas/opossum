@@ -30,7 +30,7 @@ func TestResolvePathExpandsTilde(t *testing.T) {
 func TestEnsureBindDirsCreatesMissingBindOnly(t *testing.T) {
 	base := t.TempDir()
 	o := &Orchestrator{Project: &compose.Project{Name: "demo", BaseDir: base}, out: &bytes.Buffer{}}
-	o.ensureBindDirs("svc", []string{"./data:/data", "named:/x", "/anon"})
+	o.ensureBindDirs("svc", []string{"./data:/data", "named:/x", "/anon"}, "`opossum up`")
 
 	if _, err := os.Stat(filepath.Join(base, "data")); err != nil {
 		t.Errorf("a missing bind-mount host dir should be created: %v", err)
@@ -53,7 +53,7 @@ func TestEnsureBindDirsSaysWhenAFileBecameADirectory(t *testing.T) {
 	o.ensureBindDirs("mongo", []string{
 		"./mongodb-init-replica-set.js:/docker-entrypoint-initdb.d/mongodb-init-replica-set.js",
 		"./appdata:/opt/app/data",
-	})
+	}, "`opossum up`")
 	s := out.String()
 	if !strings.Contains(s, string(codeBindFilePlaceholder)) {
 		t.Errorf("a file-shaped bind source that had to be created should say so, got:\n%s", s)
@@ -113,7 +113,7 @@ func TestEnsureBindDirsNeedsBothHalvesOfTheFileShape(t *testing.T) {
 			base := t.TempDir()
 			var out bytes.Buffer
 			o := &Orchestrator{Project: &compose.Project{Name: "demo", BaseDir: base}, out: &out}
-			o.ensureBindDirs("svc", []string{tc.mount})
+			o.ensureBindDirs("svc", []string{tc.mount}, "`opossum up`")
 			if s := out.String(); strings.Contains(s, string(codeBindFilePlaceholder)) {
 				t.Errorf("%s is not a file handed through, so this should be quiet, got:\n%s", tc.mount, s)
 			}
@@ -130,7 +130,7 @@ func TestEnsureBindDirsIsQuietWhenTheFileExists(t *testing.T) {
 	}
 	var out bytes.Buffer
 	o := &Orchestrator{Project: &compose.Project{Name: "demo", BaseDir: base}, out: &out}
-	o.ensureBindDirs("mongo", []string{"./init.js:/docker-entrypoint-initdb.d/init.js"})
+	o.ensureBindDirs("mongo", []string{"./init.js:/docker-entrypoint-initdb.d/init.js"}, "`opossum up`")
 	if s := out.String(); strings.Contains(s, string(codeBindFilePlaceholder)) {
 		t.Errorf("the file is there, so there is nothing to warn about, got:\n%s", s)
 	}

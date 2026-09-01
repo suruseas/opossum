@@ -43,7 +43,17 @@ type Service struct {
 	Entrypoint  Command     `yaml:"entrypoint"`
 	Environment Environment `yaml:"environment"`
 	EnvFile     EnvFiles    `yaml:"env_file"`
-	Ports       Ports       `yaml:"ports"`
+	// envFileErr holds why this service's env_file entries could not be read,
+	// when they could not. Loading records it here instead of failing, because
+	// a project is not broken by a service nobody is running: docker resolves
+	// env_file when it needs a service's rendered environment, so `ps` and
+	// `logs` and `config --services` all succeed against a compose file whose
+	// unused service points at an env file that does not parse (measured on
+	// Docker Compose v5.4.0). Environment is left holding the declared entries
+	// only — nothing from the files is folded in — so a caller that renders or
+	// starts this service has to ask through ResolvedEnv.
+	envFileErr error
+	Ports      Ports `yaml:"ports"`
 	// Restart is the compose restart policy. opossum honours it with a small
 	// per-project supervisor started by `up`; see internal/orchestrator/supervisor.go.
 	Restart string `yaml:"restart"`
@@ -748,6 +758,35 @@ func (s *StringOrSlice) UnmarshalYAML(value *yaml.Node) error {
 		return nil
 	}
 	return fmt.Errorf("expected a string or a list, got %s", kindName(value.Kind))
+}
+
+// ResolvedEnv is the service's environment with its env_file entries folded
+// in, or the reason they could not be. Everything that renders a service or
+// starts one goes through here rather than reading Environment directly: on a
+// failure Environment holds the declared entries alone, and handing those to a
+// container would start it with an environment nobody wrote.
+//
+// What this does not do is make that impossible. A path that reads Environment
+// without coming through here sees the declared entries and no error. Five
+// places ask here today — rendering (`config`), the two that start a container
+// (`Up`, `RunOneOff`), the audit that wraps one (`RunAudited`), and the
+// overlay planner, which starts nothing but writes a file out of what it
+// concludes. Two of those were found by review rather than by looking, which
+// is the measure of how much this list is worth.
+//
+// Making the field unreachable instead — so that no answer is possible without
+// the error — is the change that would make it structural. Environment appears
+// on 57 lines (60 occurrences: the two counts differ, and mixing them is how
+// the first version of this sentence got its number wrong). 43 of those lines
+// are in this package, 40 of them in its tests; outside the package there are
+// 14 lines and 5 non-test reads. So the work is not the 57, and it is not the
+// 5 either: it is unexporting a field this package's own tests read on 40
+// lines. Still a different change than this one.
+func (s *Service) ResolvedEnv() (Environment, error) {
+	if s.envFileErr != nil {
+		return nil, s.envFileErr
+	}
+	return s.Environment, nil
 }
 
 // Environment normalizes both the list form (KEY=value) and the map form

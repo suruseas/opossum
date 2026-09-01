@@ -76,12 +76,18 @@ func RenderConfig(p *Project) (string, error) {
 	out := configOutput{Name: p.Name, Services: map[string]configService{}}
 	for name, svc := range p.Services {
 		mem, cpu, _ := svc.Resources() // validated at load; show the effective -m/-c
+		// The rendered output carries the environment, so this is one of the
+		// places an env_file failure has been waiting for.
+		env, err := svc.ResolvedEnv()
+		if err != nil {
+			return "", err
+		}
 		cs := configService{
 			Image:       svc.Image,
 			Platform:    svc.Platform,
 			Command:     svc.Command,
 			Entrypoint:  svc.Entrypoint,
-			Environment: svc.Environment,
+			Environment: env,
 			Ports:       svc.Ports,
 			Restart:     svc.Restart,
 			Volumes:     volumesWithNoCopy(svc),

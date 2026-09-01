@@ -17,22 +17,22 @@ func TestBuildErrorDetector(t *testing.T) {
 	t.Run("cache corruption", func(t *testing.T) {
 		d := &buildErrorDetector{}
 		d.Write([]byte("#8 failed to load cache key: unable to read root manifest\n"))
-		if !cacheHint(d.hint()) {
-			t.Errorf("cache-corruption hint expected, got: %q", d.hint())
+		if !cacheHint(d.hint("opossum up")) {
+			t.Errorf("cache-corruption hint expected, got: %q", d.hint("opossum up"))
 		}
 	})
 	t.Run("resource exhaustion", func(t *testing.T) {
 		d := &buildErrorDetector{}
 		d.Write([]byte("Error: unavailable: rpc error: code = Unavailable desc = error reading from server: EOF\n"))
-		if !resourceHint(d.hint()) {
-			t.Errorf("resource hint expected, got: %q", d.hint())
+		if !resourceHint(d.hint("opossum up")) {
+			t.Errorf("resource hint expected, got: %q", d.hint("opossum up"))
 		}
 	})
 	t.Run("disk full", func(t *testing.T) {
 		d := &buildErrorDetector{}
 		d.Write([]byte("#12 exporting layers: write /var/lib/.../blob: no space left on device\n"))
-		if !diskHint(d.hint()) {
-			t.Errorf("disk-full hint expected, got: %q", d.hint())
+		if !diskHint(d.hint("opossum up")) {
+			t.Errorf("disk-full hint expected, got: %q", d.hint("opossum up"))
 		}
 	})
 	t.Run("disk full outranks resource exhaustion", func(t *testing.T) {
@@ -40,14 +40,14 @@ func TestBuildErrorDetector(t *testing.T) {
 		// remedy must win — growing the builder would make ENOSPC worse.
 		d := &buildErrorDetector{}
 		d.Write([]byte("no space left on device\nrpc error: code = Unavailable desc = error reading from server: EOF\n"))
-		if !diskHint(d.hint()) {
-			t.Errorf("disk-full hint should win over the resource hint, got: %q", d.hint())
+		if !diskHint(d.hint("opossum up")) {
+			t.Errorf("disk-full hint should win over the resource hint, got: %q", d.hint("opossum up"))
 		}
 	})
 	t.Run("plain build error gets no hint", func(t *testing.T) {
 		d := &buildErrorDetector{}
 		d.Write([]byte(`#5 ERROR: process "/bin/sh -c bogus" did not complete successfully: exit code 127` + "\n"))
-		if h := d.hint(); h != "" {
+		if h := d.hint("opossum up"); h != "" {
 			t.Errorf("no hint expected for an ordinary build error, got: %q", h)
 		}
 	})
@@ -55,17 +55,76 @@ func TestBuildErrorDetector(t *testing.T) {
 		d := &buildErrorDetector{}
 		d.Write([]byte("rpc error: unable to read "))
 		d.Write([]byte("root manifest: ..."))
-		if !cacheHint(d.hint()) {
+		if !cacheHint(d.hint("opossum up")) {
 			t.Error("a signature straddling two writes should still match")
 		}
 	})
 	t.Run("both signatures pick the resource hint", func(t *testing.T) {
 		d := &buildErrorDetector{}
 		d.Write([]byte("failed to load cache key\nrpc error: code = Unavailable desc = error reading from server: EOF\n"))
-		if !resourceHint(d.hint()) {
-			t.Errorf("resource hint (the superset remedy) should win when both fire, got: %q", d.hint())
+		if !resourceHint(d.hint("opossum up")) {
+			t.Errorf("resource hint (the superset remedy) should win when both fire, got: %q", d.hint("opossum up"))
 		}
 	})
+}
+
+// Builds are reached from `opossum up`, `opossum run`, and `opossum build`, and
+// each hint ends by telling the reader what to type again. That has to be the
+// command they typed — advice to `opossum up` after an `opossum build` failed
+// sends them somewhere else (#667). Every hint × every verb, because each of the
+// three hints embeds the command in a different sentence and any one of them
+// could keep a literal behind.
+func TestHintNamesTheCommandThatWasTyped(t *testing.T) {
+	verbs := []string{"opossum up", "opossum run", "opossum build"}
+	states := map[string]func() *buildErrorDetector{
+		"disk full":          func() *buildErrorDetector { return &buildErrorDetector{diskFull: true} },
+		"resource exhausted": func() *buildErrorDetector { return &buildErrorDetector{resourceExhausted: true} },
+		"cache corrupt":      func() *buildErrorDetector { return &buildErrorDetector{cacheCorrupt: true} },
+	}
+	for name, mk := range states {
+		t.Run(name, func(t *testing.T) {
+			for _, verb := range verbs {
+				h := mk().hint(verb)
+				if !strings.Contains(h, verb) {
+					t.Errorf("hint for %q should tell the reader to retype it, got: %q", verb, h)
+				}
+				// `opossum up` must appear only as the caller's verb, never as a
+				// leftover literal beside it.
+				for _, other := range verbs {
+					if other != verb && strings.Contains(h, other) {
+						t.Errorf("hint for %q also names %q: %q", verb, other, h)
+					}
+				}
+			}
+			// A caller that never said which command it serves gets wording that
+			// names none — naming no command beats naming a wrong one.
+			h := mk().hint("")
+			for _, verb := range verbs {
+				if strings.Contains(h, verb) {
+					t.Errorf("with no redo given the hint must not guess %q, got: %q", verb, h)
+				}
+			}
+			if !strings.Contains(h, "rerun the opossum command") {
+				t.Errorf("with no redo given the hint should still say to rerun, got: %q", h)
+			}
+		})
+	}
+}
+
+// Build hands its caller's command through to the hint — the field exists so the
+// orchestrator's up/run/build paths can each name themselves.
+func TestBuildHintEchoesTheCallersCommand(t *testing.T) {
+	r := replayShim(t, "#12 exporting to image\nfailed to solve: write blob: no space left on device\n", 1)
+	err := r.Build(BuildOptions{Tag: "x:1", Context: t.TempDir(), Redo: "opossum run"})
+	if err == nil {
+		t.Fatal("expected a build error")
+	}
+	if !strings.Contains(err.Error(), "then: opossum run") {
+		t.Errorf("the hint should retype the caller's command, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "opossum up") {
+		t.Errorf("the hint should not name a command nobody typed, got: %v", err)
+	}
 }
 
 // Build turns a known builder failure into an actionable hint on the error, and

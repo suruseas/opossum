@@ -57,6 +57,20 @@ type Orchestrator struct {
 	// whole compose file: `up web` must not leave a watcher polling for services
 	// nobody started.
 	started []string
+
+	// notedDockerSocket names the services whose Docker-socket note has been
+	// REPORTED — its prose printed to the reader in this run, which the caller
+	// says through MarkNotesReported. Planning the note is not enough: three of
+	// the paths that plan it print only its headline (an overlay already on
+	// disk, -f with actionable changes beside it, a write that failed), and a
+	// headline is a table of contents, not a finding. The up that follows says
+	// the same thing through warnDockerSocket, and one run saying it twice —
+	// note and warning, near verbatim, a screen apart — reads as two findings.
+	// Only that exact repeat is suppressed: the warning reads mounts wider than
+	// the note (an anonymous volume, a named volume merely containing the name,
+	// like `docker.sock-vol`), and on those inputs it is the only voice, so it
+	// still speaks. Which reading is right is #599; nothing here moves it.
+	notedDockerSocket map[string]bool
 }
 
 // upOptions holds the `up` recreate/build flags.
@@ -527,6 +541,23 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 		return err
 	}
 
+	// Fail here if a service's env_file could not be read — before anything is
+	// removed, warned about, built or started. The order is settled by this
+	// point and nothing below it is free: orphan containers are stopped and
+	// deleted a few lines down, images are built in the loop, and a peer that
+	// is being recreated is torn down again by the rollback when a later
+	// service refuses. All of that would be paid for a command that was always
+	// going to fail. `RunOneOff` asks at its own top for the same reason.
+	for _, name := range order {
+		svc := o.Project.Services[name]
+		if svc == nil {
+			continue
+		}
+		if _, err := svc.ResolvedEnv(); err != nil {
+			return err
+		}
+	}
+
 	o.reportIgnoredFields(order, true)
 	// No Postgres data-directory warning here any more: opossum clears
 	// `lost+found` out of the volumes it creates, so the mount that used to be
@@ -743,7 +774,10 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 				return fmt.Errorf("service %q: image %q is not built and --no-build was given", name, image)
 			case need:
 				o.logf("Building %s\n", name)
-				if err := o.rt.Build(o.buildOptions(image, svc.Build)); err != nil {
+				// `opossum up` even when this runs for a one-off's dependency: the
+				// dependency is broken on the up side, and `opossum up <dep>` is
+				// the command that retries it.
+				if err := o.rt.Build(o.buildOptions(image, svc.Build, "opossum up")); err != nil {
 					return buildFailed(name, err)
 				}
 				rebuilt = true
@@ -752,7 +786,14 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 
 		mem, cpu, _ := svc.Resources() // validated at load
 		svcNets, dnsDomain, dnsSearch := o.serviceNetworks(svc)
-		env := svc.Environment
+		// The pre-flight above has already refused a service whose env_file
+		// could not be read, so this cannot fail here today. It is asked
+		// through the same door anyway: the alternative is reading Environment
+		// directly, which is what every path that got this wrong did.
+		env, err := svc.ResolvedEnv()
+		if err != nil {
+			return err
+		}
 		vols := append(o.resolveVolumes(name, svc.Volumes), o.secretMounts(svc)...)
 		mcpMount, err := o.mcpConfigMount(name, svc, !o.up.dryRun)
 		if err != nil {
@@ -806,7 +847,7 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 		if !o.up.dryRun {
 			// Create any missing bind-mount host directories (docker compose does; the
 			// runtime errors on a missing bind source).
-			if err := o.ensureBindDirs(name, svc.Volumes); err != nil {
+			if err := o.ensureBindDirs(name, svc.Volumes, "`opossum up`"); err != nil {
 				return err
 			}
 		}
@@ -2230,6 +2271,21 @@ func (o *Orchestrator) initdbNotEmptyHint(svcName string, svc *compose.Service, 
 		codePGDATADatadir, why, vol, pgdata)
 }
 
+// MarkNotesReported records which services' Docker-socket notes were actually
+// shown to the reader — prose, not just the headline — so the up that follows
+// does not repeat them. The caller is the layer that printed: only it knows
+// whether the prose made it out.
+func (o *Orchestrator) MarkNotesReported(changes []Adaptation) {
+	for _, c := range changes {
+		if c.Kind == "note" && c.Code == string(codeDockerSocket) {
+			if o.notedDockerSocket == nil {
+				o.notedDockerSocket = map[string]bool{}
+			}
+			o.notedDockerSocket[c.Service] = true
+		}
+	}
+}
+
 // warnDockerSocket warns when a service mounts the Docker daemon socket. Apple
 // `container` has none to expose: it runs these containers over XPC, so nothing
 // here answers on that path about them. Something else may — where the path is a
@@ -2240,6 +2296,11 @@ func (o *Orchestrator) initdbNotEmptyHint(svcName string, svc *compose.Service, 
 // It used to say the mount fails at runtime. It does not: bind-mounting a host
 // socket works, and #614 has the measurement.
 func (o *Orchestrator) warnDockerSocket(name string, svc *compose.Service) {
+	if o.notedDockerSocket[name] {
+		// The note in this same run already said this, in the same words. See
+		// the field's comment for what is and is not suppressed.
+		return
+	}
 	for _, v := range svc.Volumes {
 		// Deliberately not isDockerSocketMount: this reads the mount as written,
 		// which is wider in two ways that matter.
@@ -2769,6 +2830,15 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 	if !o.rt.Available() {
 		return ErrRuntimeAbsent()
 	}
+	// Ask for the environment here, at the top, and not where it is first
+	// needed. Between there and here this starts dependencies, creates the
+	// network, builds images and deletes a stale container of the same name —
+	// and a refusal afterwards leaves the started dependencies running, which
+	// nothing takes back. `up` asks in its own pre-flight for the same reason.
+	env, err := svc.ResolvedEnv()
+	if err != nil {
+		return err
+	}
 
 	// Keep the one-off's own stdout clean (e.g. an MCP server's JSON-RPC over
 	// stdio): dependency startup, build, and volume-seeding progress all go to
@@ -2822,7 +2892,7 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 	if svc.Build != nil {
 		image = o.Project.Name + "-" + service + ":latest"
 		o.logf("Building %s\n", service)
-		if err := o.rt.Build(o.buildOptions(image, svc.Build)); err != nil {
+		if err := o.rt.Build(o.buildOptions(image, svc.Build, "opossum run")); err != nil {
 			return buildFailed(service, err)
 		}
 	}
@@ -2839,7 +2909,7 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 	if err := o.refuseSymlinkedSocketMounts(service, svc.Volumes); err != nil {
 		return err
 	}
-	if err := o.ensureBindDirs(service, svc.Volumes); err != nil {
+	if err := o.ensureBindDirs(service, svc.Volumes, "`opossum run`"); err != nil {
 		return err
 	}
 	o.seedVolumes(service, svc, image)
@@ -2858,7 +2928,6 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 	}
 	mem, cpu, _ := svc.Resources() // validated at load
 	svcNets, dnsDomain, dnsSearch := o.serviceNetworks(svc)
-	env := svc.Environment
 	vols := append(o.resolveVolumes(service, svc.Volumes), o.secretMounts(svc)...)
 	mcpMount, err := o.mcpConfigMount(service, svc, true)
 	if err != nil {
@@ -2938,7 +3007,7 @@ func (o *Orchestrator) Build(services []string) error {
 		}
 		image := o.Project.Name + "-" + name + ":latest"
 		o.logf("Building %s\n", name)
-		if err := o.rt.Build(o.buildOptions(image, svc.Build)); err != nil {
+		if err := o.rt.Build(o.buildOptions(image, svc.Build, "opossum build")); err != nil {
 			return buildFailed(name, err)
 		}
 	}
@@ -3038,7 +3107,11 @@ func (o *Orchestrator) Restart(services []string) error {
 	return nil
 }
 
-func (o *Orchestrator) buildOptions(tag string, b *compose.Build) runtime.BuildOptions {
+// redo is the opossum command that asked for this build — "opossum up",
+// "opossum run", or "opossum build" — echoed in build-failure hints so the
+// retry advice names what the reader actually typed. A parameter, not a field:
+// every new call site has to say which command it serves.
+func (o *Orchestrator) buildOptions(tag string, b *compose.Build, redo string) runtime.BuildOptions {
 	ctx := b.Context
 	if ctx == "" {
 		ctx = "."
@@ -3051,6 +3124,7 @@ func (o *Orchestrator) buildOptions(tag string, b *compose.Build) runtime.BuildO
 		Dockerfile: b.Dockerfile,
 		Args:       b.Args,
 		Target:     b.Target,
+		Redo:       redo,
 	}
 }
 
@@ -3322,7 +3396,13 @@ func (o *Orchestrator) resolvePath(p string) string {
 // doesn't exist yet, matching docker compose (Apple `container` errors on a
 // missing bind source instead of creating it). Only bind mounts are touched;
 // named/anonymous volumes and external volumes are left to the runtime.
-func (o *Orchestrator) ensureBindDirs(service string, vols []string) error {
+//
+// redo is the command the advice below tells the reader to run again —
+// "`opossum up`" from Up, "`opossum run`" from a one-off. Both callers reach
+// this, and the advice used to say `opossum up` to both: the person who typed
+// `run` was told to redo a command they never ran, right after a mkdir line
+// that was worth copying exactly.
+func (o *Orchestrator) ensureBindDirs(service string, vols []string, redo string) error {
 	for _, v := range vols {
 		mount, target, _, ok := splitMount(v)
 		if !ok || !isHostPath(mount) {
@@ -3358,14 +3438,14 @@ func (o *Orchestrator) ensureBindDirs(service string, vols []string) error {
 					"%q, and there is nothing there\n"+
 					"  the container cannot start without it — point the link at something that "+
 					"exists, or remove the link and let opossum create the directory, then run "+
-					"`opossum up` again",
-					codeBindDirCreate, service, src, target)
+					"%s again",
+					codeBindDirCreate, service, src, target, redo)
 			}
 			return fmt.Errorf("[%s] service %q needs the host directory %s for a bind mount, and it "+
 				"could not be created: %v\n"+
 				"  the container cannot start without it — create it yourself (`mkdir -p %s`) or fix "+
-				"the parent directory's permissions, then run `opossum up` again",
-				codeBindDirCreate, service, src, mkErr, src)
+				"the parent directory's permissions, then run %s again",
+				codeBindDirCreate, service, src, mkErr, src, redo)
 		}
 		o.logf("Created host directory %s for a bind mount\n", src)
 		// A directory is all this can create, and for a mount that names a file
@@ -3389,9 +3469,9 @@ func (o *Orchestrator) ensureBindDirs(service string, vols []string) error {
 				"(docker compose does the same). If that path is meant to be a file, the service will "+
 				"find a directory where it expects one and carry on without it — an init script "+
 				"won't run, a config won't be read — so remove the empty directory (`rmdir %s`), put "+
-				"the real file there, and run `opossum up` again. If it is meant to be a directory "+
+				"the real file there, and run %s again. If it is meant to be a directory "+
 				"(`conf.d`, `.ssh`), there is nothing to do.\n",
-				service, src, target, src)
+				service, src, target, src, redo)
 		}
 	}
 	return nil

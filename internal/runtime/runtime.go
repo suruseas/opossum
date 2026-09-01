@@ -788,6 +788,11 @@ type BuildOptions struct {
 	Dockerfile string
 	Args       []string
 	Target     string // --target: multi-stage build stage
+	// Redo is the opossum command that led to this build (e.g. "opossum up"),
+	// echoed in recovery hints so the reader is told to retype what they actually
+	// typed. Empty means unknown: hints then name no command rather than a wrong
+	// one.
+	Redo string
 }
 
 // Build builds an image. It always requests `--progress plain` so build output is
@@ -814,7 +819,7 @@ func (r *Runtime) Build(o BuildOptions) error {
 	det := &buildErrorDetector{}
 	err := r.streamHeartbeat("building", det, args...)
 	if err != nil {
-		if h := det.hint(); h != "" {
+		if h := det.hint(o.Redo); h != "" {
 			return fmt.Errorf("%w\n%s", err, h)
 		}
 	}

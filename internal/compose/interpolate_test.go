@@ -1804,6 +1804,17 @@ func TestAByteOrderMarkAtTheStartOfAnEnvFileIsNotPartOfTheFirstKey(t *testing.T)
 				}
 
 				proj, err := Load(cf)
+				// The two roads deliver the same failure at different moments.
+				// The project's own .env is read to load the compose file at
+				// all, so a bad one fails the load; a service's env_file is
+				// resolved for whoever renders or starts that service, so the
+				// load succeeds and the failure waits on the service. Both
+				// still have to say the same thing, which is what this asks.
+				if err == nil && road != "the project .env" && proj != nil {
+					if svc, ok := proj.Services["app"]; ok {
+						_, err = svc.ResolvedEnv()
+					}
+				}
 				if tc.wantErr != "" {
 					if err == nil {
 						t.Fatalf("want a failure saying %q, got none", tc.wantErr)
@@ -1819,7 +1830,10 @@ func TestAByteOrderMarkAtTheStartOfAnEnvFileIsNotPartOfTheFirstKey(t *testing.T)
 				if err != nil {
 					t.Fatalf("Load: %v", err)
 				}
-				got := proj.Services["app"].Environment
+				got, err := proj.Services["app"].ResolvedEnv()
+				if err != nil {
+					t.Fatalf("ResolvedEnv: %v", err)
+				}
 				for _, want := range []string{keyA + "=" + tc.wantA, keyB + "=" + tc.wantB} {
 					if !slices.Contains(got, want) {
 						t.Errorf("want %q in the environment, got %q", want, got)

@@ -6,11 +6,33 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.24.3] - 2026-09-01
+
+### Fixed
+
+- The advice printed when a bind mount's host source cannot be created — and its two siblings, the dangling-symlink refusal and the note left when a directory has to stand in for a file — now tells you to rerun the command you actually typed. Someone who typed `opossum run` used to be told to run `opossum up` again, one line after a `mkdir -p` that was worth copying exactly.
+- A service you are not running no longer breaks the whole project. `env_file:`
+  entries were read while the compose file was being loaded, which happens
+  before profiles are applied, so a `profiles:`-gated service pointing at a file
+  that was missing or that failed to expand made `config`, `up` and `ps` all
+  fail — for a service none of them would have started. The failure is now
+  raised where a service's environment is actually needed: `config` and `up`
+  report it for the services they render and start, as does `run`, while `ps`
+  and `logs`, which need no environment, no longer carry it at all. That is
+  where docker compose draws it too, measured on Docker Compose v5.4.0:
+  `config --services`, `ps` and `logs` all succeed against a service whose env
+  file does not expand, while a full `config` of that service fails. Its `up`
+  and `run` were not measured.
+- `opossum up --from-docker-compose` no longer says the same thing twice about a Docker socket mount. The overlay's note and the up's own warning carried the same paragraph a screen apart, reading as two findings; when the note's prose has actually been shown in a run, the warning now stays quiet. Everywhere else it still speaks — when only the note's one-line headline was printed (an overlay already on disk, `-f` alongside real changes), and for mounts only the warning recognises, like an anonymous volume or a volume merely named after the socket.
+- Build-failure hints (out of disk, builder out of resources, corrupted builder
+  cache) now end by telling you to rerun the command you actually typed: a failed
+  `opossum run` or `opossum build` no longer advises `opossum up`.
+
 ## [0.24.2] - 2026-09-01
 
 ### Changed
 
-- The Homebrew package is now published as a cask rather than a formula. `brew install suruseas/opossum/opossum` works as before and still pulls in Apple's `container` runtime; existing formula installs are pointed at the cask on their next `brew upgrade`. The cask clears macOS's quarantine attribute on install, so the unsigned binary runs without a Gatekeeper detour. This follows Homebrew's direction for pre-compiled binaries — the tooling that generated the old formula shape is being retired.
+- The Homebrew package is now published as a cask rather than a formula. `brew install suruseas/opossum/opossum` works as before and still pulls in Apple's `container` runtime. An existing formula install hears about the move on its next `brew update`, but does not cross on its own: Homebrew wants a migration into a third-party tap trusted first, and prints the two commands that finish it — `brew trust --cask suruseas/opossum/opossum`, then `brew install --cask suruseas/opossum/opossum`. The old keg is unlinked rather than uninstalled, and `brew uninstall --formula --force opossum` clears it when convenient. The cask clears macOS's quarantine attribute on install, so the unsigned binary runs without a Gatekeeper detour. This follows Homebrew's direction for pre-compiled binaries — the tooling that generated the old formula shape is being retired.
 
 ## [0.24.1] - 2026-08-28
 
@@ -1003,7 +1025,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.24.2...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.24.3...HEAD
+[0.24.3]: https://github.com/suruseas/opossum/compare/v0.24.2...v0.24.3
 [0.24.2]: https://github.com/suruseas/opossum/compare/v0.24.1...v0.24.2
 [0.24.1]: https://github.com/suruseas/opossum/compare/v0.24.0...v0.24.1
 [0.24.0]: https://github.com/suruseas/opossum/compare/v0.23.1...v0.24.0

@@ -487,11 +487,17 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 			svc.Volumes = collapseMountsByTarget(svc.Volumes)
 		}
 		// Fold env_file values into the environment (explicit `environment` wins).
+		// A failure is recorded on the service rather than failing the load: the
+		// project is not broken by a service nobody is running, and whether this
+		// service is one of those is not knowable here — profiles are applied a
+		// layer up. Whoever renders or starts it asks through ResolvedEnv, which
+		// answers with this error.
 		env, err := resolveEnvFiles(baseDir, svc.EnvFile, svc.Environment, scope)
 		if err != nil {
-			return nil, fmt.Errorf("service %q: %w", name, err)
+			svc.envFileErr = fmt.Errorf("service %q: %w", name, err)
+		} else {
+			svc.Environment = env
 		}
-		svc.Environment = env
 
 		// Every referenced secret must be a defined, file-based top-level secret.
 		for _, ref := range svc.Secrets {

@@ -602,6 +602,29 @@ func (o *Orchestrator) adaptService(name string, svc *compose.Service, claimed m
 	if svc == nil {
 		return nil
 	}
+	// The notes are computed before anything is decided, because they are the
+	// part of this that does not depend on the environment: noteNoYAML reads
+	// Restart and Volumes and nothing else. They are appended last, where they
+	// have always gone.
+	notes := o.noteNoYAML(name, svc)
+	// Decide nothing from an environment that could not be read. The two
+	// questions below are both answered out of it — whether PGDATA is already
+	// set is the load-bearing one — and an unreadable env_file reads there as
+	// a variable nobody set, which is the one mistake the PGDATA guard exists
+	// to avoid: writing an overlay that sets PGDATA over the value the user
+	// was supplying at run time. The overlay outlives the failed run, so a
+	// wrong answer is not undone by the command that produced it stopping.
+	//
+	// The notes still go out. Withholding them would make an unreadable
+	// env_file the reason a service's `restart:` policy or device mount went
+	// unmentioned, and those notes exist so that a thing opossum writes no
+	// YAML for is not a mystery — an unrelated failure elsewhere is no reason
+	// to restore the mystery. The same goes for the two suggesters PlanOverlay
+	// runs outside this function: they read volumes and recorded failures,
+	// never the environment.
+	if _, err := svc.ResolvedEnv(); err != nil {
+		return notes
+	}
 	var out []serviceAdaptation
 	// Ask first whether the PGDATA half is available: for an image that initialises
 	// somewhere other than the mount, the swap is only a fix alongside it.
@@ -611,7 +634,7 @@ func (o *Orchestrator) adaptService(name string, svc *compose.Service, claimed m
 	if p, ok := o.adaptPGDATA(name, svc, swappedPostgres); ok {
 		out = append(out, p)
 	}
-	out = append(out, o.noteNoYAML(name, svc)...)
+	out = append(out, notes...)
 	return out
 }
 

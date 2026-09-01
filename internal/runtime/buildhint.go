@@ -76,23 +76,41 @@ func containsAny(s string, subs []string) bool {
 // cause when it co-occurs with a resource/connection error (a full volume makes
 // the builder fail downstream), and its remedy — free disk — is the opposite of
 // the resource remedy (grow the builder), which would only make ENOSPC worse.
-func (d *buildErrorDetector) hint() string {
+//
+// redo is the opossum command the reader typed and should type again once the
+// remedy is applied — builds are reached from `up`, `run`, and `build`, and
+// advice that names a command the reader didn't type sends them somewhere else.
+// Empty means the caller didn't say: the hint then names no command, because
+// naming none beats naming a wrong one.
+func (d *buildErrorDetector) hint(redo string) string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	switch {
 	case d.diskFull:
+		then := "then rerun the opossum command that failed"
+		if redo != "" {
+			then = "then: " + redo
+		}
 		return "hint: the build ran out of disk space — Apple's builder pulls multi-GB base images and writes build layers onto the host volume. Free space and retry:\n" +
 			"    container image prune -f          # remove unused images\n" +
 			"    container builder delete --force  # clear the builder's cache (recreated automatically)\n" +
-			"    df -h /                           # confirm there's room, then: opossum up"
+			"    df -h /                           # confirm there's room, " + then
 	case d.resourceExhausted:
+		retry := "    # then rerun the opossum command that failed"
+		if redo != "" {
+			retry = "    " + redo
+		}
 		return "hint: the builder ran out of resources or lost its connection — common for heavy builds. Give it more and retry:\n" +
 			"    container builder delete --force\n" +
 			"    container builder start --cpus 4 --memory 8g\n" +
-			"    opossum up"
+			retry
 	case d.cacheCorrupt:
+		again := "then rerun the opossum command that failed."
+		if redo != "" {
+			again = "then run `" + redo + "` again."
+		}
 		return "hint: the builder cache looks corrupted (e.g. from a build interrupted with Ctrl-C). " +
-			"Run `container builder delete --force` (a fresh builder is created automatically), then run `opossum up` again."
+			"Run `container builder delete --force` (a fresh builder is created automatically), " + again
 	}
 	return ""
 }

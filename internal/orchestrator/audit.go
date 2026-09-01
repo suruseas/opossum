@@ -64,6 +64,29 @@ func (o *Orchestrator) RunAudited(service string, command []string, opts RunOneO
 	if !ok {
 		return nil, o.unknownServiceErr(service)
 	}
+	// Ask for the environment first, before anything is snapshotted or
+	// started. Two reasons, and the second is why this sits at the very top
+	// rather than anywhere before the run.
+	//
+	// One: the run below reports its outcome as an exit code, and an exit code
+	// has no room for "this service's env_file could not be read" — the reason
+	// would be spent on a report that says `exit -1` and names neither the
+	// file nor the variable.
+	//
+	// Two: what follows is not all measurement. This takes a workspace
+	// snapshot and, without --no-deps, starts the service's dependencies. The
+	// snapshot is not what survives — a defer removes it on the way out of
+	// every road, including a refusal — but the directory holding it is, and
+	// the started dependencies certainly are.
+	//
+	// What this asks is narrower than "can this run happen". It asks about
+	// this service's own environment. A dependency whose env_file cannot be
+	// read still fails further down, after the snapshot directory exists, and
+	// that road is #660 — the same shape as a dependency that fails to start
+	// for any other reason, which `origin/main` has too.
+	if _, err := svc.ResolvedEnv(); err != nil {
+		return nil, err
+	}
 	report := &AuditReport{Service: service, Command: command}
 
 	// Files: snapshot the workspace before the run so we can diff after.

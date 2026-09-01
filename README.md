@@ -82,8 +82,29 @@ brew install suruseas/opossum/opossum
 ```
 
 This installs a pre-built binary — no Go toolchain or local build — and pulls in
-Apple's `container` runtime as a dependency. (Published with each tagged release;
-`darwin/arm64` only, since the runtime requires macOS 26 on Apple silicon.)
+Apple's `container` runtime as a dependency. Since v0.24.2 the tap ships opossum
+as a cask; the install command is unchanged, and the binary arrives without a
+quarantine flag, so there is no Gatekeeper prompt on first run. (Published with
+each tagged release; `darwin/arm64` only, since the runtime requires macOS 26 on
+Apple silicon.)
+
+#### Already installed as a formula (v0.7.0 or earlier)?
+
+The formula does not turn into the cask by itself. Third-party casks sit behind
+Homebrew's trust gate (Homebrew 5.1.15 and later), so `brew update` announces
+the migration but stops at a warning instead of installing. Complete it with:
+
+```sh
+brew update
+brew trust --cask suruseas/opossum/opossum
+brew install --cask suruseas/opossum/opossum
+brew uninstall --formula --force opossum   # the old keg is unlinked, not removed
+```
+
+After that, `opossum` on your `PATH` is the cask binary and `opossum version`
+reports the current release. One caveat: if a hand-placed `opossum` binary sits
+in `/opt/homebrew/bin` (one Homebrew doesn't own), the cask stops rather than
+overwrite it — remove that file first.
 
 ### From source
 

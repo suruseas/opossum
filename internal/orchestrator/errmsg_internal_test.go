@@ -52,7 +52,7 @@ func TestEnsureBindDirsFailsWhenTheSourceCannotBeMade(t *testing.T) {
 	var out bytes.Buffer
 	o := New(p, &rt.Runtime{}, "", &out)
 	src := filepath.Join(parent, "child")
-	err := o.ensureBindDirs("svc", []string{src + ":/data"})
+	err := o.ensureBindDirs("svc", []string{src + ":/data"}, "`opossum up`")
 
 	// A failure, not a warning: the source is not there and opossum could not put
 	// it there, so the runtime will refuse the mount (measured: `path '…' does not
@@ -145,7 +145,7 @@ func TestEnsureBindDirsCreatesTheSourceDockerWould(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "made", "by", "opossum")
 	p := &compose.Project{Name: "demo", BaseDir: t.TempDir(), Services: map[string]*compose.Service{}}
-	if err := New(p, &rt.Runtime{}, "", &bytes.Buffer{}).ensureBindDirs("web", []string{src + ":/data"}); err != nil {
+	if err := New(p, &rt.Runtime{}, "", &bytes.Buffer{}).ensureBindDirs("web", []string{src + ":/data"}, "`opossum up`"); err != nil {
 		t.Fatalf("ensureBindDirs: %v", err)
 	}
 
@@ -171,7 +171,7 @@ func TestEnsureBindDirsNamesADanglingSymlinkForWhatItIs(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := &compose.Project{Name: "demo", BaseDir: t.TempDir(), Services: map[string]*compose.Service{}}
-	err := New(p, &rt.Runtime{}, "", &bytes.Buffer{}).ensureBindDirs("web", []string{link + ":/data"})
+	err := New(p, &rt.Runtime{}, "", &bytes.Buffer{}).ensureBindDirs("web", []string{link + ":/data"}, "`opossum up`")
 	if err == nil {
 		t.Fatal("a bind source that is a broken symlink must fail the up")
 	}
@@ -200,7 +200,7 @@ func TestEnsureBindDirsAcceptsASourceThatIsAlreadyAFile(t *testing.T) {
 	}
 	p := &compose.Project{Name: "demo", BaseDir: t.TempDir(), Services: map[string]*compose.Service{}}
 	o := New(p, &rt.Runtime{}, "", &bytes.Buffer{})
-	if err := o.ensureBindDirs("web", []string{conf + ":/etc/nginx/nginx.conf:ro"}); err != nil {
+	if err := o.ensureBindDirs("web", []string{conf + ":/etc/nginx/nginx.conf:ro"}, "`opossum up`"); err != nil {
 		t.Errorf("a config file that is already there is a mount that works: %v", err)
 	}
 	// And it is still a file afterwards — nothing replaced it with a directory.
@@ -257,5 +257,138 @@ func TestOneShotDepFailureHasNextStep(t *testing.T) {
 	}
 	if s := err.Error(); !strings.Contains(s, "did not complete successfully") || !strings.Contains(s, "opossum run init") {
 		t.Errorf("one-shot failure should point at inspecting it, got: %s", s)
+	}
+}
+
+// The advice names the command the reader actually typed. Both verbs reach
+// ensureBindDirs, and the advice used to say `opossum up` to both — the person
+// who typed `run` was told to redo a command they never ran. One table for
+// both directions, because fixing one verb and leaving the other is exactly
+// the shape this regressed into before.
+func TestTheRetryAdviceNamesTheVerbThatWasTyped(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	// Every shape that speaks the advice, crossed with both verbs: the three
+	// sentences are three separate format strings, and putting a verb back
+	// into just one of them would slip past a table that only ever provokes
+	// the mkdir failure.
+	shapes := map[string]func(t *testing.T, dir string) (mount string){
+		"the source cannot be made": func(t *testing.T, dir string) string {
+			parent := filepath.Join(dir, "ro")
+			if err := os.Mkdir(parent, 0o500); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { os.Chmod(parent, 0o700) })
+			return filepath.Join(parent, "child") + ":/data"
+		},
+		"a dangling symlink": func(t *testing.T, dir string) string {
+			link := filepath.Join(dir, "cfg")
+			if err := os.Symlink(filepath.Join(dir, "gone"), link); err != nil {
+				t.Fatal(err)
+			}
+			return link + ":/data"
+		},
+		"a directory stands in for a file": func(t *testing.T, dir string) string {
+			return filepath.Join(dir, "nginx.conf") + ":/etc/nginx/nginx.conf"
+		},
+	}
+	for _, verb := range []struct {
+		redo, mustNot string
+	}{
+		{"`opossum up`", "`opossum run`"},
+		{"`opossum run`", "`opossum up`"},
+	} {
+		for name, mk := range shapes {
+			t.Run(verb.redo+"/"+name, func(t *testing.T) {
+				dir := t.TempDir()
+				mount := mk(t, dir)
+				p := &compose.Project{Name: "demo", BaseDir: t.TempDir(), Services: map[string]*compose.Service{}}
+				var out bytes.Buffer
+				o := New(p, &rt.Runtime{}, "", &out)
+				err := o.ensureBindDirs("svc", []string{mount}, verb.redo)
+				// The advice lives in the error for the two refusals and on the
+				// warn stream for the placeholder; read wherever it went.
+				said := out.String()
+				if err != nil {
+					said += err.Error()
+				}
+				if !strings.Contains(said, "run "+verb.redo+" again") {
+					t.Errorf("the advice should say to run %s again, said:\n%s", verb.redo, said)
+				}
+				if strings.Contains(said, verb.mustNot) {
+					t.Errorf("the advice names %s — a command the reader never typed, said:\n%s", verb.mustNot, said)
+				}
+			})
+		}
+	}
+}
+
+// And the wiring: RunOneOff hands its own verb in. The table above proves the
+// words follow the argument; this proves the argument is the right one on the
+// path a real `opossum run` takes — a call site quietly passing `opossum up`
+// would satisfy every case above.
+func TestARefusedRunIsToldToRunAgain(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	parent := filepath.Join(t.TempDir(), "ro")
+	if err := os.Mkdir(parent, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(parent, 0o700) })
+	p := &compose.Project{Name: "demo", BaseDir: t.TempDir(), Services: map[string]*compose.Service{
+		"svc": {Image: "app:1", Volumes: []string{filepath.Join(parent, "child") + ":/data"}},
+	}}
+	// A real (fake) runtime binary, so the run gets past the CLI check and to
+	// the bind pre-flight this measures. Nothing should start: the refusal
+	// comes before any container does.
+	shim, err := filepath.Abs(filepath.Join("..", "..", "testdata", "fake-container.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := New(p, &rt.Runtime{Bin: shim}, "", &bytes.Buffer{})
+	err = o.RunOneOff("svc", []string{"/bin/true"}, RunOneOffOptions{})
+	if err == nil {
+		t.Fatal("the bind source cannot be made, so the run must refuse — nothing was measured")
+	}
+	if !strings.Contains(err.Error(), "then run `opossum run` again") {
+		t.Errorf("someone who typed `run` should be told to run `opossum run` again, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "`opossum up`") {
+		t.Errorf("the advice names `opossum up`, which the reader never typed: %v", err)
+	}
+}
+
+// The other half of the pair: Up hands in its own verb too. Only both wiring
+// tests together pin the call sites — the table proves the words follow the
+// argument, and each of these proves one caller passes the argument that names
+// itself.
+func TestARefusedUpIsToldToUpAgain(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	parent := filepath.Join(t.TempDir(), "ro")
+	if err := os.Mkdir(parent, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(parent, 0o700) })
+	p := &compose.Project{Name: "demo", BaseDir: t.TempDir(), Services: map[string]*compose.Service{
+		"svc": {Image: "app:1", Volumes: []string{filepath.Join(parent, "child") + ":/data"}},
+	}}
+	shim, err := filepath.Abs(filepath.Join("..", "..", "testdata", "fake-container.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := New(p, &rt.Runtime{Bin: shim}, "", &bytes.Buffer{})
+	err = o.Up(true)
+	if err == nil {
+		t.Fatal("the bind source cannot be made, so the up must refuse — nothing was measured")
+	}
+	if !strings.Contains(err.Error(), "then run `opossum up` again") {
+		t.Errorf("someone who typed `up` should be told to run `opossum up` again, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "`opossum run`") {
+		t.Errorf("the advice names `opossum run`, which the reader never typed: %v", err)
 	}
 }
