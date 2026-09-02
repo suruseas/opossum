@@ -232,7 +232,7 @@ func wsCmd() *cobra.Command {
 			tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 			fmt.Fprintln(tw, "NAME\tSAVED")
 			for _, s := range snaps {
-				fmt.Fprintf(tw, "%s\t%s\n", s.Name, s.ModTime.Format("2006-01-02 15:04:05"))
+				fmt.Fprintf(tw, "%s\t%s\n", orchestrator.OneLine(s.Name), s.ModTime.Format("2006-01-02 15:04:05"))
 			}
 			return tw.Flush()
 		},
@@ -259,7 +259,7 @@ func wsCmd() *cobra.Command {
 			if err := workspace.New(path).Remove(args...); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Removed %d snapshot(s): %s\n", len(args), strings.Join(args, ", "))
+			fmt.Fprintf(cmd.OutOrStdout(), "Removed %d snapshot(s): %s\n", len(args), orchestrator.OneLine(strings.Join(args, ", ")))
 			return nil
 		},
 	}
@@ -282,7 +282,7 @@ func wsCmd() *cobra.Command {
 				fmt.Fprintln(out, "Nothing to prune.")
 				return nil
 			}
-			fmt.Fprintf(out, "Removed %d snapshot(s): %s\n", len(removed), strings.Join(removed, ", "))
+			fmt.Fprintf(out, "Removed %d snapshot(s): %s\n", len(removed), orchestrator.OneLine(strings.Join(removed, ", ")))
 			return nil
 		},
 	}
@@ -453,18 +453,12 @@ func runCLI(args []string, out, errOut io.Writer) int {
 //
 // Done here rather than at the two hundred places that build an error: a list of
 // the ones that were remembered is a list with a hole in it.
+//
+// The rule itself moved next to OneLine (orchestrator.Quoted) when the watch
+// warnings turned out to print the same errors through %v without it (#688);
+// this stays as the name this file's history talks about.
 func quoted(msg string) string {
-	var b strings.Builder
-	for i, line := range strings.Split(msg, "\n") {
-		if i > 0 {
-			b.WriteString("\n")
-			if !strings.HasPrefix(line, "  ") {
-				b.WriteString("  ")
-			}
-		}
-		b.WriteString(orchestrator.OneLine(line))
-	}
-	return b.String()
+	return orchestrator.Quoted(msg)
 }
 
 func upCmd() *cobra.Command {
@@ -1377,6 +1371,15 @@ func loadOrchestrator(out io.Writer) (*orchestrator.Orchestrator, error) {
 	return orchestrator.New(proj, rt, dnsDomain, out), nil
 }
 
+// entryLine prints one adaptation as opossum's own line. The summary carries
+// values from the compose file, and a newline in one hands the rest of the
+// value a line that starts where opossum's sentences start — flattened here, at
+// the one place every listing prints through, so a producer that forgets the
+// rule cannot reopen it (#513: two of the four producers had).
+func entryLine(stderr io.Writer, c orchestrator.Adaptation) {
+	fmt.Fprintf(stderr, "opossum:   [%s] %s\n", c.Code, orchestrator.OneLine(c.Summary))
+}
+
 // reportOverlay prints what the overlay contains, grouped by what opossum is
 // actually claiming. Applied entries are changes; suggestions and notes are not,
 // and lumping them together would overstate what happened.
@@ -1396,7 +1399,7 @@ func reportOverlay(stderr io.Writer, verb string, changes []orchestrator.Adaptat
 		fmt.Fprintf(stderr, "opossum: %s %s — %d change(s) so this project runs on Apple container:\n",
 			verb, orchestrator.OverlayFileName, len(applied))
 		for _, c := range applied {
-			fmt.Fprintf(stderr, "opossum:   [%s] %s\n", c.Code, c.Summary)
+			entryLine(stderr, c)
 		}
 	} else {
 		fmt.Fprintf(stderr, "opossum: %s %s — no automatic fix was needed or possible:\n",
@@ -1405,13 +1408,13 @@ func reportOverlay(stderr io.Writer, verb string, changes []orchestrator.Adaptat
 	if len(suggested) > 0 {
 		fmt.Fprintf(stderr, "opossum: %d suggestion(s) written but NOT applied — they change what the project means, so they're yours to decide:\n", len(suggested))
 		for _, c := range suggested {
-			fmt.Fprintf(stderr, "opossum:   [%s] %s\n", c.Code, c.Summary)
+			entryLine(stderr, c)
 		}
 	}
 	if len(noted) > 0 {
 		fmt.Fprintf(stderr, "opossum: %d note(s) about things %s:\n", len(noted), orchestrator.NoteFrame)
 		for _, c := range noted {
-			fmt.Fprintf(stderr, "opossum:   [%s] %s\n", c.Code, c.Summary)
+			entryLine(stderr, c)
 		}
 	}
 	fmt.Fprintf(stderr, "opossum: each entry says why and how to undo it. Your compose file was not modified;\n"+
@@ -1441,7 +1444,7 @@ func hasActionable(changes []orchestrator.Adaptation) bool {
 func reportNotesOnly(stderr io.Writer, body string, changes []orchestrator.Adaptation) bool {
 	fmt.Fprintf(stderr, "opossum: nothing to fix or suggest, but %d thing(s) %s:\n", len(changes), orchestrator.NoteFrame)
 	for _, c := range changes {
-		fmt.Fprintf(stderr, "opossum:   [%s] %s\n", c.Code, c.Summary)
+		entryLine(stderr, c)
 	}
 	spoke := reportNoteProse(stderr, "opossum: no overlay was written (it would only hold comments), so here is what it would have said:", body)
 	if !spoke {
@@ -1531,7 +1534,7 @@ func reportEntries(stderr io.Writer, changes []orchestrator.Adaptation) {
 		}
 		fmt.Fprintf(stderr, "opossum: %d %s:\n", len(got), label[kind])
 		for _, c := range got {
-			fmt.Fprintf(stderr, "opossum:   [%s] %s\n", c.Code, c.Summary)
+			entryLine(stderr, c)
 		}
 	}
 }

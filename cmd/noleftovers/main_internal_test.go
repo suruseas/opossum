@@ -165,9 +165,11 @@ func TestARunThatLeavesSomethingBehindIsRefused(t *testing.T) {
 
 // The difference is taken in time, not in ownership. A suite that starts in
 // another terminal while this one runs makes a directory that was not here
-// before, and from out here that is indistinguishable from a leak — so it is
+// before, and a name with no pid in it cannot be asked whose it is — so it is
 // reported, and the report has to say so rather than telling the reader to
 // remove a directory something is still building into.
+//
+// A name that does carry a pid is a different case, and the one below it.
 func TestADirectoryThatAppearsDuringTheRunIsReportedWithTheCaveat(t *testing.T) {
 	tmp := tempdir(t)
 	other := filepath.Join(tmp, "opossum-cmd-test-somebody-else")
@@ -185,8 +187,11 @@ func TestADirectoryThatAppearsDuringTheRunIsReportedWithTheCaveat(t *testing.T) 
 	// this run's, and it must not hand over an unconditional removal.
 	for _, w := range []string{
 		"these appeared in ",
-		"a suite started in another terminal while this one ran looks exactly the same",
+		"name with no pid",
 		"once nothing is using them:",
+		// Nothing live appeared, so the report must not point at a list it
+		// did not print.
+		"would be listed on its own",
 	} {
 		if !strings.Contains(out.String(), w) {
 			t.Errorf("should say %q, said:\n%s", w, out.String())
@@ -197,6 +202,63 @@ func TestADirectoryThatAppearsDuringTheRunIsReportedWithTheCaveat(t *testing.T) 
 	// now. The `want` above is what does the work.
 	if strings.Contains(out.String(), "this run left") {
 		t.Errorf("must not claim these are this run's, said:\n%s", out.String())
+	}
+}
+
+// And the case the caveat above was standing in for. internal/suitedir names
+// what it makes <prefix><pid>-<random> and reaps by asking whether that pid is
+// still alive; asked here, the same question separates "someone else is
+// working" from "a run ended without cleaning up". Reporting the first as a
+// leak is what taught the reader to shrug (#668).
+func TestADirectoryWhoseMakerIsStillRunningIsNotCalledALeak(t *testing.T) {
+	tmp := tempdir(t)
+	// This process is alive by definition, so its own pid is the one live pid
+	// this test can name without starting something to hold it.
+	mine := filepath.Join(tmp, fmt.Sprintf("opossum-cmd-test-%d-1", os.Getpid()))
+	// A pid that is readable and not alive. A number too large to be a pid
+	// would land among the leaks as well — for the other reason, that nothing
+	// can be read from it — and would leave the liveness question untested, so
+	// this ends a real process and uses its pid. (The system could hand that
+	// number to something else in between; nothing here can rule that out.)
+	gone := exec.Command("sh", "-c", "exit 0")
+	if err := gone.Run(); err != nil {
+		t.Fatalf("could not spend a pid: %v", err)
+	}
+	dead := filepath.Join(tmp, fmt.Sprintf("opossum-cmd-test-%d-1", gone.Process.Pid))
+
+	var out bytes.Buffer
+	code := run([]string{"sh", "-c", fmt.Sprintf("mkdir %q %q; sleep 0.2", mine, dead)}, &out)
+	got := out.String()
+
+	// The live one is named, and named as someone's work rather than as a leak.
+	if !strings.Contains(got, "belong to a run still going") {
+		t.Errorf("should say the live one belongs to a run still going, said:\n%s", got)
+	}
+	if !strings.Contains(got, fmt.Sprintf("pid %d", os.Getpid())) {
+		t.Errorf("should name the pid it read, said:\n%s", got)
+	}
+	// A live pid is not proof the maker is alive: the system may have handed
+	// that number to something else since. The report is only worth its
+	// certainty if it says so — the wording it replaced said as much about the
+	// case it covered, and was checked for saying it.
+	if !strings.Contains(got, "handed to something else") {
+		t.Errorf("should own up to pid reuse, said:\n%s", got)
+	}
+	// And the leak paragraph points at that list, since there is one.
+	if !strings.Contains(got, "listed above instead") {
+		t.Errorf("should send the reader to the list above, said:\n%s", got)
+	}
+	// The dead one is still a leak, and still offered for removal — the live one
+	// is not, which is the whole point.
+	if !strings.Contains(got, "once nothing is using them:") || !strings.Contains(got, dead) {
+		t.Errorf("the dead one should still be reported for removal, said:\n%s", got)
+	}
+	if strings.Contains(got, "rm -rf "+mine) {
+		t.Errorf("must not offer to remove a directory whose maker is alive, said:\n%s", got)
+	}
+	// A leak was found, so the run still fails.
+	if code != 1 {
+		t.Errorf("exit = %d, want 1, said:\n%s", code, got)
 	}
 }
 

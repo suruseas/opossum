@@ -282,6 +282,37 @@ func OneLine(s string) string {
 	}, s)
 }
 
+// Quoted keeps a failure on the lines opossum gave it: every line goes through
+// OneLine, and a continuation line that does not already start indented is
+// pushed in by two spaces, so only the first line begins at the margin — the
+// position that separates opossum's sentences from quoted ones.
+//
+// Deliberately multi-line messages keep their shape: their continuations (a
+// hint's command block, an error's second line of advice) are already
+// indented. What moves is a line break a VALUE carried — a path, a service
+// name, the runtime's own output — which used to start the rest of the value
+// at column zero, where a project could put a sentence and have it read as
+// opossum reporting something. Indented, it reads as what it is: a quoted
+// value.
+//
+// Two callers, one rule: the CLI's single error printer, and logf (the warning printer) for
+// error-typed arguments (#688 — a watch warning printed an `up` failure
+// through %v, and the same forged line that the CLI printer indents walked
+// straight to column zero).
+func Quoted(msg string) string {
+	var b strings.Builder
+	for i, line := range strings.Split(msg, "\n") {
+		if i > 0 {
+			b.WriteString("\n")
+			if !strings.HasPrefix(line, "  ") {
+				b.WriteString("  ")
+			}
+		}
+		b.WriteString(OneLine(line))
+	}
+	return b.String()
+}
+
 // whyNoPGDATA names the one thing that stopped opossum writing the other half,
 // rather than listing both and leaving the reader to work out which applies.
 func (d dataDirDecision) whyNoPGDATA() string {
@@ -783,18 +814,26 @@ func isHostDevicePath(src string) bool {
 func noteBlock(what string, why, expect []string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# %s\n", OneLine(what))
-	section := func(label string, lines []string) {
-		for i, l := range lines {
-			if i == 0 {
-				fmt.Fprintf(&b, "# %s: %s\n", label, OneLine(l))
-			} else {
-				fmt.Fprintf(&b, "#   %s\n", OneLine(l))
-			}
+	commentSection(&b, "Why", why)
+	commentSection(&b, "What to expect", expect)
+	return b.String()
+}
+
+// commentSection writes one labelled section of a comment block, every line
+// through OneLine. The block ends up on screen or inside the overlay's comment,
+// and a value's newline in either place hands the rest of the value a line of
+// its own — on screen it speaks from column zero in opossum's voice, in the
+// overlay it carries YAML out of the comment and the self-check drops the whole
+// file. One writer for every block kind: when the rule lived in each builder's
+// own closure, two of the three had lost it (#513).
+func commentSection(b *strings.Builder, label string, lines []string) {
+	for i, l := range lines {
+		if i == 0 {
+			fmt.Fprintf(b, "# %s: %s\n", label, OneLine(l))
+		} else {
+			fmt.Fprintf(b, "#   %s\n", OneLine(l))
 		}
 	}
-	section("Why", why)
-	section("What to expect", expect)
-	return b.String()
 }
 
 // adaptBindMountedDataDir swaps a bind-mounted database data directory for a named
@@ -878,25 +917,17 @@ func (o *Orchestrator) adaptBindMountedDataDir(name string, svc *compose.Service
 // isDockerSocketMount reports whether a bind mount is about the Docker socket,
 // by either end of it.
 //
-// One caller now: the note below. The pre-flight refusal used to ask the same
-// question, to withhold its offer of mounting what the link points at — on the
-// reading that the offer could not help here. Measured, it does: a container
-// started here reaches a daemon through the resolved path. So the refusal makes
-// the same offer to everyone, and what is worth saying about that daemon is
-// said once, here. (`warnDockerSocket` asks a third, wider question over the
-// mount as written; see #599.)
+// Two callers: the note below and warnDockerSocket, which since #599 asks
+// this same question — one run no longer says opposite things about one
+// socket. The pre-flight refusal used to ask it too, to withhold its offer of
+// mounting what the link points at — on the reading that the offer could not
+// help here. Measured, it does: a container started here reaches a daemon
+// through the resolved path. So the refusal makes the same offer to everyone,
+// and what is worth saying about that daemon is said once, here.
 //
 // The last path element, not the whole path. Matching anywhere would call a
 // gpg-agent socket under a directory named `docker.sock.d/` a Docker socket
 // and tell its owner about a daemon that has nothing to do with it.
-//
-// warnDockerSocket still matches anywhere, so on that one input the two say
-// opposite things about the same socket — the warning calls it Docker's, this
-// does not. Seeing both in one run takes two services (the refusal returns
-// before the warning is reached for a single one), but the disagreement is
-// there either way. It is why #599 is open; it is not fixed here because
-// narrowing the warning also changes which mounts warn at all, which deserves
-// its own decision.
 func isDockerSocketMount(src, target string) bool {
 	return pathLeaf(src) == "docker.sock" || pathLeaf(target) == "docker.sock"
 }
@@ -1001,20 +1032,11 @@ func (o *Orchestrator) adaptPGDATA(name string, svc *compose.Service, willBeName
 // it. Wrapped lines are indented so the block stays readable.
 func commentBlock(what string, why, verify, ifFails []string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "# %s\n", what)
-	writeSection := func(label string, lines []string) {
-		for i, l := range lines {
-			if i == 0 {
-				fmt.Fprintf(&b, "# %s: %s\n", label, l)
-			} else {
-				fmt.Fprintf(&b, "#   %s\n", l)
-			}
-		}
-	}
-	writeSection("Why", why)
-	writeSection("Verify", verify)
-	writeSection("If this still fails", ifFails)
-	writeSection("To undo", []string{
+	fmt.Fprintf(&b, "# %s\n", OneLine(what))
+	commentSection(&b, "Why", why)
+	commentSection(&b, "Verify", verify)
+	commentSection(&b, "If this still fails", ifFails)
+	commentSection(&b, "To undo", []string{
 		"delete this entry, or this whole file. Your original compose file was",
 		"not modified, and docker compose never reads this file.",
 	})
@@ -1414,19 +1436,10 @@ func (o *Orchestrator) suggestSharedVolumeFix(order []string) []serviceAdaptatio
 // and how to apply it. The YAML that follows is commented out by the renderer.
 func suggestionBlock(what string, why, apply []string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "# %s\n", what)
-	section := func(label string, lines []string) {
-		for i, l := range lines {
-			if i == 0 {
-				fmt.Fprintf(&b, "# %s: %s\n", label, l)
-			} else {
-				fmt.Fprintf(&b, "#   %s\n", l)
-			}
-		}
-	}
-	section("Why", why)
-	section("To apply", apply)
-	section("To ignore", []string{"delete this block. Nothing here is in effect until you uncomment it."})
+	fmt.Fprintf(&b, "# %s\n", OneLine(what))
+	commentSection(&b, "Why", why)
+	commentSection(&b, "To apply", apply)
+	commentSection(&b, "To ignore", []string{"delete this block. Nothing here is in effect until you uncomment it."})
 	return b.String()
 }
 

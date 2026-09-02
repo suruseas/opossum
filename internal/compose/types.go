@@ -49,7 +49,9 @@ type Service struct {
 	// env_file when it needs a service's rendered environment, so `ps` and
 	// `logs` and `config --services` all succeed against a compose file whose
 	// unused service points at an env file that does not parse (measured on
-	// Docker Compose v5.4.0). Environment is left holding the declared entries
+	// Docker Compose v5.4.0; that run, and the missing-file shape beside it, are
+	// in testdata/docker-compose-env-file.md, commands and all, so they can be
+	// taken again). Environment is left holding the declared entries
 	// only — nothing from the files is folded in — so a caller that renders or
 	// starts this service has to ask through ResolvedEnv.
 	envFileErr error

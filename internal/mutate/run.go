@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 
 	"github.com/suruseas/opossum/internal/suitedir"
 )
@@ -38,12 +40,19 @@ type Runner struct {
 	// where it is rather than sitting silent.
 	Log func(string)
 
-	// Ctx is meant to stop the toolchain when the run is being abandoned, and
-	// does not yet: nothing here reads it, so the `go test` below outlives an
-	// interrupt and is adopted away (#607). Set by callers who expect it to,
-	// and left set so that wiring it is a change in one place. Until then a
-	// `go test` started by this process outlives it either way, holding the
-	// pipes open — setting this does not yet change that.
+	// Ctx stops the toolchain when the run is being abandoned. Cancelling it
+	// sends an interrupt to the `go test` NewRunner starts and to the test
+	// binary underneath it — two processes rather than one: ending only the
+	// first leaves the second holding the pipes open, adopted away (#607 has
+	// the measurement). A test binary that catches the interrupt and does not
+	// exit is past what this can end: the escalation five seconds later
+	// (WaitDelay) reaches `go test` alone, and such a binary is adopted away
+	// exactly as before.
+	//
+	// Read when a command is started rather than when the Runner is built, so a
+	// caller that sets it after NewRunner — which is every caller — is wired,
+	// and nobody may rewire it while a sweep is running: nothing guards the
+	// field. A nil one is an uncancellable run rather than a panic.
 	Ctx context.Context
 
 	// mu guards the in-flight mutation, which RestorePending reads from another
@@ -67,21 +76,58 @@ type Runner struct {
 
 // NewRunner returns a Runner wired to the real toolchain and filesystem.
 func NewRunner(root string) *Runner {
-	return &Runner{
-		Root: root,
-		Ctx:  context.Background(),
-		Go: func(args ...string) (string, string, error) {
-			cmd := exec.Command("go", args...)
-			cmd.Dir = root
-			var out, errOut bytes.Buffer
-			cmd.Stdout, cmd.Stderr = &out, &errOut
-			err := cmd.Run()
-			return out.String(), errOut.String(), err
-		},
+	r := &Runner{
+		Root:  root,
+		Ctx:   context.Background(),
 		Read:  func(p string) ([]byte, error) { return os.ReadFile(filepath.Join(root, p)) },
 		Write: func(p string, b []byte) error { return os.WriteFile(filepath.Join(root, p), b, 0o644) },
 		Log:   func(s string) { fmt.Fprintln(os.Stderr, s) },
 	}
+	r.Go = func(args ...string) (string, string, error) {
+		// r.Ctx rather than a captured one: callers set it after this returns.
+		ctx := r.Ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		cmd := exec.CommandContext(ctx, "go", args...)
+		cmd.Dir = root
+		// Its own process group, and the signal goes to the group. `go test` is
+		// not the process doing the work — it builds, then runs a test binary —
+		// so ending the toolchain means ending both, and only the group reaches
+		// the second. Measured, cancelling while a test slept:
+		//
+		//	nothing (the shape before this)   Wait never returns; both live on
+		//	CommandContext's default SIGKILL  go test dies at once; the test binary is adopted away
+		//	SIGINT to `go test` alone         it does not pass it on: WaitDelay kills it 5s
+		//	                                  later, and the test binary is adopted away
+		//	SIGINT to the group               both gone in 0.01s, and `go test` exits
+		//	                                  (status 1) rather than being killed
+		//
+		// The cost, measured under a pty: a ^C typed at the terminal reached
+		// the child directly before this (it died 130 before the parent moved),
+		// and with Setpgid it no longer does — the parent alone hears it. The
+		// ending still happens, but it now goes through whoever cancels this
+		// context — in cmd/mutate the interrupt handler, before it starts
+		// putting the tree back. What is actually given up is the terminal's
+		// own delivery as a backstop: a run whose handler is stuck used to lose
+		// its toolchain to the ^C anyway, and now keeps it until the WaitDelay
+		// or the sleep runs out. (A mutate killed outright — SIGKILL runs no
+		// handler — leaves the toolchain running under either wiring.)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGINT) }
+		// A toolchain that ignores the interrupt does not get to hold the run
+		// open. Long enough for a test binary shutting down normally to finish
+		// first, short enough not to read as a hang. What it kills on expiry
+		// is `go test` alone — exec offers no group-wide escalation — so a
+		// test binary that caught the interrupt and stayed is left behind, as
+		// the Ctx doc says.
+		cmd.WaitDelay = 5 * time.Second
+		var out, errOut bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &out, &errOut
+		err := cmd.Run()
+		return out.String(), errOut.String(), err
+	}
+	return r
 }
 
 // Sweep applies each mutation in turn, records what caught it, and puts the file
@@ -112,6 +158,16 @@ func (r *Runner) Sweep(ms []Mutation) ([]Result, error) {
 	}
 	var out []Result
 	for _, m := range ms {
+		// A cancelled run stops asking. Every round below writes a mutation
+		// into the tree and puts it back, and once the context is gone the
+		// toolchain answers "context canceled" to every question — rounds that
+		// measure nothing, while the writes race whatever the canceller is
+		// doing to this tree (for the baseline worktree, removing it). Checked
+		// here rather than left to the toolchain error so the answer says
+		// "cancelled", not something about the mutation it happened to be on.
+		if r.Ctx != nil && r.Ctx.Err() != nil {
+			return out, fmt.Errorf("cancelled after %d of %d mutations: %w", len(out), len(ms), r.Ctx.Err())
+		}
 		res, err := r.one(m)
 		if err != nil {
 			return out, err

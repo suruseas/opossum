@@ -1783,11 +1783,20 @@ func TestAByteOrderMarkAtTheStartOfAnEnvFileIsNotPartOfTheFirstKey(t *testing.T)
 		{name: "a mark in front of a comment", envfile: "A=1\n" + bom + "# " + canary + "\n", wantErr: "byte-order mark"},
 		{name: "a mark alone on a line", envfile: "A=1\n" + bom + "\n", wantErr: "byte-order mark"},
 	} {
-		for _, road := range []string{"the project .env", "a service env_file"} {
-			t.Run(tc.name+", through "+road, func(t *testing.T) {
+		// The road is a flag with a name, not a name to compare against: the
+		// branches below turned on the string, so changing it in one place
+		// sent every case down the other road with nothing going red.
+		for _, road := range []struct {
+			name       string
+			projectEnv bool
+		}{
+			{"the project .env", true},
+			{"a service env_file", false},
+		} {
+			t.Run(tc.name+", through "+road.name, func(t *testing.T) {
 				dir := t.TempDir()
 				var composeText string
-				if road == "the project .env" {
+				if road.projectEnv {
 					composeText = compose
 					mustWriteFile(t, filepath.Join(dir, ".env"), tc.envfile)
 				} else {
@@ -1799,7 +1808,7 @@ func TestAByteOrderMarkAtTheStartOfAnEnvFileIsNotPartOfTheFirstKey(t *testing.T)
 				mustWriteFile(t, cf, composeText)
 
 				keyA, keyB := "OUT_A", "OUT_B"
-				if road != "the project .env" {
+				if !road.projectEnv {
 					keyA, keyB = "A", "B"
 				}
 
@@ -1810,7 +1819,7 @@ func TestAByteOrderMarkAtTheStartOfAnEnvFileIsNotPartOfTheFirstKey(t *testing.T)
 				// resolved for whoever renders or starts that service, so the
 				// load succeeds and the failure waits on the service. Both
 				// still have to say the same thing, which is what this asks.
-				if err == nil && road != "the project .env" && proj != nil {
+				if err == nil && !road.projectEnv && proj != nil {
 					if svc, ok := proj.Services["app"]; ok {
 						_, err = svc.ResolvedEnv()
 					}

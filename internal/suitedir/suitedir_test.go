@@ -165,6 +165,81 @@ func TestWhatCountsAsAMakerName(t *testing.T) {
 	}
 }
 
+// The same question asked without the prefix, which is what cmd/noleftovers
+// has: a name out of $TMPDIR and no idea which suite made it. Reading from the
+// right instead of from a known prefix buys that, and the cost is that a name
+// this package never made can still present the right shape. The rows below are
+// where that costs something and where it does not — every producer of an
+// `opossum-*` directory in this tree is here, because a leak of theirs read as
+// somebody's live work would be excused rather than reported (#668).
+func TestWhatCountsAsAMakerNameWithoutThePrefix(t *testing.T) {
+	for _, tc := range []struct {
+		base string
+		pid  int
+		ok   bool
+	}{
+		// What Make writes: <prefix><pid>-<random>, and MkdirTemp's random part
+		// is digits with no separator in it. The prefix may hold as many
+		// separators as it likes.
+		{"p-123-456", 123, true},
+		{"opossum-orch-test-47524-1065077236", 47524, true},
+		// The other two producers of `opossum-*` in this tree. Neither is
+		// readable, so neither is ever excused as somebody's live work.
+		{"opossum-dryrun1065077236", 0, false},
+		{"opossum-mutate-baseline-1065077236", 0, false},
+		// Nothing to read from.
+		{"opossum-orch-test-47524", 0, false},
+		{"p-abc-456", 0, false},
+		{"p-123-abc", 0, false},
+		// A pid must still be a pid, which is PidLeading's business.
+		{"p-0-456", 0, false},
+		{"p-99999999-456", 0, false},
+		// Where reading from the right is not the same as reading the shape.
+		// None of these can come out of Make — its random field never holds a
+		// separator — but a foreign name may look like this, and what it reads
+		// then is written down here rather than left to be discovered.
+		//
+		// Three trailing number fields: the middle one wins, not the first.
+		{"p-1234-56-78", 56, true},
+		// A minus sign is a separator before it is a sign, so this reads 5
+		// rather than refusing -5.
+		{"p--5-456", 5, true},
+		// Atoi takes a sign, so a signed last field still counts as digits.
+		{"p-123-+456", 123, true},
+		// An empty prefix reads as well: the guard asks for a separator before
+		// the pid, not for anything in front of it. Nothing reaches this — the
+		// caller only asks about names matching `opossum-*`.
+		{"-123-456", 123, true},
+	} {
+		t.Run(tc.base, func(t *testing.T) {
+			pid, ok := MakerPid(tc.base)
+			if ok != tc.ok || pid != tc.pid {
+				t.Errorf("MakerPid(%q) = %d, %v, want %d, %v", tc.base, pid, ok, tc.pid, tc.ok)
+			}
+		})
+	}
+}
+
+// The two readers must agree about a name Make actually wrote. They are
+// separate functions because one is told the prefix and the other is not, and
+// the way they could hurt is by answering differently about the same directory.
+func TestBothReadersAgreeAboutANameMakeWrote(t *testing.T) {
+	dir, err := Make("p-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	base := filepath.Base(dir)
+	withPrefix, okWith := makerOf(base, "p-")
+	withoutPrefix, okWithout := MakerPid(base)
+	if okWith != okWithout || withPrefix != withoutPrefix {
+		t.Errorf("makerOf(%q) = %d, %v but MakerPid = %d, %v", base, withPrefix, okWith, withoutPrefix, okWithout)
+	}
+	if withPrefix != os.Getpid() {
+		t.Errorf("read pid %d, want this process's %d", withPrefix, os.Getpid())
+	}
+}
+
 func TestALivePidReadsAsAlive(t *testing.T) {
 	if !Alive(os.Getpid()) {
 		t.Error("this process reads as gone")

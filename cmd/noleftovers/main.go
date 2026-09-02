@@ -26,6 +26,8 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"github.com/suruseas/opossum/internal/suitedir"
 )
 
 // Only what this repository names. `opossum-*` covers the three suites that
@@ -83,14 +85,32 @@ func run(argv []string, w io.Writer) int {
 	// Anything that was not here before. A difference rather than "everything
 	// matching", so what the machine already had is left alone — but it is a
 	// difference in time, not in ownership: a suite that starts in another
-	// terminal while this one runs appears here too, and this cannot tell the
-	// two apart. Hence the wording below, which says when they appeared rather
-	// than whose they are.
-	var left []string
+	// terminal while this one runs appears here too.
+	//
+	// The name says who made it. internal/suitedir builds <prefix><pid>-<random>
+	// and sweeps by asking whether that pid is still alive; the same question is
+	// asked here. A directory whose maker is still running is not something this
+	// run left behind — it is someone else's, in progress — and reporting it as
+	// a leak taught the reader to shrug at this check (#668).
+	var left, theirs []string
 	for d := range snapshot(tmp) {
-		if !before[d] {
-			left = append(left, d)
+		if before[d] {
+			continue
 		}
+		if pid, ok := suitedir.MakerPid(filepath.Base(d)); ok && suitedir.Alive(pid) {
+			theirs = append(theirs, fmt.Sprintf("%s (pid %d)", filepath.Base(d), pid))
+			continue
+		}
+		left = append(left, d)
+	}
+	sort.Strings(theirs)
+	if len(theirs) > 0 {
+		fmt.Fprintf(w, "\nthese appeared in %s while this ran and belong to a run still going:\n", tmp)
+		for _, t := range theirs {
+			fmt.Fprintf(w, "  %s\n", t)
+		}
+		fmt.Fprintln(w, "the process that made each is alive, so they are not this run's to clean up")
+		fmt.Fprintln(w, "(a pid the system has since handed to something else would read the same way)")
 	}
 	if len(left) == 0 {
 		return code
@@ -101,10 +121,22 @@ func run(argv []string, w io.Writer) int {
 	for _, d := range left {
 		fmt.Fprintf(w, "  %s\n", filepath.Base(d))
 	}
-	fmt.Fprintln(w, "a suite that finishes removes its own, so this is most likely a run that ended")
-	fmt.Fprintln(w, "before it could — a panic, a -timeout, or an interrupt — but")
-	fmt.Fprintln(w, "a suite started in another terminal while this one ran looks exactly the same")
-	fmt.Fprintln(w, "from here, so check that nothing else is using them")
+	fmt.Fprintln(w, "a suite that finishes removes its own, so this is a run that ended before it")
+	fmt.Fprint(w, "could — a panic, a -timeout, or an interrupt. ")
+	// "listed above" only reads as an instruction when there is something
+	// above. With no live maker among what appeared, the same sentence sends
+	// the reader up the page to find nothing — so say which of the two the
+	// reader is looking at.
+	if len(theirs) > 0 {
+		fmt.Fprintln(w, "A suite still going in another")
+		fmt.Fprintln(w, "terminal is listed above instead, by the pid in its name; a name with no pid")
+		fmt.Fprintln(w, "to read is here too, since nothing can be asked about it")
+	} else {
+		fmt.Fprintln(w, "None of these belongs to a suite")
+		fmt.Fprintln(w, "still going: one whose pid is alive would be listed on its own, and none")
+		fmt.Fprintln(w, "was. A name with no pid to read is here too, since nothing can be asked")
+		fmt.Fprintln(w, "about it")
+	}
 
 	// A directory merely left is untidy. One with the binary inside it still
 	// running is what this exists for: the in-suite check would have named that

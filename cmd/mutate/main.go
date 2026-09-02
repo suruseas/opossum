@@ -148,12 +148,16 @@ func run(args []string, stdout, stderr io.Writer, sigs <-chan os.Signal, exit fu
 			return exitFailed
 		}
 	}
-	// Meant to take the toolchain with us: a `go test` that outlives this command
-	// holds the pipes open. It does not yet — the runner never reads this, so the
-	// child survives the interrupt and is adopted away (#607). Kept because two
-	// other places do read it — making the baseline tree, and deciding below
-	// whether an interrupt is in flight — and because the wiring that makes the
-	// first sentence true is one line in the runner.
+	// Takes the toolchain with us: a `go test` that outlives this command holds
+	// the pipes open, and so does the test binary underneath it — the runner
+	// puts both in one process group and interrupts the group, because ending
+	// only the first leaves the second adopted away (#607). "Takes" is as
+	// strong as an interrupt: a test binary that catches it and stays is
+	// beyond this — the runner's Ctx doc has the boundary.
+	//
+	// Three other places read it: making the baseline tree, the baseline
+	// runner's own toolchain, and deciding below whether an interrupt is in
+	// flight.
 	ctx, stopToolchain := context.WithCancel(context.Background())
 	defer stopToolchain()
 
@@ -231,6 +235,17 @@ func run(args []string, stdout, stderr io.Writer, sigs <-chan os.Signal, exit fu
 	defer close(done)
 
 	results, sweepErr := r.Sweep(ms)
+	// An interrupt reaches this as a cancelled context, and what the sweep made
+	// of it is not news. The likeliest place for a ^C to land is the baseline
+	// run in front of everything, and a baseline cut off mid-run comes back as
+	// "the suite could not be run" — told, without this, to the author who
+	// pressed the ^C. The handler says the true thing and ends the process; the
+	// baseline comparison below has carried this same guard all along, and this
+	// side of it only became reachable when cancellation was wired through to
+	// the toolchain (#607).
+	if ctx.Err() != nil {
+		return exitFailed
+	}
 	// The table and the counts go out together. Quoting the table into a pull
 	// request and then writing the totals by hand is how a body ends up with a
 	// total beside a breakdown that adds to something else.
@@ -277,18 +292,27 @@ func run(args []string, stdout, stderr io.Writer, sigs <-chan os.Signal, exit fu
 // first long-running thing happens inside it.
 func compareAgainst(ctx context.Context, cwd, ref, sha string, ms []mutate.Mutation,
 	now []mutate.Result, stderr io.Writer, setCleanup func(func())) (string, error) {
-	// Cleanup and creation must not overlap. Removing a directory means reading
-	// it, deleting what was read, and then asking for the directory itself; a
-	// `git worktree add` still running underneath can turn any of those steps
-	// into a removal that does not remove, and every way it can is quiet — the
-	// only report is a return value on a path whose caller is on its way to
-	// os.Exit. Taken before the handler is given anything to run, so cleanup
-	// waits for the creation rather than racing it, whenever it is asked.
-	var creating sync.Mutex
+	// Cleanup must not overlap anything else that has its hands in the tree.
+	// Removing a directory means reading it, deleting what was read, and then
+	// asking for the directory itself; a `git worktree add` still running
+	// underneath — or a sweep still writing a mutation in and putting it back —
+	// can turn any of those steps into a removal that does not remove, and
+	// every way it can is quiet: the only report is a return value on a path
+	// whose caller is on its way to os.Exit. So both the creation and the sweep
+	// hold this, and cleanup takes it: whenever cleanup is asked, it waits for
+	// whichever is in flight rather than racing it. The wait is short by
+	// construction — the handler cancels the context before it asks, and a
+	// cancelled sweep lets go within milliseconds (the toolchain is interrupted,
+	// and the next round is refused) — and bounded even when it is not: under a
+	// test binary that ignores the interrupt, the runner's WaitDelay ends `go
+	// test` alone five seconds later and Go returns, so the sweep lets go then;
+	// the binary itself may outlive all of this (Runner.Ctx has that boundary).
+	// Taken before the handler is given anything to run.
+	var inUse sync.Mutex
 	var parent, tree string
 	cleanup := func() {
-		creating.Lock()
-		defer creating.Unlock()
+		inUse.Lock()
+		defer inUse.Unlock()
 		if parent == "" {
 			// Only reachable when the directory was never made, so there is
 			// nothing here to remove. Returning while the name is still unset
@@ -347,8 +371,8 @@ func compareAgainst(ctx context.Context, cwd, ref, sha string, ms []mutate.Mutat
 	// that arrives before this line finds nothing registered, which is the same
 	// as anywhere else in the run that has not made anything yet.
 	if err := func() error {
-		creating.Lock()
-		defer creating.Unlock()
+		inUse.Lock()
+		defer inUse.Unlock()
 		setCleanup(cleanup)
 		made, err := os.MkdirTemp("", "opossum-mutate-baseline-")
 		if err != nil {
@@ -378,12 +402,21 @@ func compareAgainst(ctx context.Context, cwd, ref, sha string, ms []mutate.Mutat
 	}
 	var before []mutate.Result
 	if len(applicable) > 0 {
-		rb := mutate.NewRunner(tree)
-		// The same ctx as the main runner, so the day cancellation reaches
-		// the toolchain (#607) it reaches both trees rather than only one.
+		rb := baselineRunner(tree)
+		// The same ctx as the main runner, so cancellation reaches the
+		// toolchain in both trees rather than only one. This is the tree it
+		// matters most in: the sweep here is where the minutes go, and it is
+		// this tree the interrupt handler then takes apart.
 		rb.Ctx = ctx
 		rb.Log = func(s string) { fmt.Fprintln(stderr, "baseline tree: "+s) }
-		before, err = rb.Sweep(applicable)
+		// Held for the whole sweep, not per round: every round writes into
+		// the tree and puts it back, and the removal has to find the tree
+		// idle. See inUse for why the hold is short once the context is gone.
+		before, err = func() ([]mutate.Result, error) {
+			inUse.Lock()
+			defer inUse.Unlock()
+			return rb.Sweep(applicable)
+		}()
 		if err != nil {
 			// The inner message may say "make them pass first", which nobody
 			// can do to a committed tree; what they can do is pick a ref
@@ -398,6 +431,12 @@ func compareAgainst(ctx context.Context, cwd, ref, sha string, ms []mutate.Mutat
 	}
 	return mutate.CompareReport(ref+" ("+short+")", now, before, fresh, ambiguous), nil
 }
+
+// baselineRunner makes the runner that sweeps the baseline tree. A variable
+// for the same reason addWorktree is: what the handler must not overlap is a
+// sweep in flight, and a test can only put one in flight — and interrupt
+// exactly there, on every machine alike — by standing in for the toolchain.
+var baselineRunner = mutate.NewRunner
 
 // removeAll is a variable for the same reason addWorktree is: the report
 // below exists for the runs where removal fails, and a test that cannot make

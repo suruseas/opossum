@@ -58,6 +58,39 @@ func makerOf(base, prefix string) (int, bool) {
 	return PidLeading(rest)
 }
 
+// MakerPid reads the pid out of a name made here without knowing the prefix it
+// was made with. The shape is <prefix><pid>-<random>, and both trailing fields
+// are digits, so the pid is the second-to-last one — found by walking the
+// separators from the right rather than by naming a prefix.
+//
+// It is exported for cmd/noleftovers, which sees a name and no prefix: it
+// reports directories that appeared in $TMPDIR while a command ran, and
+// "appeared" covers another terminal's suite as well as this one's leavings.
+// The pid tells those apart, and this package already answers that question for
+// its own sweep — one implementation rather than a second that drifts (#668).
+//
+// Reading from the right means nothing in front of the last two fields is
+// looked at, so a name this package never made can present the shape and be
+// read. Which names those are is written down in the test rather than guessed
+// at here; the ones this tree actually produces are all in it. The direction
+// that costs something is a foreign leak read as somebody's live work — it
+// would be excused instead of reported — so a name that cannot be read is
+// treated as a leak rather than as somebody's.
+func MakerPid(base string) (int, bool) {
+	rand := strings.LastIndex(base, "-")
+	if rand <= 0 {
+		return 0, false
+	}
+	if _, err := strconv.Atoi(base[rand+1:]); err != nil {
+		return 0, false
+	}
+	sep := strings.LastIndex(base[:rand], "-")
+	if sep < 0 {
+		return 0, false
+	}
+	return PidLeading(base[sep+1:])
+}
+
 // PidLeading reads a pid off the front of a name, and says so when there is not
 // one to read.
 //

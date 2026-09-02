@@ -1254,11 +1254,7 @@ func TestTheRecordNamesWhatTheSourceHas(t *testing.T) {
 	//     the file declaring it. The value alone was not enough: a second name
 	//     resolved beside it moved the measurement while the documented one
 	//     stayed put.
-	judged, socketPath, resolved, ranged := conformanceJudgements(t, pkgs)
-	if len(judged) == 0 {
-		t.Fatalf("%s declares nothing, so the rule below reads for something that is no "+
-			"longer written there", daemonMarksVar)
-	}
+	judged, socketPath, resolved, ranged := conformanceJudgements(t, fset, pkgs)
 
 	namedWord := func(s string) bool {
 		return regexp.MustCompile(`\b` + regexp.QuoteMeta(s) + `\b`).MatchString(record)
@@ -1303,7 +1299,7 @@ func TestTheRecordNamesWhatTheSourceHas(t *testing.T) {
 			"claim is about the path the documents name; a measurement that starts "+
 			"somewhere else measures a different claim.", daemonSocketConst, socketPath)
 	}
-	if !ranged {
+	if len(judged) > 0 && !ranged {
 		t.Errorf("nothing walks %s any more, so holding it against the record above says "+
 			"nothing about what the measurement asks for. A declaration no test reads is "+
 			"a record of an intention, not of a measurement.", daemonMarksVar)
@@ -1322,6 +1318,134 @@ func TestTheRecordNamesWhatTheSourceHas(t *testing.T) {
 // make it about something else.
 const daemonSocketConst = "dockerSocketName"
 
+// judgementLead names the passage in the record that says what the daemon
+// measurement decides on. The passage is one paragraph and holds nothing else:
+// the value that was observed once lives in the next one, so that everything
+// between backticks here is a decision. That is what makes the comparison
+// below possible — the record's own shape decides what counts as a judgement,
+// rather than this guessing which of its backticked strings look like marks.
+const judgementLead = "daemon を名指すのは後者"
+
+// The rule above reads source → record: every string the measurement decides
+// on has to be named in the record. That direction alone lets the record
+// outlive what it describes. Deleting the daemon measurement, and with it the
+// declaration this reads, left the record still saying in as many words that
+// the answer is judged on `Api-Version:` — with nothing measuring it, and
+// nothing to say so (#657).
+//
+// A Fatal stood there instead, refusing the deletion. That kept the record
+// honest by forbidding a change that took nothing away, and it said as much
+// itself: "the rule below passes on anything". What was missing was the other
+// direction, so this reads it: the strings the record names between backticks
+// in the judgement passage, and the strings the measurement decides on, are
+// the same set.
+//
+// What each way round catches:
+//
+//   - A mark dropped from the declaration: the record still names it, the
+//     source no longer decides on it. Red here; green under the old rules,
+//     which is the hole #657 opened this with.
+//   - The measurement deleted whole: every mark the record names is
+//     unmeasured. Red here.
+//   - Both taken out together: nothing is named and nothing is decided on.
+//     Green — there is no claim left to keep honest. That is about the marks:
+//     taking the whole daemon measurement out is still red elsewhere, on
+//     daemonSocketConst's own rule and on the record naming a test that no
+//     longer exists.
+//   - A mark added without the record: red under the rule above, and here.
+//     Written into the record's next paragraph rather than the judgement one,
+//     it is green under the rule above and red here — which is what binding
+//     this to one passage buys.
+//
+// What it does not catch, measured rather than guessed:
+//
+//   - Backticks taken off. Dropping a mark from the declaration and, in the
+//     same sentence, writing Api-Version: without them changes no word a
+//     reader sees and is green: what makes a string a judgement here is the
+//     backticks, and nothing holds the record to using them.
+//   - The lead rewritten while the marks go. Saying the same thing in other
+//     words moves the passage out of reach, and with the declaration empty
+//     this returns quietly — the "nothing said about it" half of that early
+//     return is assumed, not read. Either alone is red; it takes both.
+//   - A declaration this cannot read. conformanceJudgements used to skip what
+//     it could not read, so a mark moved into a constant looked deleted and
+//     this accused the record. It says so itself now, and fails before this
+//     rule runs — except where the declaration is not where it looks: a
+//     daemonMarks written inside a function is not a package-level
+//     declaration, nothing reads it, and this accuses the record again
+//     (measured, #657).
+//
+// The passage has to exist while anything is decided on. Missing it while the
+// source still judges is a record that stopped describing its measurement, and
+// this fails loudly rather than reading an empty set.
+func TestTheSourceJudgesOnWhatTheRecordNames(t *testing.T) {
+	root := repoRoot(t)
+	recordPath := filepath.Join(root, "docs", "real-runtime-review.md")
+	record := readLines(t, recordPath)
+
+	pkg := filepath.Join(root, "internal", "orchestrator")
+	fset := token.NewFileSet()
+	pkgs, err := parser.ParseDir(fset, pkg, nil, 0)
+	if err != nil {
+		t.Fatalf("reading %s: %v", pkg, err)
+	}
+	judged, _, _, _ := conformanceJudgements(t, fset, pkgs)
+
+	decides := map[string]bool{}
+	for _, j := range judged {
+		decides[j.lit] = true
+	}
+
+	block, err := blockContaining(record, judgementLead)
+	if err != nil {
+		if len(decides) == 0 {
+			return // nothing decided on, and nothing said about it
+		}
+		t.Fatalf("the measurement decides on %d string(s) and docs/real-runtime-review.md "+
+			"has no passage holding %q: %v. The record is where what a measurement "+
+			"accepts is written down; one that has stopped saying it cannot be held to "+
+			"anything.", len(decides), judgementLead, err)
+	}
+
+	names := map[string]bool{}
+	for _, m := range regexp.MustCompile("`([^`]+)`").FindAllStringSubmatch(block, -1) {
+		names[m[1]] = true
+	}
+
+	var unmeasured, unrecorded []string
+	for s := range names {
+		if !decides[s] {
+			unmeasured = append(unmeasured, s)
+		}
+	}
+	for s := range decides {
+		if !names[s] {
+			unrecorded = append(unrecorded, s)
+		}
+	}
+	sort.Strings(unmeasured)
+	sort.Strings(unrecorded)
+	if len(unmeasured) > 0 {
+		t.Errorf("docs/real-runtime-review.md says the answer is judged on %v and nothing "+
+			"in %s decides on them. A record naming what no measurement asks for is the "+
+			"shape this file exists to refuse: it reads as though the claim were still "+
+			"being checked.\n"+
+			"  Before taking it out of the record, check that the measurement is not "+
+			"deciding on it under another name: a local of a different name, or a "+
+			"package-level declaration this reads while the run uses one written inside "+
+			"a function, both leave the mark measured and invisible here, and the record "+
+			"would be the wrong thing to change. A declaration this cannot read, and a "+
+			"name with no declaration this reads, each say so on their own before this "+
+			"(#657).", unmeasured, pkg)
+	}
+	if len(unrecorded) > 0 {
+		t.Errorf("%s decides on %v and the judgement passage in "+
+			"docs/real-runtime-review.md does not name them. What a measurement accepts "+
+			"is the measurement; a reader of the record would be told less is required "+
+			"than is.", pkg, unrecorded)
+	}
+}
+
 type judgement struct{ fn, lit string }
 
 // daemonMarksVar holds what the daemon measurement accepts as an answer.
@@ -1338,7 +1462,11 @@ const conformancePackage = "orchestrator_test"
 // precondition has to be loud.
 const realRuntimeGate = "realRuntime"
 
-// conformanceJudgements reads four things out of the conformance suite: the
+// conformanceJudgements reads four things out of the conformance suite, and
+// refuses to hand back a half-read fifth: where it cannot read the marks, or
+// cannot find a declaration of them while the name is used, it fails with the
+// places rather than returning an empty set that reads as "nothing is judged
+// on" (#657). The four are: the
 // strings the daemon measurement declares as what an answer has to carry,
 // whether that declaration is walked, the value of daemonSocketConst, and
 // which paths the file declaring it resolves.
@@ -1379,13 +1507,68 @@ const realRuntimeGate = "realRuntime"
 // package. The cost of that boundary is that a sibling file in the same
 // package can resolve anything it likes and hand the result over, which is
 // #657.
-func conformanceJudgements(t *testing.T, pkgs map[string]*ast.Package) (judged []judgement, socketPath string, resolved []string, ranged bool) {
+func conformanceJudgements(t *testing.T, fset *token.FileSet, pkgs map[string]*ast.Package) (judged []judgement, socketPath string, resolved []string, ranged bool) {
 	t.Helper()
+	var unreadable []string // places inside a declaration this reads but cannot make sense of
+	var outOfReach []string // places the name appears when no declaration was read at all
+	var shadows []string    // places the name is declared again inside a function
+	var written []string    // places the name is assigned to after the declaration
+	declared := false       // a package-level daemonMarks was found and read
+	at := func(n ast.Node) string {
+		pos := fset.Position(n.Pos())
+		return filepath.Base(pos.Filename) + ":" + strconv.Itoa(pos.Line) + ":" + strconv.Itoa(pos.Column)
+	}
+	defer func() {
+		t.Helper()
+		switch {
+		case len(unreadable) > 0:
+			t.Fatalf("%s is declared where this reads it, and %d place(s) in that "+
+				"declaration cannot be read (%s) — places, not marks: one of them may "+
+				"stand for several. What is read is a list of string literals written "+
+				"out; a mark built by a call, assigned somewhere else, or named by a "+
+				"constant is invisible here, and invisible reads the same as absent — "+
+				"which makes the record look wrong where it is right. Write the marks "+
+				"out as literals, or teach this to read what is there (#657).",
+				daemonMarksVar, len(unreadable), strings.Join(unreadable, ", "))
+		case declared && len(shadows) > 0:
+			t.Fatalf("%s is declared where this reads it, and a function gives the same "+
+				"name to something of its own at %d place(s) (%s) — a short declaration, "+
+				"a var, a parameter or result, a receiver, or a range variable. This "+
+				"reads the package's declaration and holds it against the record; a run "+
+				"reaching the other one measures something else, and nothing here goes "+
+				"red about it. Names are all this compares: whether the second one is "+
+				"even in scope where the marks are used is not worked out, so a name "+
+				"reused somewhere unrelated lands here too. Give one of them another "+
+				"name, or teach this to tell them apart (#657).",
+				daemonMarksVar, len(shadows), strings.Join(shadows, ", "))
+		case declared && len(written) > 0:
+			t.Fatalf("%s is declared where this reads it, and assigned to at %d place(s) "+
+				"(%s). What is read is the value written at the declaration; what the run "+
+				"measures is whatever was last assigned. Those can differ with nothing "+
+				"here going red about it, which is the same silence a second declaration "+
+				"of the name would buy. What is read is the name standing alone on the "+
+				"left of an assignment: writing an element, copying into the slice, or "+
+				"going through a pointer changes it just as well and is not read here, "+
+				"and neither is whether this assignment runs before the marks are used. "+
+				"Build the list once where it is declared, or teach this to follow what "+
+				"happens to it (#657).",
+				daemonMarksVar, len(written), strings.Join(written, ", "))
+		case len(outOfReach) > 0:
+			t.Fatalf("no declaration of %s was read, and the name is used in %s at %d "+
+				"place(s) (%s) — every mention, not only declarations. What is read is "+
+				"package-level declarations, so one written inside a function is measured "+
+				"and invisible here; invisible reads the same as absent, which makes the "+
+				"record look wrong where it is right. Declare the marks where the package "+
+				"can see them, or teach this to read what is there (#657).",
+				daemonMarksVar, conformancePackage, len(outOfReach),
+				strings.Join(outOfReach, ", "))
+		}
+	}()
 	for name, p := range pkgs {
 		// One package only. A declaration of the same name elsewhere in the
 		// tree compiles fine and would be read as though it were this one —
 		// the same reason the host paths above are read from one package.
-		if name != "orchestrator_test" {
+		if name != conformancePackage {
 			continue
 		}
 		for _, f := range p.Files {
@@ -1402,6 +1585,14 @@ func conformanceJudgements(t *testing.T, pkgs map[string]*ast.Package) (judged [
 					}
 					for i, n := range vs.Names {
 						if i >= len(vs.Values) {
+							// A declaration with no value of its own — one
+							// name of a grouped const, say. Nothing to read,
+							// and for the marks that is not the same as
+							// nothing to say.
+							if n.Name == daemonMarksVar {
+								declared = true
+								unreadable = append(unreadable, at(n))
+							}
 							continue
 						}
 						switch n.Name {
@@ -1411,13 +1602,25 @@ func conformanceJudgements(t *testing.T, pkgs map[string]*ast.Package) (judged [
 								socketPath, _ = strconv.Unquote(lit.Value)
 							}
 						case daemonMarksVar:
+							declared = true
 							comp, ok := vs.Values[i].(*ast.CompositeLit)
 							if !ok {
+								// Built rather than written out — appended
+								// to, assigned in init, taken from a call.
+								// The elements are still there at run time
+								// and unreadable from here, which is the
+								// whole of what this is about.
+								unreadable = append(unreadable, at(vs.Values[i]))
 								continue
 							}
 							for _, el := range comp.Elts {
 								lit, ok := el.(*ast.BasicLit)
 								if !ok || lit.Kind != token.STRING {
+									// Not skipped quietly: an element this
+									// cannot read is not an element that is
+									// not there, and the rules downstream
+									// cannot tell those apart.
+									unreadable = append(unreadable, at(el))
 									continue
 								}
 								if v, err := strconv.Unquote(lit.Value); err == nil && v != "" {
@@ -1464,6 +1667,132 @@ func conformanceJudgements(t *testing.T, pkgs map[string]*ast.Package) (judged [
 				}
 				return true
 			})
+		}
+	}
+	// A second declaration of the same name inside a function is not read here
+	// and may be the one the measurement uses. Nothing downstream can tell:
+	// the marks come back non-empty and wrong, which is the one shape in this
+	// family that stays green.
+	for name, p := range pkgs {
+		if name != conformancePackage {
+			continue
+		}
+		for _, f := range p.Files {
+			// Every way a function gives the name to something of its own:
+			// a short declaration, a var, a parameter or result, a receiver,
+			// the key or value of a range. Each of them is a declaration Go
+			// resolves before the package-level one.
+			named := func(fl *ast.FieldList) {
+				if fl == nil {
+					return
+				}
+				for _, fld := range fl.List {
+					for _, id := range fld.Names {
+						if id.Name == daemonMarksVar {
+							shadows = append(shadows, at(id))
+						}
+					}
+				}
+			}
+			var bodies []ast.Node
+			for _, d := range f.Decls {
+				switch d := d.(type) {
+				case *ast.FuncDecl:
+					if d.Body == nil {
+						continue
+					}
+					named(d.Recv)
+					named(d.Type.Params)
+					named(d.Type.Results)
+					bodies = append(bodies, d.Body)
+				case *ast.GenDecl:
+					// A function literal held by a package-level variable runs
+					// like any other body, and the declaration it may write to
+					// is the one being read here.
+					if d.Tok != token.VAR {
+						continue
+					}
+					for _, sp := range d.Specs {
+						vs, ok := sp.(*ast.ValueSpec)
+						if !ok {
+							continue
+						}
+						for _, v := range vs.Values {
+							if lit, ok := v.(*ast.FuncLit); ok {
+								named(lit.Type.Params)
+								named(lit.Type.Results)
+								bodies = append(bodies, lit.Body)
+							}
+						}
+					}
+				}
+			}
+			for _, body := range bodies {
+				ast.Inspect(body, func(n ast.Node) bool {
+					switch n := n.(type) {
+					case *ast.AssignStmt:
+						// A short declaration makes a second name; a plain
+						// assignment keeps the one name and changes what it
+						// holds. Both leave the declaration this reads
+						// describing something the run does not use.
+						for _, lhs := range n.Lhs {
+							id, ok := lhs.(*ast.Ident)
+							if !ok || id.Name != daemonMarksVar {
+								continue
+							}
+							if n.Tok == token.DEFINE {
+								shadows = append(shadows, at(id))
+							} else {
+								written = append(written, at(id))
+							}
+						}
+					case *ast.ValueSpec:
+						for _, id := range n.Names {
+							if id.Name == daemonMarksVar {
+								shadows = append(shadows, at(id))
+							}
+						}
+					case *ast.RangeStmt:
+						if n.Tok != token.DEFINE {
+							return true
+						}
+						for _, e := range []ast.Expr{n.Key, n.Value} {
+							if id, ok := e.(*ast.Ident); ok && id.Name == daemonMarksVar {
+								shadows = append(shadows, at(id))
+							}
+						}
+					case *ast.FuncLit:
+						named(n.Type.Params)
+						named(n.Type.Results)
+					}
+					return true
+				})
+			}
+		}
+	}
+
+	// The name used somewhere this does not read is not the name gone. Only
+	// package-level declarations are walked above, so a daemonMarks written
+	// inside a function is measured and invisible — and invisible would reach
+	// the rules downstream as an empty set, which reads as "the record names
+	// what nothing measures". Say what is true instead: it is here, and not
+	// where this can read it.
+	if !declared {
+		for name, p := range pkgs {
+			if name != conformancePackage {
+				continue
+			}
+			for _, f := range p.Files {
+				ast.Inspect(f, func(n ast.Node) bool {
+					if id, ok := n.(*ast.Ident); ok && id.Name == daemonMarksVar {
+						// Every mention, declarations and uses alike: which
+						// of them is the declaration is exactly what this
+						// could not work out.
+						outOfReach = append(outOfReach, at(id))
+					}
+					return true
+				})
+			}
 		}
 	}
 	return judged, socketPath, resolved, ranged

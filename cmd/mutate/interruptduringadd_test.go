@@ -9,11 +9,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
-
-	"github.com/suruseas/opossum/internal/suitedir"
 	"testing"
 	"time"
+
+	"github.com/suruseas/opossum/internal/mutate"
+	"github.com/suruseas/opossum/internal/suitedir"
 )
 
 // gitFixture writes the smallest module a baseline sweep can run over and
@@ -600,4 +602,241 @@ func TestAWorktreeMadeWhileAGrandchildHoldsOnIsNotAFailure(t *testing.T) {
 	if code == exitFailed {
 		t.Errorf("exit = %d: git succeeded and only its pipes outlived it", code)
 	}
+}
+
+// The creation was one of two things that have their hands in the tree; the
+// sweep is the other, and the longer one — minutes, against the creation's
+// milliseconds. An interrupt during it used to run cleanup beside a `go test`
+// still writing there (the toolchain outlived the interrupt), and after the
+// toolchain learned to stop, beside the sweep's own last write — the mutation
+// being put back. Either way the removal ran on a tree that was not idle, and
+// what that leaves behind is the leftover with the caveat nobody can act on.
+//
+// This holds the sweep in flight and interrupts exactly there. The handler
+// must wait: exiting while the sweep is parked is the defect, and the order is
+// what this pins — not the leftover, which is the symptom and varies with the
+// disk.
+func TestTheHandlerWaitsForASweepStillRunningInTheTree(t *testing.T) {
+	mod := gitFixture(t)
+	t.Chdir(mod)
+	ownTemp(t)
+	preexisting := baselineDirs(t)
+	t.Cleanup(func() {
+		for d := range baselineDirs(t) {
+			if !preexisting[d] {
+				_ = os.RemoveAll(d)
+			}
+		}
+	})
+
+	// The seam: the baseline tree's runner is real — its reads and writes land
+	// in the actual worktree, which is what the removal must not overlap —
+	// but its first toolchain call announces itself and then waits. The wait
+	// is what keeps the sweep in flight; what the call returns afterwards is
+	// whatever the real toolchain says under a context the handler has by
+	// then cancelled.
+	inFlight := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	realNew := baselineRunner
+	baselineRunner = func(tree string) *mutate.Runner {
+		r := realNew(tree)
+		realGo := r.Go
+		r.Go = func(args ...string) (string, string, error) {
+			once.Do(func() { close(inFlight) })
+			<-release
+			return realGo(args...)
+		}
+		return r
+	}
+	t.Cleanup(func() { baselineRunner = realNew })
+
+	sigs := make(chan os.Signal, 1)
+	type atExit struct {
+		code      int
+		leftovers []string
+	}
+	exited := make(chan atExit, 4)
+	exit := func(c int) {
+		var left []string
+		for d := range baselineDirs(t) {
+			if !preexisting[d] {
+				left = append(left, d)
+			}
+		}
+		exited <- atExit{code: c, leftovers: left}
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		var out bytes.Buffer
+		errOut := &lockedBuf{}
+		run([]string{"-baseline", "HEAD", spec(t, sweepFor("func Answer() int { return 43 }"))},
+			&out, errOut, sigs, exit)
+	}()
+	stopRun := func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		<-done
+	}
+	select {
+	case <-inFlight:
+	case <-time.After(120 * time.Second):
+		stopRun()
+		t.Fatal("the baseline sweep never reached the toolchain, so this measured nothing")
+	}
+	sigs <- os.Interrupt
+
+	// Same shape as the creation test above, and the same direction of
+	// safety: a handler that waits sends nothing here, so no machine is slow
+	// enough to fail this by accident.
+	select {
+	case e := <-exited:
+		stopRun()
+		t.Fatalf("the run exited while the baseline sweep was still in the tree "+
+			"(code %d, leftovers %v): cleanup ran beside the sweep instead of after it. "+
+			"This pins the order, not the leftover", e.code, e.leftovers)
+	case <-time.After(2 * time.Second):
+	}
+
+	close(release)
+	select {
+	case e := <-exited:
+		if e.code != exitInterrupted {
+			t.Errorf("exit = %d, want %d", e.code, exitInterrupted)
+		}
+		if len(e.leftovers) > 0 {
+			t.Errorf("the worktree outlived the handler: %v", e.leftovers)
+		}
+	case <-time.After(60 * time.Second):
+		<-done
+		t.Fatal("the signal was never heard: nothing tried to exit")
+	}
+	<-done
+}
+
+// The test above parks the sweep at its first toolchain call, which is the
+// baseline run — and during the baseline the sweep has written nothing into
+// the tree. It proves the handler waits for a sweep, not that it waits for the
+// part of one that matters: a lock narrowed to each toolchain call, leaving
+// the mutation's write-in and put-back outside it, keeps that test green while
+// reopening the exact window this closes. So this one parks the sweep on its
+// second write into the tree — the restore of the first mutation, the last
+// thing a cancelled round does there — and interrupts with the write in hand.
+//
+// The order is what is pinned, and by a flag rather than a clock: exit
+// records whether the write had been let go of yet.
+func TestTheHandlerWaitsForARestoreStillBeingWrittenIntoTheTree(t *testing.T) {
+	mod := gitFixture(t)
+	t.Chdir(mod)
+	ownTemp(t)
+	preexisting := baselineDirs(t)
+	t.Cleanup(func() {
+		for d := range baselineDirs(t) {
+			if !preexisting[d] {
+				_ = os.RemoveAll(d)
+			}
+		}
+	})
+
+	inFlight := make(chan struct{})
+	release := make(chan struct{})
+	var writes int
+	var once sync.Once
+	realNew := baselineRunner
+	baselineRunner = func(tree string) *mutate.Runner {
+		r := realNew(tree)
+		realWrite := r.Write
+		r.Write = func(p string, b []byte) error {
+			writes++
+			if writes == 2 {
+				once.Do(func() { close(inFlight) })
+				<-release
+			}
+			return realWrite(p, b)
+		}
+		return r
+	}
+	t.Cleanup(func() { baselineRunner = realNew })
+
+	released := func() bool {
+		select {
+		case <-release:
+			return true
+		default:
+			return false
+		}
+	}
+	sigs := make(chan os.Signal, 1)
+	type atExit struct {
+		code      int
+		early     bool // exit reached while the write was still parked
+		leftovers []string
+	}
+	exited := make(chan atExit, 4)
+	exit := func(c int) {
+		var left []string
+		for d := range baselineDirs(t) {
+			if !preexisting[d] {
+				left = append(left, d)
+			}
+		}
+		exited <- atExit{code: c, early: !released(), leftovers: left}
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		var out bytes.Buffer
+		errOut := &lockedBuf{}
+		run([]string{"-baseline", "HEAD", spec(t, sweepFor("func Answer() int { return 43 }"))},
+			&out, errOut, sigs, exit)
+	}()
+	stopRun := func() {
+		if !released() {
+			close(release)
+		}
+		<-done
+	}
+	select {
+	case <-inFlight:
+	case <-time.After(120 * time.Second):
+		stopRun()
+		t.Fatal("the baseline sweep never got as far as restoring a mutation, so this measured nothing")
+	}
+	sigs <- os.Interrupt
+
+	// Give a handler that does not wait every chance to show it: the clock
+	// here only decides how long a correct handler is watched, and a correct
+	// one sends nothing whatever the machine.
+	select {
+	case e := <-exited:
+		stopRun()
+		t.Fatalf("the run exited while the restore write was still parked in the tree "+
+			"(code %d, leftovers %v): cleanup ran beside the sweep's own write instead of "+
+			"after it", e.code, e.leftovers)
+	case <-time.After(2 * time.Second):
+	}
+
+	close(release)
+	select {
+	case e := <-exited:
+		if e.early {
+			t.Errorf("the handler exited before the write was let go of")
+		}
+		if e.code != exitInterrupted {
+			t.Errorf("exit = %d, want %d", e.code, exitInterrupted)
+		}
+		if len(e.leftovers) > 0 {
+			t.Errorf("the worktree outlived the handler: %v", e.leftovers)
+		}
+	case <-time.After(60 * time.Second):
+		<-done
+		t.Fatal("the signal was never heard: nothing tried to exit")
+	}
+	<-done
 }

@@ -2,8 +2,11 @@ package mutate
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -11,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // The pattern missing is the failure this package exists to make impossible: a
@@ -1532,5 +1536,165 @@ func TestWhyItWouldNotBuildDropsBlankLines(t *testing.T) {
 	got := whyItWouldNotBuild("# p\n\nvet: ./a.go:1:1: only this\n\n")
 	if got != "vet: ./a.go:1:1: only this" {
 		t.Errorf("one problem, one line, got %q", got)
+	}
+}
+
+// Cancelling the context ends the toolchain, and "the toolchain" is two
+// processes: `go test` builds and then runs a test binary, and the second is
+// the one doing the work. This used to end neither — the field was declared and
+// never read — and the three comments that said otherwise were the reason the
+// next person believed the interrupt path was covered (#607).
+//
+// The failure it left is not tidiness. cmd/mutate's interrupt handler stops the
+// toolchain and then takes the baseline worktree apart; a `go test` that is
+// still writing into that tree turns the removal into "directory not empty",
+// which is the shape #602 reports.
+func TestCancellingTheContextEndsTheToolchainAndWhatItStarted(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and runs a fixture module")
+	}
+	root := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The pid makes the name answer to this run alone: a second instance of
+	// this very test — another session running the suite — builds a different
+	// name, so neither can find (or, in the cleanup below, kill) the other's
+	// processes.
+	marker := fmt.Sprintf("mutatectxfixture%d", os.Getpid())
+	write("go.mod", "module "+marker+"\n\ngo 1.25\n")
+	write("slow_test.go", "package "+marker+"\n\nimport (\n\t\"testing\"\n\t\"time\"\n)\n\n"+
+		"func TestSleeps(t *testing.T) { time.Sleep(120 * time.Second) }\n")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r := NewRunner(root)
+	r.Ctx = ctx
+
+	returned := make(chan error, 1)
+	go func() {
+		_, _, err := r.Go("test", "-count=1", "./...")
+		returned <- err
+	}()
+
+	// Wait for the test binary itself, not just for `go test`: cancelling
+	// during the build would leave the second process untested, which is the
+	// half that was broken.
+	deadline := time.Now().Add(90 * time.Second)
+	waited := time.Now()
+	for len(testBinaries(t, marker)) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the fixture's test binary never started, so cancellation was never asked the question")
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	t.Logf("the fixture's test binary came up after %.2fs: %v", time.Since(waited).Seconds(), testBinaries(t, marker))
+	cancel()
+	select {
+	case <-returned:
+	case <-time.After(30 * time.Second):
+		// The failure being reported is "cancel does not work", so cancel is
+		// not the cleanup: kill what was found before failing, or the sleeper
+		// sits for its full two minutes.
+		for _, pid := range testBinaries(t, marker) {
+			if p, err := os.FindProcess(pid); err == nil {
+				p.Kill()
+			}
+		}
+		t.Fatal("Go did not return within 30s of the context being cancelled")
+	}
+	// The test sleeps for two minutes, so anything still here outlived the run
+	// that started it.
+	for i := 0; i < 25; i++ {
+		if len(testBinaries(t, marker)) == 0 {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	left := testBinaries(t, marker)
+	for _, pid := range left {
+		if p, err := os.FindProcess(pid); err == nil {
+			p.Kill()
+		}
+	}
+	t.Fatalf("%d process(es) outlived the cancelled run: %v", len(left), left)
+}
+
+// testBinaries returns the pids of running test binaries built from the named
+// module. The build path plus a -test. flag is what is matched, so neither a
+// shell that merely mentions the name nor the toolchain still building the
+// binary is counted.
+func testBinaries(t *testing.T, module string) []int {
+	t.Helper()
+	out, err := exec.Command("ps", "-ax", "-o", "pid,command").Output()
+	if err != nil {
+		t.Fatalf("could not look for processes: %v", err)
+	}
+	var pids []int
+	for _, line := range strings.Split(string(out), "\n") {
+		// The running binary, not the build of it: the linker's own command
+		// line — `link -o .../<module>.test -importcfg ...` — carries the same
+		// path, comes up ~55ms earlier on a cold cache, and made the wait
+		// below return before there was a test binary to stop (about one run
+		// in twelve, measured). What only the running binary has is its
+		// arguments: `go test` always passes -test.* flags.
+		if !strings.Contains(line, "/"+module+".test -test.") {
+			continue
+		}
+		var pid int
+		if _, err := fmt.Sscan(strings.TrimSpace(line), &pid); err == nil {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
+}
+
+// Once the run is cancelled, the sweep must stop rather than keep writing
+// mutations into a tree and reading "context canceled" as an answer about them.
+// The rounds after cancellation measure nothing, and their writes land in a
+// tree the canceller may already be taking apart — cmd/mutate's interrupt
+// handler removes the baseline worktree while its runner would still be
+// spinning here.
+func TestACancelledSweepStopsInsteadOfMeasuringNothing(t *testing.T) {
+	f := newFake(t, map[string]string{"x.go": "call()"})
+	f.testOut["call()"] = passJSON
+	f.testOut["noop()"] = failJSON("TestTheWireIsThere")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	f.Ctx = ctx
+
+	var wrote int
+	inner := f.Write
+	f.Write = func(p string, b []byte) error { wrote++; return inner(p, b) }
+
+	got, err := f.Sweep([]Mutation{mut(), mut()})
+	if err == nil || !strings.Contains(err.Error(), "cancelled") {
+		t.Fatalf("a cancelled sweep should say so, got results=%v err=%v", got, err)
+	}
+	if len(got) != 0 {
+		t.Errorf("no mutation was measured, but %d results came back", len(got))
+	}
+	if wrote != 0 {
+		t.Errorf("a cancelled sweep wrote into the tree %d time(s)", wrote)
+	}
+}
+
+// The declared default: a Runner whose Ctx was set to nil runs uncancellably
+// rather than panicking. NewRunner's Go reads the field at call time exactly so
+// that callers can set it late — and the guard is what stands between "unset"
+// and a nil dereference inside CommandContext.
+func TestANilContextMeansUncancellableRatherThanPanic(t *testing.T) {
+	r := NewRunner(t.TempDir())
+	r.Ctx = nil
+	out, _, err := r.Go("env", "GOMOD")
+	if err != nil {
+		t.Fatalf("a nil-ctx run should still run: %v (%s)", err, out)
+	}
+	if strings.TrimSpace(out) == "" {
+		t.Errorf("`go env GOMOD` printed nothing: %q", out)
 	}
 }

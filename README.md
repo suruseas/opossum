@@ -96,15 +96,32 @@ the migration but stops at a warning instead of installing. Complete it with:
 
 ```sh
 brew update
+brew uninstall --formula --force opossum   # frees /opt/homebrew/bin/opossum for the cask
 brew trust --cask suruseas/opossum/opossum
 brew install --cask suruseas/opossum/opossum
-brew uninstall --formula --force opossum   # the old keg is unlinked, not removed
 ```
 
-After that, `opossum` on your `PATH` is the cask binary and `opossum version`
-reports the current release. One caveat: if a hand-placed `opossum` binary sits
-in `/opt/homebrew/bin` (one Homebrew doesn't own), the cask stops rather than
-overwrite it — remove that file first.
+The uninstall comes first because the cask will not put its link where
+something already sits — and when that something is the formula's own link, it
+says so only in a warning (`skipping link`) **and still reports
+`successfully installed`**, so nothing tells you the binary was never placed.
+(Between the two commands `opossum` is briefly absent from your `PATH`; the
+install at the end brings it back.) After that, `which opossum` points into
+the Caskroom and `opossum --version` reports the current release.
+
+**If `opossum` is not found after migrating** — an earlier version of this
+guide ran the uninstall last, which could remove the only binary — the formula
+is already gone and only the cask step is missing:
+
+```sh
+brew trust --cask suruseas/opossum/opossum
+brew reinstall --cask suruseas/opossum/opossum   # `install` if brew says it is not installed
+opossum --version
+```
+
+If that stops with `already a Binary at /opt/homebrew/bin/opossum`, something
+Homebrew doesn't own still sits there — check it with
+`ls -l /opt/homebrew/bin/opossum` and move it aside before retrying.
 
 ### From source
 

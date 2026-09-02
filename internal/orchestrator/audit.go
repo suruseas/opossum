@@ -271,14 +271,22 @@ func (r *AuditReport) WriteJSON(w io.Writer) error {
 }
 
 // WriteSummary renders a short human-readable summary.
+//
+// Every quoted value goes through OneLine: the report quotes what the audited
+// container did — file paths it wrote, hosts it dialed — and those are the
+// suspect's words, not opossum's. A line break inside one used to end the
+// report's line and start the rest at column zero, where the report's own
+// findings start, so a process could write a file whose name reads as a clean
+// finding. The tables go through row() and the errors through quoted() for the
+// same reason; this writer had neither (#573).
 func (r *AuditReport) WriteSummary(w io.Writer) {
-	fmt.Fprintf(w, "Audit of `%s`%s — exit %d\n", r.Service, cmdSuffix(r.Command), r.ExitCode)
+	fmt.Fprintf(w, "Audit of `%s`%s — exit %d\n", OneLine(r.Service), OneLine(cmdSuffix(r.Command)), r.ExitCode)
 
 	fmt.Fprint(w, "  files:  ")
 	if !r.Files.Observed {
-		fmt.Fprintf(w, "unobserved (%s)\n", r.Files.Reason)
+		fmt.Fprintf(w, "unobserved (%s)\n", OneLine(r.Files.Reason))
 	} else if len(r.Files.Changes) == 0 {
-		fmt.Fprintf(w, "no changes under %s\n", r.Files.Workspace)
+		fmt.Fprintf(w, "no changes under %s\n", OneLine(r.Files.Workspace))
 	} else {
 		var a, c, d int
 		for _, ch := range r.Files.Changes {
@@ -291,22 +299,22 @@ func (r *AuditReport) WriteSummary(w io.Writer) {
 				d++
 			}
 		}
-		fmt.Fprintf(w, "%d changed, %d added, %d deleted under %s\n", c, a, d, r.Files.Workspace)
+		fmt.Fprintf(w, "%d changed, %d added, %d deleted under %s\n", c, a, d, OneLine(r.Files.Workspace))
 		for _, ch := range r.Files.Changes {
-			fmt.Fprintf(w, "    %-8s %s\n", ch.Kind, ch.Path)
+			fmt.Fprintf(w, "    %-8s %s\n", ch.Kind, OneLine(ch.Path))
 		}
 	}
 
 	fmt.Fprint(w, "  egress: ")
 	if !r.Egress.Observed {
-		fmt.Fprintf(w, "unobserved (%s)\n", r.Egress.Reason)
+		fmt.Fprintf(w, "unobserved (%s)\n", OneLine(r.Egress.Reason))
 	} else if len(r.Egress.Destinations) == 0 {
-		fmt.Fprintf(w, "no outbound connections (via %s)\n", r.Egress.Via)
+		fmt.Fprintf(w, "no outbound connections (via %s)\n", OneLine(r.Egress.Via))
 	} else {
-		fmt.Fprintf(w, "%d destination(s) (via %s): %s\n", len(r.Egress.Destinations), r.Egress.Via, strings.Join(r.Egress.Destinations, ", "))
+		fmt.Fprintf(w, "%d destination(s) (via %s): %s\n", len(r.Egress.Destinations), OneLine(r.Egress.Via), OneLine(strings.Join(r.Egress.Destinations, ", ")))
 	}
 
-	fmt.Fprintf(w, "  resources: unobserved (%s)\n", r.Resources.Reason)
+	fmt.Fprintf(w, "  resources: unobserved (%s)\n", OneLine(r.Resources.Reason))
 }
 
 func cmdSuffix(cmd []string) string {

@@ -5867,8 +5867,9 @@ func mustWrite(t *testing.T, path, body string) {
 // loads, still lists, and still starts everything else — measured on Docker
 // Compose v5.4.0, where `config --services`, `ps` and `logs` all succeed on
 // exactly this shape and only a full `config` with the profile active fails.
-// `up` is asked here too, on the same reasoning, though docker's was not
-// measured for it.
+// That run is the gated pair of tables in testdata/docker-compose-env-file.md,
+// with the commands beside it. `up` is asked here too, on the same reasoning,
+// though docker's was not measured for it.
 //
 // opossum used to fail all of them at load, because load reads every service's
 // env_file and load is a layer below profiles (#413).
@@ -5906,7 +5907,10 @@ func TestABrokenEnvFileOnAGatedServiceDoesNotBreakTheProject(t *testing.T) {
 // being rendered and started, so the failure it has been holding is due. `ps`
 // stays green — it needs no environment, and docker's does not fail here either
 // (measured on Docker Compose v5.4.0: `ps`, `logs` and `config --services` all
-// succeed against an active service whose env_file does not expand).
+// succeed against an active service whose env_file does not expand — that run,
+// and the missing-file shape beside it, are kept with their commands and
+// answers in testdata/docker-compose-env-file.md, so a later reader can take
+// them again rather than take this sentence's word for it).
 func TestABrokenEnvFileReachesTheCommandsThatNeedTheEnvironment(t *testing.T) {
 	fakeShim(t)
 	compose := writeCompose(t, "name: demo\nservices:\n  web:\n    image: web\n"+
@@ -5950,6 +5954,59 @@ func TestABrokenEnvFileReachesTheCommandsThatNeedTheEnvironment(t *testing.T) {
 			}
 			if err != nil {
 				t.Fatalf("this command needs no environment, so it should not carry the failure: %v\n%s", err, out)
+			}
+		})
+	}
+}
+
+// Which service the failure belongs to, asked where a person reads it. The
+// name is put on the error at load, and internal/compose holds it to that —
+// but a project has more than one service, and the message a user gets is the
+// one the CLI prints. Dropping the name leaves the library tests red and every
+// command still green (measured), so the fact that `up` says whose env_file it
+// is has been resting on the layer below.
+//
+// The broken service is neither first nor last in the file and its name is not
+// the project's, so a message that named the wrong thing — the project, the
+// first service, the file only — would read differently from one that names
+// the service. `config` and `up` are both asked: they reach the environment by
+// different roads (rendering, starting, and running one service), and the name
+// has to survive all of them.
+//
+// What is asked is the error the command returns. The line a person reads is
+// that error printed by runCLI, which quotes it and adds a prefix; nothing
+// between here and there drops a word (#660).
+func TestTheEnvFileFailureNamesWhichServiceItBelongsTo(t *testing.T) {
+	fakeShim(t)
+	compose := writeCompose(t, "name: demo\nservices:\n"+
+		"  alpha:\n    image: a\n"+
+		"  beta:\n    image: b\n    env_file: [gone.env]\n"+
+		"  gamma:\n    image: c\n")
+
+	for _, args := range [][]string{
+		{"config"},
+		{"up"},
+		// Where a container is born, there are two roads, and the neighbour
+		// above holds both to the same line; a name that survived one of them
+		// would be half an answer.
+		{"run", "--no-deps", "beta", "echo", "hi"},
+		{"run", "--audit", "--no-deps", "beta", "echo", "hi"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			out, err := run(t, append([]string{"-f", compose}, args...)...)
+			if err == nil {
+				t.Fatalf("beta's env_file is missing, so this has to fail; got:\n%s", out)
+			}
+			if !strings.Contains(err.Error(), "beta") {
+				t.Errorf("the failure should say which service it belongs to (beta), got: %v.\n"+
+					"  A project has many services and only one of them is broken; a "+
+					"message that does not name it leaves the reader to find out which.",
+					err)
+			}
+			for _, other := range []string{"alpha", "gamma"} {
+				if strings.Contains(err.Error(), other) {
+					t.Errorf("the failure names %s, which has no env_file: %v", other, err)
+				}
 			}
 		})
 	}
@@ -6017,10 +6074,10 @@ func TestACommandRefusesAnUnreadableEnvironmentBeforeStartingAnything(t *testing
 // One run, one voice about the Docker socket. `up --from-docker-compose`
 // prints the note and then runs the up, whose warning says the same thing in
 // the same words — a screen apart, it read as two findings. Only the exact
-// repeat goes: the warning reads mounts wider than the note (the anonymous
-// volume below never reaches the note's predicate), and where it is the only
-// voice it still speaks. Which of the two readings of "a Docker socket mount"
-// is right is #599's question, and none of these cases move it.
+// repeat goes: where the warning is the only voice (a plain up, a note whose
+// prose never printed) it still speaks. Since #599 the warning asks the
+// note's own question, so the cases below that once exercised its wider read
+// now pin the opposite: a mount that binds no Docker socket gets no voice.
 func TestTheDockerSocketIsSpokenAboutOnce(t *testing.T) {
 	// The sentence the note's Why and the warning share, and the entry list does
 	// not: the headline also appears in the entry list above the prose, which is
@@ -6043,10 +6100,16 @@ func TestTheDockerSocketIsSpokenAboutOnce(t *testing.T) {
 			args:    []string{"up", "--no-build", "--no-supervisor"},
 			want:    1,
 		},
-		"an anonymous volume reaches only the warning": {
+		// An anonymous volume mounts nothing from the host under docker either
+		// (Docker Compose v5.4.0 canonicalizes it to `type: volume`, no host
+		// source), so there is no divergence and no voice speaks — the note's
+		// predicate never saw it, and since #599 the warning asks the same
+		// question. This case used to expect 1 from the warning's wider read;
+		// the sentence it printed ("mounts the Docker socket") was false here.
+		"an anonymous volume is nobody's socket": {
 			compose: "services:\n  watcher:\n    image: app:1\n    volumes:\n      - \"/var/run/docker.sock\"\n",
 			args:    []string{"up", "--from-docker-compose", "--no-build", "--no-supervisor"},
-			want:    1,
+			want:    0,
 		},
 		// The steady state of a --from-docker-compose project: the overlay is
 		// already on disk, so the run prints the note's HEADLINE only ("found
@@ -6070,13 +6133,17 @@ func TestTheDockerSocketIsSpokenAboutOnce(t *testing.T) {
 			args:    []string{"-f", "compose.yaml", "up", "--from-docker-compose", "--no-build", "--no-supervisor"},
 			want:    1,
 		},
-		// Two services, one voice each: the note speaks for the bind mount, the
-		// warning for the anonymous volume the note's predicate cannot see. A
-		// suppression keyed any wider than the service — "a note spoke, so all
-		// warnings hush" — silences the second voice.
+		// Two services, one voice each. This case used to pair a bind with an
+		// anonymous volume so the second voice was the warning; since #599 the
+		// warning asks the note's question and the anonymous volume is nobody's
+		// socket, so both voices here are notes — which also means a
+		// suppression keyed to the service and one keyed to the run can no
+		// longer be told apart from the outside (notes report all services or
+		// none). What still can: a dedupe of the SENTENCE keyed to the run —
+		// "said once, hush the rest" — would print 1 here.
 		"two services keep one voice each": {
 			compose: "services:\n  ci:\n    image: app:1\n    volumes:\n      - \"./docker.sock:/var/run/docker.sock\"\n" +
-				"  anon:\n    image: app:1\n    volumes:\n      - \"/var/run/docker.sock\"\n",
+				"  side:\n    image: app:1\n    volumes:\n      - \"./outer.sock:/var/run/docker.sock\"\n",
 			args: []string{"up", "--from-docker-compose", "--no-build", "--no-supervisor"},
 			want: 2,
 		},

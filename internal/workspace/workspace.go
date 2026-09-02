@@ -448,6 +448,12 @@ func validateName(name string) error {
 	if name != filepath.Base(name) || name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
 		return fmt.Errorf("invalid snapshot name %q: use a simple name with no path separators", name)
 	}
+	// A control character in a name breaks every listing that prints it — a
+	// newline hands the rest of the name a line of its own (#573). %q above
+	// shows the escape, so the refusal names what it saw.
+	if strings.ContainsFunc(name, func(r rune) bool { return r < ' ' || r == 0x7f }) {
+		return fmt.Errorf("invalid snapshot name %q: control characters (newlines, tabs) are not allowed", name)
+	}
 	return nil
 }
 

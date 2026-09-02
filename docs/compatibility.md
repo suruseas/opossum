@@ -109,7 +109,7 @@ them.
 | `platform` | ✅ | passed to `container run --platform`; `linux/amd64` also enables `--rosetta` so x86-64-only images run on Apple silicon |
 | `ports` | ✅ | passed to `container run -p`; both the short form (`"8080:80"`, `"3000"`) and the long mapping form (`{target, published, protocol, host_ip}`) are accepted. A bare container port gets a host port (Apple's runtime requires one): the same number when it's free, otherwise a free one, with a notice. |
 | `environment` | ✅ | list or map form; null value passes host value through |
-| `env_file` | ✅ | string or list (short, or long `{path, required}`); `KEY=VALUE` files folded in, `environment` overrides them. Missing file errors unless `required: false` |
+| `env_file` | ✅ | string or list (short, or long `{path, required}`); `KEY=VALUE` files folded in, `environment` overrides them. A missing file — or one that fails to expand — errors unless `required: false`, and only where the environment is needed: `config`, `up` and `run` raise it, while `ps`, `logs` and `config --services` do not. A service that `profiles:` keeps out of this run is not read by any of them |
 | `volumes` | ✅ | bind mounts (host paths resolved against the compose dir; `~` expanded; a missing source directory is created), named volumes (namespaced `<project>_<volume>`), anonymous volumes (`- /app/node_modules`, named after the service and path), and `type: tmpfs` (mounted via `--tmpfs`); short `src:dst[:ro]` or long form (`{type, source, target, read_only}`) |
 | `tmpfs` | ✅ | service-level tmpfs targets (string or list); folded together with any `type: tmpfs` volume entries |
 | `secrets` | ✅ | file-based only; mounted read-only at `/run/secrets/<name>` (the `*_FILE` pattern). `external` secrets are rejected; `uid`/`gid`/`mode` are not applied |
@@ -222,6 +222,13 @@ harmless (the comment is dropped anyway), but a `${VAR:?required}` in a comment 
 **fail the load**. Keep interpolation syntax out of comments, or write the `$` as
 `$$` to keep it literal.
 
+A value carrying line breaks — a multi-line PEM key in `.env`, say — is carried
+through parsing whole: referencing it from the compose file yields the full
+multi-line string, as docker compose does (measured on v5.4.0). Expanding raw
+text can't write such a value in place, so opossum holds it aside behind a
+one-line private-use marker (U+E001) and restores it after the parse — which is
+why a compose file or variable that already contains U+E001 is refused.
+
 The values in an env file are themselves expanded, as docker compose does. This
 was measured against Compose v5.3.1 case by case, because two of the rules are not
 the ones a reader would guess:
@@ -300,7 +307,7 @@ opossum mirrors the common `docker compose` subcommands, delegating each to the
 | `restart [service…]` | ✅ | stop then start in place |
 | `kill [service…]` | ✅ | send a signal (default KILL); `-s/--signal` |
 | `run [--rm] [--no-deps] [-T] <service> [cmd]` | ✅ | one-off foreground container; starts deps unless `--no-deps`; `-T`/`--no-tty` disables the pseudo-terminal; progress goes to stderr so the one-off's stdout stays clean (usable as an MCP stdio bridge); no published ports |
-| `config [--services]` | ✅ | validate and print the resolved config (interpolation + env_file applied), noting ignored fields; mirrors what `up` starts, so `profiles:`-gated services appear only with `--profile` |
+| `config [--services]` | ✅ | validate and print the resolved config (interpolation + env_file applied), noting ignored fields; mirrors what `up` starts, so `profiles:`-gated services appear only with `--profile`. `--services` prints the names in startup order without resolving `env_file`, so it answers for a project whose env files do not — compose-file `${VAR}` interpolation still runs, and still fails the command when a required variable has no value |
 
 Add `--verbose` to any command to print each underlying `container` invocation
 (as `+ container …`) to stderr — handy when filing a bug report, so you can see

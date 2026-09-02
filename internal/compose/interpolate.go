@@ -7,6 +7,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -375,6 +377,26 @@ func expandEnvValue(val string, literal bool, scope envScope, path string, line 
 // Either way it is refused rather than quietly conflated with an emptied value.
 const emptied = "\ue000"
 
+// held is what an expansion writes where a reference produced a value that
+// cannot ride in the text: one carrying a line break. Expansion happens before
+// the parser, so writing the value itself would push its second line into the
+// document as structure — `KEY: ${PEM}` with a three-line PEM stops parsing at
+// all, and docker (which expands after parsing) loads the same file fine.
+//
+// The marker is one line — held, the value's index, held again — so the
+// document parses, and the repair pass that already takes the emptied mark out
+// of the tree puts the real value back into the scalar that carries the
+// marker. Downstream reads the tree, so it sees the value whole, line breaks
+// and all, exactly as a post-parse expansion would have handed it over.
+//
+// U+E001 is private-use like U+E000, refused on the same grounds wherever it
+// arrives already written (the file, a variable's value): a marker that could
+// be forged is an index into someone else's table.
+const held = "\ue001"
+
+// heldMarker matches what expansion wrote: the index between two marks.
+var heldMarker = regexp.MustCompile(held + `(\d+)` + held)
+
 // interpolated is an expanded compose document, in whichever form survived.
 //
 // The tree is the better one and is used when there is one: it carries the
@@ -427,7 +449,12 @@ func interpolateDocument(raw []byte, lookup varLookup) (interpolated, error) {
 		return interpolated{}, fmt.Errorf("the compose file contains U+E000, a private-use character this uses to " +
 			"track values that expand to nothing; remove it (it is not something a compose file needs)")
 	}
-	out, err := expand(raw, lookup, emptied)
+	if bytes.Contains(raw, []byte(held)) {
+		return interpolated{}, fmt.Errorf("the compose file contains U+E001, a private-use character this uses to " +
+			"carry multi-line values through parsing; remove it (it is not something a compose file needs)")
+	}
+	var vals []string
+	out, err := expand(raw, lookup, emptied, &vals)
 	if err != nil {
 		var u unterminatedRef
 		if errors.As(err, &u) {
@@ -435,9 +462,9 @@ func interpolateDocument(raw []byte, lookup varLookup) (interpolated, error) {
 		}
 		return interpolated{}, err
 	}
-	if !bytes.Contains(out, []byte(emptied)) {
-		// Nothing expanded to nothing, so there is nothing to repair and the bytes
-		// are already what the caller should read.
+	if !bytes.Contains(out, []byte(emptied)) && len(vals) == 0 {
+		// Nothing expanded to nothing and nothing is held aside, so there is
+		// nothing to repair and the bytes are already what the caller should read.
 		return interpolated{raw: out}, nil
 	}
 	var doc yaml.Node
@@ -456,7 +483,31 @@ func interpolateDocument(raw []byte, lookup varLookup) (interpolated, error) {
 		return interpolated{raw: out}, nil
 	}
 	unmark(&doc)
+	restore(&doc, vals)
 	return interpolated{node: &doc, raw: out}, nil
+}
+
+// restore puts held values back into the scalars whose markers stand for them,
+// after unmark — the two marks answer different questions and neither may see
+// the other's. A scalar that gains a line break stays a scalar: the tree is
+// decoded, not written back out, and a decoded string carries its newlines
+// whole, which is exactly what a post-parse expansion would have produced.
+func restore(n *yaml.Node, vals []string) {
+	if n.Kind == yaml.ScalarNode && strings.Contains(n.Value, held) {
+		n.Value = heldMarker.ReplaceAllStringFunc(n.Value, func(m string) string {
+			i, err := strconv.Atoi(strings.Trim(m, held))
+			if err != nil || i < 0 || i >= len(vals) {
+				return m // not one of ours; the document was refused if it held the mark, so this cannot happen
+			}
+			return vals[i]
+		})
+		// The tag has to be pinned the way unmark pins it: a value that is now
+		// "3\n0" must not come back as a number.
+		n.Tag = "!!str"
+	}
+	for _, c := range n.Content {
+		restore(c, vals)
+	}
 }
 
 // unmark takes the mark out of every scalar that carries one, in keys as well as
@@ -491,7 +542,7 @@ func unmark(n *yaml.Node) {
 // interpolate expands references in text that is not a YAML document: an env-file
 // value, or a default argument.
 func interpolate(raw []byte, lookup varLookup) ([]byte, error) {
-	return expand(raw, lookup, "")
+	return expand(raw, lookup, "", nil)
 }
 
 // expand rewrites `$VAR`, `${VAR}`, defaults `${VAR:-d}` (d when unset or empty)
@@ -502,7 +553,13 @@ func interpolate(raw []byte, lookup varLookup) ([]byte, error) {
 // emptyAs is written in place of a reference that produced nothing. A document
 // passes the mark, so the parser can be asked afterwards where the value went; a
 // `.env` value passes "" and simply loses the text, which is what it means.
-func expand(raw []byte, lookup varLookup, emptyAs string) ([]byte, error) {
+//
+// hold, when non-nil, collects values that cannot ride in the text — ones
+// carrying a line break, which the parser would read as structure — and a
+// one-line marker is written in their place for restore to undo after parsing.
+// A `.env` value passes nil: it is not parsed as YAML, so its newlines ride as
+// themselves.
+func expand(raw []byte, lookup varLookup, emptyAs string, hold *[]string) ([]byte, error) {
 	var out bytes.Buffer
 	s := string(raw)
 	for i := 0; i < len(s); {
@@ -540,10 +597,10 @@ func expand(raw []byte, lookup varLookup, emptyAs string) ([]byte, error) {
 				}
 				return nil, err
 			}
-			if err := refuseMark("${"+expr+"}", val, emptyAs); err != nil {
+			if err := refuseMark("${"+expr+"}", val, emptyAs, hold); err != nil {
 				return nil, err
 			}
-			out.WriteString(orMark(val, emptyAs))
+			writeVal(&out, val, emptyAs, hold)
 			i += 2 + end + 1
 		case isNameStart(next):
 			j := i + 1
@@ -552,10 +609,10 @@ func expand(raw []byte, lookup varLookup, emptyAs string) ([]byte, error) {
 			}
 			name := s[i+1 : j]
 			val, _ := lookup(name)
-			if err := refuseMark("$"+name, val, emptyAs); err != nil {
+			if err := refuseMark("$"+name, val, emptyAs, hold); err != nil {
 				return nil, err
 			}
-			out.WriteString(orMark(val, emptyAs))
+			writeVal(&out, val, emptyAs, hold)
 			i = j
 		default: // a lone $ (e.g. before a space) is literal
 			out.WriteByte('$')
@@ -570,23 +627,34 @@ func expand(raw []byte, lookup varLookup, emptyAs string) ([]byte, error) {
 // it through the shell or an env file is the same problem arriving by another
 // road, and letting it through would conflate what somebody set with what
 // expansion produced.
-func refuseMark(name, val, emptyAs string) error {
-	if emptyAs == "" || !strings.Contains(val, emptyAs) {
-		return nil
-	}
+func refuseMark(name, val, emptyAs string, hold *[]string) error {
 	// The reference as it was written — `${V}`, or `${V:-fallback}` — and not what
 	// it resolved to: a variable is where a password or a token lives, and the
 	// reader needs to know which one to go and fix, not what is in it.
-	return fmt.Errorf("the value of %s contains U+E000, a private-use character opossum uses to "+
-		"track values that expand to nothing; remove it from that value", name)
+	if emptyAs != "" && strings.Contains(val, emptyAs) {
+		return fmt.Errorf("the value of %s contains U+E000, a private-use character opossum uses to "+
+			"track values that expand to nothing; remove it from that value", name)
+	}
+	if hold != nil && strings.Contains(val, held) {
+		return fmt.Errorf("the value of %s contains U+E001, a private-use character opossum uses to "+
+			"carry multi-line values through parsing; remove it from that value", name)
+	}
+	return nil
 }
 
-// orMark is the expanded value, or the mark when there is nothing to write.
-func orMark(val, emptyAs string) string {
-	if val == "" {
-		return emptyAs
+// writeVal writes the expanded value: the mark when there is nothing to write,
+// a one-line marker (the value held aside for restore) when the value carries a
+// line break the parser would read as structure, and the value itself otherwise.
+func writeVal(out *bytes.Buffer, val, emptyAs string, hold *[]string) {
+	switch {
+	case val == "" && emptyAs != "":
+		out.WriteString(emptyAs)
+	case hold != nil && strings.ContainsAny(val, "\n\r"):
+		*hold = append(*hold, val)
+		fmt.Fprintf(out, "%s%d%s", held, len(*hold)-1, held)
+	default:
+		out.WriteString(val)
 	}
-	return val
 }
 
 // matchBrace returns the index in s of the `}` that closes a `${` reference whose

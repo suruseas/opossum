@@ -77,6 +77,43 @@ func TestLoadEnvFileMissingErrors(t *testing.T) {
 	}
 }
 
+// What the load leaves behind on the failure road: the environment the compose
+// file declares, untouched. The resolution folds env_file entries under
+// `environment:` and hands back one list; when it fails there is no such list,
+// and writing that empty result over the field would take the declared entries
+// with it. Nothing downstream would say so — ResolvedEnv answers with the
+// error either way, and the readers that go straight to the field (all of them
+// behind a guard, see internal/repohygiene) would see a service that declares
+// nothing rather than one that declares what it says (#660).
+func TestAFailedEnvFileLeavesTheDeclaredEnvironmentInPlace(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "compose.yaml")
+	body := "services:\n  web:\n    image: web\n" +
+		"    environment:\n      - DECLARED=here\n      - AND=so is this\n" +
+		"    env_file: nope.env\n"
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	proj, err := Load(p)
+	if err != nil {
+		t.Fatalf("load should not fail on an env_file a caller has not asked for: %v", err)
+	}
+	svc := proj.Services["web"]
+	if _, err := svc.ResolvedEnv(); err == nil {
+		t.Fatal("the env_file is missing, so asking for the environment has to fail")
+	}
+	// Two entries, so that "all of it, in order" and "some of it" are different
+	// answers here: one would let a resolution that kept the first and dropped
+	// the rest read the same as one that kept everything.
+	want := Environment{"DECLARED=here", "AND=so is this"}
+	if got := svc.Environment; !reflect.DeepEqual(got, want) {
+		t.Errorf("the declared environment = %#v, want %#v.\n"+
+			"  The resolution failed, so there is nothing to fold in; what was written "+
+			"out is still written out. Overwriting it with the empty result of a failed "+
+			"resolution makes the service look as though it declared nothing.", got, want)
+	}
+}
+
 func TestLoadEnvFileOptionalMissingSkipped(t *testing.T) {
 	// A long-form entry with required: false is skipped when the file is absent,
 	// while a required entry (default) in the same list still errors (#85).

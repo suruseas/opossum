@@ -37,4 +37,8 @@ if [ "$want" != "$here" ]; then
 	exit 1
 fi
 
+# A throwaway clone of the bundle, with nothing to push from it — wired all the
+# same, so that the gate below has nothing to say about it.
+git config core.hooksPath .githooks
+
 exec make test

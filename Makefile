@@ -6,7 +6,7 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//')
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: build test real-conformance cover sieve install snapshot changelog changelog-preview
+.PHONY: build test wired hooks real-conformance cover sieve install snapshot changelog changelog-preview
 
 build: ## build the opossum binary with the version stamped in
 	go build -ldflags "$(LDFLAGS)" -o opossum ./cmd/opossum
@@ -46,7 +46,7 @@ build: ## build the opossum binary with the version stamped in
 # seconds of CPU beside it. Measured, three CI runs in a row. Splitting the
 # recipe gives the measuring package the quiet it is measuring; both lines
 # run under the leftovers check, and the gate is red if either is.
-test: ## run the full test suite (the regression gate)
+test: wired ## run the full test suite (the regression gate)
 	go run ./cmd/noleftovers go test $$(go list ./... | grep -v '/cmd/busy$$') -race -cover -count=1
 	go run ./cmd/noleftovers go test ./cmd/busy -race -cover -count=1
 
@@ -81,6 +81,14 @@ cover: ## run tests with coverage
 # way. What the sieve does not see: the current Go release. It runs the
 # version go.mod asks for; the second compiler is half of what the pull
 # request's one CI run exists to attest.
+# Named, not refused — see sieve/wired.sh. A prerequisite of `test` so that the
+# one command everyone runs is where an unwired clone is heard about.
+wired: ## say so when this clone's push-time sieve is not wired
+	@sh sieve/wired.sh
+
+hooks: ## wire the commit and push hooks into this clone (once per clone)
+	git config core.hooksPath .githooks
+
 sieve: ## run the regression gate in a clean Linux container (the push-time sieve)
 	@docker image inspect opossum-sieve >/dev/null 2>&1 || \
 		docker build -t opossum-sieve -f sieve/Dockerfile sieve

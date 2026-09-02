@@ -66,10 +66,13 @@ type Orchestrator struct {
 	// headline is a table of contents, not a finding. The up that follows says
 	// the same thing through warnDockerSocket, and one run saying it twice —
 	// note and warning, near verbatim, a screen apart — reads as two findings.
-	// Only that exact repeat is suppressed: the warning reads mounts wider than
-	// the note (an anonymous volume, a named volume merely containing the name,
-	// like `docker.sock-vol`), and on those inputs it is the only voice, so it
-	// still speaks. Which reading is right is #599; nothing here moves it.
+	// Only that exact repeat is suppressed. Since #599 the warning asks the
+	// note's own question (isDockerSocketMount over the split mount), so every
+	// mount the warning sees, an adapting run notes — which means a key this
+	// fine and a key to the whole run can no longer be told apart from the
+	// outside (notes report all services or none). The per-service key is kept
+	// because it states the intent: one service's note answers for that
+	// service, not for its neighbours.
 	notedDockerSocket map[string]bool
 }
 
@@ -312,6 +315,16 @@ func (o *Orchestrator) logf(format string, a ...interface{}) {
 	for i, v := range flat {
 		if t, ok := v.(ourText); ok {
 			flat[i] = string(t)
+			continue
+		}
+		// An error is not string-kind, so the reflect arm below walks past it —
+		// which is how a watch warning printed an `up` failure through %v with
+		// a project's line break intact (#688). Quoted, not OneLine: an error
+		// is deliberately multi-line (a hint's command block, a second line of
+		// advice), and the CLI's own error printer draws the same line — keep
+		// the shape, push a value's escape onto an indented line.
+		if e, ok := v.(error); ok {
+			flat[i] = Quoted(e.Error())
 			continue
 		}
 		// By kind, not by type. A named string type — and this package already
@@ -2302,23 +2315,20 @@ func (o *Orchestrator) warnDockerSocket(name string, svc *compose.Service) {
 		return
 	}
 	for _, v := range svc.Volumes {
-		// Deliberately not isDockerSocketMount: this reads the mount as written,
-		// which is wider in two ways that matter.
+		// The same question the note asks: does either end of the mount name
+		// docker.sock? This used to read the unsplit string, which warned on
+		// three shapes where the warning's own sentence — "mounts the Docker
+		// socket" — is false:
 		//
-		// A named volume called `docker.sock-vol` counts here and not there.
-		// And an anonymous volume — `- /var/run/docker.sock`, which names a
-		// container path and no host path — counts here and never reaches the
-		// shared predicate at all, because splitMount refuses it. That second
-		// difference predates the predicate; the two callers have disagreed
-		// about anonymous volumes for as long as both have existed.
-		//
-		// A third difference is new: a directory called `docker.sock.d/` counts
-		// here and not there, because the shared predicate now reads the last
-		// path element. On that input opossum says opposite things about one
-		// socket. Narrowing this to match would also change which mounts warn at
-		// all, and there is no eval behind either behaviour — so the decision
-		// lives in #599 instead of being settled as a side effect here.
-		if strings.Contains(v, "docker.sock") {
+		// An anonymous volume (`- /var/run/docker.sock`) mounts nothing from the
+		// host under docker either — Docker Compose v5.4.0 canonicalizes it to
+		// `type: volume` with no host source — so there is no divergence to
+		// report, and no socket was mounted. A directory called `docker.sock.d/`
+		// and a socket called `my-docker.sock` are somebody else's sockets;
+		// telling a gpg-agent owner they mount the Docker socket is just wrong.
+		// It also ends one run saying opposite things about one mount — the
+		// note reads its mounts through this predicate already.
+		if src, tgt, _, ok := splitMount(v); ok && isDockerSocketMount(src, tgt) {
 			o.warnf(codeDockerSocket, "service %q mounts the Docker socket (%s), which does not "+
 				"answer for the containers here. Apple `container` runs them, and it has no socket "+
 				"to share; if a Docker daemon answers on that path, it is a different one and knows "+

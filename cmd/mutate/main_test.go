@@ -1233,3 +1233,44 @@ func TestTheReportCarriesWhatTheGitStepsSaid(t *testing.T) {
 		t.Errorf("with remove never run, the registration outlives the directory, said:\n%s", said)
 	}
 }
+
+// A ^C during the baseline run must not be answered with "the suite could not
+// be run": the suite is fine, the author interrupted it. The handler owns what
+// the interrupt says; the sweep's own reading of its cancelled toolchain — and
+// an empty table — stay unprinted. The comparison path has carried this guard
+// since it was written; the plain sweep's side only became reachable when
+// cancellation started actually stopping the toolchain.
+func TestAnInterruptDuringTheBaselineIsNotReportedAsABrokenSuite(t *testing.T) {
+	throwawayModule(t)
+	// Loaded before run is called: the interrupt is in hand the moment the
+	// handler starts listening, which lands it in the baseline — the fixture's
+	// test sleeps two seconds, so nothing else has had time to begin.
+	sigs := make(chan os.Signal, 1)
+	sigs <- os.Interrupt
+	exited := make(chan int, 4)
+	var out bytes.Buffer
+	errOut := &lockedBuf{}
+
+	run([]string{spec(t, sweepFor("func Answer() int { return 43 }"))}, &out, errOut, sigs,
+		func(c int) { exited <- c })
+
+	select {
+	case code := <-exited:
+		if code != exitInterrupted {
+			t.Errorf("exit = %d, want the interrupted status %d", code, exitInterrupted)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the signal was never heard: nothing tried to exit")
+	}
+	if s := errOut.String(); !strings.Contains(s, "interrupted") {
+		t.Errorf("stderr = %q, want the handler's own message", s)
+	}
+	// The two readings this used to hand out: the sweep's ("could not be run",
+	// over a suite that was merely interrupted) and the empty table.
+	if s := errOut.String(); strings.Contains(s, "could not be run") || strings.Contains(s, "cancelled after") {
+		t.Errorf("stderr reports the interrupt as a sweep failure: %q", s)
+	}
+	if out.String() != "" {
+		t.Errorf("stdout should stay empty on an interrupted run, got %q", out.String())
+	}
+}

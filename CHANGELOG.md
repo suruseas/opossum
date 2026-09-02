@@ -6,6 +6,62 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.24.4] - 2026-09-02
+
+### Fixed
+
+- A value with a line break in it — a multi-line PEM key in `.env`, say — no
+  longer breaks the compose file that references it. Interpolation runs on the
+  raw text, so the value's second line used to land in the document as YAML
+  structure and the whole load failed with a syntax error; the value is now
+  held aside during parsing and restored whole afterwards, so `${PEM}` yields
+  the full multi-line string exactly as docker compose does (measured on
+  Docker Compose v5.4.0). One visible shift: a reference written inside a
+  double-quoted scalar used to survive with the value's line breaks folded to
+  spaces — those now arrive as real line breaks too, which is what docker
+  hands over.
+- A line break inside a compose value no longer breaks what opossum writes or
+  says about it. The applied/suggestion summaries printed on screen kept the
+  rest of such a value on opossum's own line (it used to continue at column
+  zero, where it read as opossum's words), and the overlay's comment blocks
+  flatten it too — previously one multi-line value made the generated
+  `compose.opossum.yaml` fail its own validity check, which cost every fix
+  from that run, announced only as a YAML error on a file you never wrote.
+  Notes were already flattened; now all three entry kinds are.
+- The audit summary and the workspace-snapshot listing no longer let quoted
+  values write lines of their own. A file path or destination reported by
+  `opossum run --audit`, and a snapshot directory name listed by
+  `opossum ws ls`, used to carry a line break onto the screen at the column
+  where opossum's own findings start; both are flattened now, and
+  `opossum ws snapshot` refuses names containing control characters outright.
+  A snapshot that already carries such a name can no longer be addressed by
+  name (`ws rm`, `ws rollback`, `ws diff` refuse it); its data is untouched,
+  and `opossum ws prune --all` — or deleting its directory under
+  `.opossum-snapshots/` by hand — still cleans it up.
+- The Docker-socket warning now asks the same question as the migration note:
+  does either end of the mount name `docker.sock`? It used to match the
+  substring anywhere in the line, which warned people whose mounts carry no
+  Docker socket at all — a directory like `docker.sock.d/`, a socket named
+  `my-docker.sock`, and the anonymous form `- /var/run/docker.sock`, which
+  mounts nothing from the host under Docker either (measured on Docker
+  Compose v5.4.0: it canonicalizes to a plain anonymous volume), so there was
+  no divergence to warn about.
+- The formula-to-cask migration steps in the README ran the uninstall last,
+  which could leave you with no `opossum` at all: the cask refuses to
+  overwrite what already sits at `/opt/homebrew/bin/opossum` — the formula's
+  own link included — so its install step could place nothing, and the
+  uninstall then removed the only binary. The steps now uninstall the formula
+  first (with a note about the brief gap), and the README gains a recovery
+  section for anyone who followed the old order: `brew trust --cask` then
+  `brew reinstall --cask suruseas/opossum/opossum` brings opossum back.
+- `make test` no longer reports another run's temporary directories as leftovers from this one. The check compares `$TMPDIR` before and after, and a suite started in a second terminal appears in that difference exactly as a leak does; it said so, but left the reader with no way to tell which they were looking at. The names carry the pid of the process that made them — the sweep that reclaims them has always read it — so the report reads it too, and lists a directory whose maker is still alive separately, without offering to remove it. Anything whose maker has gone, and anything whose name has no pid to read, is reported as before.
+- Warnings that embed a failure — watch's rebuild, restart, sync and setup
+  errors, the volume-seeding warnings, the supervisor's stop-marker warning —
+  now quote it the way the CLI's error output does: continuation lines are
+  indented, and a line break inside a quoted value — a bind path, a service
+  name — can no longer start a line of its own at the column where opossum's
+  messages begin.
+
 ## [0.24.3] - 2026-09-01
 
 ### Fixed
@@ -32,7 +88,7 @@ All notable changes to opossum are documented here. The format follows
 
 ### Changed
 
-- The Homebrew package is now published as a cask rather than a formula. `brew install suruseas/opossum/opossum` works as before and still pulls in Apple's `container` runtime. An existing formula install hears about the move on its next `brew update`, but does not cross on its own: Homebrew wants a migration into a third-party tap trusted first, and prints the two commands that finish it — `brew trust --cask suruseas/opossum/opossum`, then `brew install --cask suruseas/opossum/opossum`. The old keg is unlinked rather than uninstalled, and `brew uninstall --formula --force opossum` clears it when convenient. The cask clears macOS's quarantine attribute on install, so the unsigned binary runs without a Gatekeeper detour. This follows Homebrew's direction for pre-compiled binaries — the tooling that generated the old formula shape is being retired.
+- The Homebrew package is now published as a cask rather than a formula. `brew install suruseas/opossum/opossum` works as before and still pulls in Apple's `container` runtime. An existing formula install hears about the move on its next `brew update`, but does not cross on its own: Homebrew wants a migration into a third-party tap trusted first, and stops at a warning. Take the order from the README's install section, which uninstalls the formula before installing the cask — not the order Homebrew prints in that warning. Installing the cask while the formula is still linked does not fail: Homebrew sees the formula's own symlink in the binary's place, skips the link, and still reports the cask installed, so uninstalling the formula afterwards takes away the only `opossum` on your `PATH`. If that has already happened, `brew reinstall --cask suruseas/opossum/opossum` puts it back. The cask clears macOS's quarantine attribute on install, so the unsigned binary runs without a Gatekeeper detour. This follows Homebrew's direction for pre-compiled binaries — the tooling that generated the old formula shape is being retired.
 
 ## [0.24.1] - 2026-08-28
 
@@ -1025,7 +1081,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.24.3...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.24.4...HEAD
+[0.24.4]: https://github.com/suruseas/opossum/compare/v0.24.3...v0.24.4
 [0.24.3]: https://github.com/suruseas/opossum/compare/v0.24.2...v0.24.3
 [0.24.2]: https://github.com/suruseas/opossum/compare/v0.24.1...v0.24.2
 [0.24.1]: https://github.com/suruseas/opossum/compare/v0.24.0...v0.24.1

@@ -3226,6 +3226,50 @@ func TestUpWarnsOnDockerSocketMount(t *testing.T) {
 	}
 }
 
+// The warning asks the same question as the note: does either END of the
+// mount name docker.sock? Each row here misses on all but
+// one clause, so narrowing the predicate to one side — or letting it read the
+// unsplit string again — turns exactly one row (#599 has the history: the old
+// substring read warned a gpg-agent owner about docker.sock.d/, warned on
+// my-docker.sock, and warned on an anonymous volume that mounts nothing from
+// the host under docker either — measured on Docker Compose v5.4.0, which
+// canonicalizes `- /var/run/docker.sock` to `type: volume` with no host
+// source; no divergence, so nothing to warn about).
+func TestTheSocketWarningReadsTheEndsOfTheMount(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		host  string // "" = anonymous (the mount is just the target)
+		targ  string
+		warns bool
+	}{
+		{"named on the host side only", "docker.sock", "/run/inner.sock", true},
+		{"named on the container side only", "outer.sock", "/var/run/docker.sock", true},
+		{"a directory that merely says docker.sock", "docker.sock.d/S.gpg-agent", "/run/user/1000/gnupg/S.gpg-agent", false},
+		{"a name that merely ends in docker.sock", "my-docker.sock", "/run/my-docker.sock", false},
+		{"an anonymous volume at the socket's path", "", "/var/run/docker.sock", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt, _ := fakeShim(t)
+			mount := tc.targ
+			if tc.host != "" {
+				// Under a real directory so the up can create what a bind needs
+				// and the walk reaches the warning.
+				mount = filepath.Join(t.TempDir(), tc.host) + ":" + tc.targ
+			}
+			p := project("demo", map[string]*compose.Service{
+				"app": {Image: "app:1", Volumes: []string{mount}},
+			})
+			var out bytes.Buffer
+			if err := orchestrator.New(p, rt, "opossum", &out).Up(true); err != nil {
+				t.Fatalf("Up: %v", err)
+			}
+			if got := strings.Contains(out.String(), "[OPSM-204]"); got != tc.warns {
+				t.Errorf("%s: warned=%v, want %v\n%s", mount, got, tc.warns, out.String())
+			}
+		})
+	}
+}
+
 // Where it stops matters, and the documentation now says so: this is not a
 // pre-flight. Services earlier in the order are already running when the bad
 // mount is reached, and the rollback takes them away again. AGENTS.md used to

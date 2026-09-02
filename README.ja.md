@@ -73,12 +73,22 @@ formula は自動では cask に切り替わりません。サードパーティ
 
 ```sh
 brew update
+brew uninstall --formula --force opossum   # /opt/homebrew/bin/opossum を cask のために空ける
 brew trust --cask suruseas/opossum/opossum
 brew install --cask suruseas/opossum/opossum
-brew uninstall --formula --force opossum   # 旧 keg は unlink されるだけで、削除はされません
 ```
 
-これで `PATH` 上の `opossum` は cask のバイナリになり、`opossum version` が現行リリースを報告します。注意点が1つ：`/opt/homebrew/bin` に手置きの `opossum`（Homebrew 管理外のファイル）があると、cask は上書きせずそこで止まります——先にそのファイルを退けてください。
+uninstall が先頭にあるのは、cask が `/opt/homebrew/bin/opossum` に既に何かあるとリンクを張らないためです——しかもそれが formula 自身のリンクの場合、警告（`skipping link`）を出すだけで**「successfully installed」と成功を報告します**。バイナリが置かれなかったことを、何も教えてくれません。（uninstall と install の間、`opossum` は一時的に `PATH` から消えます。最後の install で戻ります。）完了後は `which opossum` が Caskroom を指し、`opossum --version` が現行リリースを報告します。
+
+**移行後に `opossum` が見つからない場合**——この案内の以前の版は uninstall を最後に置いており、唯一のバイナリが消えることがありました。その状態では formula は既に消えていて、cask の一歩だけが残っています：
+
+```sh
+brew trust --cask suruseas/opossum/opossum
+brew reinstall --cask suruseas/opossum/opossum   # 未インストールと言われたら install
+opossum --version
+```
+
+`already a Binary at /opt/homebrew/bin/opossum` で止まる場合は、Homebrew 管理外の何かがまだそこに居ます——`ls -l /opt/homebrew/bin/opossum` で確認し、退けてから再実行してください。
 
 ### ソースから
 

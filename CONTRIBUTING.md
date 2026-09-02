@@ -88,6 +88,13 @@ a clean machine shows up here, before the push. The tree goes in as committed:
 an uncommitted fix in your working tree cannot make the sieve green for a push
 that does not include it, and nothing a test writes survives the container.
 
+The hook is wired per clone — `make hooks` sets `core.hooksPath` once, and
+that is the whole of it — and a clone where nobody has is the quiet kind of
+gap: its pushes go through with no gate and no message, which from outside
+looks exactly like a sieve that passed. So `make test` says so, first thing,
+whenever the clone it runs in is not wired. It says it and then runs the gate;
+the line is there to be seen, not to stop anything.
+
 The sieve needs the Docker daemon running; the hook refuses, and says so,
 when it is not. What the sieve does not run is the current Go release — it
 uses the version go.mod asks for, and the second compiler is half of what the
@@ -121,7 +128,7 @@ whatever they were measuring at the time.
 There is a hook for the half of that which answers in about a second:
 
 ```sh
-git config core.hooksPath .githooks
+make hooks    # git config core.hooksPath .githooks
 ```
 
 It runs `gofmt -l .` and `go vet` for both platforms, and refuses the commit if
@@ -147,7 +154,9 @@ What it does not catch, so that a green commit is not read as more than it is:
   moved out or deleted.
 
 `core.hooksPath` replaces `.git/hooks` rather than adding to it: anything already
-there stops running. Nothing is there in this repository today (only the samples
+there stops running. The same goes for a `core.hooksPath` set globally — `make
+hooks` sets the clone's own, which wins, so a hooks directory of your own stops
+running in this clone (and was not running this repository's sieve before). Nothing is there in this repository today (only the samples
 git ships), but a tool that installs its own hooks later — `git lfs install`, for
 one — would go quiet.
 
