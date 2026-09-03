@@ -319,8 +319,38 @@ func (s *Service) UnmarshalYAML(value *yaml.Node) error {
 	if dep, ok := keys["deploy"]; ok && deployHasExtra(dep) {
 		s.Unsupported = append(s.Unsupported, "deploy")
 	}
+	// `networks` in its map form carries per-network settings (aliases,
+	// ipv4_address, …) that opossum reads past — ServiceNetworks keeps only the
+	// names. Each dropped key is named here as `networks.<net>.<key>`, so an
+	// alias that never resolves was announced rather than discovered.
+	if nets, ok := keys["networks"]; ok {
+		s.Unsupported = append(s.Unsupported, ignoredServiceNetworkFields(nets)...)
+	}
 	sort.Strings(s.Unsupported)
 	return nil
+}
+
+// ignoredServiceNetworkFields lists the keys under a service's map-form
+// `networks:` entries, all of which are dropped (the entry's name is the only
+// thing acted on). A list-form `networks:` carries no keys and yields nothing.
+func ignoredServiceNetworkFields(n yaml.Node) []string {
+	if n.Kind != yaml.MappingNode {
+		return nil
+	}
+	var decls map[string]map[string]yaml.Node
+	if n.Decode(&decls) != nil {
+		return nil
+	}
+	var out []string
+	for net, fields := range decls {
+		for k := range fields {
+			if strings.HasPrefix(k, "x-") {
+				continue
+			}
+			out = append(out, fmt.Sprintf("networks.%s.%s", net, k))
+		}
+	}
+	return out
 }
 
 // deployHasExtra reports whether a `deploy:` node contains anything beyond
@@ -538,6 +568,115 @@ type VolumeDecl struct {
 	Name     string `yaml:"name"`
 }
 
+// UnmarshalYAML accepts `external` as a bool or as the older map form
+// (`external: {name: x}`), the way docker compose still does (with a
+// deprecation notice; measured on v5.4.0, which canonicalizes it to
+// `name: x` + `external: true`). Older compose files carry the map form
+// often, and reading it as a type error sent people to the wrong place.
+func (d *VolumeDecl) UnmarshalYAML(value *yaml.Node) error {
+	if err := wantMapping(value, "VolumeDecl"); err != nil {
+		return err
+	}
+	var raw rawVolumeDecl
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	ext, name, err := decodeExternal(&raw.External)
+	if err != nil {
+		return err
+	}
+	d.External = ext
+	d.Name, err = externalName(raw.Name, name, &raw.External)
+	return err
+}
+
+// wantMapping reproduces the decoder's own refusal of a value that is not a
+// mapping, naming the declaration the way the default decoder did — the raw
+// shapes below are internal names, and a reader acts on "VolumeDecl", not on
+// "rawVolumeDecl".
+func wantMapping(value *yaml.Node, decl string) error {
+	if value.Kind == yaml.MappingNode || value.Kind == 0 || (value.Kind == yaml.ScalarNode && value.Tag == "!!null") {
+		return nil
+	}
+	return &yaml.TypeError{Errors: []string{fmt.Sprintf("line %d: cannot unmarshal %s into compose.%s", value.Line, value.ShortTag(), decl)}}
+}
+
+// externalName settles the name between an explicit `name:` and the map
+// form's `external.name`. docker compose accepts both when they agree and
+// refuses the file when they differ (measured on v5.4.0: "name and
+// external.name conflict; only use name"), and so does this.
+func externalName(explicit, fromExternal string, at *yaml.Node) (string, error) {
+	switch {
+	case fromExternal == "":
+		return explicit, nil
+	case explicit == "" || explicit == fromExternal:
+		return fromExternal, nil
+	}
+	return "", &yaml.TypeError{Errors: []string{fmt.Sprintf("line %d: name %q and external.name %q conflict; only use name", at.Line, explicit, fromExternal)}}
+}
+
+// decodeExternal reads an `external:` value: absent or a bool, or the map form
+// whose `name` names the pre-existing resource. Anything else is refused by
+// shape, naming what was found, rather than left to the decoder's
+// "cannot unmarshal !!map into bool".
+func decodeExternal(n *yaml.Node) (external bool, name string, err error) {
+	shape := func(got string) error {
+		return &yaml.TypeError{Errors: []string{fmt.Sprintf("line %d: external: expected true/false or a mapping with name, got %s", n.Line, got)}}
+	}
+	switch n.Kind {
+	case 0:
+		return false, "", nil
+	case yaml.ScalarNode:
+		var b bool
+		if err := n.Decode(&b); err == nil {
+			return b, "", nil
+		}
+		// A quoted "true"/"false" is a string to YAML and a bool to docker
+		// compose (measured on v5.4.0); read it the same way.
+		if b, perr := strconv.ParseBool(n.Value); perr == nil && n.Tag == "!!str" {
+			return b, "", nil
+		}
+		return false, "", shape(fmt.Sprintf("%q", n.Value))
+	case yaml.MappingNode:
+		// Only `name` lives here. docker compose refuses any other key
+		// ("additional properties … not allowed"), and so does this — a typo
+		// for `name` would otherwise turn into a nameless external volume.
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			if k := n.Content[i].Value; k != "name" {
+				return false, "", &yaml.TypeError{Errors: []string{fmt.Sprintf("line %d: external: unknown key %q (only name is allowed here)", n.Content[i].Line, k)}}
+			}
+		}
+		var m struct {
+			Name string `yaml:"name"`
+		}
+		if err := n.Decode(&m); err != nil {
+			return false, "", err
+		}
+		return true, m.Name, nil
+	}
+	return false, "", shape(kindName(n.Kind))
+}
+
+// The declarations as they are read, with `external` kept as a node until
+// decodeExternal has looked at its shape. Named — not anonymous structs —
+// because a decode error names the type it failed to fill, and the reader
+// acts on "VolumeDecl" where "struct { … }" says nothing.
+type (
+	rawVolumeDecl struct {
+		External yaml.Node `yaml:"external"`
+		Name     string    `yaml:"name"`
+	}
+	rawNetworkDecl struct {
+		Internal bool      `yaml:"internal"`
+		External yaml.Node `yaml:"external"`
+		Name     string    `yaml:"name"`
+	}
+	rawSecret struct {
+		File     string    `yaml:"file"`
+		External yaml.Node `yaml:"external"`
+	}
+)
+
 // NetworkDecl is a top-level `networks:` entry. opossum namespaces and creates a
 // declared network per project (like the default), acting on:
 //   - `internal: true` — a host-only network created with `container network
@@ -551,6 +690,25 @@ type NetworkDecl struct {
 	Internal bool   `yaml:"internal"`
 	External bool   `yaml:"external"`
 	Name     string `yaml:"name"`
+}
+
+// UnmarshalYAML: see VolumeDecl — the map form of `external` is read the
+// same way here.
+func (d *NetworkDecl) UnmarshalYAML(value *yaml.Node) error {
+	if err := wantMapping(value, "NetworkDecl"); err != nil {
+		return err
+	}
+	var raw rawNetworkDecl
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	ext, name, err := decodeExternal(&raw.External)
+	if err != nil {
+		return err
+	}
+	d.Internal, d.External = raw.Internal, ext
+	d.Name, err = externalName(raw.Name, name, &raw.External)
+	return err
 }
 
 // ServiceNetworks is a service's `networks:` — the declared networks it joins.
@@ -593,6 +751,25 @@ func (n *ServiceNetworks) UnmarshalYAML(value *yaml.Node) error {
 type Secret struct {
 	File     string `yaml:"file"`
 	External bool   `yaml:"external"`
+}
+
+// UnmarshalYAML: the map form of `external` marks the secret external, so the
+// load refuses it as an external secret (which it is) rather than as a type
+// error.
+func (s *Secret) UnmarshalYAML(value *yaml.Node) error {
+	if err := wantMapping(value, "Secret"); err != nil {
+		return err
+	}
+	var raw rawSecret
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	ext, _, err := decodeExternal(&raw.External)
+	if err != nil {
+		return err
+	}
+	s.File, s.External = raw.File, ext
+	return nil
 }
 
 // SecretRef is a service's reference to a top-level secret. The short form is

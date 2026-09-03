@@ -1378,3 +1378,35 @@ func TestFidelityInspectReadsTheRunningSideForTheAddress(t *testing.T) {
 		t.Error("a published port's host address is not the container's address")
 	}
 }
+
+// Two errors whose format carries the name of the thing and the CLI's own
+// words about it, in that order: `creating network %q: %w\n%s` and
+// `starting %q: %w\n%s`. Exchanging the name and the output leaves both
+// compiling and both tests above green — TestStartSurfacesError only asked
+// whether an error came back at all (`swaps -sweep ./internal/runtime` found
+// both). Read the other way round, the first line of the error names the
+// CLI's complaint as the thing that failed and puts the name where the
+// explanation goes. Both are compared whole — the wording, that is: whether
+// the CLI's error stays unwrappable (%w rather than %v) is a different
+// property, and nothing here pins it.
+func TestTheStartErrorNamesTheContainerBeforeTheCLIsWords(t *testing.T) {
+	err := replayShim(t, "Error: container not found: ghost\n", 1).Start("ghost")
+	if err == nil {
+		t.Fatal("Start should surface an error when the container is missing")
+	}
+	want := "starting \"ghost\": exit status 1\nError: container not found: ghost"
+	if err.Error() != want {
+		t.Errorf("Start said:\n%q\nwant:\n%q", err.Error(), want)
+	}
+}
+
+func TestTheNetworkErrorNamesTheNetworkBeforeTheCLIsWords(t *testing.T) {
+	created, err := replayShim(t, "Error: no such subnet available\n", 1).EnsureNetwork("demo-net", false)
+	if err == nil || created {
+		t.Fatalf("a failed `network create` should come back as an error, got created=%v err=%v", created, err)
+	}
+	want := "creating network \"demo-net\": exit status 1\nError: no such subnet available"
+	if err.Error() != want {
+		t.Errorf("EnsureNetwork said:\n%q\nwant:\n%q", err.Error(), want)
+	}
+}

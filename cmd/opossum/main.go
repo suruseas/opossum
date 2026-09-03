@@ -1142,23 +1142,37 @@ func adaptProject(stderr io.Writer, o *orchestrator.Orchestrator, dryRun bool) (
 		// for. That much holds wherever the reader is standing: it is a property of
 		// the findings, and the same test decides it here and on the writing path.
 		//
-		// What that second run does with the project as a whole is a different
-		// question, and not one to answer from here. It may write nothing — an
-		// overlay already there, a compose file under a name discovery does not
-		// look for, --dry-run again — or it may write plenty, because -f reads the
-		// file it was given while discovery reads what it finds, override files
-		// included, and the two do not see the same project. Both directions are
-		// #518. Neither is claimed here.
+		// No second run is offered. "Re-run without -f" used to be the advice,
+		// and it sent the reader back for a run this cannot vouch for: it may
+		// write nothing — an overlay already there, a compose file under a
+		// name discovery does not look for, --dry-run again, a directory that
+		// cannot be written to — or it may write something else entirely,
+		// because -f reads the file it was given while discovery reads what it
+		// finds, override files included, and the two do not see the same
+		// project. What this run does know is what the overlay would hold, so
+		// that is what it hands over, as text: the reader can put it in place
+		// themselves, and where, is said.
 		body, changes := o.PlanOverlay()
 		switch {
 		case hasActionable(changes):
-			fmt.Fprintf(stderr, "opossum: found %d change(s) this project needs, but -f was given — "+
-				"an overlay is only merged when opossum discovers the compose file itself. "+
-				"Re-run without -f to have them written, or apply them by hand:\n", len(changes))
+			// The way to use it is said as the command to type, and that command
+			// keeps -f: an overlay is auto-merged only next to a compose file
+			// opossum discovers, and the file -f named may be nowhere near one —
+			// another directory, another name, a directory with a different
+			// project's compose in it. Named as a second -f, the overlay merges
+			// wherever it is, against the file it was written for.
+			fmt.Fprintf(stderr, "opossum: found %d change(s) this project needs, but -f was given, and an "+
+				"overlay is merged on its own only when opossum discovers the compose file itself — "+
+				"so none was written. Here is what one would hold. To use it, write it as %s next to %s "+
+				"and name both:\n  opossum up --from-docker-compose%s -f %s\n",
+				len(changes), orchestrator.OverlayFileName, composeFiles[0], fileFlags(composeFiles),
+				orchestrator.OverlayFileName)
 			// Listed here rather than pointing at warnings further down: on this
-			// path there are none. A reader told to apply changes by hand has to be
-			// able to see which.
+			// path there are none. The headlines are the index; the text below
+			// them is the file, and the notes' prose in it counts as reported.
 			reportEntries(stderr, changes)
+			reportOverlayText(stderr, body)
+			o.MarkNotesReported(changes)
 		case len(changes) > 0:
 			// No second run is offered for these: an overlay holding only them is
 			// never written, with or without -f, so the run the reader was being
@@ -1235,6 +1249,16 @@ func adaptProject(stderr io.Writer, o *orchestrator.Orchestrator, dryRun bool) (
 		fmt.Fprintf(stderr, "opossum: couldn't write %s (%v) — starting without it. "+
 			"What it would have contained:\n", orchestrator.OverlayFileName, err)
 		reportEntries(stderr, changes)
+		// The headlines above are the index; the file is the content. Nobody
+		// is getting the file, so its text goes here instead — YAML blocks and
+		// the prose beside them alike, as written, so it can be put in place
+		// by hand. Only the header that explains the file to a reader of the
+		// file is dropped: there is no file for it to explain.
+		reportOverlayText(stderr, body)
+		// The notes' prose reached the reader just now, inside that text; the
+		// up that follows must not say it again as a warning (MarkNotesReported
+		// has the contract).
+		o.MarkNotesReported(changes)
 		return nil, nil
 	}
 	reportOverlay(stderr, "wrote", changes)
@@ -1513,6 +1537,41 @@ func noteProse(body string) string {
 		out = append(out, trimmed)
 	}
 	return strings.Join(out, "\n")
+}
+
+// fileFlags spells the -f flags a run was given, as they would be typed again.
+func fileFlags(files []string) string {
+	var b strings.Builder
+	for _, f := range files {
+		b.WriteString(" -f ")
+		b.WriteString(f)
+	}
+	return b.String()
+}
+
+// reportOverlayText prints the overlay's text for a reader who is not getting
+// the file: every line two spaces in, minus the leading comment block in which
+// the file introduces itself (it ends at the first blank line). The text is
+// otherwise as it would have been written — comment marks, "$$" and all —
+// because the one thing a reader can do with it is write it into a file.
+func reportOverlayText(stderr io.Writer, body string) {
+	lines := strings.Split(strings.TrimRight(body, "\n"), "\n")
+	start := 0
+	for i, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			start = i + 1
+			break
+		}
+	}
+	fmt.Fprintln(stderr)
+	for _, line := range lines[start:] {
+		if line == "" {
+			fmt.Fprintln(stderr)
+			continue
+		}
+		fmt.Fprintf(stderr, "  %s\n", line)
+	}
+	fmt.Fprintln(stderr)
 }
 
 // reportEntries prints entries grouped by what opossum is claiming.

@@ -6,6 +6,42 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.24.5] - 2026-09-04
+
+### Fixed
+
+- When `up --from-docker-compose` cannot write `compose.opossum.yaml` — a
+  directory it has no permission to create files in, say — it now prints the
+  overlay's text after the headlines, indented, minus the header that
+  introduces the file to a reader of the file: the YAML it would have applied
+  and the `Why:` (and, for notes, `What to expect:`) beside every entry, as they would have been
+  written, so the file can be put in place by hand. It used to promise "what it
+  would have contained" and then show one headline per entry, leaving the
+  reasons nowhere. (The road where no overlay is written because it would only
+  hold notes already printed its prose.)
+- `up --from-docker-compose -f <file>` no longer tells you to "re-run without
+  -f" to have the overlay written. That second run reads the compose file it
+  discovers on its own — with its override file — rather than the file `-f`
+  named, and may write nothing at all (an overlay already there, a file name
+  discovery does not look for, `--dry-run` again, a directory it cannot write
+  to) or something else. Instead the run prints the overlay's text after the
+  headlines — the YAML and the `Why:` beside every entry, as it would have been
+  written — and says how to use it: write it as `compose.opossum.yaml` next to
+  the file `-f` named and pass both, `-f <file> -f compose.opossum.yaml`. A
+  note's prose shown this way is not repeated as a warning by the `up` that
+  follows.
+- The older map form of `external` — `external: {name: x}` under a volume or a
+  network — is now read the way docker compose reads it (as `external: true`
+  with that name), instead of failing the load with a type error about
+  unmarshalling a map into a bool. For a secret it means what it says, an
+  external secret, and is refused as one.
+- Network settings opossum reads past are now named when they are dropped,
+  the way volume fields already were: `ipam`, `driver` and the like under a
+  top-level `networks:` declaration, and `aliases` / `ipv4_address` under a
+  service's map-form `networks:` entry, appear in `opossum config`'s ignored
+  list and in `--verbose` warnings as `networks.<net>.<key>`. An alias that
+  never resolved used to be the only sign it had been ignored.
+
 ## [0.24.4] - 2026-09-02
 
 ### Fixed
@@ -1081,7 +1117,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.24.4...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.24.5...HEAD
+[0.24.5]: https://github.com/suruseas/opossum/compare/v0.24.4...v0.24.5
 [0.24.4]: https://github.com/suruseas/opossum/compare/v0.24.3...v0.24.4
 [0.24.3]: https://github.com/suruseas/opossum/compare/v0.24.2...v0.24.3
 [0.24.2]: https://github.com/suruseas/opossum/compare/v0.24.1...v0.24.2

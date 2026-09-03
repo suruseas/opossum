@@ -110,7 +110,7 @@ them.
 | `ports` | ✅ | passed to `container run -p`; both the short form (`"8080:80"`, `"3000"`) and the long mapping form (`{target, published, protocol, host_ip}`) are accepted. A bare container port gets a host port (Apple's runtime requires one): the same number when it's free, otherwise a free one, with a notice. |
 | `environment` | ✅ | list or map form; null value passes host value through |
 | `env_file` | ✅ | string or list (short, or long `{path, required}`); `KEY=VALUE` files folded in, `environment` overrides them. A missing file — or one that fails to expand — errors unless `required: false`, and only where the environment is needed: `config`, `up` and `run` raise it, while `ps`, `logs` and `config --services` do not. A service that `profiles:` keeps out of this run is not read by any of them |
-| `volumes` | ✅ | bind mounts (host paths resolved against the compose dir; `~` expanded; a missing source directory is created), named volumes (namespaced `<project>_<volume>`), anonymous volumes (`- /app/node_modules`, named after the service and path), and `type: tmpfs` (mounted via `--tmpfs`); short `src:dst[:ro]` or long form (`{type, source, target, read_only}`) |
+| `volumes` | ✅ | `external: true` (with optional `name`), or the older map form `external: {name: x}`, which is read the way docker compose reads it — a `name:` that differs from the map's is refused, an unknown key in the map is refused; `external: null` is read as false where docker refuses it. Also: bind mounts (host paths resolved against the compose dir; `~` expanded; a missing source directory is created), named volumes (namespaced `<project>_<volume>`), anonymous volumes (`- /app/node_modules`, named after the service and path), and `type: tmpfs` (mounted via `--tmpfs`); short `src:dst[:ro]` or long form (`{type, source, target, read_only}`) |
 | `tmpfs` | ✅ | service-level tmpfs targets (string or list); folded together with any `type: tmpfs` volume entries |
 | `secrets` | ✅ | file-based only; mounted read-only at `/run/secrets/<name>` (the `*_FILE` pattern). `external` secrets are rejected; `uid`/`gid`/`mode` are not applied |
 | `depends_on` | ✅ | list or long (`condition`) form — orders startup and gates on `service_healthy` / `service_completed_successfully` |
@@ -229,6 +229,10 @@ text can't write such a value in place, so opossum holds it aside behind a
 one-line private-use marker (U+E001) and restores it after the parse — which is
 why a compose file or variable that already contains U+E001 is refused.
 
+For the same reason, a reference in a mapping **key** (`${NAME}: value`) is
+expanded too: raw text has no notion of key versus value. docker compose leaves
+keys alone, so a file that relies on a literal `${…}` key reads differently here.
+
 The values in an env file are themselves expanded, as docker compose does. This
 was measured against Compose v5.3.1 case by case, because two of the rules are not
 the ones a reader would guess:
@@ -346,7 +350,7 @@ features aren't supported. The detailed rationale for each is in
 - **Won't run at all**: composes that need Linux-host kernel access (WireGuard's `NET_ADMIN` + `/lib/modules`) — Apple `container` doesn't provide it (also true of Docker Desktop for the host-path cases).
 - **Won't manage *these* containers**: tools that drive Docker through `/var/run/docker.sock` (e.g. Portainer). Apple `container` exposes no Docker-compatible daemon socket of its own — it talks to the host over XPC — so nothing here answers on that path about the containers it runs. The mount itself is not the obstacle: bind-mounting a host Unix socket into a container *does* work (since `container` 1.1.0), and a Docker daemon was reached that way from inside a container on 2026-08-28. That is the one socket that has been measured here; what a session socket mount (X11, PulseAudio) reaches is a separate question, and has not been measured — see **OPSM-106**. What puts a symlink at that name varies by which Docker distribution you have, and one merely installed answers nothing — so what you get, if anything answers, is that daemon's containers, not opossum's.
 - **cgroup-sensitive JVM images (e.g. Elasticsearch 7.x)**: the container's bundled JDK reads the host cgroup to size the heap, and Apple `container`'s VM doesn't expose the cgroup mount the way it expects — the process crashes at launch with `CgroupInfo.getMountPoint() … null` before any config applies (`ES_JAVA_OPTS`/`JAVA_TOOL_OPTIONS` don't help; observed on Elasticsearch 7.16 and 7.17). `opossum ps` shows such a service as `stopped`; check `opossum logs <svc>`. This is a runtime/JDK–VM incompatibility, not an opossum limitation.
-- **Not parsed**: `configs`, `extends`, and the map form of `external`.
+- **Not parsed**: `configs` and `extends` (ignored, and listed by `config`).
 
 Everything else in the [Compose support](#compose-fields) and
 [Command support](#commands) tables works as in docker compose.
@@ -391,9 +395,10 @@ disturbing it:
   usual "two engines, one data directory" hazard, not something opossum does to
   you.
 - **Ports and data.** If your Docker stack is already up on the same host ports,
-  opossum's `up` simply fails to bind (nothing is harmed). And because named-volume
-  data isn't shared between the two runtimes, opossum starts such a service from a
-  fresh, empty volume rather than your Docker data.
+  opossum's `up` refuses before starting anything and names the port (`OPSM-201`;
+  nothing is harmed). And because named-volume data isn't shared between the two
+  runtimes, opossum starts such a service from a fresh volume — seeded from the
+  image, not from your Docker data.
 
 In short: **point opossum at your existing `docker-compose.yml` and try `opossum
 up`** — the worst case is a port clash or an unsupported field it simply skips

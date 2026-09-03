@@ -40,8 +40,8 @@ Three things, with the measurement behind each.
 **1. Real compose files, measured.** 156 self-hosting projects from
 [Compose-Examples](https://github.com/Haxxnet/Compose-Examples), run unmodified:
 61 (39%) came up completely as written, 78 (50%) with `--from-docker-compose`, and
-0 were made worse. Every remaining failure is reported with a diagnostic code and
-a suggested fix rather than a raw runtime error.
+0 were made worse. Each failure opossum can diagnose is reported with a diagnostic
+code and a suggested fix rather than a raw runtime error.
 [Method, corpus and the full breakdown →](docs/compatibility.md)
 
 **2. It fixes the incompatibilities for you.** `opossum up --from-docker-compose`
@@ -174,7 +174,7 @@ the verbs you already know:
 ```sh
 opossum ps            # services / IP / ports / status
 opossum stats         # live CPU / memory / net / I/O per service
-opossum logs web -f   # follow a service's logs
+opossum logs web --follow   # follow a service's logs
 opossum exec -it web sh
 opossum down          # stop + remove (add -v to also drop named volumes)
 ```
@@ -186,8 +186,8 @@ slow; see [Troubleshooting builds](docs/troubleshooting.md#troubleshooting-build
 opossum ignores (`dns_search`, `container_name`, …).
 
 **If a service doesn't come up**, opossum warns about the usual causes at `up`
-time and names the fix — an unregistered DNS domain, Postgres data on a named
-volume, a host port already taken (on macOS a busy 5000/7000 is often AirPlay
+time and names the fix — an unregistered DNS domain, Postgres data on a volume
+opossum didn't create, a host port already taken (on macOS a busy 5000/7000 is often AirPlay
 Receiver), a build context under `/private/tmp`.
 [Each one, and what to do →](docs/troubleshooting.md)
 

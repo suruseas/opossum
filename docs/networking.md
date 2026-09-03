@@ -64,7 +64,7 @@ opossum is a thin orchestration layer — it never re-implements the runtime:
 - **Service discovery** — creates a per-project network (`<project>-net`) and
   attaches every service to it. The runtime registers a container in its DNS
   server when the container is **named `<name>.<domain>`**, so opossum names each
-  container `<service>.<domain>` (e.g. `db.opossum`) and starts it with
+  container `<service>.<project>.<domain>` (e.g. `db.shop.opossum`) and starts it with
   `--dns-domain <domain>` (default `opossum`). Because every container then has
   `<domain>` in its search list, peers reach each other by the **bare service
   name** (`db`, `cache`, …) — matching compose semantics. The domain must be

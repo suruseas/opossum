@@ -27,7 +27,7 @@ Docker Compose ファイル（`docker-compose.yml`）を読み、オープンな
 **1. 実運用の compose ファイルで測ってある。**
 [Compose-Examples](https://github.com/Haxxnet/Compose-Examples) の自己ホスト用
 プロジェクト 156 本を無改変で実行：無改変のまま完走が 61 本（39%）、
-`--from-docker-compose` を付けて 78 本（50%）、悪化 0 本。残った失敗はすべて、
+`--from-docker-compose` を付けて 78 本（50%）、悪化 0 本。opossum が診断できた失敗は、
 生のランタイムエラーではなく診断コードと対処の提案として報告されます。
 [方法・母数・内訳（英語）→](docs/compatibility.md)
 
@@ -132,14 +132,14 @@ opossum up --from-docker-compose   # ビルド済みイメージを Docker か�
 ```sh
 opossum ps            # サービス / IP / ポート / 状態
 opossum stats         # サービスごとのライブ CPU / メモリ / net / I/O
-opossum logs web -f   # サービスのログを追う
+opossum logs web --follow   # サービスのログを追う
 opossum exec -it web sh
 opossum down          # 停止＋削除（-v で named volume も削除）
 ```
 
 **Apple のビルダーでビルドしたい場合は**、`--from-docker-compose` を外して `opossum up` を実行すれば、opossum が `build:` を持つサービスを自前でビルドします（重いビルドには時間がかかることがあります。[ビルドのトラブルシュート（英語）](docs/troubleshooting.md#troubleshooting-builds)参照）。どちらの場合も、先に `opossum config` を実行すると、補間を解決した後の設定と、opossum が無視するフィールド（`dns_search`、`container_name` など）を確認できます。
 
-**サービスが起動しないときは**、よくある原因は `up` の時点で警告として表示され、対処も併記されます——DNS ドメインの未登録、Postgres のデータが named volume 直下、ホストポートの使用中（macOS で 5000/7000 が埋まっているのはたいてい AirPlay レシーバー）、`/private/tmp` 配下のビルドコンテキスト。
+**サービスが起動しないときは**、よくある原因は `up` の時点で警告として表示され、対処も併記されます——DNS ドメインの未登録、opossum が作っていない volume 上の Postgres データ、ホストポートの使用中（macOS で 5000/7000 が埋まっているのはたいてい AirPlay レシーバー）、`/private/tmp` 配下のビルドコンテキスト。
 [それぞれの対処（英語）→](docs/troubleshooting.md)
 
 ### きれいに消すには

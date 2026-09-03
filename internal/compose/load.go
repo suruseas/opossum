@@ -86,7 +86,8 @@ func ignoredTopLevel(doc interpolated) []string {
 		// real `name:`), so reporting the whole key as ignored was wrong — and noisy,
 		// since almost every real project declares named volumes. The fields inside a
 		// declaration that opossum *doesn't* act on are reported individually below,
-		// so nothing is silently dropped.
+		// so nothing is silently dropped. `networks` goes the same way: acted on
+		// for external/name/internal, with the rest reported per field.
 		case k == "name" || k == "services" || k == "version" || k == "secrets" || k == "networks" || k == "volumes":
 		case strings.HasPrefix(k, "x-"):
 		default:
@@ -94,7 +95,34 @@ func ignoredTopLevel(doc interpolated) []string {
 		}
 	}
 	out = append(out, ignoredVolumeFields(top["volumes"])...)
+	out = append(out, ignoredNetworkFields(top["networks"])...)
 	sort.Strings(out)
+	return out
+}
+
+// networkDeclFields are the per-network keys opossum acts on. Anything else in
+// a declaration (ipam, driver, driver_opts, labels, attachable, enable_ipv6) is
+// parsed and dropped, and used to be dropped without a word — a project that
+// pins a subnet under `ipam` got a plain project network and nothing said so.
+var networkDeclFields = map[string]bool{"external": true, "name": true, "internal": true}
+
+// ignoredNetworkFields reports unacted-on keys inside top-level network
+// declarations as `networks.<net>.<key>`, the way ignoredVolumeFields does for
+// volumes: the same kind of silence, now with the same voice.
+func ignoredNetworkFields(node yaml.Node) []string {
+	var decls map[string]map[string]yaml.Node
+	if node.IsZero() || node.Decode(&decls) != nil {
+		return nil
+	}
+	var out []string
+	for net, fields := range decls {
+		for k := range fields {
+			if networkDeclFields[k] || strings.HasPrefix(k, "x-") {
+				continue
+			}
+			out = append(out, fmt.Sprintf("networks.%s.%s", net, k))
+		}
+	}
 	return out
 }
 

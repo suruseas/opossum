@@ -7,7 +7,7 @@ about it — plus the limits worth knowing before you hit them.
 
 (see [Differences from docker compose](compatibility.md#where-it-differs-from-docker-compose)):
 
-1. **DNS domain not registered** → services can't resolve each other by name. Run the setup line above.
+1. **DNS domain not registered** → services can't resolve each other by name. Run the one-time setup from the README: `sudo container system dns create opossum`.
 2. **Postgres on a volume opossum didn't create** → `initdb` refuses it, naming `lost+found`. Volumes opossum creates are cleared of it, so recreating the volume (`opossum down -v`, then `up`) is the fix; `PGDATA=/var/lib/postgresql/data/pgdata` still works if you'd rather keep the volume.
 3. **Host port already in use** → `up` names the port and service; on macOS a taken 5000/7000 is often the **AirPlay Receiver** (turn it off in System Settings › General › AirDrop & Handoff, or remap the host port).
 4. **Building from a temp/scratch dir** → Apple's builder can't read a context under `/private/tmp` or a symlink. Build from a real path under your home directory (or use `--from-docker-compose`).
@@ -61,13 +61,16 @@ build can starve.
 
 ## Known limitations
 
-- **Named volumes are mount points, so a database's data directory can't sit
-  directly on one.** opossum passes named volumes through and the runtime
-  auto-creates them, but `container` mounts a volume as a filesystem mount point
-  containing `lost+found`. Postgres/MySQL `initdb` refuses a non-empty data
-  directory, so `-v pgdata:/var/lib/postgresql/data` fails. Point the database at
-  a **subdirectory** of the mount instead — e.g. for Postgres set
-  `environment: { PGDATA: /var/lib/postgresql/data/pgdata }`. Only bind-mount host
+- **A volume opossum did not create may refuse a database's data directory.**
+  `container` mounts a volume as a filesystem mount point holding `lost+found`,
+  and Postgres's `initdb` refuses a non-empty data directory. opossum removes
+  `lost+found` from the volumes it creates, so a plain
+  `-v pgdata:/var/lib/postgresql/data` works as it does on Docker. A volume made
+  elsewhere (an older opossum, `container volume create`, another project) still
+  holds it: `up` reports `OPSM-101` and the way out — recreate the volume
+  (`opossum down -v`, then `up`), or keep it and point `PGDATA` at a
+  **subdirectory** (`environment: { PGDATA: /var/lib/postgresql/data/pgdata }`).
+  MySQL/MariaDB tolerate the mount point either way. Only bind-mount host
   paths are resolved to absolute paths. Named volumes are namespaced per project
   (`<project>_<volume>`), so concurrent projects don't share one — except a
   volume declared `external: true` in the top-level `volumes:` block, which is

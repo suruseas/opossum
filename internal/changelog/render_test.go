@@ -299,3 +299,53 @@ func TestLoadNormalizesLineEndingsAndPadding(t *testing.T) {
 		t.Errorf("body = %q", body)
 	}
 }
+
+// Three refusals whose format strings carry two or more same-typed arguments:
+// the fragment's name and the offending line, the name and the offending
+// character, the bad type and the list of good ones. Exchanged, each still
+// compiles and each test above stays green — the tests asked whether a rule
+// refused and, for the margin, which one; none asked what it said
+// (`swaps -sweep ./internal/changelog`). A refusal
+// that names the line as the file, or the character as the file, sends the
+// author to open the wrong thing; so each is compared whole.
+func TestARefusalNamesTheFragmentAndThenWhatIsWrongWithIt(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "7-margin.added.md", "- One.\n\nTwo, at the margin.\n")
+	_, err := changelog.Load(dir)
+	if err == nil {
+		t.Fatal("a line at the margin should be refused")
+	}
+	want := "7-margin.added.md: line 3 is at the left margin: \"Two, at the margin.\"\n" +
+		"a fragment is one entry: after the first line, a line is indented by two " +
+		"spaces, is blank, or starts the next entry with \"- \". At the margin it is " +
+		"read as the changelog's own structure once the fragment is published"
+	if err.Error() != want {
+		t.Errorf("the margin refusal said:\n%q\nwant:\n%q", err.Error(), want)
+	}
+
+	dir = t.TempDir()
+	write(t, dir, "8-japanese.fixed.md", "- 日本語で書いた。\n")
+	_, err = changelog.Load(dir)
+	if err == nil {
+		t.Fatal("a Japanese entry should be refused")
+	}
+	want = "8-japanese.fixed.md: the entry is published into CHANGELOG.md as written, which is in English — " +
+		"this one has \"日\" in it"
+	if err.Error() != want {
+		t.Errorf("the language refusal said:\n%q\nwant:\n%q", err.Error(), want)
+	}
+
+	dir = t.TempDir()
+	write(t, dir, "9-x.bogus.md", "- One.\n")
+	_, err = changelog.Load(dir)
+	if err == nil {
+		t.Fatal("an unknown type should be refused")
+	}
+	// Load wraps the name's own refusal as "<name>: <reason>", and the name is
+	// part of what is compared: a refusal that drops it leaves the author with
+	// a bad type and no file to open.
+	want = "9-x.bogus.md: unknown type \"bogus\" (want one of added, changed, deprecated, removed, fixed, security)"
+	if err.Error() != want {
+		t.Errorf("the type refusal said:\n%q\nwant:\n%q", err.Error(), want)
+	}
+}

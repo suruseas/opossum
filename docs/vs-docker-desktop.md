@@ -115,15 +115,16 @@ up hundreds of short-lived containers.
 
 ## Daily-op gaps for a docker compose user
 
-opossum covers the common verbs: `up`, `down`, `ps`, `logs -f`, `exec`, `build`,
-`pull`, `run`, `restart`, `stop`, `kill`, `stats`, `config`, `images`. Known
-gaps:
+opossum covers the common verbs: `up`, `down`, `destroy`, `ps`, `logs --follow`,
+`exec`, `build`, `pull`, `import`, `run`, `start`, `restart`, `stop`, `kill`,
+`stats`, `config`, `images`, `cp`, `watch`, `doctor`, `ws`. What is and isn't
+there:
 
 | Operation | Status | Notes |
 |-----------|--------|-------|
-| `cp` (copy files to/from a service) | ❌ | `container cp` exists underneath — thin wrapper planned |
-| `watch` (live sync/rebuild on change) | ❌ | dev-loop convenience; planned as a `develop.watch` MVP |
-| Restart policies (`restart: always`) | ❌ ignored | auto-restarting a crashed container needs a supervisor; a real limitation, not just a missing flag |
+| `cp` (copy files to/from a service) | ✅ | `opossum cp` wraps `container cp` |
+| `watch` (live sync/rebuild on change) | ✅ | `opossum watch` runs the compose file's `develop.watch` rules — sync, sync+restart, rebuild |
+| Restart policies (`restart: always`) | ✅ | `up` starts a per-project supervisor (`always`/`unless-stopped` exactly, `on-failure` with a bounded retry count); `down` stops it |
 | GUI / dashboard | ❌ | opossum is CLI-only — a different tool class than Docker Desktop |
 | One-shot `system prune` | ❌ | `container system df` shows the aggregate (and `opossum doctor` flags large reclaimable storage), but cleanup is per-resource — `image prune` / `volume prune`, not one command |
 

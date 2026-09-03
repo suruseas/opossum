@@ -1325,13 +1325,60 @@ func TestMinusFDoesNotSendTheReaderBackForNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("up: %v", err)
 	}
-	if !strings.Contains(out, "Re-run without -f") {
-		t.Errorf("there is a change here that a second run would write, so say so:\n%s", out)
+	// There is a change here, and it is handed over as the file's text — not
+	// as an errand: a run without -f may write nothing, or something else,
+	// and neither is this run's to promise (#518).
+	if !strings.Contains(out, "so none was written. Here is what one would hold") {
+		t.Errorf("a fixable change should be handed over, not promised for a second run:\n%s", out)
+	}
+	if strings.Contains(out, "Re-run without -f") {
+		t.Errorf("the second run is not this run's to promise:\n%s", out)
+	}
+	// The headlines stay as the index of what follows.
+	if !strings.Contains(out, "opossum: 2 change(s) opossum would apply:") {
+		t.Errorf("the headlines should still index the text:\n%s", out)
+	}
+	if !strings.Contains(out, "      PGDATA: /var/lib/postgresql/data/pgdata") {
+		t.Errorf("the overlay's own YAML should be on screen, since no file will be:\n%s", out)
+	}
+	// The way to use it is a command that keeps -f: discovery may find a
+	// different file, or none, and an overlay named as a second -f merges
+	// wherever it is. The advice is then followed, to the letter, and has to
+	// work: the text on screen becomes the file, and the command applies it.
+	const advice = "  opossum up --from-docker-compose -f mine.yaml -f compose.opossum.yaml"
+	if !strings.Contains(out, "write it as compose.opossum.yaml next to mine.yaml and name both:\n"+advice+"\n") {
+		t.Errorf("the reader should be told where to put it and how to name it, got:\n%s", out)
+	}
+	_, text, _ := strings.Cut(out, advice+"\n")
+	var overlay []string
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(line, "opossum:") || strings.HasPrefix(line, "Dry run") {
+			if len(overlay) > 0 && strings.HasPrefix(line, "Dry run") {
+				break
+			}
+			continue
+		}
+		overlay = append(overlay, strings.TrimPrefix(line, "  "))
+	}
+	if err := os.WriteFile(filepath.Join(fixable, "compose.opossum.yaml"), []byte(strings.Join(overlay, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	applied, err := run(t, "up", "--from-docker-compose", "-f", "mine.yaml", "-f", "compose.opossum.yaml", "--no-build", "--dry-run")
+	if err != nil {
+		t.Fatalf("up with the overlay named: %v", err)
+	}
+	if !strings.Contains(applied, "-e PGDATA=/var/lib/postgresql/data/pgdata") {
+		t.Errorf("following the advice should apply the change to the planned run, got:\n%s", applied)
+	}
+	// The text carries the Docker-socket note's prose, so the up that follows
+	// must not tell it again as a warning (the contract MarkNotesReported keeps).
+	if n := strings.Count(out, "[OPSM-204]"); n != 1 {
+		t.Errorf("the Docker-socket note was told %d times; its prose was shown, so once:\n%s", n, out)
 	}
 	// One or the other, never both: a project with a fixable thing and a note in
 	// it takes the first branch whole.
 	if strings.Contains(out, because) {
-		t.Errorf("a second run writes an overlay here, so the reader should not also be told it does not:\n%s", out)
+		t.Errorf("an overlay would hold something here, so the reader should not also be told it would not:\n%s", out)
 	}
 
 	// One note, not two. Two notes is the shape where "the notes" and "the last
@@ -1369,11 +1416,11 @@ func TestMinusFDoesNotSendTheReaderBackForNothing(t *testing.T) {
 }
 
 // A suggestion is not applied, but it is written down for the reader to
-// uncomment — so an overlay does hold it, and sending the reader back for a run
-// that writes one is right. The question this asks is the same one the writing
-// path asks, and asking a narrower one here (only applied changes count) would
-// tell a project of suggestions that opossum was writing no YAML for them.
-func TestMinusFStillOffersTheSecondRunForSuggestions(t *testing.T) {
+// uncomment — so an overlay does hold it, and its text is worth handing over.
+// The question this asks is the same one the writing path asks, and asking a
+// narrower one here (only applied changes count) would tell a project of
+// suggestions that opossum was writing no YAML for them.
+func TestMinusFHandsOverTheSuggestionsText(t *testing.T) {
 	fakeShim(t)
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "mine.yaml"), []byte(
@@ -1386,8 +1433,12 @@ func TestMinusFStillOffersTheSecondRunForSuggestions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("up: %v", err)
 	}
-	if !strings.Contains(out, "Re-run without -f") {
-		t.Errorf("an overlay holds a suggestion, so the run that writes one is worth offering:\n%s", out)
+	if !strings.Contains(out, "so none was written. Here is what one would hold") {
+		t.Errorf("an overlay holds a suggestion, so its text is worth handing over:\n%s", out)
+	}
+	// The suggestion itself, commented out as the file would carry it.
+	if !strings.Contains(out, "# [opossum suggestion — NOT APPLIED]") {
+		t.Errorf("the suggestion's text should be on screen, as the file would hold it:\n%s", out)
 	}
 	if strings.Contains(out, "opossum writes no YAML for") {
 		t.Errorf("these are suggestions — opossum writes the YAML, commented:\n%s", out)
@@ -6167,5 +6218,251 @@ func TestTheDockerSocketIsSpokenAboutOnce(t *testing.T) {
 				t.Errorf("the run speaks about the Docker socket %d time(s), want %d:\n%s", got, tc.want, said)
 			}
 		})
+	}
+}
+
+// Three messages whose format strings carry two or more same-typed arguments,
+// found by exchanging them (`swaps -sweep ./cmd/opossum`): the suite stayed
+// green with each exchange, and the probe confirmed the suite does feed the
+// arguments different values — nobody read the sentence whole. Each is pinned
+// whole here, with the two things in their places.
+
+// `ws rollback` names the snapshot it restored and the auto-save it made of
+// what was there. Read the other way round, it sends the reader to recover
+// from the wrong one. The auto-save carries a timestamp, so its name is taken
+// from the line and the line is then compared whole.
+func TestWsRollbackNamesTheTargetAndTheAutosaveInThatOrder(t *testing.T) {
+	work := filepath.Join(t.TempDir(), "work")
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExec(t, filepath.Join(work, "f.txt"), "v1")
+	if _, err := run(t, "ws", "snapshot", "s1", "--path", work); err != nil {
+		t.Fatalf("ws snapshot: %v", err)
+	}
+	out, err := run(t, "ws", "rollback", "s1", "--path", work)
+	if err != nil {
+		t.Fatalf("ws rollback: %v", err)
+	}
+	// The auto-save is named before-rollback-YYYYMMDD-HHMMSS.nnnnnnnnn (see
+	// workspace's timestamp). A match that stopped short would shorten `want`
+	// by the same amount and the whole-line comparison below would go red, so
+	// the class is exact rather than generous.
+	autosave := regexp.MustCompile(`before-rollback-[0-9]{8}-[0-9]{6}\.[0-9]{9}`).FindString(out)
+	if autosave == "" {
+		t.Fatalf("no auto-save named in %q", out)
+	}
+	want := fmt.Sprintf("Rolled workspace back to %q (the previous state was saved as %q)\n", "s1", autosave)
+	if out != want {
+		t.Errorf("ws rollback said:\n%q\nwant:\n%q", out, want)
+	}
+}
+
+// `ws ls` is a two-column table, NAME then SAVED. A test that looks for the
+// name somewhere in the output is satisfied with the columns the other way
+// round; this reads each row by column, with the saved-at times set so that
+// the two rows cannot be confused with each other either.
+func TestWsLsPutsTheNameBeforeTheTimeOnEveryRow(t *testing.T) {
+	work := filepath.Join(t.TempDir(), "work")
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExec(t, filepath.Join(work, "f.txt"), "v1")
+	stamps := map[string]time.Time{
+		"older": time.Date(2026, 1, 2, 3, 4, 5, 0, time.Local),
+		"newer": time.Date(2026, 6, 7, 8, 9, 10, 0, time.Local),
+	}
+	for name, at := range stamps {
+		if _, err := run(t, "ws", "snapshot", name, "--path", work); err != nil {
+			t.Fatalf("ws snapshot %s: %v", name, err)
+		}
+		// The snapshot directory is a sibling of the workspace; its mtime is
+		// what the table prints.
+		dirs, _ := filepath.Glob(filepath.Join(filepath.Dir(work), "*", name))
+		if len(dirs) != 1 {
+			t.Fatalf("expected one snapshot directory for %s, found %v", name, dirs)
+		}
+		if err := os.Chtimes(dirs[0], at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out, err := run(t, "ws", "ls", "--path", work)
+	if err != nil {
+		t.Fatalf("ws ls: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) != 3 || strings.Join(strings.Fields(lines[0]), " ") != "NAME SAVED" {
+		t.Fatalf("want a NAME SAVED header and two rows, got:\n%s", out)
+	}
+	// Split on whitespace, which reads the columns only because the names
+	// this test chose carry none — a snapshot name may. The columns are the
+	// question here, not the names.
+	for _, row := range lines[1:] {
+		cols := strings.Fields(row)
+		if len(cols) != 3 { // name, date, time
+			t.Errorf("row %q does not read as name, date, time", row)
+			continue
+		}
+		at, ok := stamps[cols[0]]
+		if !ok {
+			t.Errorf("row %q: first column %q is not a snapshot name — the columns are the other way round", row, cols[0])
+			continue
+		}
+		if got, want := cols[1]+" "+cols[2], at.Format("2006-01-02 15:04:05"); got != want {
+			t.Errorf("row %q: saved-at column is %q, want %q", row, got, want)
+		}
+	}
+}
+
+// With --force there is nobody to read a warning, so a mistargeted destroy is
+// refused — and the refusal names two projects: the one asked for and the one
+// this directory belongs to. Exchanged, it tells the reader the opposite of
+// what happened. Pinned whole, including which files would have gone.
+func TestDestroyForceRefusalNamesBothProjectsTheRightWayRound(t *testing.T) {
+	fakeShim(t)
+	t.Setenv("STATE_DIR", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("INSPECT_PROJECT", "other")
+	dir := destroyProject(t, "name: mine\nservices:\n  web:\n    image: web\n")
+	t.Chdir(dir)
+
+	_, err := run(t, "-p", "other", "destroy", "--force")
+	if err == nil {
+		t.Fatal("a mistargeted --force destroy must be refused")
+	}
+	want := fmt.Sprintf("refusing to destroy %q from a directory that belongs to %q: "+
+		"--force would remove this directory's generated files (%s) under another "+
+		"project's name, with nothing asked and nobody to read a warning.\n"+
+		"  To remove only %[1]q's containers, volumes, images and supervisor, add --keep-local.\n"+
+		"  To take this directory apart, run it here without -p.",
+		"other", "mine", filepath.Join(dir, ".opossum")+", "+filepath.Join(dir, "compose.opossum.yaml"))
+	if err.Error() != want {
+		t.Errorf("the refusal said:\n%q\nwant:\n%q", err.Error(), want)
+	}
+}
+
+// When the overlay cannot be written, "what it would have contained" used to be
+// followed by one headline per entry — the index of a file nobody was getting,
+// with the file's own words (Why, What to expect, the YAML itself) nowhere.
+// The note-only road learned to print its prose (#491); this is the other
+// road, the one with something to apply, and it prints the file's text so
+// that a reader can put it in place by hand.
+func TestAnOverlayThatCannotBeWrittenIsShownInFull(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes into a 0555 directory, so the road this measures is not there")
+	}
+	fakeShim(t)
+	t.Setenv("STATE_DIR", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	dir := t.TempDir()
+	// One change to apply (PGDATA under a named volume) and one note (a device
+	// node), so both kinds of entry have text that only the file carried. The
+	// bind's host path carries a "$": the overlay writes it as "$$" so compose
+	// reads it back literally, and the text on screen is for writing into a
+	// file, so it must keep the "$$" — which nothing can measure without one.
+	host := filepath.Join(t.TempDir(), "price$data")
+	if err := os.MkdirAll(host, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Written into the compose file as "$$": compose interpolates a bare "$"
+	// as a variable, and "$data" is nobody's.
+	inCompose := strings.ReplaceAll(host, "$", "$$")
+	// The path sits at a second Postgres's data directory, which is what puts
+	// it into an entry (a suggestion) at all: a bind anywhere else is not
+	// something the overlay speaks about.
+	compose := "name: n5\nservices:\n  db:\n    image: postgres:16\n    volumes:\n" +
+		"      - pgdata:/var/lib/postgresql/data\n      - /dev/ttyUSB0:/dev/ttyUSB0\n" +
+		"  pg2:\n    image: postgres:16\n    volumes:\n      - " + inCompose + ":/var/lib/postgresql/data\n" +
+		"volumes:\n  pgdata: {}\n"
+	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte(compose), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	// Nothing can be created here, so the overlay's temp file cannot either.
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	out, _ := run(t, "up", "--from-docker-compose", "--no-build", "--no-supervisor")
+	if !strings.Contains(out, "couldn't write compose.opossum.yaml") {
+		t.Fatalf("this test is about the road where the overlay cannot be written, and that road was not taken:\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "compose.opossum.yaml")); err == nil {
+		t.Fatal("the overlay was written after all, so nothing here measures the fallback")
+	}
+	// The headlines stay — they are the index — and then the file's words: the
+	// applied entry's YAML and its Why, the note's Why and What to expect, and
+	// the "$$" as the file would have carried it.
+	for _, want := range []string{
+		"What it would have contained:",
+		"opossum: 3 change(s) opossum would apply:",
+		"      PGDATA: /var/lib/postgresql/data/pgdata",
+		"  # Why: Apple container attaches a named volume as a filesystem mount point",
+		"  # [opossum note] service \"db\": mounts the host path /dev/ttyUSB0",
+		"  # What to expect: expect this service's device-dependent features not to work",
+		"price$$data",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the fallback should carry %q, said:\n%s", want, out)
+		}
+	}
+	// And not the file introducing itself to a reader of the file: after the
+	// headlines, the first line of the text is the YAML, two spaces in. Asked
+	// by position rather than by the header's wording, which this test does
+	// not own.
+	_, after, _ := strings.Cut(out, "What it would have contained:")
+	var first string
+	for _, line := range strings.Split(after, "\n")[1:] {
+		if strings.TrimSpace(line) != "" && !strings.HasPrefix(line, "opossum:") {
+			first = line
+			break
+		}
+	}
+	if first != "  services:" {
+		t.Errorf("the text should open with the YAML, two spaces in, got %q in:\n%s", first, out)
+	}
+}
+
+// The text just shown carries the notes' prose, so the up that follows must
+// not say the same thing again as a warning — that is the contract the
+// note-only road keeps through MarkNotesReported, and this road prints the
+// same prose. A Docker-socket mount is the note that also has a warning in
+// `up`, so it is the one that shows a second telling.
+func TestAnOverlayShownInFullCountsAsItsNotesReported(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes into a 0555 directory, so the road this measures is not there")
+	}
+	fakeShim(t)
+	t.Setenv("STATE_DIR", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	// A file named docker.sock, outside the read-only project so the bind's
+	// source exists (a symlink to a socket would be refused before any of
+	// this, which is a different road).
+	sock := filepath.Join(t.TempDir(), "docker.sock")
+	if err := os.WriteFile(sock, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	compose := "name: n6\nservices:\n  db:\n    image: postgres:16\n    volumes:\n" +
+		"      - pgdata:/var/lib/postgresql/data\n      - " + sock + ":/var/run/docker.sock\nvolumes:\n  pgdata: {}\n"
+	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte(compose), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	out, _ := run(t, "up", "--from-docker-compose", "--no-build", "--no-supervisor")
+	if !strings.Contains(out, "couldn't write compose.opossum.yaml") {
+		t.Fatalf("the road where the overlay cannot be written was not taken:\n%s", out)
+	}
+	if !strings.Contains(out, "  # [opossum note] service \"db\": mounts the Docker socket") {
+		t.Fatalf("the note's prose should have been shown, said:\n%s", out)
+	}
+	if n := strings.Count(out, "[OPSM-204]"); n != 1 {
+		t.Errorf("the Docker-socket note was told %d times; the prose was shown, so the warning must stay quiet:\n%s", n, out)
 	}
 }
