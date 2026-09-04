@@ -588,11 +588,38 @@ type serviceAdaptation struct {
 // have applied the fix by hand, and adapting on top of that would be noise (or
 // wrong).
 func (o *Orchestrator) PlanOverlay() (string, []Adaptation) {
+	body, changes, _ := o.PlanOverlayFor(nil)
+	return body, changes
+}
+
+// PlanOverlayFor is PlanOverlay for a run that named services on the command
+// line. Naming a profile-gated service enables it, as under docker compose, so
+// the plan looks at it too.
+//
+// A service gated behind a profile that is not active is left out. It is not
+// started, not shown by `config` (docker compose omits it there as well) —
+// and so not diagnosed: an entry
+// about it would ask the reader to judge whether a change to a service that
+// is not running concerns them, and a note would say "this cannot be fixed"
+// about something that is not going to run. What was left out is returned by
+// name, so the caller can say so; a later run with the profile enabled finds
+// the overlay already there and reports what those services would need
+// (#492).
+func (o *Orchestrator) PlanOverlayFor(named []string) (body string, changes []Adaptation, gated []string) {
+	on := map[string]bool{}
+	for _, n := range named {
+		on[n] = true
+	}
 	names := make([]string, 0, len(o.Project.Services))
 	for name := range o.Project.Services {
+		if !o.enabled(name, on) {
+			gated = append(gated, name)
+			continue
+		}
 		names = append(names, name)
 	}
 	sort.Strings(names) // deterministic output
+	sort.Strings(gated)
 
 	claimed := map[string]bool{} // volume names this plan has already taken
 	var plans []serviceAdaptation
@@ -602,9 +629,9 @@ func (o *Orchestrator) PlanOverlay() (string, []Adaptation) {
 	plans = append(plans, o.suggestSharedVolumeFix(names)...)
 	plans = append(plans, o.suggestObservedChownFailures(plans, claimed)...)
 	if len(plans) == 0 {
-		return "", nil
+		return "", nil, gated
 	}
-	return renderOverlay(plans), summarize(plans)
+	return renderOverlay(plans), summarize(plans), gated
 }
 
 func summarize(plans []serviceAdaptation) []Adaptation {

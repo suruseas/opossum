@@ -256,7 +256,7 @@ func TestRunJSONStatusMapping(t *testing.T) {
 }
 
 // A large reclaimable total (untagged build layers piling up) warns with the
-// prune fix — the disk-fill case `container images ls` hides.
+// prune fix — the disk-fill case `container image ls` hides.
 func TestCheckStorageWarnsOnLargeReclaimable(t *testing.T) {
 	df := "TYPE           TOTAL  ACTIVE  SIZE    RECLAIMABLE\n" +
 		"Images         286    0       188 GB  188 GB (100%)\n" +

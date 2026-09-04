@@ -2717,11 +2717,32 @@ func (o *Orchestrator) Stats(services []string, noStream bool) error {
 	if err != nil {
 		return err
 	}
-	names := make([]string, len(targets))
-	for i, name := range targets {
-		names[i] = o.containerName(name)
+	names := o.createdContainers(targets)
+	if len(names) == 0 {
+		return fmt.Errorf("no container found for any of the %d service(s) — if they were never started, `opossum up` creates them", len(targets))
 	}
 	return o.rt.Stats(names, noStream)
+}
+
+// createdContainers narrows a list of services to the container names that
+// exist on the runtime, in the order given. "Exists" is what `inspect` said:
+// a runtime that cannot answer at all (apiserver down) reads as "nothing
+// exists" here, which is why the message a caller prints on an empty answer
+// says "not found" and only offers `opossum up` as the likely cause. `container stats` (1.3.1) refuses
+// the whole call when any name it is handed does not exist — "no such
+// container", exit 1, nothing shown for the ones that do — where 1.2.2 skipped
+// the missing name. A service that was never started has no container, so
+// asking for it would blank the stats of every other service; asking only for
+// the ones that exist shows the same thing on either version. Stopped
+// containers are kept: both versions skip those quietly.
+func (o *Orchestrator) createdContainers(services []string) []string {
+	var names []string
+	for _, name := range services {
+		if cname := o.containerName(name); o.rt.Inspect(cname).Exists {
+			names = append(names, cname)
+		}
+	}
+	return names
 }
 
 // Copy copies files between a service's container and the host, like

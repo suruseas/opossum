@@ -1,0 +1,27 @@
+$ ./opossum -f vz/compose.yaml up
+--- exit code: 1
+--- stdout ---
+warning: [OPSM-102] services "a", "b" share named volume "shared", but Apple container attaches a named volume to only one running container at a time — the others fail to start. Use a bind mount (a host path) for shared data, or bake it into the image.
+Creating network vz-net
+Starting a (alpine:3.20)
+a.vz.opossum
+Starting b (alpine:3.20)
+--- stderr ---
+[0/6] [0s]
+[1/6] Fetching image [0s]
+[2/6] Unpacking image [0s]
+[3/6] Fetching kernel [0s]
+[4/6] Fetching init image [0s]
+[5/6] Unpacking init image [0s]
+[6/6] Starting container [0s]
+[6/6] Starting container [0s]
+[0/6] [0s]
+[1/6] Fetching image [0s]
+[2/6] Unpacking image [0s]
+[3/6] Fetching kernel [0s]
+[4/6] Fetching init image [0s]
+[5/6] Unpacking init image [0s]
+[6/6] Starting container [0s]
+[6/6] Starting container [0s]
+Error: failed to bootstrap container (cause: "internalError: "failed to bootstrap container b.vz.opossum (cause: "unknown: "Error Domain=VZErrorDomain Code=2 "The storage device attachment is invalid." UserInfo={NSLocalizedFailure=Invalid virtual machine configuration., NSLocalizedFailureReason=The storage device attachment is invalid.}"")"")
+opossum: [OPSM-103] service "b" can't start: Apple `container` attaches a named volume to only one running container at a time, and "vz_shared" (held by running container "a.vz.opossum") is already attached elsewhere — the second attach fails with a storage-device (VZError) error. Stop the container holding it (`container stop <name>`), or give this service its own volume; for shared data use a bind mount (a host path) instead

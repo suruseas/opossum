@@ -2191,6 +2191,28 @@ func TestStatsCLI(t *testing.T) {
 	}
 }
 
+// container 1.3.1 fails the whole `stats` call when one of the names it is
+// handed does not exist (the shim does the same for $INSPECT_ABSENT). A
+// service that was never started must not take the others' stats down with
+// it: the CLI asks only for the containers that exist.
+func TestStatsLeavesOutAServiceThatWasNeverStartedCLI(t *testing.T) {
+	readLog := fakeShim(t)
+	t.Setenv("INSPECT_ABSENT", "db.demo.opossum")
+	compose := writeCompose(t, "name: demo\nservices:\n  web:\n    image: web:latest\n  db:\n    image: db:latest\n")
+	if _, err := run(t, "-f", compose, "stats", "--no-stream"); err != nil {
+		t.Fatalf("stats with one never-started service should still show the other, got: %v", err)
+	}
+	var stats string
+	for _, l := range readLog() {
+		if strings.HasPrefix(l, "stats") {
+			stats = l
+		}
+	}
+	if !strings.Contains(stats, "web.demo.opossum") || strings.Contains(stats, "db.demo.opossum") {
+		t.Errorf("stats should be asked for web only, got %q", stats)
+	}
+}
+
 func TestCpCLI(t *testing.T) {
 	readLog := fakeShim(t)
 	compose := writeCompose(t, "name: demo\nservices:\n  web:\n    image: web:latest\n")
@@ -6464,5 +6486,131 @@ func TestAnOverlayShownInFullCountsAsItsNotesReported(t *testing.T) {
 	}
 	if n := strings.Count(out, "[OPSM-204]"); n != 1 {
 		t.Errorf("the Docker-socket note was told %d times; the prose was shown, so the warning must stay quiet:\n%s", n, out)
+	}
+}
+
+// `up --from-docker-compose` used to plan the overlay before the run's
+// profiles were enabled, and over every service in the file — so a service
+// gated behind a profile got an entry, and a note, about a run it was not
+// part of. Now the plan follows the run: without the profile the service is
+// left out and said to be; with it (flag or COMPOSE_PROFILES) it is looked at.
+func TestTheOverlayFollowsTheProfilesOfThisRun(t *testing.T) {
+	fakeShim(t)
+	t.Setenv("STATE_DIR", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("COMPOSE_PROFILES", "")
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte(
+		"name: prof\nservices:\n  web:\n    image: alpine:3\n  db:\n    image: postgres:16\n"+
+			"    profiles: [debug]\n    volumes:\n      - pgdata:/var/lib/postgresql/data\nvolumes:\n  pgdata: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	out, err := run(t, "up", "--from-docker-compose", "--no-build", "--dry-run")
+	if err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	if strings.Contains(out, "[OPSM-101]") {
+		t.Errorf("db is not part of this run, so it should not be diagnosed:\n%s", out)
+	}
+	want := "opossum: 1 service(s) gated behind a profile not enabled in this run were not looked at " +
+		"(docker compose leaves them out of `config` the same way): db. A run with the profile enabled " +
+		"reports what they would need."
+	if !strings.Contains(out, want) {
+		t.Errorf("the service left out should be named, with why:\n%s\nwant: %s", out, want)
+	}
+	if regexp.MustCompile(`Startup order: .*\bdb\b`).MatchString(out) {
+		t.Errorf("db is gated and not enabled, so it should not be in the plan:\n%s", out)
+	}
+
+	for name, args := range map[string][]string{
+		"--profile":        {"up", "--from-docker-compose", "--no-build", "--dry-run", "--profile", "debug"},
+		"COMPOSE_PROFILES": {"up", "--from-docker-compose", "--no-build", "--dry-run"},
+		"named":            {"up", "--from-docker-compose", "--no-build", "--dry-run", "db"},
+	} {
+		if name == "COMPOSE_PROFILES" {
+			t.Setenv("COMPOSE_PROFILES", "debug")
+		} else {
+			t.Setenv("COMPOSE_PROFILES", "")
+		}
+		out, err := run(t, args...)
+		if err != nil {
+			t.Fatalf("%s: up: %v", name, err)
+		}
+		if !strings.Contains(out, "[OPSM-101]") {
+			t.Errorf("%s: db is part of this run, so it should be diagnosed:\n%s", name, out)
+		}
+		if strings.Contains(out, "were not looked at") {
+			t.Errorf("%s: nothing was left out, so nothing should be said to be:\n%s", name, out)
+		}
+		// And the run itself starts db: the overlay reload begins from a fresh
+		// orchestrator, and the profiles have to be enabled on it again, or the
+		// entry is written for a service that then does not start.
+		if !regexp.MustCompile(`Startup order: .*\bdb\b`).MatchString(out) {
+			t.Errorf("%s: db is enabled for this run, so it should be in the plan:\n%s", name, out)
+		}
+	}
+}
+
+// The overlay is written once. A later run that enables a profile finds it in
+// place and is told what more it found — and told how to have that written:
+// by deleting the file and running again. That rerun has to be *this* run,
+// profile flags and named services included, because the plan looks only at
+// what the run enables; the plain command would look at fewer and leave the
+// same services out again. The advice is followed to the letter and has to
+// work.
+func TestTheRewriteAdviceRepeatsThisRunsProfiles(t *testing.T) {
+	fakeShim(t)
+	t.Setenv("STATE_DIR", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("COMPOSE_PROFILES", "")
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte(
+		"name: prof\nservices:\n  pg:\n    image: postgres:16\n    volumes:\n      - pg:/var/lib/postgresql/data\n"+
+			"  db:\n    image: postgres:16\n    profiles: [debug]\n    volumes:\n      - pgdata:/var/lib/postgresql/data\n"+
+			"volumes:\n  pg: {}\n  pgdata: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	// Written without the profile: pg's entry only.
+	if _, err := run(t, "up", "--from-docker-compose", "--no-build", "--no-supervisor"); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	first, err := os.ReadFile(filepath.Join(dir, "compose.opossum.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(first), "\"db\"") {
+		t.Fatalf("db was not part of the first run, so the overlay should not hold it:\n%s", first)
+	}
+
+	// With the profile: found more, and the advice names the profile.
+	out, err := run(t, "up", "--from-docker-compose", "--no-build", "--dry-run", "--profile", "debug")
+	if err != nil {
+		t.Fatalf("up --profile debug: %v", err)
+	}
+	if !strings.Contains(out, "found more") || !strings.Contains(out, "[OPSM-101] service \"db\"") {
+		t.Fatalf("the run with the profile should find db's entry missing:\n%s", out)
+	}
+	const advice = "`rm compose.opossum.yaml && opossum up --from-docker-compose --profile debug`"
+	if !strings.Contains(out, advice) {
+		t.Errorf("the rewrite advice should repeat this run's profile, got:\n%s\nwant: %s", out, advice)
+	}
+
+	// Followed to the letter: the rewrite holds db.
+	if err := os.Remove(filepath.Join(dir, "compose.opossum.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(t, "up", "--from-docker-compose", "--no-build", "--no-supervisor", "--profile", "debug"); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	second, err := os.ReadFile(filepath.Join(dir, "compose.opossum.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(second), "service \"db\"") {
+		t.Errorf("following the advice should write db's entry, got:\n%s", second)
 	}
 }

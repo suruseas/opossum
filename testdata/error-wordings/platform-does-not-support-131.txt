@@ -1,0 +1,15 @@
+$ container run --rm --name v131recap-exc excalidraw/excalidraw-room:latest true
+--- exit code: 1
+--- stdout ---
+--- stderr ---
+[0/6] [0s]
+[1/6] Fetching image [0s]
+[1/6] Fetching image [1s]
+[1/6] Fetching image [2s]
+[1/6] Fetching image 0% (1 of 12 blobs, 2 KB/89.1 MB, 1 KB/s) [3s]
+[1/6] Fetching image 28% (3 of 12 blobs, 25.7/89.1 MB, 7 KB/s) [4s]
+[1/6] Fetching image 32% (6 of 12 blobs, 28.7/89.1 MB, 25.7 MB/s) [5s]
+[1/6] Fetching image 54% (8 of 12 blobs, 48.3/89.1 MB, 2.1 MB/s) [6s]
+[1/6] Fetching image 99% (11 of 12 blobs, 89.1/89.1 MB, 31.2 MB/s) [7s]
+[1/6] Fetching image 100% (12 blobs, 89.1 MB) [7s]
+Error: image sha256:2fe999f9be4379e3ee282fc45d75d84a691a6383dde33544514cc395287c7a70 does not support required platforms

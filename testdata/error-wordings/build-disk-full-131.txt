@@ -1,0 +1,41 @@
+$ ./opossum -f bdisk/compose.yaml up
+--- exit code: 1
+--- stdout ---
+Creating network bdisk-net
+Building b
+--- stderr ---
+#1 [resolver] fetching image...docker.io/library/alpine:3.20
+#1 DONE 0.0s
+
+#2 [internal] load build definition from Dockerfile
+#2 transferring dockerfile: 99B done
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 229B done
+#3 DONE 0.0s
+
+#4 oci-layout://docker.io/library/alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+#4 resolve docker.io/library/alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc done
+#4 CACHED
+
+#5 [linux/arm64 1/2] RUN dd if=/dev/zero of=/dev/full bs=1M count=1
+#5 0.040 dd: error writing '/dev/full': No space left on device
+#5 0.040 1+0 records in
+#5 0.040 0+0 records out
+#5 0.040 0 bytes (0B) copied, 0.000280 seconds, 0B/s
+#5 ERROR: process "/bin/sh -c dd if=/dev/zero of=/dev/full bs=1M count=1" did not complete successfully: exit code: 1
+------
+ > [linux/arm64 1/2] RUN dd if=/dev/zero of=/dev/full bs=1M count=1:
+0.040 dd: error writing '/dev/full': No space left on device
+0.040 1+0 records in
+0.040 0+0 records out
+0.040 0 bytes (0B) copied, 0.000280 seconds, 0B/s
+------
+Error: unknown: "failed to solve: process "/bin/sh -c dd if=/dev/zero of=/dev/full bs=1M count=1" did not complete successfully: exit code: 1"
+opossum: building service "b": exit status 1
+  hint: the build ran out of disk space — Apple's builder pulls multi-GB base images and writes build layers onto the host volume. Free space and retry:
+    container image prune -f          # remove unused images
+    container builder delete --force  # clear the builder's cache (recreated automatically)
+    df -h /                           # confirm there's room, then: opossum up
+  (if Apple's builder can't handle this Dockerfile, build it with Docker and import it: opossum import b)

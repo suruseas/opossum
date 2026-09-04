@@ -1,0 +1,6 @@
+$ container volume delete v131recap-vol
+--- exit code: 1
+--- stdout ---
+--- stderr ---
+failed to delete volume: ["error": invalidArgument: "volume 'v131recap-vol' is currently in use and cannot be accessed by another container, or deleted", "id": v131recap-vol]
+Error: delete failed for one or more volumes: ["v131recap-vol"]

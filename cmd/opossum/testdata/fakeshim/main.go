@@ -253,6 +253,16 @@ func main() {
 				names = append(names, a)
 			}
 		}
+		// container 1.3.1: a name that does not exist fails the whole call — no
+		// table for the ones that do (measured 2026-09-04, stats-absent-only.txt).
+		for _, m := range strings.Fields(os.Getenv("INSPECT_ABSENT")) {
+			for _, n := range names {
+				if n == m {
+					fmt.Fprintf(os.Stderr, "Error: no such container: %s\n", n)
+					os.Exit(1)
+				}
+			}
+		}
 		if jsonForm {
 			var objs []string
 			for _, n := range names {

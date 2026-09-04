@@ -1,0 +1,35 @@
+$ ./opossum -f bres/compose.yaml up
+--- exit code: 1
+--- stdout ---
+Creating network bres-net
+Building b
+--- stderr ---
+#1 [resolver] fetching image...docker.io/library/alpine:3.20
+#1 DONE 0.0s
+
+#2 [internal] load build definition from Dockerfile
+#2 transferring dockerfile: 105B done
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 235B done
+#3 DONE 0.0s
+
+#4 oci-layout://docker.io/library/alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+#4 resolve docker.io/library/alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc done
+#4 CACHED
+
+#5 [linux/arm64 1/2] RUN echo "rpc error: code = Unavailable" >&2; exit 1
+#5 0.044 rpc error: code = Unavailable
+#5 ERROR: process "/bin/sh -c echo \"rpc error: code = Unavailable\" >&2; exit 1" did not complete successfully: exit code: 1
+------
+ > [linux/arm64 1/2] RUN echo "rpc error: code = Unavailable" >&2; exit 1:
+0.044 rpc error: code = Unavailable
+------
+Error: unknown: "failed to solve: process "/bin/sh -c echo \"rpc error: code = Unavailable\" >&2; exit 1" did not complete successfully: exit code: 1"
+opossum: building service "b": exit status 1
+  hint: the builder ran out of resources or lost its connection — common for heavy builds. Give it more and retry:
+    container builder delete --force
+    container builder start --cpus 4 --memory 8g
+    opossum up
+  (if Apple's builder can't handle this Dockerfile, build it with Docker and import it: opossum import b)

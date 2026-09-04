@@ -1,0 +1,18 @@
+$ ./opossum -f rootfs/compose.yaml up
+--- exit code: 1
+--- stdout ---
+Creating network rootfs-net
+Created host directory /Users/<user>/opossum-dogfood/v131/rootfs/notthere.conf for a bind mount
+Starting m (alpine:3.20)
+--- stderr ---
+[0/6] [0s]
+[1/6] Fetching image [0s]
+[2/6] Unpacking image [0s]
+[3/6] Fetching kernel [0s]
+[4/6] Fetching init image [0s]
+[5/6] Unpacking init image [0s]
+[6/6] Starting container [0s]
+[6/6] Starting container [0s]
+Error: failed to start process m.rootfs.opossum in container m.rootfs.opossum (cause: "internalError: "failed to start process (cause: "internalError: "startProcess: failed to start process: internalError: "vmexec error: mount failed with errno 20: failed to resolve '/etc/passwd' in rootfs""")"")
+opossum: starting service "m": exit status 1
+  → [OPSM-107] the bind mount for /etc/passwd couldn't be resolved. If it's a config FILE, create it on the host first — opossum creates a missing bind source as a directory, which can't mount onto a file path.

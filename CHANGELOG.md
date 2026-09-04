@@ -6,6 +6,44 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.24.6] - 2026-09-05
+
+### Fixed
+
+- `up --from-docker-compose` no longer writes overlay entries — or notes —
+  about services gated behind a profile that is not enabled in this run.
+  Those services are not started and `config` does not show them (docker
+  compose leaves them out the same way), so an entry about one asked the
+  reader to judge whether a change to something that was not running was
+  theirs to care about. The plan now follows the run: a service is looked at
+  when its profile is enabled (`--profile`, `COMPOSE_PROFILES`) or when it is
+  named on the command line, and the services left out are named up front. A
+  later run with the profile enabled finds the overlay in place and reports
+  what those services would need.
+- With several `-f` files, a service's `networks:` now merges across the two
+  spellings the way docker compose reads them: a file that lists `[back]` over
+  one that wrote `back: {aliases: [...]}` keeps the map's entries (so the
+  per-field report still names the aliases opossum does not act on), and a
+  network both files name is joined once, not passed as two `--network` flags.
+  Before, the list form replaced the map wholesale at merge time, so the
+  aliases disappeared before anything could report them.
+- `opossum stats` (and `stats --host`) now ask the runtime only for the
+  containers that exist. Apple `container` 1.3.1 fails the whole `stats` call
+  when any name it is handed does not exist, so a project with one service
+  that was never started showed nothing for the others; on 1.2.2 the missing
+  name was skipped. When no service has a container at all, `stats` now says
+  so (and points at `opossum up`) instead of handing the runtime an empty list.
+  Also, `doctor`'s storage note named `container images ls`,
+  a command 1.3.1 no longer has — it says `container image ls` now.
+- With several `-f` files, a key an override writes with nothing after it
+  (`working_dir:`, `ports:`, `environment:`, a network's `internal:`, a
+  secret's `file:`) now leaves the earlier file's value in place, the way
+  docker compose reads it. Before, the empty key won: the value was cleared,
+  and a secret that lost its `file:` this way failed the load. `command:` and
+  `entrypoint:` still clear the command, and `A:` inside `environment:` or
+  `build.args` still means "take it from the shell" — both as docker compose
+  does.
+
 ## [0.24.5] - 2026-09-04
 
 ### Fixed
@@ -1117,7 +1155,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.24.5...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.24.6...HEAD
+[0.24.6]: https://github.com/suruseas/opossum/compare/v0.24.5...v0.24.6
 [0.24.5]: https://github.com/suruseas/opossum/compare/v0.24.4...v0.24.5
 [0.24.4]: https://github.com/suruseas/opossum/compare/v0.24.3...v0.24.4
 [0.24.3]: https://github.com/suruseas/opossum/compare/v0.24.2...v0.24.3

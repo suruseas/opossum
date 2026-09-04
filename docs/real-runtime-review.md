@@ -13,7 +13,8 @@ opossum は二層で検証する:
 
 ## いま検証されている `container` の版
 
-**2026-08-21 / `container CLI version 1.2.2`（Homebrew formula `1.2.2_1`）/ macOS 26。**
+**2026-09-04 / `container CLI version 1.3.1`（Homebrew formula `1.3.1`）/ macOS 26。**
+（1.2.2 → 1.3.1 の差分と、1.3.1 で引き直していない主張は `testdata/real-cli-output.md` の冒頭に索引がある。）
 更新は `brew upgrade container`（Apple の pkg ではない）。更新後は `container system start`。
 
 上の表の「日々」が意味を持つのは、fake が**現実の版と一致している**あいだだけ。その根拠は

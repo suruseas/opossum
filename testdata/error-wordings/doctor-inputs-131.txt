@@ -1,0 +1,33 @@
+$ container system df
+--- exit code: 0
+--- stdout ---
+TYPE           TOTAL  ACTIVE  SIZE      RECLAIMABLE
+Images         9      2       18.58 GB  7.68 GB (41%)
+Containers     2      1       3.27 GB   1.37 GB (42%)
+Local Volumes  8      1       777.8 MB  708.4 MB (91%)
+--- stderr ---
+$ container builder status
+--- exit code: 0
+--- stdout ---
+ID        IMAGE                                                STATE    IP  CPUS  MEMORY
+buildkit  ghcr.io/apple/container-builder-shim/builder:0.13.1  stopped      2     2048 MB
+--- stderr ---
+$ container builder status
+--- exit code: 0
+--- stdout ---
+ID        IMAGE                                                STATE    IP               CPUS  MEMORY
+buildkit  ghcr.io/apple/container-builder-shim/builder:0.13.1  running  192.168.69.5/24  2     2048 MB
+--- stderr ---
+$ container system status
+--- exit code: 0
+--- stdout ---
+FIELD              VALUE
+status             running
+appRoot            /Users/<user>/Library/Application Support/com.apple.container/
+installRoot        /opt/homebrew/Cellar/container/1.3.1/
+logRoot            
+apiserver.version  container-apiserver version 1.3.1 (build: release, commit: unspeci)
+apiserver.commit   unspecified
+apiserver.build    release
+apiserver.appName  container-apiserver
+--- stderr ---

@@ -26,9 +26,16 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/suruseas/opossum/internal/suitedir"
 )
+
+// interruptGrace is how long the end of a run waits for an interrupt that may
+// still be on its way from the kernel (see the select at the end of run).
+// Longer than the runtime's hand-off takes on a machine running a whole
+// gate's worth of test binaries at once; shorter than anyone notices.
+const interruptGrace = 500 * time.Millisecond
 
 // Only what this repository names. `opossum-*` covers the three suites that
 // build under $TMPDIR and the dry-run directory the product itself makes; what
@@ -168,18 +175,28 @@ func run(argv []string, w io.Writer) int {
 		fmt.Fprintf(w, "\nthe command was killed by %s rather than exiting\n", killedBy)
 		return code
 	}
+	// Asked here rather than inferred from the command's status, because a
+	// command that catches ^C for itself leaves no trace of it in that status
+	// — `go test` answers 1, the same as a run whose tests failed.
+	//
+	// Asked with a grace period rather than at once. A ^C reaches this process
+	// and the command together, and the command can be gone — trapped, exited,
+	// reaped by Run above — before the runtime here has moved the signal from
+	// the kernel to this channel: that hand-off is a goroutine's turn, and
+	// under a loaded machine it comes late. A read that did not wait called
+	// such a run "failed" — one gate in five, measured in the sieve's
+	// container (#711). A run that left nothing behind returns above and
+	// never reaches this; one that did pays this much, once, at the end,
+	// whether or not anyone interrupted it.
 	select {
 	case <-interrupted:
-		// Asked here rather than inferred from the command's status, because a
-		// command that catches ^C for itself leaves no trace of it in that
-		// status — `go test` answers 1, the same as a run whose tests failed.
 		fmt.Fprintf(w, "\nthis run was interrupted; the command handled that itself and exited %d,\n", code)
 		fmt.Fprintln(w, "so its status says nothing about whether the tests were going to pass")
 		if code == 0 {
 			return 1
 		}
 		return code
-	default:
+	case <-time.After(interruptGrace):
 	}
 	if code == 0 {
 		return 1

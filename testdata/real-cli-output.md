@@ -5,9 +5,29 @@ stdout+stderr と exit code の golden。`testdata/fake-container.sh` はこれ�
 返し、`internal/runtime/runtime_test.go` の忠実性 eval はこの文字列を各パーサに流して
 整合を確認する。**CLI 更新時はここを再採取して同期すること。**
 
-**最終検証: 2026-08-21 / `container CLI version 1.2.2`（Homebrew formula `1.2.2_1`）。**
-下記の節を実機で採り直した（生出力は `~/opossum-dogfood/results/df421-after/`）。各節に
-付いている古い採取日は、その記述が**最初に**確かめられた日。
+**最終検証: 2026-09-04 / `container CLI version 1.3.1`（Homebrew formula `1.3.1`）。**
+下記の節を実機で採り直した（生出力は `~/opossum-dogfood/results/v131-recapture/`、68 ファイル、
+各ファイルは `$ <コマンド>` → `--- exit code:` → `--- stdout ---` → `--- stderr ---` の形）。各節に
+付いている古い採取日は、その記述が**最初に**確かめられた日。**1.3.1 で引き直していない主張**は
+節の中で名指ししてある（「DNS 解決の挙動」の前半、`stats` の `--format`／ストリーミング既定）。
+
+**1.2.2 → 1.3.1 で変わったもの（節ごとの注記が正、ここは索引）**：
+- `network inspect` / `network ls --format json`：`status.ipv6Subnet` が増えた（キー増のみ）
+- `inspect` / `ls -a --format json`：`publishedPorts[].count`・`status.networks[].mtu`・
+  `mounts[].type.volume.{cache,format,sync}` が増えた（キー増のみ。一度も起動していない
+  `buildkit` は `status.startedDate` を持たず、stopped の run コンテナは持っていた——**観測2件、規則は未確認**）。
+  opossum のパーサが読むキーは1つも消えていない
+- `volume delete`：引数なしは `USAGE:` ブロックでなく `Error: no volumes specified and --all not
+  supplied`（exit 1）。成功時は volume 名を stdout にエコーする（1.2.2 は無出力）
+- `stats`：**不在のコンテナ名を渡すと `Error: no such container: <name>`・exit 1 で呼び出し全体が
+  失敗する**（1.2.2 は黙って飛ばしていた）。stopped は今も飛ばして exit 0。→ opossum は
+  存在するコンテナだけを渡す（`createdContainers`）
+- `run --platform` の失敗2文言は両方健在だが、引き金が入れ替わった（下の節）
+- `container images ls`（複数形）は 1.3.1 で `Plugin 'container-images' not found.`・exit 64。単数の
+  `image ls` を使う（`doctor` の案内文を直した）。**1.2.2 で通っていたかは測っていない**（比較対象が消えていた）
+- 更新直後、コンテナ側のネットワークが全滅した（egress・コンテナ間・DNS。CLI 自身の pull は
+  ホスト側なので通る）。`opossum doctor` が `network containers can't reach the internet` で
+  検出し、案内どおり `container system stop && container system start` で直った
 
 **その回で「全節・変化なし」と書いたのは誤りだった（2026-08-23 訂正）。**
 `--platform` の節が載せている失敗の文言は、1.2.2 で**もう1つ増えていた**。採り直したのは
@@ -62,6 +82,7 @@ Error: failed to delete one or more networks: ["<name>"]
       "name" : "<name>",
       ...
 ```
+1.3.1: `status` に `ipv6Subnet` が増えた（`ipv4Gateway`/`ipv4Subnet` はそのまま）。抜粋部は一致。
 
 ## `container network inspect <name>`  （不在, exit 1）
 ```
@@ -81,6 +102,8 @@ Error: container not found: <name>
 `status.state` に状態（`running` / `stopped`）、`status.networks[].ipv4Address` に IF アドレス、
 `configuration.publishedPorts[]` に公開ポート（`containerPort` / `hostAddress`（`0.0.0.0`）/
 `hostPort` / `proto`）。詳細な JSON は `fake-container.sh` の inspect ケースを参照。
+1.3.1 で増えたキー：`publishedPorts[].count`・`status.networks[].mtu`・`mounts[].type.volume.{cache,format,sync}`
+（`encoding/json` は黙って捨てる。シムの形は 1.3.1 の真部分集合のまま）。
 → `Inspect(name)`: この1回のパースで State / IP / Ports / Labels / Exists を取り出し、
 `ps` の IP・PORTS・STATUS 列と、IP/Label 系ヘルパの両方に使う。
 ラベルは `configuration.labels`（マップ）。`run -l opossum.project=<name>` を付けると:
@@ -91,6 +114,8 @@ Error: container not found: <name>
 （bare 名）時の同名衝突ガードと所属メタデータに使う。
 
 ## DNS 解決の挙動（spike で確認 / 複数プロジェクト分離の根拠）
+**1.3.1 で引き直したのは後半（登録済みドメイン＋サブドメイン名前空間化：proj1/proj2 の bare `db` が別 IP に解決）だけ。**
+**前半の「未登録ドメインで NXDOMAIN」は 1.2.2 の観測のまま**（1.3.1 では引いていない）。
 - **登録済みドメイン必須**: `--dns-search proj1`（未登録）だと相手を bare 名で引くと **NXDOMAIN**。
   登録済み `opossum` なら解決成功。`system dns create` は sudo・システム共有。
 - **サブドメインで名前空間化できる**: `--name db.<proj>.opossum` ＋ `--dns-search <proj>.opossum`
@@ -113,14 +138,17 @@ Error: container not found: <name>
 
 ## `container volume delete <name>`  （#59 `down -v` の根拠 / 2026-07-03 実機確認）
 ```
-USAGE: container volume delete [--all] [--debug] [<names> ...]
-  <names>   Volume names        （`delete` は `rm` エイリアスあり）
+# 1.3.1（引数なし, exit 1）:
+Error: no volumes specified and --all not supplied
+# 1.2.2 までは USAGE: container volume delete [--all] [--debug] [<names> ...] のブロックだった
 ```
+（`delete` は `rm` エイリアスあり。使用中の volume は `volume 'X' is currently in use and cannot be
+accessed by another container, or deleted` ＋ `Error: delete failed for one or more volumes: [...]`・exit 1）
 実機ラウンドトリップ（初出時は `container CLI version 1.0.0`）:
 ```
 $ container volume create opossum-review-vol   # 作成
 $ container volume ls                           # -> named / local として一覧
-$ container volume delete opossum-review-vol    # 削除（exit 0、標準出力なし）
+$ container volume delete opossum-review-vol    # 削除（exit 0。1.3.1 は volume 名を stdout にエコー。「無出力」は 1.0.0 期の記録で、1.2.2 は未測）
 $ container volume ls                            # -> もう出ない（削除確認）
 ```
 → `runtime.DeleteVolume(name)` は `volume delete <name>` を発行（best-effort、使用中/不在は無言でスキップ）。
@@ -134,9 +162,13 @@ $ container stats --no-stream <name>
 Container ID  Cpu %    Memory Usage         Net Rx/Tx            Block I/O            Pids
 <name>        0.79%    29.41 MiB / 1.00 GiB 18.08 KiB / 0.57 KiB 25.68 MiB / 0.00 KiB 6
 ```
-実機で確認した重要挙動: **複数コンテナ名を渡すと1テーブルにまとめて表示**し、**stopped/不在のコンテナは
-グレースフルにスキップ**（running 分のみ表示、exit 0）。→ `opossum stats` は出力をパースせず passthrough
-（`runtime.Stats` が `stream` で stdio 直結）するため、この出力形式に依存しない。
+実機で確認した重要挙動: **複数コンテナ名を渡すと1テーブルにまとめて表示**し、**stopped のコンテナは
+グレースフルにスキップ**（running 分のみ表示、exit 0）。**不在の名前は 1.3.1 では飛ばさない**——
+`Error: no such container: <name>`・exit 1 で、同時に渡した running 分も表示されない（1.2.2 は
+飛ばしていた。2026-09-04 実測、`stats-absent-only.txt` / `stats-multi-with-stopped.txt`）。
+→ `opossum stats` は出力をパースせず passthrough（`runtime.Stats` が `stream` で stdio 直結）するため
+出力形式には依存しないが、**渡す名前は存在するコンテナに絞る**（`Orchestrator.createdContainers`）。
+`--format json|table|yaml|toml` とストリーミング既定は help の記述で、1.3.1 では `--no-stream` しか引いていない。
 
 ## `container image inspect` / `image delete`  （#126 `opossum images` / `down --rmi` の根拠 / 2026-07-06 実機採取）
 `opossum images` の PRESENT 判定と `down --rmi` の削除に使う。実機で採取した exit セマンティクス:
@@ -163,9 +195,12 @@ $ container exec <name> redis-cli ping   # -> PONG（Rosetta で稼働）
 この節は長く `does not support required platforms` だけを載せていた。**1.2.2 はもう1つの言い方もする**ので、両方を書く。どちらが出るかは image によって決まり、選べない:
 
 ```
-# image index が arm64 を持たない（excalidraw/excalidraw-room:latest）——取得前に落ちる
+# 1.2.2: image index が arm64 を持たない（excalidraw/excalidraw-room:latest）——取得前に落ちる
 $ container run --rm excalidraw/excalidraw-room:latest true
 Error: platform linux/arm64
+# 1.3.1: 同じ image は 12 blob を全部取得してから、下の「does not support」で落ちる（2026-09-04）。
+# `Error: platform linux/arm64` のほうは、amd64 だけの image を既定 arm64 で走らせると出る
+# （platform-image-no-arm64-131.txt）。2文言とも 1.3.1 に健在、引き金が入れ替わっただけ
 
 # 取得してから不一致が分かる（Compose-Examples/examples/cs2-dedicated-server, atlas）
 Error: image sha256:6822b9… does not support required platforms
@@ -183,7 +218,7 @@ Error: platform linux/amd64
 
 前の節が「1.2.2 で全節を採り直して変化なし」と書いているのに、この文言の変化は入っていなかった。**引き金を実際に引き直していなかった**ため（→ #421 への追記、#478）。
 
-## 診断が一致させている文言と、その引き方  （2026-08-23 に 1.2.2 で確認）
+## 診断が一致させている文言と、その引き方  （2026-08-23 に 1.2.2 で確認、2026-09-04 に 1.3.1 で引き直し）
 
 opossum は、ランタイムの出力の文言に一致させて案内を出す。**一致しなくなっても、出るのは
 「案内が無い」状態**で、テストは古い文言を入力にしているので緑のまま——**壊れた形ではなく、
@@ -242,18 +277,18 @@ HOST FOOTPRINT が黙って `—`／上流はホストのコマンド）。
 
 | # | 診断 | 一致させている場所 | 上流の文言（**全部**が捕獲物に入っていること） | **経路** | **上流の文言** |
 |---|---|---|---|---|---|
-| 1 | OPSM-412 | `orchestrator.go` `runErrorHint` | `does not support required platforms` | `raw:corpus-cs2-old-wording.txt` | `raw:corpus-atlas-old-wording.txt` |
-| 2 | OPSM-412 | 同上 | `Error: platform linux/arm64` | `raw:platform-image-index-no-arm64.txt` | `raw:platform-image-index-no-arm64.txt` |
-| 3 | OPSM-107 | 同上 | `failed to resolve` `in rootfs` | `raw:rootfs-resolve.txt` | `raw:rootfs-resolve.txt` |
-| 4 | OPSM-201 | 同上 | `Address already in use` | `raw:port-in-use-duplicate-publish.txt` | `raw:port-in-use-duplicate-publish.txt` |
-| 5 | OPSM-103 | `isStorageAttachmentError` | `VZErrorDomain` `Code=2` `storage device attachment is invalid` | `raw:vzerror-shared-named-volume.txt` | `raw:vzerror-shared-named-volume.txt` |
-| 6 | build（cache 破損） | `buildhint.go` | `unable to read root manifest` | `raw:build-cache-path-only.txt` | `unverified` |
-| 7 | build（resource） | 同上 | `rpc error: code = Unavailable` | `raw:build-resource-path-only.txt` | `unverified` |
-| 8 | build（disk full） | 同上 | `No space left on device` | `raw:build-disk-full.txt` | `unverified` |
-| 9 | volume の削除警告 | `runtime.go` `resourceInUse` | `in use` | `raw:volume-in-use-via-opossum.txt` | `raw:volume-in-use.txt` |
-| 10 | image の削除警告 | `runtime.go` `DeleteImage` | `in use` | `path-tried:image-in-use-not-reached.txt` | `unverified` |
-| 11 | `doctor` の storage 警告 | `doctor.go` `parseReclaimable` | `GB (` | `raw:doctor-inputs.txt` | `raw:doctor-inputs.txt`（`GB` と `B` のみ。`KB`/`MB`/`TB`/`PB` は unverified） |
-| 12 | `doctor` の builder 警告 | `doctor.go` `parseBuilder` | `running` `MB` | `raw:doctor-inputs.txt` | `raw:doctor-inputs.txt`（`running` と `MB` のみ。`stopped` と `GB` は unverified） |
+| 1 | OPSM-412 | `orchestrator.go` `runErrorHint` | `does not support required platforms` | `raw:platform-does-not-support-131.txt` | `raw:platform-does-not-support-131.txt` |
+| 2 | OPSM-412 | 同上 | `Error: platform linux/arm64` | `raw:platform-image-no-arm64-131.txt` | `raw:platform-image-no-arm64-131.txt` |
+| 3 | OPSM-107 | 同上 | `failed to resolve` `in rootfs` | `raw:rootfs-resolve-131.txt` | `raw:rootfs-resolve-131.txt` |
+| 4 | OPSM-201 | 同上 | `Address already in use` | `raw:port-in-use-duplicate-publish-131.txt` | `raw:port-in-use-duplicate-publish-131.txt` |
+| 5 | OPSM-103 | `isStorageAttachmentError` | `VZErrorDomain` `Code=2` `storage device attachment is invalid` | `raw:vzerror-shared-named-volume-131.txt` | `raw:vzerror-shared-named-volume-131.txt` |
+| 6 | build（cache 破損） | `buildhint.go` | `unable to read root manifest` | `raw:build-cache-path-only-131.txt` | `unverified` |
+| 7 | build（resource） | 同上 | `rpc error: code = Unavailable` | `raw:build-resource-path-only-131.txt` | `unverified` |
+| 8 | build（disk full） | 同上 | `No space left on device` | `raw:build-disk-full-131.txt` | `unverified` |
+| 9 | volume の削除警告 | `runtime.go` `resourceInUse` | `in use` | `raw:volume-in-use-via-opossum-131.txt` | `raw:volume-in-use-131.txt` |
+| 10 | image の削除警告 | `runtime.go` `DeleteImage` | `in use` | `path-tried:image-in-use-not-reached-131.txt` | `unverified` |
+| 11 | `doctor` の storage 警告 | `doctor.go` `parseReclaimable` | `GB (` | `raw:doctor-inputs-131.txt` | `raw:doctor-inputs-131.txt`（`GB` と `MB` のみ。`B`/`KB`/`TB`/`PB` は unverified） |
+| 12 | `doctor` の builder 警告 | `doctor.go` `parseBuilder` | `running` `MB` | `raw:doctor-inputs-131.txt` | `raw:doctor-inputs-131.txt`（`running`・`stopped`・`MB` のみ。`GB` は unverified） |
 
 **文言列に書くのは、上流が出す文字列だけ。** コードの識別子やファイル名は「一致させている
 場所」に出す。混ぜていたときは、`runtime.go` のような**コード側の名前まで「上流の文言」として
@@ -310,14 +345,17 @@ builder status` の行にしか無かった**——この検査を入れて初�
 
 
 
-**行10 が「未確認」な理由**：思いついた経路では届かなかった。`DeleteImage` が `--force` を
-付けているのを疑っているが、**記録に残っているのは opossum の出力だけ**で、
-`container image delete` の stderr も終了コードも採っていない。**原因は未確認**、
-**別の経路があるかも分からない**。
+**行10 が「未確認」な理由**：思いついた経路では届かなかった。1.2.2 の記録は opossum の出力だけ
+だったが、**1.3.1 では `container image delete` の stderr と終了コードまで採った**
+（`image-in-use-not-reached-131.txt`：`--force` なしで exit 0、stderr は `Reclaimed 1.17 GB in disk
+space` だけ、`in use` は無い）。**ただし「その image を running コンテナが使っていた」ことは捕獲物に
+無い**——同じ採取で走っていたのは alpine の `v131recap-run` だけで、消した image のコンテナは
+`--platform` の失敗で立っていない。だから「`--force` のせい」か「image 側に使用中ガードが無い」かは
+**この記録からは言えない**。原因は未確認・別の経路があるかも分からない、は 1.2.2 のまま。
 
 **行11・12 の「〜のみ」が意味すること**：一致させているのは**分岐のある形**で、上流から
-引いたのはその一部だけ。行11 は `GB` と `B`（`KB`/`MB`/`TB`/`PB` は未観測）、行12 は
-`running` と `MB`（`stopped` と `GB` は未観測）。**分岐を列挙したまま「確認済み」と書くと、
+引いたのはその一部だけ。行11 は `GB` と `MB`（`B`/`KB`/`TB`/`PB` は未観測——1.2.2 では `0 B (0%)`
+が出ていたが 1.3.1 の捕獲物には無い）、行12 は `running`・`stopped`・`MB`（`GB` は未観測）。**分岐を列挙したまま「確認済み」と書くと、
 確かめていない分岐まで確かめたことになる。**
 
 **行6〜8 の「経路のみ」が意味すること**：`RUN` の出力に文言を書けば hint は出る——**配線は

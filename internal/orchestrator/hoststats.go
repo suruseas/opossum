@@ -134,15 +134,17 @@ func (o *Orchestrator) StatsHost(services []string) error {
 	if err != nil {
 		return err
 	}
-	names := make([]string, len(targets))
-	for i, name := range targets {
-		names[i] = o.containerName(name)
-	}
+	// Only containers that exist go to `container stats`: a name it does not
+	// know fails the whole snapshot on 1.3.1 (see createdContainers), which
+	// would blank the guest column for every service, not just the missing one.
+	existing := o.createdContainers(targets)
 
 	// Guest-view usage (best-effort — a container that isn't running just has no
 	// row, which we render as "—" too).
 	guest := map[string]runtimeStat{}
-	if snap, err := o.rt.StatsSnapshot(names); err == nil {
+	if len(existing) == 0 {
+		// nothing to ask for; every row renders "—" below
+	} else if snap, err := o.rt.StatsSnapshot(existing); err == nil {
 		for _, s := range snap {
 			guest[s.ID] = runtimeStat{usage: s.MemoryUsageBytes, limit: s.MemoryLimitBytes}
 		}
@@ -155,8 +157,8 @@ func (o *Orchestrator) StatsHost(services []string) error {
 	fmt.Fprintln(w, "SERVICE\tGUEST MEM\tHOST FOOTPRINT")
 	var total int64
 	var mapped bool
-	for i, svc := range targets {
-		cname := names[i]
+	for _, svc := range targets {
+		cname := o.containerName(svc)
 		gm := "—"
 		if g, ok := guest[cname]; ok {
 			gm = humanBytes(g.usage) + " / " + humanBytes(g.limit)

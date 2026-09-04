@@ -1,0 +1,8 @@
+$ container run --rm v131recap-amdonly:test true
+--- exit code: 1
+--- stdout ---
+--- stderr ---
+[0/6] [0s]
+[1/6] Fetching image [0s]
+[1/6] Fetching image [0s]
+Error: platform linux/arm64

@@ -1,0 +1,7 @@
+$ ./opossum -f xav131/compose.yaml down -v
+--- exit code: 0
+--- stdout ---
+Stopping a
+Removing volume xav131_data
+--- stderr ---
+warning: could not remove volume "xav131_data": it's still in use by a container — stop the container, then remove it with `container volume delete xav131_data`

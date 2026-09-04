@@ -1,0 +1,6 @@
+$ container image delete v131recap-armonly:test
+--- exit code: 0
+--- stdout ---
+v131recap-armonly:test
+--- stderr ---
+Reclaimed 1.17 GB in disk space

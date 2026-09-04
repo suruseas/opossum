@@ -706,3 +706,76 @@ func nothingLeftInTheGroup(t *testing.T, pgid int) {
 		t.Errorf("the interrupt left something running in the command's process group: %s", left)
 	}
 }
+
+// The interrupt can reach this process after the command is already gone. A
+// ^C is delivered to the whole group at once, but the command may trap it,
+// exit, and be reaped before the runtime here has moved the signal from the
+// kernel to the channel — that hand-off is a goroutine's turn, and on a loaded
+// machine it comes late. Read at once, the channel was empty and the run was
+// called a failure: one gate in five, in the sieve's container (#711). This
+// makes the lateness deterministic instead of hoping for load: the command
+// alone gets the interrupt and exits; this process gets its copy a beat later.
+func TestAnInterruptThatArrivesAfterTheCommandIsGoneStillCounts(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "noleftovers")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("building: %v\n%s", out, err)
+	}
+	tmp := t.TempDir()
+	leak := filepath.Join(tmp, "opossum-cmd-test-late")
+	cmd := exec.Command(bin, "sh", "-c", fmt.Sprintf("trap 'exit 7' INT; mkdir %q; sleep 300", leak))
+	cmd.Env = append(os.Environ(), "TMPDIR="+tmp)
+	said := saidInto(t, cmd)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) })
+	waitForSleeper(t, cmd.Process.Pid, leak)
+
+	// The command's copy first: the shell (noleftovers' direct child) and
+	// its sleep — a POSIX trap runs only once the foreground command has
+	// ended, so the sleep has to hear it too, as it would from a ^C to the
+	// group. The shell first: having heard it, it waits for the sleep to end
+	// and then exits 7. The other way round, the shell could reap the sleep
+	// before hearing its own and end 130 — a window of microseconds, and the
+	// loaded machine this is about is where such windows open. Then, a beat
+	// later, this process's own copy.
+	sh := childOf(t, cmd.Process.Pid)
+	sleeper := childOf(t, sh)
+	for _, pid := range []int{sh, sleeper} {
+		if err := syscall.Kill(pid, syscall.SIGINT); err != nil {
+			t.Fatal(err)
+		}
+	}
+	time.Sleep(150 * time.Millisecond)
+	if err := syscall.Kill(cmd.Process.Pid, syscall.SIGINT); err != nil {
+		t.Fatal(err)
+	}
+	_ = cmd.Wait()
+	nothingLeftInTheGroup(t, cmd.Process.Pid)
+	if got := cmd.ProcessState.ExitCode(); got != 7 {
+		t.Fatalf("exit = %d, want the command's own 7 — an interrupted run keeps the status the command chose, said:\n%s", got, said())
+	}
+	if s := said(); !strings.Contains(s, "this run was interrupted") || strings.Contains(s, "it failed as well as leaving these") {
+		t.Errorf("a late interrupt should still be read as one, said:\n%s", s)
+	}
+}
+
+// childOf returns the pid of the direct child of pid — the shell noleftovers
+// started — waiting briefly for it to exist.
+func childOf(t *testing.T, pid int) int {
+	t.Helper()
+	for i := 0; i < 50; i++ {
+		out, _ := exec.Command("pgrep", "-P", strconv.Itoa(pid)).Output()
+		if f := strings.Fields(string(out)); len(f) > 0 {
+			n, err := strconv.Atoi(f[0])
+			if err == nil {
+				return n
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("pid %d never had a child to signal", pid)
+	return 0
+}

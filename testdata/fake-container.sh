@@ -1,8 +1,9 @@
 #!/bin/sh
 # A fake `container` CLI used to smoke-test opossum without the real runtime.
 # It logs each invocation to $FAKE_LOG and returns output shaped like the real
-# `container` 1.0.0 CLI (see testdata/real-cli-output.md for the captured
-# reference these are kept in sync with). Overrides:
+# `container` CLI of the version testdata/real-cli-output.md names at its top
+# (the captured reference these are kept in sync with; the shapes here are a
+# subset of that version's — keys the parsers never read are left out). Overrides:
 #   FAKE_DNS_DOMAIN   domain reported by `system dns list` (default: opossum)
 echo "container $*" >> "${FAKE_LOG:-/dev/null}"
 
@@ -70,6 +71,10 @@ case "$1" in
     fi
     ;;
   inspect)
+    # $INSPECT_ABSENT names containers that do not exist (exit 1, like the real CLI).
+    for m in ${INSPECT_ABSENT:-}; do
+      [ "$2" = "$m" ] && { echo "Error: container not found: $2" >&2; exit 1; }
+    done
     # Mirror the real `container inspect` shape: the interface address lives
     # under status.networks[].ipv4Address, while a published port surfaces a
     # 0.0.0.0 hostAddress that must NOT be mistaken for the container's IP.
@@ -79,6 +84,18 @@ case "$1" in
     cat <<'JSON'
 [{"status":{"state":"running","networks":[{"network":"demo-net","ipv4Address":"192.168.64.10/24","ipv6Address":"fdee:0:0:0::10/64","ipv4Gateway":"192.168.64.1"}]},"configuration":{"networks":[{"network":"demo-net-configured"}],"publishedPorts":[{"containerPort":8080,"hostAddress":"0.0.0.0","hostPort":8080,"proto":"tcp"}]}}]
 JSON
+    ;;
+  stats)
+    # container 1.3.1: one name that does not exist fails the whole call, and
+    # nothing is shown for the ones that do (stats-absent-only.txt). Stopped
+    # ones are skipped quietly. Otherwise the table's header, as passthrough.
+    shift
+    for a in "$@"; do
+      for m in ${INSPECT_ABSENT:-}; do
+        [ "$a" = "$m" ] && { echo "Error: no such container: $a" >&2; exit 1; }
+      done
+    done
+    echo "Container ID  Cpu %    Memory Usage         Net Rx/Tx            Block I/O            Pids"
     ;;
   *) echo "fake-container: unknown command $1" >&2; exit 0 ;;
 esac

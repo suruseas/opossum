@@ -42,9 +42,11 @@ func TestRunErrorHintPlatform(t *testing.T) {
 		// that is fetched before the mismatch is found still says this on 1.2.2
 		// (Compose-Examples/examples/cs2-dedicated-server, atlas).
 		{"the wording from both versions", "", "Error: image sha256:abc does not support required platforms", true},
-		// container 1.2.2, measured against excalidraw/excalidraw-room:latest,
-		// whose image index lists amd64 only.
-		{"the wording only 1.2.2 uses", "", "Error: platform linux/arm64", true},
+		// container 1.2.2 said this for excalidraw/excalidraw-room:latest (image
+		// index without arm64); 1.3.1 says it for an amd64-only local image run as
+		// the default arm64 (platform-image-no-arm64-131.txt) — same wording,
+		// different trigger.
+		{"the wording both versions use for a missing arm64", "", "Error: platform linux/arm64", true},
 		// container 1.2.2, measured by building an image for arm64 only and
 		// running it with --platform linux/amd64. The message names what is
 		// missing, so this is not an arm64 problem and amd64 is not the answer.

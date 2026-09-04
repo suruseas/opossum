@@ -175,15 +175,66 @@ func Load(path string, envFiles ...string) (*Project, error) {
 
 // mergeMap deep-merges override onto base per the compose spec: keys in both
 // recurse; keys only in override are added.
-func mergeMap(base, over map[string]any) map[string]any {
+func mergeMap(base, over map[string]any, path string) map[string]any {
 	for k, ov := range over {
 		if bv, ok := base[k]; ok {
-			base[k] = mergeValue(bv, ov, k)
+			base[k] = mergeValue(bv, ov, k, path)
 		} else {
 			base[k] = ov
 		}
 	}
 	return base
+}
+
+// collections are the top-level mappings whose keys are names the file's
+// author chose — a service, a network, a volume — rather than fields. A key
+// directly under one of them is an element, so a service called `networks` or
+// `environment` must not be merged the way the field of that name is; the
+// special cases below look at the key and the path it sits at, not the key
+// alone. Docker compose branches on the full path (services.*.networks) for
+// the same reason.
+var collections = map[string]bool{"services": true}
+
+// nullReadsAsUnsetIn are the mappings inside which a key with nothing after
+// it is a value (unset / empty) rather than "not given": a service's
+// environment and labels, and its build.args.
+var nullReadsAsUnsetIn = map[string]bool{"environment": true, "labels": true, "args": true}
+
+// nullIsAValue reports whether a null at key under path is read as a value
+// that wins over the base (see mergeValue). The two shapes: a service's
+// command/entrypoint (key is the field, path is the service — not a
+// collection), and a variable inside one of nullReadsAsUnsetIn (path ends in
+// that mapping's name, and the mapping is a field, not an element named like
+// one: its own parent is not a collection).
+func nullIsAValue(key, path string) bool {
+	if (key == "command" || key == "entrypoint") && !collections[path] {
+		return true
+	}
+	return nullReadsAsUnsetIn[lastSegment(path)] && !collections[parentPath(path)]
+}
+
+// parentPath is the dotted path one level up ("" at the root or one below it).
+func parentPath(path string) string {
+	if i := strings.LastIndex(path, "."); i >= 0 {
+		return path[:i]
+	}
+	return ""
+}
+
+// lastSegment is the key a dotted path ends in ("" for the document root).
+func lastSegment(path string) string {
+	if i := strings.LastIndex(path, "."); i >= 0 {
+		return path[i+1:]
+	}
+	return path
+}
+
+// childPath is the dotted path of key under path ("" is the document root).
+func childPath(path, key string) string {
+	if path == "" {
+		return key
+	}
+	return path + "." + key
 }
 
 // replaceSeqKeys are sequence fields that represent a single value, so an override
@@ -211,14 +262,56 @@ var mergeByTargetKeys = map[string]bool{"volumes": true}
 // mergeValue merges one value: env-like fields merge by key (list or map form),
 // nested mappings merge by key, most sequences append (deduping known list
 // fields), and replaceSeqKeys sequences / scalars are overridden.
-func mergeValue(base, over any, key string) any {
+func mergeValue(base, over any, key string, path string) any {
+	if over == nil {
+		// A key with nothing after it (`working_dir:`, `ports:`, `internal:`)
+		// is "not given" to docker compose: the base's value stands, whatever
+		// its kind — scalar, list, mapping, a declaration's field (measured
+		// against docker compose v5.5.0). Two places read a null as a value
+		// instead, and win with it: `command:`/`entrypoint:` mean "no command",
+		// and a variable inside environment or build.args means "unset" (taken
+		// from the shell at run time, as a bare `A` in the list form does;
+		// inside labels it means the empty string). Both are fields of a
+		// service, so neither applies to a *service* that happens to be called
+		// `command` or `environment` — an element of a collection is named by
+		// its author, and the path says which it is (see collections).
+		if nullIsAValue(key, path) {
+			return over
+		}
+		return base
+	}
+	// The env-like rule needs no such guard: a collection element is a
+	// mapping, and toEnvMap is the identity on a mapping, so a service called
+	// `environment` merges the same either way (measured; a guard here would be
+	// code nothing can observe). The list rules below (command, ports, volumes)
+	// need none either — they apply to two lists, and an element is never one.
 	if envLikeKeys[key] {
-		return mergeMap(toEnvMap(base), toEnvMap(over))
+		return mergeMap(toEnvMap(base), toEnvMap(over), childPath(path, key))
+	}
+	// The networks rule does: its "an empty entry keeps the other side" would
+	// otherwise apply to a *service* called `networks`, where a null override
+	// must win as it does for any service field.
+	if key == "networks" && !collections[path] {
+		// A service's `networks:` comes in two forms — a list of names, or a map
+		// keyed by name whose values carry aliases and addresses. docker compose
+		// reads the list as a map with empty entries before merging, so a file
+		// that restates the list form over one that used the map form keeps the
+		// map's entries (aliases included) instead of replacing them, and a name
+		// both files list is one network, not two. An empty entry in the map
+		// form (`back:` with nothing under it) is read the same way (measured
+		// against docker compose v5.4.0). Do the same: read both sides as maps
+		// and merge by name, keeping the other side's settings where one side
+		// wrote only the name.
+		if b, ok := networksAsMap(base); ok {
+			if o, ok := networksAsMap(over); ok {
+				return mergeNetworks(b, o, childPath(path, key))
+			}
+		}
 	}
 	switch o := over.(type) {
 	case map[string]any:
 		if b, ok := base.(map[string]any); ok {
-			return mergeMap(b, o)
+			return mergeMap(b, o, childPath(path, key))
 		}
 	case []any:
 		if b, ok := base.([]any); ok && !replaceSeqKeys[key] {
@@ -233,6 +326,48 @@ func mergeValue(base, over any, key string) any {
 		}
 	}
 	return over
+}
+
+// networksAsMap reads a `networks:` value in either form as the map form: a
+// list of names becomes a map of those names to null (the entry docker compose
+// makes of a listed name), a map is returned as is. Anything else — a list
+// holding something that is not a name, a scalar — is not a networks value this
+// can read, and ok is false so the caller falls back to the ordinary merge.
+func networksAsMap(v any) (map[string]any, bool) {
+	switch x := v.(type) {
+	case map[string]any:
+		return x, true
+	case []any:
+		out := make(map[string]any, len(x))
+		for _, e := range x {
+			name, ok := e.(string)
+			if !ok {
+				return nil, false
+			}
+			out[name] = nil
+		}
+		return out, true
+	}
+	return nil, false
+}
+
+// mergeNetworks is mergeMap for two map-form `networks:` values, with one
+// difference: an entry that is empty on one side (a name the list form gave,
+// or `back:` with nothing under it) keeps whatever the other side wrote for
+// that name. A plain mergeMap would let the empty side win and drop the
+// aliases the other file set — the loss this road exists to avoid.
+func mergeNetworks(base, over map[string]any, path string) map[string]any {
+	for k, ov := range over {
+		if bv, had := base[k]; had {
+			// mergeValue keeps the base entry when ov is nil — a name the list
+			// form gave, or `back:` with nothing under it — so the aliases the
+			// other file set survive; see there.
+			base[k] = mergeValue(bv, ov, k, path)
+		} else {
+			base[k] = ov
+		}
+	}
+	return base
 }
 
 // mergeSeqByTarget collapses mount entries that share a target path, keeping the
@@ -397,7 +532,7 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 			if merged == nil {
 				merged = m
 			} else {
-				merged = mergeMap(merged, m)
+				merged = mergeMap(merged, m, "")
 			}
 		}
 		// Merging builds a new tree, so there are no positions to keep: the files

@@ -127,7 +127,7 @@ them.
 | `restart` | ✅ | `always` / `unless-stopped` / `on-failure[:N]` — `up` starts a small per-project supervisor that brings a service back when it exits, and `down` stops it. **`on-failure` can't be told from a clean exit**: Apple `container` doesn't report a container's exit code, so opossum treats any exit as a failure and gives up after a few tries rather than looping. Services another service waits on with `service_completed_successfully` are meant to exit, so they're never watched |
 | `cap_add` / `cap_drop` | ✅ | Linux capabilities → `--cap-add` / `--cap-drop` (e.g. `NET_ADMIN`, or `ALL`) |
 | `network_mode` | ✅ (`none`) | `network_mode: none` → `--network none`: full network isolation (loopback only, no egress and no name resolution) — the floor for sandboxing an untrusted workload. Other values (e.g. `host`) have no equivalent on Apple `container`, so they're ignored (the service joins the project network) and listed among the ignored fields — the file still loads. |
-| `networks` (top-level + per-service) | ✅ | declare networks and place services on them (a service may join several — one `--network` each, in declaration order). A top-level `internal: true` network is created host-only (`container network create --internal`): no internet egress, though the host stays reachable — see [Constraining egress](agent-sandbox.md). `external: true` (with optional `name`) uses a pre-existing network by its real name (never created or removed). Peers on an internal network can't resolve each other by name (use IPs). Network **aliases** aren't applied. |
+| `networks` (top-level + per-service) | ✅ | declare networks and place services on them (a service may join several — one `--network` each, in declaration order; after a multi-file merge, in name order). A top-level `internal: true` network is created host-only (`container network create --internal`): no internet egress, though the host stays reachable — see [Constraining egress](agent-sandbox.md). `external: true` (with optional `name`) uses a pre-existing network by its real name (never created or removed). Peers on an internal network can't resolve each other by name (use IPs). Network **aliases** aren't applied. |
 | `${VAR}` interpolation | ✅ | `$VAR`, `${VAR}`, `${VAR:-default}`, `${VAR:?required}`, `$$` escape; values from a `.env` file next to the compose file (or `--env-file` paths, which replace `.env`; later files win), overridden by the shell |
 
 Other compose fields (e.g. `container_name`, `dns_search`)
@@ -136,7 +136,13 @@ the ignored fields, so a `docker-compose.yml` runs without surprises.
 
 **Multiple files merge** like docker compose: pass `-f base.yml -f override.yml`
 (later files override earlier ones — mappings merge by key, most sequences append,
-`command`/`entrypoint` replace), and a `compose.override.yaml` (or
+`command`/`entrypoint` replace, `volumes` merge by mount point, and a service's
+`networks` merge by network name across the list and map forms — a file that
+lists `[back]` over one that wrote `back: {aliases: [...]}` keeps the map's
+entries, and a name both files carry is joined once). A key a later file writes with nothing after it (`working_dir:`, `ports:`,
+a network's `internal:`) is "not given" and leaves the earlier value in place;
+the exceptions, as in docker compose, are `command:`/`entrypoint:` (no command)
+and a variable inside `environment:` or `build.args` (taken from the shell), and a `compose.override.yaml` (or
 `docker-compose.override.yml`) next to a discovered compose file is merged
 automatically. `volumes` are keyed by **mount point**: if more than one entry
 mounts the same container path, the last one wins — so an override can swap a bind

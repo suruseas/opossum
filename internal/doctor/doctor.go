@@ -266,7 +266,7 @@ func parseBuilder(out string) (memMB int, state string) {
 const reclaimableWarnBytes = 20_000_000_000
 
 // checkStorage surfaces how much image/volume storage the runtime holds that no
-// running container references. Apple's `container images ls` hides untagged
+// running container references. Apple's `container image ls` hides untagged
 // (dangling) images, so a large cache from repeated builds/pulls can fill the
 // disk unseen — `container system df` is the only place it shows. This warns only
 // past reclaimableWarnBytes; below it, the amount is reported as informational.
@@ -281,7 +281,7 @@ func checkStorage(rt Runner) check {
 	}
 	if b >= reclaimableWarnBytes {
 		return check{"storage", warn,
-			fmt.Sprintf("%s of images/volumes are reclaimable — not referenced by any running container, and untagged ones don't show in `container images ls`, so this can fill the disk unseen", humanBytes(b)),
+			fmt.Sprintf("%s of images/volumes are reclaimable — not referenced by any running container, and untagged ones don't show in `container image ls`, so this can fill the disk unseen", humanBytes(b)),
 			"if you're low on disk, reclaim it: container image prune -a && container volume prune"}
 	}
 	return check{"storage", ok, fmt.Sprintf("%s of images/volumes reclaimable", humanBytes(b)), ""}

@@ -1,0 +1,28 @@
+$ ./opossum -f port/compose.yaml up
+--- exit code: 1
+--- stdout ---
+Creating network port-net
+Starting a (alpine:3.20)
+a.port.opossum
+  ↳ a on the host: localhost:19532
+Starting b (alpine:3.20)
+--- stderr ---
+[0/6] [0s]
+[1/6] Fetching image [0s]
+[2/6] Unpacking image [0s]
+[3/6] Fetching kernel [0s]
+[4/6] Fetching init image [0s]
+[5/6] Unpacking init image [0s]
+[6/6] Starting container [0s]
+[6/6] Starting container [0s]
+[0/6] [0s]
+[1/6] Fetching image [0s]
+[2/6] Unpacking image [0s]
+[3/6] Fetching kernel [0s]
+[4/6] Fetching init image [0s]
+[5/6] Unpacking init image [0s]
+[6/6] Starting container [0s]
+[6/6] Starting container [0s]
+Error: failed to bootstrap container (cause: "internalError: "failed to bootstrap container b.port.opossum (cause: "unknown: "bind(descriptor:ptr:bytes:): Address already in use) (errno: 48)"")"")
+opossum: starting service "b": exit status 1
+  → [OPSM-201] a published host port is already in use, which opossum's pre-flight did not see. Remap the port in the compose file (this service publishes localhost:19532).

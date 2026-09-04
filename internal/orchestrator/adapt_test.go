@@ -2206,3 +2206,58 @@ volumes:
 			"unreadable env_file is not a reason to drop this service from it; got %+v", shared)
 	}
 }
+
+// A service gated behind a profile that is not active is left out of the
+// plan. It is not started and not shown by `config` — docker compose leaves
+// it out there too — and an entry about it would ask the reader to judge
+// whether a change to a service that is not running is theirs to care about.
+// What enables it enables the plan's eye on it as well: the profile, or naming
+// the service, as under docker compose. (A service with no profile is looked
+// at whether or not this run starts it — that is unchanged.) What was left
+// out comes back by name, in order, so the caller can say so (#492).
+func TestPlanOverlayLeavesOutServicesGatedByAnInactiveProfile(t *testing.T) {
+	const body = `name: prof
+services:
+  web:
+    image: alpine:3
+  db:
+    image: postgres:16
+    profiles: [debug]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+volumes:
+  pgdata: {}
+`
+	o := New(loadProject(t, body), nil, "opossum", io.Discard)
+	text, changes, gated := o.PlanOverlayFor(nil)
+	if len(changes) != 0 || text != "" {
+		t.Errorf("db is gated and not enabled, so nothing should be planned; got %d change(s):\n%s", len(changes), text)
+	}
+	if len(gated) != 1 || gated[0] != "db" {
+		t.Errorf("the service left out should be named, got %v", gated)
+	}
+	// Two left out come back in name order, whatever order the map gave them.
+	two := loadProject(t, strings.Replace(body, "volumes:\n  pgdata: {}\n",
+		"  zeta:\n    image: alpine:3\n    profiles: [debug]\n  alpha:\n    image: alpine:3\n    profiles: [debug]\nvolumes:\n  pgdata: {}\n", 1))
+	// Asked more than once: a map walk happens to come out sorted often enough
+	// that a single ask would let the sort go missing unnoticed.
+	for i := 0; i < 8; i++ {
+		_, _, gated = New(two, nil, "opossum", io.Discard).PlanOverlayFor(nil)
+		if got, want := strings.Join(gated, ","), "alpha,db,zeta"; got != want {
+			t.Fatalf("gated = %v, want %v", got, want)
+		}
+	}
+
+	o = New(loadProject(t, body), nil, "opossum", io.Discard)
+	o.EnableProfiles([]string{"debug"})
+	_, changes, gated = o.PlanOverlayFor(nil)
+	if len(changes) == 0 || len(gated) != 0 {
+		t.Errorf("with the profile enabled db is looked at: changes=%d gated=%v", len(changes), gated)
+	}
+
+	o = New(loadProject(t, body), nil, "opossum", io.Discard)
+	_, changes, gated = o.PlanOverlayFor([]string{"db"})
+	if len(changes) == 0 || len(gated) != 0 {
+		t.Errorf("naming db enables it, as under docker compose: changes=%d gated=%v", len(changes), gated)
+	}
+}
