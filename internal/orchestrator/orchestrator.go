@@ -710,6 +710,33 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 		for _, n := range createdNets {
 			o.rt.DeleteNetwork(n)
 		}
+		// Say so. The output above read "Starting cache" and then the failure,
+		// and nothing said what became of cache — read as "still running",
+		// which it is not (docker compose does leave it running; this does not).
+		// Not under --dry-run, where nothing was started and nothing is torn
+		// down. "Removed" is checked, not assumed: Stop and Delete report
+		// nothing, so the runtime is asked whether each is gone.
+		if len(started) > 0 && !o.up.dryRun {
+			var gone, left []string
+			for _, name := range order {
+				if !createdSvc[name] {
+					continue
+				}
+				if o.rt.Inspect(o.containerName(name)).Exists {
+					left = append(left, name)
+				} else {
+					gone = append(gone, name)
+				}
+			}
+			switch {
+			case len(left) == 0:
+				o.logf("Rolled back %s — stopped and removed; nothing this `up` started is left running\n", strings.Join(gone, ", "))
+			case len(gone) == 0:
+				o.logf("Tried to roll back %s, but the container is still there — `opossum down` removes it\n", strings.Join(left, ", "))
+			default:
+				o.logf("Rolled back %s — stopped and removed; %s is still there — `opossum down` removes it\n", strings.Join(gone, ", "), strings.Join(left, ", "))
+			}
+		}
 		// Ask what is still running rather than reasoning about it. A service left
 		// alone because it was already up to date is not in the teardown above, and
 		// neither is one the loop never reached — so a list built while walking the

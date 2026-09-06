@@ -46,13 +46,12 @@ func gitFixture(t *testing.T) string {
 // this test made — a bare glob would also name, and then remove, the working
 // directory of anyone else running a baseline sweep on the same machine.
 //
-// Made through suitedir rather than beside it. cmd/noleftovers looks for
-// opossum-* directly under the temp dir, and a directory named after the test
-// would sit outside that: the runs the net exists for — a panic, a -timeout,
-// where no t.Cleanup gets a turn — would leave the worktrees somewhere nothing
-// looks. Putting one there under our own name is not enough either, because
-// then nothing removes it when this run dies; suitedir puts the pid in the name
-// so a later run can tell an abandoned directory from a live one.
+// Made through suitedir rather than beside it. cmd/noleftovers reports a
+// directory named after the test when a run leaves one at the top of the temp
+// dir (#552), but reporting is all it can do: the runs the net exists for — a
+// panic, a -timeout, where no t.Cleanup gets a turn — leave it with no pid in
+// its name, so nothing can tell an abandoned directory from a live one, and
+// nothing removes it. suitedir puts the pid in the name so a later run can.
 func ownTemp(t *testing.T) {
 	t.Helper()
 	dir, err := suitedir.Make("opossum-mutate-test-")

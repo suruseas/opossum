@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -373,7 +374,10 @@ func writeCompose(t *testing.T, body string) string {
 	return p
 }
 
-// run executes the CLI with args and returns captured stdout plus any error.
+// run executes the CLI with args and returns what it wrote to stdout and stderr
+// together, in the order it was written, plus any error. Together, so a test
+// that only cares what was said can read one string; a test that cares where
+// it was said uses runSplit, because this cannot tell the two apart.
 func run(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	root := newRootCmd()
@@ -383,6 +387,51 @@ func run(t *testing.T, args ...string) (string, error) {
 	root.SetArgs(args)
 	err := root.Execute()
 	return out.String(), err
+}
+
+// runSplit is run with stdout and stderr captured separately, for a test about
+// which of the two something is written to. Diagnostics, warnings and progress
+// belong on stderr: a reader piping stdout into another tool sees only what
+// that tool was meant to get.
+func runSplit(t *testing.T, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
+	root := newRootCmd()
+	var out, errOut strings.Builder
+	root.SetOut(&out)
+	root.SetErr(&errOut)
+	root.SetArgs(args)
+	err = root.Execute()
+	return out.String(), errOut.String(), err
+}
+
+// The suggestions a --from-docker-compose run hands over are diagnostics, and
+// diagnostics go to stderr — said of this path when it was written, and until
+// now unguarded: with stdout and stderr captured together, a run that wrote the
+// suggestions to stdout read exactly the same (#511).
+func TestTheSuggestionsTextGoesToStderr(t *testing.T) {
+	fakeShim(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "mine.yaml"), []byte(
+		"name: sug\nservices:\n  web:\n    image: nginx\n    volumes:\n      - shared:/srv\n"+
+			"  worker:\n    image: busybox\n    volumes:\n      - shared:/srv\nvolumes:\n  shared: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	stdout, stderr, err := runSplit(t, "up", "--from-docker-compose", "-f", "mine.yaml", "--no-build", "--dry-run")
+	if err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	for _, line := range []string{
+		"so none was written. Here is what one would hold",
+		"# [opossum suggestion — NOT APPLIED]",
+	} {
+		if !strings.Contains(stderr, line) {
+			t.Errorf("%q belongs on stderr, where diagnostics go, stderr:\n%s", line, stderr)
+		}
+		if strings.Contains(stdout, line) {
+			t.Errorf("%q is a diagnostic and must not be on stdout, stdout:\n%s", line, stdout)
+		}
+	}
 }
 
 // TestUpPartialCLI exercises the full CLI path: flag parsing, compose loading,
@@ -1871,6 +1920,21 @@ func TestConfigRejectsGatedDependency(t *testing.T) {
 	}
 }
 
+// A service key with nothing under it used to crash the whole command with a
+// nil dereference (#735); it is a load error now, and this runs the real CLI
+// path so a crash would take the test binary down rather than pass unnoticed.
+func TestConfigRefusesAServiceWithNothingUnderItCLI(t *testing.T) {
+	fakeShim(t)
+	compose := writeCompose(t, "services:\n  web:\n")
+	out, err := run(t, "-f", compose, "config")
+	if err == nil {
+		t.Fatal("config should refuse a service key with nothing under it")
+	}
+	if !strings.Contains(err.Error()+out, `service "web" must be a mapping`) {
+		t.Errorf("want the mapping refusal, got err=%v out=%q", err, out)
+	}
+}
+
 // Multiple -f merge on the command line: a later file overrides an earlier one.
 func TestMultipleComposeFilesCLI(t *testing.T) {
 	fakeShim(t)
@@ -3208,6 +3272,11 @@ func TestRolledBackUpStartsNoSupervisor(t *testing.T) {
 	out, err := run(t, "up", "--no-build")
 	if err == nil {
 		t.Fatal("up should fail when a service must be built and --no-build was given")
+	}
+	// The refusal names the service and then the image, both strings: swapped,
+	// it reads as sound English about a service called after an image (#559).
+	if want := `service "app": image "rolled-app:latest" is not built and --no-build was given`; !strings.Contains(err.Error(), want) {
+		t.Errorf("the refusal should say %q, got: %v", want, err)
 	}
 	if strings.Contains(out, "OPSM-408") {
 		t.Errorf("a rolled-back up has nothing left to watch, but it announced a supervisor:\n%s", out)
@@ -6422,7 +6491,7 @@ func TestAnOverlayThatCannotBeWrittenIsShownInFull(t *testing.T) {
 		"      PGDATA: /var/lib/postgresql/data/pgdata",
 		"  # Why: Apple container attaches a named volume as a filesystem mount point",
 		"  # [opossum note] service \"db\": mounts the host path /dev/ttyUSB0",
-		"  # What to expect: expect this service's device-dependent features not to work",
+		"  # What to expect: this service's device-dependent features will not work",
 		"price$$data",
 	} {
 		if !strings.Contains(out, want) {
@@ -6613,4 +6682,74 @@ func TestTheRewriteAdviceRepeatsThisRunsProfiles(t *testing.T) {
 	if !strings.Contains(string(second), "service \"db\"") {
 		t.Errorf("following the advice should write db's entry, got:\n%s", second)
 	}
+}
+
+// The supervisor writes through a size-capped log. When that log cannot be
+// opened it says so on the line it writes instead — the time, then the notice —
+// and carries on uncapped. No test reached that line (the swap sweep of #559
+// reported it unreached), so the time and the notice could have changed places
+// with nothing going red. A directory where the log file should be is what
+// keeps the pid file writable while the log is not.
+func TestASupervisorThatCannotOpenItsLogSaysSoTimeFirst(t *testing.T) {
+	fakeShim(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"),
+		[]byte("name: uncapped\nservices:\n  web:\n    image: web:latest\n    restart: always\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	state := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(state, "opossum", "uncapped", "supervisor.log"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(opossumBin, "__supervise", "--watch-service", "web")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "XDG_STATE_HOME="+state)
+	var out lockedOutput
+	cmd.Stdout, cmd.Stderr = &out, &out
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_, _ = cmd.Process.Wait()
+	})
+	deadline := time.Now().Add(15 * time.Second)
+	for !strings.Contains(out.String(), "[OPSM-411]") {
+		if time.Now().After(deadline) {
+			t.Fatalf("the supervisor never said its log was uncapped, said:\n%s", out.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := syscall.Kill(cmd.Process.Pid, syscall.SIGINT); err != nil {
+		t.Fatal(err)
+	}
+	_ = cmd.Wait()
+	// The time opens the line and the notice follows it: two strings on one
+	// format call, and printed the other way round the line would still be
+	// a line.
+	line := regexp.MustCompile(`(?m)^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:Z|[+-]\d\d:\d\d) \[OPSM-411\] couldn't open a size-capped log \(`)
+	if !line.MatchString(out.String()) {
+		t.Errorf("the notice should read `<time> [OPSM-411] couldn't open a size-capped log (…)`, said:\n%s", out.String())
+	}
+}
+
+// lockedOutput is a buffer a child's output can land in while the test reads
+// it: exec copies stdout on its own goroutine, and a plain builder read from
+// the test at the same time is a data race.
+type lockedOutput struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *lockedOutput) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedOutput) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
 }

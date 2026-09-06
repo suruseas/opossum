@@ -46,11 +46,14 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 # One line of evidence before the sieve: whether the image it needs is here.
-# The Makefile only builds when `docker image inspect` says it is not, and the
-# build reaches out to the registry, which has timed out on this machine and
-# turned pushes red (#706) — while the image was there a minute later. Which of
-# the two the hook saw is what nobody could say afterwards; now the log says.
-if docker image inspect opossum-sieve >/dev/null 2>&1; then
+# The Makefile only builds when the image is not there, and the build reaches
+# out to the registry, which has timed out on this machine and turned pushes
+# red (#706). Asked the way the Makefile asks — `image ls`, which wakes a
+# daemon Docker Desktop's Resource Saver has stopped — and a test holds the
+# two to the same words. `image inspect` told a stopped daemon's caller "No
+# such image" without waking it, and that was the whole story: the image was
+# there, and this line, asking the same way, said absent.
+if [ -n "$(docker image ls -q opossum-sieve:latest 2>/dev/null)" ]; then
 	echo "pre-push: the sieve image is present, so no build should follow" >&2
 else
 	echo "pre-push: the sieve image is absent, so the sieve will build it first (a registry round-trip)" >&2

@@ -65,6 +65,11 @@ volumes:
 	if len(changes) != 1 || changes[0].Code != "OPSM-101" || changes[0].Service != "db" {
 		t.Fatalf("expected one OPSM-101 change for db, got %+v", changes)
 	}
+	// The summary names the service and then the path. Both are strings, and
+	// exchanged they would read as a service called after a directory (#559).
+	if want := `service "db": PGDATA pointed at /var/lib/postgresql/data/pgdata (a subdirectory of the volume)`; changes[0].Summary != want {
+		t.Errorf("summary = %q, want %q", changes[0].Summary, want)
+	}
 	if !strings.Contains(body, "PGDATA: /var/lib/postgresql/data/pgdata") {
 		t.Errorf("overlay should set PGDATA to a subdirectory, got:\n%s", body)
 	}
@@ -1882,7 +1887,7 @@ func TestTheNotesAreWordForWordWhatWeMeanToSay(t *testing.T) {
 		`#   session socket (X11, PulseAudio) is mounted as a path too, and what`,
 		`#   would answer on it is the host's own session; whether anything useful`,
 		`#   comes through here has not been measured.`,
-		`# What to expect: expect this service's device-dependent features not to work; no compose`,
+		`# What to expect: this service's device-dependent features will not work; no compose`,
 		`#   change grants a VM access to the host's devices.`,
 	}, "\n")
 	if got := noteBlockOf(t, overlay); got != want {

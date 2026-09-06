@@ -832,6 +832,11 @@ func TestABadBaselineRefFailsBeforeTheSweep(t *testing.T) {
 	if !strings.Contains(errOut.String(), "no-such-ref") {
 		t.Errorf("the failure should name the ref:\n%s", errOut.String())
 	}
+	// The git command comes first and git's own words after the colon — two
+	// strings on one format call, and exchanged the line would still read (#559).
+	if !strings.Contains(errOut.String(), "git rev-parse --verify no-such-ref^{commit}: fatal:") {
+		t.Errorf("the failure should read `git <args>: <git's words>`:\n%s", errOut.String())
+	}
 	// The test that sleeps two seconds is the sweep's floor; failing before
 	// it is what "before the sweep" means here.
 	if e := time.Since(start); e > 1500*time.Millisecond {
@@ -853,6 +858,11 @@ func TestASweepWithTwoRowsOfOneNameIsRefused(t *testing.T) {
 	}
 	if !strings.Contains(errOut.String(), `share the name "x"`) {
 		t.Errorf("the refusal should name the collision:\n%s", errOut.String())
+	}
+	// The two positions are both ints on one format call: the earlier row first,
+	// so a reader looking for the duplicate starts at the right one (#559).
+	if !strings.Contains(errOut.String(), `mutations 1 and 2 share the name "x"`) {
+		t.Errorf("the refusal should say which rows, earlier first:\n%s", errOut.String())
 	}
 }
 
@@ -1272,5 +1282,35 @@ func TestAnInterruptDuringTheBaselineIsNotReportedAsABrokenSuite(t *testing.T) {
 	}
 	if out.String() != "" {
 		t.Errorf("stdout should stay empty on an interrupted run, got %q", out.String())
+	}
+}
+
+// The two closing lines on stderr count survivors, and mutations that measured
+// nothing, against the whole sweep. Both numbers are ints on one format call —
+// and with one mutation "1 of 1" reads the same either way round, so these
+// sweeps carry two, of which one is the case being counted (#559).
+func TestTheClosingCountsPutTheCaseBeforeTheWhole(t *testing.T) {
+	caught := `{"name":"the answer changes","file":"m.go","from":"func Answer() int { return 42 }","to":"func Answer() int { return 43 }","packages":["./..."]}`
+	for name, tc := range map[string]struct {
+		other string
+		want  string
+	}{
+		"one survivor of two": {
+			other: `{"name":"a helper nobody calls","file":"m.go","from":"package m","to":"package m\n\nfunc Unused() int { return 1 }","packages":["./..."]}`,
+			want:  "mutate: 1 of 2 mutations survived",
+		},
+		"one of two measured nothing": {
+			other: `{"name":"the answer does not build","file":"m.go","from":"func Answer() int { return 42 }","to":"func Answer() int { return undefinedThing() }","packages":["./..."]}`,
+			want:  "mutate: 1 of 2 mutations measured nothing",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			throwawayModule(t)
+			var out, errOut bytes.Buffer
+			run([]string{spec(t, "["+caught+","+tc.other+"]")}, &out, &errOut, nil, func(int) {})
+			if !strings.Contains(errOut.String(), tc.want) {
+				t.Errorf("stderr should say %q, got:\n%s\nstdout:\n%s", tc.want, errOut.String(), out.String())
+			}
+		})
 	}
 }

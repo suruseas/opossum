@@ -323,8 +323,16 @@ func TestTheOverlayAsksAboutAnImageOnceAndOnlyWhenItMatters(t *testing.T) {
     image: postgres:17-alpine
     volumes:
       - ./reports:/var/lib/postgresql/data
+  # A named volume at the data directory: the PGDATA entry's comment asks the
+  # image where its cluster goes (#490), and the answer is the cached one.
+  ledger:
+    image: postgres:17-alpine
+    volumes:
+      - ledgerdata:/var/lib/postgresql/data
   proxy:
     image: nginx:alpine
+volumes:
+  ledgerdata: {}
 `
 	o := New(loadProject(t, body), &runtime.Runtime{Bin: shim}, "opossum", io.Discard)
 	o.PlanOverlay()
@@ -339,8 +347,9 @@ func TestTheOverlayAsksAboutAnImageOnceAndOnlyWhenItMatters(t *testing.T) {
 			}
 		}
 	}
-	// Two services on the same image, and a mount below the data directory that is
-	// considered and passed over: one question, not four.
+	// Three services on the same image, a mount below the data directory that is
+	// considered and passed over, and a named volume whose comment asks too: one
+	// question, not five.
 	if asked != 1 {
 		t.Errorf("one image between them, asked %d times", asked)
 	}
@@ -1026,5 +1035,97 @@ func TestOverlayLeavesAMountAloneWhenTheImageInitialisesBelowIt(t *testing.T) {
 	}
 	if strings.Contains(overlay, "db-data") {
 		t.Errorf("the overlay moved a mount that works:\n%s", overlay)
+	}
+}
+
+// The PGDATA entry guards against lost+found wherever the image keeps its cluster
+// — but for an image that keeps it somewhere else, 18 above all, it is also the
+// half that makes the server use the volume: the pair starts and the mount alone
+// does not (pg18-named-old-datadir*.txt). A comment calling that "belt and braces"
+// tells the reader the one line their database needs is optional (#490). So the
+// comment says which it is, from the same decision everything else about the data
+// directory is written from.
+func TestThePGDATACommentSaysWhenItIsTheOtherHalfAndNotJustBeltAndBraces(t *testing.T) {
+	const named = `services:
+  db:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_PASSWORD: x
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+volumes:
+  dbdata: {}
+`
+	for _, tc := range []struct {
+		name, image, fixture string
+		want, absent         []string
+	}{
+		{
+			// The clauses the captures support are held word for word: what a
+			// server does without the entry is the one thing this comment is for,
+			// and a comment saying the opposite would read just as well.
+			name:  "18 keeps its cluster elsewhere, so the entry is the other half",
+			image: "postgres:18-alpine", fixture: "../../testdata/image-inspect/postgres18.json",
+			want: []string{
+				"Here this entry does more than that: this image keeps",
+				"its cluster in /var/lib/postgresql/18/docker, not at the mount,",
+				"so without it the volume would stay unused — the server keeps its cluster",
+				"inside the container, or, as the Postgres 18 images do, refuses to start",
+				"on finding data at the old path. With it the two together start. The data",
+			},
+			absent: []string{"belt and braces"},
+		},
+		{
+			// Declared below the mount: the image makes that subdirectory itself
+			// and starts on the mount alone (pg-image-declares-pgdata-below-the-
+			// mount.txt), so the entry is only the guard — and must not claim the
+			// server would refuse to start without it.
+			name:    "an image that keeps its cluster below the mount gets the guard wording",
+			image:   "postgres:16",
+			fixture: "../../testdata/image-inspect/postgres-pgdata-below-datadir.json",
+			want:    []string{"so this is belt and braces: it also covers a volume"},
+			absent:  []string{"does more than that", "refuses to start", "was not here to be asked"},
+		},
+		{
+			name:    "17 keeps its cluster at the mount, so the entry is only the guard",
+			image:   "postgres:17-alpine",
+			fixture: "../../testdata/image-inspect/postgres17.json",
+			want:    []string{"so this is belt and braces: it also covers a volume"},
+			absent:  []string{"does more than that", "refuses to start", "was not here to be asked"},
+		},
+		{
+			name:  "the image was not here to be asked, so the comment hedges",
+			image: "postgres:18-alpine", fixture: "",
+			want: []string{
+				"so this is belt and braces: it also covers a volume",
+				"made before that, or by another tool. The image was not here to be asked;",
+				"if it keeps its cluster elsewhere, as Postgres 18 does, this entry is also",
+				"what points the server into the volume, and the two together start where",
+				"the mount alone leaves the volume unused.",
+			},
+			absent: []string{"does more than that"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := strings.Replace(named, "postgres:18-alpine", tc.image, 1)
+			overlay, changes := planWithImage(t, body, tc.fixture)
+			var codes []string
+			for _, c := range changes {
+				codes = append(codes, c.Code)
+			}
+			if !strings.Contains(strings.Join(codes, ","), string(codePGDATADatadir)) {
+				t.Fatalf("this is about the PGDATA entry, and none was planned: %v\n%s", codes, overlay)
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(overlay, w) {
+					t.Errorf("the comment should say %q, overlay:\n%s", w, overlay)
+				}
+			}
+			for _, a := range tc.absent {
+				if strings.Contains(overlay, a) {
+					t.Errorf("the comment should not say %q here, overlay:\n%s", a, overlay)
+				}
+			}
+		})
 	}
 }

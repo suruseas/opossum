@@ -1,0 +1,13 @@
+# clickhouse/clickhouse-server:latest / bind mount at /var/lib/clickhouse (entrypoint chowns it)
+# image digest sha256:fa394da808cc53f76d0344429421d6c422a6ee85fe7450135c0e3cff4df9bcbb
+# container CLI version 1.3.1 (build: release, commit: unspeci) / 2026-09-06 / bind mount is a host-owned virtiofs directory under $HOME
+
+$ container run -d --name clm480-ch -v /Users/<user>/opossum-dogfood/results/v131-images/bind/ch:/var/lib/clickhouse clickhouse/clickhouse-server:latest
+clm480-ch
+[exit 0]
+$ container logs clm480-ch
+chown: changing ownership of '/var/lib/clickhouse/': Operation not permitted
+[exit 0]
+$ sh -c container inspect clm480-ch | grep -m1 "\"state\""
+      "state" : "stopped"
+[exit 0]

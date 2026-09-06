@@ -169,8 +169,11 @@ list; codes are add-only and never change meaning.
   not made by this opossum, so it still has ext4's `lost+found` in it. Either let
   opossum make it (`opossum down -v`, then `up` — only when nothing else wrote to
   that volume), or add `environment: PGDATA=/var/lib/postgresql/data/pgdata`.
-  Volumes opossum creates are cleared, so a plain `pgdata:/var/lib/postgresql/data`
-  works without either.
+  Volumes opossum creates are cleared, so through Postgres 17 a plain
+  `pgdata:/var/lib/postgresql/data` works without either. Postgres 18 keeps its
+  cluster in `/var/lib/postgresql/18/docker`, so there the `PGDATA` line is also
+  what points the server into that volume: without it the mount stays unused and
+  the image refuses to start — see `[OPSM-110]` below.
 - **`[OPSM-110]` … `(unused mount/volume)` … `pg_upgrade`** → Postgres 18 changed
   where the image keeps its data: one mount at `/var/lib/postgresql`, with the
   cluster in a major-version subdirectory below it. A mount at the old

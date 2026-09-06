@@ -93,6 +93,12 @@ func main() {
 		os.Exit(1)
 	}
 	switch arg(0) {
+	case "run":
+		// A one-off's body: what the container would have written to its
+		// stdout, so a test can see which of the CLI's streams it reaches.
+		if says := os.Getenv("FAKE_RUN_SAYS"); says != "" {
+			fmt.Println(says)
+		}
 	case "system":
 		if arg(1) == "dns" && arg(2) == "list" {
 			fmt.Print("DOMAIN\nopossum\n")

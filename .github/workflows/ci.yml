@@ -48,7 +48,13 @@ jobs:
     # pull_request, the expression comes back empty, and !empty is true — the
     # manual main-tree run a release asks for goes ahead.
     if: ${{ !github.event.pull_request.draft }}
-    runs-on: ubuntu-latest
+    # A self-hosted runner: the labels name the machine class, not a machine,
+    # so a replacement with the same labels takes over without a change here.
+    # release.yml (a darwin build) and pages.yml (the deploy permission) stay
+    # on GitHub-hosted runners. The runner is expected to carry gcc (-race),
+    # jq (go.mod version reads), make and git; the first step says which one
+    # is missing rather than letting a later step fail on it obliquely.
+    runs-on: [self-hosted, Linux, X64]
     # The compiler each section installed is the compiler it uses. Left to
     # itself, go reads the `toolchain` line in go.mod and downloads a different
     # one — so the section set up with the version go.mod asks for would
@@ -62,6 +68,17 @@ jobs:
           # Full history: the changelog-fragment step three-dot diffs against
           # the PR base, and a shallow clone has no base to diff against.
           fetch-depth: 0
+      - name: the runner has the tools the steps below assume
+        run: |
+          missing=""
+          for tool in gcc jq make git; do
+            command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::this runner lacks:$missing — install them on the runner host (apt-get install build-essential jq make git)"
+            exit 1
+          fi
+          echo "runner: $(uname -srm), $(nproc) cpus, tmp=$(dirname "$(mktemp -u)")"
 
       # ---- the version go.mod asks for -----------------------------------
       #

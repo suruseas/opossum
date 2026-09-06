@@ -291,8 +291,9 @@ socket, whoever owns it. `up` warns about the rest, because nothing here answers
 on that path about these containers. A named volume
 can only be attached to one running container at a time, which is Apple
 `container`'s constraint, not a
-choice. Swarm/`deploy` beyond `resources.limits`, `configs`, and `extends` are
-ignored, and `opossum config` tells you which fields in your file were skipped.
+choice. Swarm/`deploy` beyond `resources.limits` and `configs` are ignored, and
+`opossum config` tells you which fields in your file were skipped; a service
+with `extends:` is refused by name, since its inherited settings are not read.
 
 [The details, and what to do about each →](docs/troubleshooting.md)
 

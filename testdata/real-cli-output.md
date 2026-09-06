@@ -9,7 +9,8 @@ stdout+stderr と exit code の golden。`testdata/fake-container.sh` はこれ�
 下記の節を実機で採り直した（生出力は `~/opossum-dogfood/results/v131-recapture/`、68 ファイル、
 各ファイルは `$ <コマンド>` → `--- exit code:` → `--- stdout ---` → `--- stderr ---` の形）。各節に
 付いている古い採取日は、その記述が**最初に**確かめられた日。**1.3.1 で引き直していない主張**は
-節の中で名指ししてある（「DNS 解決の挙動」の前半、`stats` の `--format`／ストリーミング既定）。
+節の中で名指ししてある（`stats` のストリーミング既定）。「DNS 解決の挙動」の前半と `stats` の
+`--format` は 2026-09-05 に引いた（末尾の「公開文書の実機主張」の節）。
 
 **1.2.2 → 1.3.1 で変わったもの（節ごとの注記が正、ここは索引）**：
 - `network inspect` / `network ls --format json`：`status.ipv6Subnet` が増えた（キー増のみ）
@@ -114,8 +115,8 @@ Error: container not found: <name>
 （bare 名）時の同名衝突ガードと所属メタデータに使う。
 
 ## DNS 解決の挙動（spike で確認 / 複数プロジェクト分離の根拠）
-**1.3.1 で引き直したのは後半（登録済みドメイン＋サブドメイン名前空間化：proj1/proj2 の bare `db` が別 IP に解決）だけ。**
-**前半の「未登録ドメインで NXDOMAIN」は 1.2.2 の観測のまま**（1.3.1 では引いていない）。
+**両方とも 1.3.1 で引き直した**（後半は 2026-09-04、前半は 2026-09-05 `p1c-unregistered-domain.txt`：
+`--dns-search clmproj`（未登録）で bare `y` も `y.clmproj` も `NXDOMAIN`、exit 1）。
 - **登録済みドメイン必須**: `--dns-search proj1`（未登録）だと相手を bare 名で引くと **NXDOMAIN**。
   登録済み `opossum` なら解決成功。`system dns create` は sudo・システム共有。
 - **サブドメインで名前空間化できる**: `--name db.<proj>.opossum` ＋ `--dns-search <proj>.opossum`
@@ -168,7 +169,9 @@ Container ID  Cpu %    Memory Usage         Net Rx/Tx            Block I/O      
 飛ばしていた。2026-09-04 実測、`stats-absent-only.txt` / `stats-multi-with-stopped.txt`）。
 → `opossum stats` は出力をパースせず passthrough（`runtime.Stats` が `stream` で stdio 直結）するため
 出力形式には依存しないが、**渡す名前は存在するコンテナに絞る**（`Orchestrator.createdContainers`）。
-`--format json|table|yaml|toml` とストリーミング既定は help の記述で、1.3.1 では `--no-stream` しか引いていない。
+`--format json|yaml` は 2026-09-05 に `--no-stream` と組んで引いた（`p14-stats-format.txt`：json は
+`[{"blockReadBytes":…,"cpuUsageUsec":…,"id":…,"memoryLimitBytes":…,"memoryUsageBytes":…,"networkRxBytes":…,"networkTxBytes":…,"numProcesses":…}]`
+の 1 要素配列、yaml は同じキーのリスト）。`table`/`toml` とストリーミング既定は help の記述のまま。
 
 ## `container image inspect` / `image delete`  （#126 `opossum images` / `down --rmi` の根拠 / 2026-07-06 実機採取）
 `opossum images` の PRESENT 判定と `down --rmi` の削除に使う。実機で採取した exit セマンティクス:
@@ -247,8 +250,8 @@ opossum は、ランタイムの出力の文言に一致させて案内を出す
 - **上流が image のもの**は別（#480）——`OPSM-101`（`initdb:` + `lost+found`）と
   `OPSM-105`（`chown` + `Operation not permitted`）と `OPSM-110`（`(unused mount/volume)` +
   `pg_upgrade`）は、コンテナのログに一致させている。この面の生出力もここに置いてある
-  （`pg17-*.txt` 5件・`pg18-*.txt` 8件）が、**表には入れない**——上流が image である以上、
-  版を書いた記録の形が違う（#480 で決める）
+  （`pg17-*.txt` 7件・`pg18-*.txt` 8件）が、**この表には入れない**——上流が image である以上、
+  版でなく image の tag と採取日で読む。下の「image 由来の文言」の表と `ImageWordings` がそれ（#480）
 - **外れても見えるもの**は別——`runtime.go` の `"exist"`（network create の冪等化）は文言が
   ずれると**失敗する**。`"not found"`（teardown の冪等化）は失敗しないが、**余計な警告が出る**。
   どちらも見える。**黙るのは見えない**
@@ -286,9 +289,19 @@ HOST FOOTPRINT が黙って `—`／上流はホストのコマンド）。
 | 7 | build（resource） | 同上 | `rpc error: code = Unavailable` | `raw:build-resource-path-only-131.txt` | `unverified` |
 | 8 | build（disk full） | 同上 | `No space left on device` | `raw:build-disk-full-131.txt` | `unverified` |
 | 9 | volume の削除警告 | `runtime.go` `resourceInUse` | `in use` | `raw:volume-in-use-via-opossum-131.txt` | `raw:volume-in-use-131.txt` |
-| 10 | image の削除警告 | `runtime.go` `DeleteImage` | `in use` | `path-tried:image-in-use-not-reached-131.txt` | `unverified` |
+| 10 | image の削除警告 | `runtime.go` `DeleteImage` 経由の `resourceInUse` | `in use` | `path-tried:image-in-use-not-reached-131.txt` | `unverified` |
 | 11 | `doctor` の storage 警告 | `doctor.go` `parseReclaimable` | `GB (` | `raw:doctor-inputs-131.txt` | `raw:doctor-inputs-131.txt`（`GB` と `MB` のみ。`B`/`KB`/`TB`/`PB` は unverified） |
 | 12 | `doctor` の builder 警告 | `doctor.go` `parseBuilder` | `running` `MB` | `raw:doctor-inputs-131.txt` | `raw:doctor-inputs-131.txt`（`running`・`stopped`・`MB` のみ。`GB` は unverified） |
+
+**文言列とコードは、コード側の宣言で結ばれている。** 上流の文言に当てる各パッケージは
+`UpstreamWordings`（`internal/runtime/upstream.go` の型）に「どの関数が・どの文言に」を宣言し、
+検査が宣言と表を両方向で突き合わせ、宣言の各文言が**その関数の本体**（とそのファイル直下の
+`var`/`const`——regexp はそこに住む）で**比較の文脈**のリテラルとして実在することを見る。比較の文脈と
+数えるのは `strings`/`regexp` の比較関数の引数・`==`/`!=` の両辺・`case`・**`[]string` の要素**
+（署名の一覧をループで当てる形。ユーザ向けの文の一覧もこの形なら通る——ここが一番緩い扉）。
+行を痩せさせても、宣言を足して行を足さなくても、その関数の一致を消して（別の関数に同じ語が
+残っていても）宣言を残しても赤になる。**宣言せずに書いた一致と、上の形以外で書いた一致は、
+これまでどおり誰にも見えない**——宣言は書く側の義務。
 
 **文言列に書くのは、上流が出す文字列だけ。** コードの識別子やファイル名は「一致させている
 場所」に出す。混ぜていたときは、`runtime.go` のような**コード側の名前まで「上流の文言」として
@@ -481,6 +494,34 @@ volumes: { shared: }
 named volume の attach は排他なので、2本目が
 `Error Domain=VZErrorDomain Code=2 "The storage device attachment is invalid."` で落ちる。
 
+## image 由来の文言（#480・上流は `container` でなく image の entrypoint）
+
+`container` の文言表と同じ三つ組で結ぶ——宣言（`internal/orchestrator/imagewordings.go`）・コードの literal・
+捕獲物（`testdata/error-wordings/`、ヘッダに image の tag と採取日）。image が更新されると `container` を
+上げていなくても黙りうるので、「最後にその文言を見た日」は捕獲物のヘッダの日付で読む。
+
+| 一致させている場所 | 文言 | image | 捕獲物 | 最後に見た日 |
+|---|---|---|---|---|
+| `pgVersionedLayoutHint` | `(unused mount/volume)` | postgres | `pg18-named-old-datadir.txt` | 2026-08-23 |
+| `pgVersionedLayoutHint` | `pg_upgrade` | postgres | `pg18-named-old-datadir.txt` | 2026-08-23 |
+| `initdbNotEmptyHint` | `initdb:` | postgres | `pg17-external-volume-lostfound-131.txt` | 2026-09-06 |
+| `initdbNotEmptyHint` | `lost+found` | postgres | `pg17-external-volume-lostfound-131.txt` | 2026-09-06 |
+| `chownCrashHint` | `chown` | postgres | `pg17-bind-old-datadir-131.txt` | 2026-09-06 |
+| `chownCrashHint` | `Operation not permitted` | postgres | `pg17-bind-old-datadir-131.txt` | 2026-09-06 |
+| `chownCrashHint` | `Operation not permitted` | redis | `redis-chown-131.txt` | 2026-09-06 |
+| `chownCrashHint` | `Operation not permitted` | mongo | `mongo-chown-131.txt` | 2026-09-06 |
+| `chownCrashHint` | `Operation not permitted` | clickhouse | `clickhouse-chown-131.txt` | 2026-09-06 |
+| `chownfailure.go` | `chown: .: Operation not permitted` | redis | `redis-chown-131.txt` | 2026-09-06 |
+| `chownfailure.go` | `chown: changing ownership of '/data/db': Operation not permitted` | mongo | `mongo-chown-131.txt` | 2026-09-06 |
+| `chownfailure.go` | `chown: changing ownership of '/var/lib/clickhouse/': Operation not permitted` | clickhouse | `clickhouse-chown-131.txt` | 2026-09-06 |
+
+**2026-09-06 の採り直しで分かったこと**：clickhouse の綴りが `chown: /var/lib/clickhouse/: …` から
+`chown: changing ownership of '/var/lib/clickhouse/': …` に変わっていた（image の更新。`chownPathRE` は両方を
+読むので動作は不変——これが #480 の言う「container を上げなくても上流が変わる」の実例）。postgres 17 は
+chown の前に `chmod: …: Operation not permitted` も出す（chown 行は健在）。採取手順は
+`~/opossum-dogfood/results/v131-images/capture.sh`、image の digest は各捕獲物のヘッダ。8/23 の捕獲物
+（`pg17-*`・`pg18-*`・`redis-family-chown-split.txt`）は #485/#486 の記録としてそのまま残す。
+
 ## `container ls -a --format json` (初出 2026-07-15、2026-08-26 に採り直し)
 
 Array of objects; opossum's `List` reads `configuration.id` (the container
@@ -546,3 +587,42 @@ vz_tmp                                named      local
 nmcheck                               named      local
 53f55c9f-57c1-40da-bebc-6ba37f66d917  anonymous  local
 ```
+
+## 公開文書の実機主張（#533 の unverified 分 / 2026-09-05 に 1.3.1 で採取）
+
+README・`docs/compatibility.md`・`docs/troubleshooting.md`・`docs/networking.md`・`docs/agent-sandbox.md` が
+述べる「実ランタイムの事実」のうち、fake では確かめられず `unverified` に残っていたものを実機で引いた。
+生出力は `~/opossum-dogfood/results/v131-claims/`（`probe.sh` が採取手順そのもの、`p<番号>-*.txt` が
+`$ <コマンド>` → 出力 → `[exit N]` の形）。image は `alpine:3`、network は既定の `default` と
+`network create --internal` で作った一時 network。
+
+| 主張（文書） | 実機（1.3.1） | ファイル |
+|---|---|---|
+| `<service>.<project>.<domain>` で相手を引ける（compat「Container names」・README） | `nslookup b.clm.opossum` が A/AAAA を返し ping 到達。`resolv.conf` は `nameserver <gateway>` だけなので **bare `b` は NXDOMAIN**——bare 名は `--dns-search <proj>.<domain>` を付けて初めて `d` → `d.clm.opossum` に解決する（opossum は `runtime.go` の `DNSSearch` でこれを付けている） | `p1-dns.txt` / `p1b-dns-search.txt` |
+| 未登録ドメインでは bare 名が NXDOMAIN（上の「DNS 解決の挙動」前半） | `--dns-search clmproj`（未登録）で `y` も `y.clmproj` も NXDOMAIN・exit 1 | `p1c-unregistered-domain.txt` |
+| `internal:` network に名前解決は無い／host には届く（networking・agent-sandbox・troubleshooting） | 名前解決は無い（`nslookup` はタイムアウト）。**ただし理由は文書と違った**：gateway（`192.168.128.1`）にも host の LAN IP にも ping は届く。gateway の 53 番へ直接引くと `read: Connection refused`——**経路が無いのではなく、internal network の gateway は DNS を出していない**。peer の IP への ping は届く。1.1.1.1 は 100% loss | `p2-internal.txt` / `p2b-internal-ip.txt` |
+| `network_mode: none` は loopback だけ・名前解決も egress も無い（compat） | `ip addr` は `lo` のみ、`resolv.conf` 相当は無く nslookup は `127.0.0.1` に `Connection refused`、`ping 1.1.1.1` は `Network unreachable` | `p13-network-none.txt` |
+| named volume は同時に 1 コンテナだけ（troubleshooting・README） | 2 つ目の `run -v clm_fresh:/data` が `Error: failed to bootstrap container … VZErrorDomain Code=2 "The storage device attachment is invalid."`・exit 1。1 つ目は running のまま | `p3-volume-exclusive.txt` |
+| 作りたての volume は空ではなく `lost+found` を持つ（compat「DB data dirs」） | `volume create` 直後の `ls -la /data` に `lost+found` だけがある | `p11-fresh-volume.txt` |
+| bind mount は host 所有で `chown` できない（compat・troubleshooting・README） | mount は `virtiofs`。**mount point 自体の `chown` は `Operation not permitted`（exit 1）**。中に作ったファイル／サブディレクトリの `chown` は **exit 0 だが所有者は `0:0` のまま変わらない**（黙って効かない）。文書の「`Operation not permitted` で落ちる」は data dir 自体を chown する DB image の経路 | `p12-bind-chown.txt` |
+| `inspect` は終了コードを出さない（compat「service_completed_successfully」・troubleshooting「restart」） | 前景 `run … sh -c 'exit 3'` の戻り値は 3。その後の `inspect` の `status` は `networks: []`・`startedDate`・`state: "stopped"` の 3 キーだけ | `p4-inspect-exitcode.txt` |
+| restart で IP が変わり、名前は保たれる（troubleshooting「restart」） | `stop` → `start` で `ipv4Address` が `.16/24` → `.17/24`（MAC も変わる）。`configuration.id` と `status.networks[].hostname` は同じ | `p8-restart-ip.txt` |
+| socket の bind mount は動く／symlink 先が socket なら runtime が拒む（README・compat「Won't manage」） | 実 socket を `-v` すると中では `socket` 型として見える。symlink を `-v` すると `Error: mount failed with errno 95 … type=none` で **起動自体が失敗**（exit 1） | `p5-socket.txt` |
+| サービスの VM に `/dev/kvm` は無い（troubleshooting「No Docker-in-Docker」） | `ls /dev/kvm` → `No such file or directory` | `p6-nested-kernel.txt` |
+| WireGuard（`NET_ADMIN` + `/lib/modules`）は動かない（compat「Won't run at all」） | `/lib/modules` は無い（kernel `6.18.15`）。`--cap-add NET_ADMIN` を付けても `ip link add wg0 type wireguard` は `RTNETLINK answers: Not supported`（付けないと `Operation not permitted`）。`dummy` 型も `Not supported` | `p6-nested-kernel.txt` |
+| builder の既定は 2 CPU / 2 GB（troubleshooting「Troubleshooting builds」） | `container system property ls` の `[build]` が `cpus = 2`・`memory = "2048mb"`。`[container]` の既定は `cpus = 4`・`memory = "1gb"` | `p7b-property.txt` |
+| `system dns create` は再起動をまたいで残る（README「Setup」） | `/etc/resolver/containerization.opossum`（`domain opossum` / `nameserver 127.0.0.1` / `port 2053`）の日付は 6/20、`kern.boottime` は 9/5——再起動後も `system dns ls` に `opossum` が出る | `p9-dns-persist.txt` |
+| `ports: - "3000"`（host 側なし）は runtime が受けない（compat「Published ports」） | `run -p 3000` → `Error: invalid publish value: 3000`・exit 1（コンテナは作られない） | `p10-port.txt` |
+| `logs`/`exec`/`cp` に不在の名前 | いずれも exit 1。`logs`：`failed to get logs for container X (cause: "internalError: "failed to open container logs: notFound: "container with ID X not found""")`／`exec`：`Error: get failed: container X not found`／`cp`（両向き）：`failed to copy from|into container X (cause: "notFound: "container with ID X not found"")` | `p15-absent.txt` |
+
+**引いていないもの（1.3.1 では unverified のまま）**：macOS 15 での網分離（この Mac は 26）、build の cache 破損／
+resource／disk full の上流文言（表の行 6–8）、ベンチ値・コーパス実測値・Homebrew 手順（実ランタイムの事実ではない）。
+
+**Elasticsearch の cgroup クラッシュ（2026-09-06 に引いた）**：7.16.3・7.17.0（同梱 JDK 17.0.1）は 1.3.1 でも
+`CgroupInfo.getMountPoint() … null` で起動直後に落ちる。7.17.28（JDK 22.0.2）は `started` まで行き 9200 が応答。
+VM 側は `cgroup2` を `/sys/fs/cgroup` に controller 無しでマウント（`/proc/self/cgroup` は `0::/`）。落ちるかは
+image の JDK で決まる（`p16-es-cgroup.txt`）。
+
+**文書を直したもの**：internal network の名前解決が無い**理由**（`docs/networking.md` の表と箇条書き、
+`docs/agent-sandbox.md`）。「resolver のある gateway へ経路が無い」から「gateway は届くが DNS を出して
+いない」へ。

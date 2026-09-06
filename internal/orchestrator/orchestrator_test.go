@@ -315,6 +315,12 @@ func TestUpFailsWhenHostPortInUse(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "already in use") || !strings.Contains(err.Error(), "[OPSM-201]") {
 		t.Errorf("up should fail with code OPSM-201 when a published host port is in use, got %v", err)
 	}
+	// The conflict line is port, network, then the service in parentheses, then
+	// any hint. The service and the hint are both strings; exchanged, the
+	// service's name would trail the parenthesis and the hint sit inside it (#559).
+	if want := fmt.Sprintf("  - %d/tcp (service %q)\n", port, "web"); err != nil && !strings.Contains(err.Error(), want) {
+		t.Errorf("the conflict line should read %q, got %v", want, err)
+	}
 }
 
 // A service that declares MCP tools gets a generated .mcp.json bind-mounted at the
@@ -1762,6 +1768,19 @@ func TestUpLooksInsideAnExistingPostgresVolume(t *testing.T) {
 			if got := strings.Contains(out.String(), "OPSM-101"); got != tc.warn {
 				t.Errorf("warned=%v, want %v; output:\n%s", got, tc.warn, out.String())
 			}
+			// When it warns, the service comes first and the volume second, and
+			// the fix names the data directory: three strings on one format call
+			// that a code check alone would pass in any order (#559).
+			if tc.warn {
+				for _, want := range []string{
+					`service "db" won't start as written: the volume "demo_pgdata" was not created by this`,
+					"adding `environment: PGDATA=/var/lib/postgresql/data/pgdata` to the service.",
+				} {
+					if !strings.Contains(out.String(), want) {
+						t.Errorf("the warning should read %q, got:\n%s", want, out.String())
+					}
+				}
+			}
 		})
 	}
 }
@@ -2648,8 +2667,11 @@ func TestUpProfilesDependencyOnDisabledErrors(t *testing.T) {
 		"helper": {Image: "helper:latest", Profiles: []string{"opt"}},
 	})
 	err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true)
-	if err == nil || !strings.Contains(err.Error(), "profile is not active") {
-		t.Fatalf("expected a disabled-dependency error, got %v", err)
+	// Held with both names in their places: which service depends and which
+	// is gated is what the reader acts on, and exchanged they read as sound
+	// English pointing at the wrong service (#559).
+	if want := `service "web" depends on "helper", whose profile is not active — enable it with --profile or COMPOSE_PROFILES, or name it explicitly`; err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("expected a disabled-dependency error saying %q, got %v", want, err)
 	}
 }
 
@@ -2697,8 +2719,8 @@ func TestRunProfilesDependencyOnDisabledErrors(t *testing.T) {
 		"helper": {Image: "helper:latest", Profiles: []string{"opt"}},
 	})
 	err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).RunOneOff("web", nil, orchestrator.RunOneOffOptions{})
-	if err == nil || !strings.Contains(err.Error(), "profile is not active") {
-		t.Fatalf("run should error on a gated-inactive dependency, got %v", err)
+	if want := `service "web" depends on "helper", whose profile is not active — enable it with --profile or COMPOSE_PROFILES, or name it explicitly`; err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("run should error on a gated-inactive dependency saying %q, got %v", want, err)
 	}
 }
 
@@ -2727,6 +2749,11 @@ func TestUpReportsExitedDependencyClearly(t *testing.T) {
 	msg := err.Error()
 	if !strings.Contains(msg, "[OPSM-401]") || !strings.Contains(msg, "not running") || !strings.Contains(msg, "last log lines") || !strings.Contains(msg, "log-line db.demo.opossum") {
 		t.Errorf("error should carry code OPSM-401 and embed the exited container's captured logs, got: %v", err)
+	}
+	// The state sits in the parentheses and the capture follows the colon; both
+	// are strings, and exchanged the state would be a log and the log a state (#559).
+	if want := "container is not running (state \"stopped\"); its last log lines:\n  log-line db.demo.opossum"; !strings.Contains(msg, want) {
+		t.Errorf("the error should read %q, got: %v", want, err)
 	}
 	if strings.Contains(msg, "opossum logs") {
 		t.Errorf("error should not suggest `opossum logs` (rollback removes the container): %v", err)
@@ -2761,6 +2788,11 @@ func TestUpFailsWhenDependencyNeverHealthy(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "db") || !strings.Contains(err.Error(), "healthcheck") {
 		t.Errorf("error should name the unhealthy dependency and healthcheck, got: %v", err)
+	}
+	// The dependency and the service that waited for it are both quoted
+	// strings: exchanged, the reader would go and fix web's healthcheck (#559).
+	if want := `dependency "db" for service "web":`; !strings.Contains(err.Error(), want) {
+		t.Errorf("the error should open with %q, got: %v", want, err)
 	}
 	lines := log()
 	// Retries were honored (exactly 2 attempts) and web never started.
@@ -2829,6 +2861,12 @@ func TestUpRefusesForeignProjectContainer(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "otherproj") || !strings.Contains(err.Error(), "--dns-domain") {
 		t.Errorf("error should name the owning project and suggest --dns-domain, got: %v", err)
+	}
+	// The container and the owning project are both quoted strings: exchanged,
+	// the sentence would call the other project a container and the container a
+	// project, and still read as English (#559).
+	if want := `container "db.demo.opossum" is already in use by project "otherproj"`; !strings.Contains(err.Error(), want) {
+		t.Errorf("the refusal should open with %q, got: %v", want, err)
 	}
 	// Crucially, opossum must NOT have force-deleted the other project's container.
 	for _, l := range log() {
@@ -3770,6 +3808,26 @@ func TestUpRemapsBareHostPortWhenTaken(t *testing.T) {
 	if !strings.Contains(out.String(), "[OPSM-206]") || !strings.Contains(out.String(), "opossum ps") {
 		t.Errorf("the remap should be announced and point at `opossum ps`, got:\n%s", out.String())
 	}
+	// The notice names the service and then the port, both strings: exchanged
+	// they read as a service called after a number (#559).
+	if want := fmt.Sprintf("service %q publishes container port %d, and the compose file", "web", port); !strings.Contains(out.String(), want) {
+		t.Errorf("the notice should open with %q, got:\n%s", want, out.String())
+	}
+	// And the two numbers at the end — where it went, and what to pin — are
+	// both ints: the free port is the one the run command carried, and the
+	// container port is the one the file named.
+	m := regexp.MustCompile(fmt.Sprintf(`-p (\d+):%d`, port)).FindStringSubmatch(calls)
+	if m == nil {
+		t.Fatalf("no -p <free>:%d in the run command, calls:\n%s", port, calls)
+	}
+	for _, want := range []string{
+		fmt.Sprintf("so opossum published it on %s instead.", m[1]),
+		fmt.Sprintf(`write it in the compose file as "<host>:%d".`, port),
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("the notice should say %q, got:\n%s", want, out.String())
+		}
+	}
 }
 
 // An explicit mapping is a contract the user wrote down: it must still fail
@@ -4231,5 +4289,43 @@ func TestThisPackageDoesNotWriteToTheRealStateDirectory(t *testing.T) {
 	}
 	if rel, rerr := filepath.Rel(home, state); rerr == nil && !strings.HasPrefix(rel, "..") {
 		t.Errorf("XDG_STATE_HOME is %s, inside the home directory %s", state, home)
+	}
+}
+
+// The line `up` prints for each service names the service and then, in
+// parentheses, the image. Both are strings: exchanged, "Starting web:latest (web)"
+// still reads as a line about starting something, and no test held the order
+// until the swap sweep found it (#559).
+func TestTheStartLineNamesTheServiceThenTheImage(t *testing.T) {
+	rt, _ := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"web": {Image: "web:latest"},
+	})
+	var out bytes.Buffer
+	if err := orchestrator.New(p, rt, "opossum", &out).Up(true); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	if !strings.Contains(out.String(), "Starting web (web:latest)\n") {
+		t.Errorf("the start line should read `Starting web (web:latest)`, got:\n%s", out.String())
+	}
+}
+
+// A dry run lists each planned command as the binary and then its arguments —
+// the line a reader could paste. Both are strings on one format call, and the
+// other way round the arguments would lead and the binary trail, which no test
+// held until the swap sweep found it (#559).
+func TestTheDryRunPlanListsTheBinaryBeforeItsArguments(t *testing.T) {
+	rt, _ := fakeShim(t)
+	var out bytes.Buffer
+	p := project("demo", map[string]*compose.Service{
+		"web": {Image: "web:latest"},
+	})
+	o := orchestrator.New(p, rt, "opossum", &out)
+	o.SetDryRun(true)
+	if err := o.Up(true); err != nil {
+		t.Fatalf("Up --dry-run: %v", err)
+	}
+	if want := "  " + rt.Bin + " network create demo-net\n"; !strings.Contains(out.String(), want) {
+		t.Errorf("the plan should list %q, got:\n%s", want, out.String())
 	}
 }

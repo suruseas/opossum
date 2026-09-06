@@ -2,9 +2,13 @@ package orchestrator
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -287,38 +291,83 @@ func TestCodesAreEmittedFromConstantsNotLiterals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) == 0 {
-		t.Fatal("no sources found — this test would pass by looking at nothing")
-	}
-	var sources []string
+	var sources int
 	for _, f := range files {
 		if !strings.HasSuffix(f, "_test.go") {
-			sources = append(sources, f)
+			sources++
 		}
 	}
-	if len(sources) == 0 {
-		t.Fatal("every source was skipped — this test would pass by looking at nothing")
+	if sources == 0 {
+		t.Fatal("no sources found — this test would pass by looking at nothing")
 	}
-	literalCode := regexp.MustCompile(`"[^"]*\[OPSM-\d+\]`)
+	// Read as syntax rather than as lines: a literal is a literal whether it is
+	// quoted or raw, written on one line or continued onto the next, or split
+	// into pieces joined with +. A line-wise regexp that wanted the opening
+	// quote missed all three (#404), while the bytes those forms print are the
+	// same as the plain literal's.
+	fset := token.NewFileSet()
+	pkgs, err := parser.ParseDir(fset, ".", func(fi os.FileInfo) bool {
+		return !strings.HasSuffix(fi.Name(), "_test.go")
+	}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	literalCode := regexp.MustCompile(`\[OPSM-\d+\]`)
 	var scanned int
-	for _, f := range sources {
-		src, err := os.ReadFile(f)
-		if err != nil {
-			t.Fatal(err)
-		}
-		scanned++
-		for i, line := range strings.Split(string(src), "\n") {
-			if literalCode.MatchString(line) {
-				t.Errorf("%s:%d writes a code as a literal; format it from its constant instead:\n  %s",
-					f, i+1, strings.TrimSpace(line))
-			}
+	for _, pkg := range pkgs {
+		for _, f := range pkg.Files {
+			scanned++
+			ast.Inspect(f, func(n ast.Node) bool {
+				text, whole, ok := literalText(n)
+				if !ok {
+					return true
+				}
+				if literalCode.MatchString(text) {
+					t.Errorf("%s writes a code as a literal; format it from its constant instead:\n  %q",
+						fset.Position(n.Pos()), text)
+				}
+				// A concatenation that folded to one string has been read whole;
+				// its pieces would only say the same thing again, in halves.
+				return !whole
+			})
 		}
 	}
 	// Counted against the whole list, not against zero. A loop that stops early
 	// leaves most of the package unread while every "did it look at anything"
 	// guard still passes, so the guard has to be "did it look at all of it".
-	if scanned != len(sources) {
+	if scanned != sources {
 		t.Fatalf("scanned %d of %d sources — the loop is stopping early, so most of the "+
-			"package is unchecked", scanned, len(sources))
+			"package is unchecked", scanned, sources)
 	}
+}
+
+// literalText is the string a node spells out, when it is a string literal or
+// a + chain made only of string literals: the value (quotes and escapes
+// resolved, so a raw string reads the same as a quoted one), and whether it was
+// a chain — so the caller can stop at the whole rather than re-reading pieces.
+func literalText(n ast.Node) (text string, chain bool, ok bool) {
+	switch x := n.(type) {
+	case *ast.BasicLit:
+		if x.Kind != token.STRING {
+			return "", false, false
+		}
+		v, err := strconv.Unquote(x.Value)
+		if err != nil {
+			return "", false, false
+		}
+		return v, false, true
+	case *ast.BinaryExpr:
+		if x.Op != token.ADD {
+			return "", false, false
+		}
+		l, _, lok := literalText(x.X)
+		r, _, rok := literalText(x.Y)
+		if !lok || !rok {
+			return "", false, false
+		}
+		return l + r, true, true
+	case *ast.ParenExpr:
+		return literalText(x.X)
+	}
+	return "", false, false
 }

@@ -51,12 +51,22 @@ func TestRestartHasNextStep(t *testing.T) {
 
 func TestPullHasNextStep(t *testing.T) {
 	shim := scriptShim(t, "  image) if [ \"$2\" = pull ]; then exit 1; fi ;;\n")
-	err := New(lifecycleProject(), shim, "opossum", &bytes.Buffer{}).Pull(nil)
+	var out bytes.Buffer
+	err := New(lifecycleProject(), shim, "opossum", &out).Pull(nil)
 	if err == nil {
 		t.Fatal("expected Pull to fail")
 	}
 	if s := err.Error(); !strings.Contains(s, "registry auth") || !strings.Contains(s, "web:latest") {
 		t.Errorf("pull failure should name the image and hint at auth/network, got: %s", s)
+	}
+	// The progress line and the failure both name the service and then the
+	// image; both are strings, and exchanged they read as pulling an image
+	// called web (#559).
+	if want := "Pulling web (web:latest)\n"; !strings.Contains(out.String(), want) {
+		t.Errorf("the progress line should read %q, got:\n%s", want, out.String())
+	}
+	if s := err.Error(); !strings.HasPrefix(s, `pulling service "web": `) || !strings.Contains(s, `check the image name "web:latest" and`) {
+		t.Errorf("the failure should open with the service and name the image in the hint, got: %s", s)
 	}
 }
 
@@ -111,5 +121,13 @@ func TestWatchSyncFailureNamesFileAndService(t *testing.T) {
 	s := out.String()
 	if !strings.Contains(s, "x.js") || !strings.Contains(s, `"app"`) || !strings.Contains(s, "opossum ps") {
 		t.Errorf("sync failure should name the file + service and point at `opossum ps`, got: %s", s)
+	}
+	// Both lines go host file first, container target second — two strings on
+	// one format call each, and exchanged they read as copying out of the
+	// container (#559).
+	for _, want := range []string{"sync " + changed + " → app:", "sync of " + changed + " to app:"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("the line should read %q…, got: %s", want, s)
+		}
 	}
 }

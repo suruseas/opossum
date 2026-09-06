@@ -230,9 +230,9 @@ opossum が扱う／無視する／拒否する compose フィールドの全て
 動いているコンテナについて答えるものが、その先に無いからです。
 named volume は同時に1つの稼働コンテナにしか接続できませんが、これは Apple
 `container` の制約であって
-選択ではありません。`resources.limits` を超える Swarm/`deploy`、`configs`、
-`extends` は無視され、`opossum config` がファイル内のどのフィールドを飛ばしたか
-を教えます。
+選択ではありません。`resources.limits` を超える Swarm/`deploy` と `configs` は
+無視され、`opossum config` がファイル内のどのフィールドを飛ばしたかを教えます。
+`extends:` を持つサービスは、継承する設定を読まないため名前を挙げて拒否します。
 
 [詳細と、それぞれへの対処（英語）→](docs/troubleshooting.md)
 

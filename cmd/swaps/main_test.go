@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -34,6 +35,12 @@ func TestTheTotalsArePrintedByWhatCountedThem(t *testing.T) {
 	if !strings.Contains(out.String(), "2 sites, 4 pairs") {
 		t.Errorf("three of a kind and two of a kind make four exchanges over two sites:\n%s", out.String())
 	}
+	// Each row is file:line, the pair count, then the head of the format — and
+	// the line and the count are both ints, the file and the head both strings.
+	// Exchanged, a row would still be a row (#559).
+	if !regexp.MustCompile(`(?m)^\S+\.go:6  pairs=3  "%s %s %s"$`).MatchString(out.String()) {
+		t.Errorf("the first site's row should read <file>.go:6  pairs=3  \"%%s %%s %%s\":\n%s", out.String())
+	}
 }
 
 func TestTSVSaysOnlyWhatASweepReads(t *testing.T) {
@@ -45,6 +52,11 @@ func TestTSVSaysOnlyWhatASweepReads(t *testing.T) {
 	line := strings.TrimSpace(out.String())
 	if got := strings.Count(line, "\t"); got != 2 {
 		t.Errorf("file, line and pairs is two tabs, got %d: %q", got, line)
+	}
+	// The line number and the pair count are both ints: exchanged, the row
+	// would still be three tab-separated fields (#559).
+	if fields := strings.Split(line, "\t"); len(fields) == 3 && (fields[1] != "5" || fields[2] != "1") {
+		t.Errorf("file, then line 5, then 1 pair; got %q", line)
 	}
 	if strings.Contains(out.String(), "sites,") {
 		t.Errorf("the totals are prose, and a sweep reads rows:\n%s", out.String())
@@ -308,6 +320,12 @@ func TestSourceCarriesNoWrapper(t *testing.T) {
 	if got := out.String(); !strings.Contains(got, "no verdict") {
 		t.Errorf("the unclean run should say so:\n%s", got)
 	}
+	// The mutation's name opens the line and the outcome sits in the
+	// parentheses; both are strings, and exchanged the line would still parse
+	// as prose (#559).
+	if !regexp.MustCompile(`(?m)^probe x\.go:\d+:\d+ arguments 1 and 2: no verdict — the probe run was not clean \(caught by `).MatchString(out.String()) {
+		t.Errorf("the no-verdict line should open with the mutation's name:\n%s", out.String())
+	}
 	for _, v := range []string{swaps.VerdictDiffers, swaps.VerdictNeverDiffered, swaps.VerdictUnreached} {
 		if strings.Contains(out.String(), v) {
 			t.Errorf("an unclean run must not carry a verdict, found %q:\n%s", v, out.String())
@@ -404,4 +422,38 @@ func (l *lockedBuf) String() string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.b.String()
+}
+
+// A pair a probe cannot carry is said with its place: file, line, the two
+// argument numbers and the reason, in that order. Five values on one format
+// call, and no test reached the line (#559's swap sweep reported it unreached).
+// A row naming a line no site sits on is the one skip nothing else can turn
+// into a probe.
+func TestAPairThatCannotCarryAProbeIsSaidWithItsPlace(t *testing.T) {
+	writeModule(t, `package x
+
+import "fmt"
+
+func Msg(entry, svc string) string {
+	return fmt.Sprintf("tool %q refers to %q", entry, svc)
+}
+`, `package x
+
+import "testing"
+
+func TestMsg(t *testing.T) {
+	if Msg("web", "db") == "" {
+		t.Fatal("empty")
+	}
+}
+`)
+	var out, errOut strings.Builder
+	rows := "x.go:99:9 reads arguments 1 and 2 the other way round: SURVIVED\n"
+	code := run([]string{"-probe", "."}, strings.NewReader(rows), &out, &errOut, nil, nil)
+	if code != 1 {
+		t.Errorf("exit = %d, want 1 — nothing could be probed", code)
+	}
+	if want := "not probed: x.go:99 arguments 1 and 2 — " + swaps.ProbeSkipNoSite; !strings.Contains(errOut.String(), want) {
+		t.Errorf("the skip should be said as %q, got:\n%s", want, errOut.String())
+	}
 }

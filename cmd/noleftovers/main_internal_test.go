@@ -38,10 +38,16 @@ import (
 //     suite that starts in another terminal while this one runs appears here
 //     too, and cannot be told apart from a leak. The report says so rather than
 //     pretending otherwise, and does not hand over an unconditional removal.
-//   - Anything not named `opossum-*`. internal/orchestrator makes one temp
-//     directory with the prefix `sk` — a Unix socket path has to stay short —
-//     and no pattern that matches it in a shared $TMPDIR would leave strangers
-//     alone. A run that leaks only that one passes.
+//   - Anything named neither `opossum-*` nor the way t.TempDir names things
+//     (`Test`, the test's name as Go writes it, digits). internal/orchestrator
+//     makes one temp directory with the prefix `sk` — a Unix socket path has to
+//     stay short — and no pattern that matches it in a shared $TMPDIR would
+//     leave strangers alone. A run that leaks only that one passes. So does one
+//     leaking a Benchmark's or a Fuzz target's t.TempDir; this tree has none.
+//   - Whose a t.TempDir is. Its name holds no pid, so any other `go test`
+//     running at the same time — this repository's in another terminal
+//     included — leaves one that reads exactly like ours, and nothing runs
+//     inside a t.TempDir for the "still running" look to find.
 //   - A leak a concurrent run tidies up. The difference is taken across the
 //     command, so something that appears and disappears while it runs is never
 //     seen.
@@ -60,8 +66,10 @@ import (
 //     rather than as text.
 //   - The command's exit status, once `go run` has it. run() returns the
 //     command's own number — except that a run which left something behind is
-//     never green, so a command that succeeded, or that chose 0 after catching
-//     ^C, comes back as 1. `make test` throws even that away: `go run` collapses
+//     never green, and neither is one heard to be interrupted (one whose signal
+//     lands after the grace at the end is not heard), so a command that
+//     succeeded after leaking, or that chose 0 after catching ^C, comes back
+//     as 1. `make test` throws even that away: `go run` collapses
 //     every non-zero status to 1, which is why the number is also printed. make
 //     itself only tells zero from non-zero, so the gate is unaffected; a script
 //     reading `make test`'s status is not.
@@ -132,6 +140,66 @@ func TestARunThatLeavesSomethingBehindIsRefused(t *testing.T) {
 			code:   0,
 			absent: []string{"these appeared in", "some-other-tool-xyz"},
 		},
+		{
+			// What t.TempDir makes: the test's name with a subtest joined on
+			// (its spaces made _), then MkdirTemp's digits. Its removal runs
+			// from t.Cleanup, which a killed test binary never reaches (#552).
+			name:   "a t.TempDir is left",
+			leaves: "TestSomething_shapesub_case1295066356",
+			exit:   0,
+			code:   1,
+			want:   []string{"these appeared in", "TestSomething_shapesub_case1295066356", "rm -rf"},
+		},
+		{
+			// A test's name keeps its symbols: this one is a real directory
+			// this repository's suite makes, comma and all.
+			name:   "a t.TempDir whose name carries symbols is left",
+			leaves: "TestAValueOfTheWrongShapeIsNotReadBacka_sequence,_which_quotes_50741035",
+			exit:   0,
+			code:   1,
+			want:   []string{"these appeared in", "which_quotes_50741035", "rm -rf"},
+		},
+		{
+			// A repeated subtest name gets #01 appended, and the # stays.
+			name:   "a t.TempDir of a repeated subtest name is left",
+			leaves: "TestDupsame#013428259938",
+			exit:   0,
+			code:   1,
+			want:   []string{"these appeared in", "TestDupsame#013428259938", "rm -rf"},
+		},
+		{
+			// Hyphens and dots are kept too, and letters of any script.
+			name:   "a t.TempDir with a hyphen, a dot and kanji is left",
+			leaves: "TestNamingv1.2a-b日本語1810744787",
+			exit:   0,
+			code:   1,
+			want:   []string{"these appeared in", "TestNamingv1.2a-b日本語1810744787", "rm -rf"},
+		},
+		{
+			// `func Test1(t *testing.T)` is a test, and its directory is Test
+			// followed by digits alone.
+			name:   "a t.TempDir of a test named by digits is left",
+			leaves: "Test1234567890",
+			exit:   0,
+			code:   1,
+			want:   []string{"these appeared in", "Test1234567890", "rm -rf"},
+		},
+		{
+			// Starts with Test, ends in no digits: not the shape, somebody's.
+			name:   "a name that only starts with Test is left",
+			leaves: "Testimonial",
+			exit:   0,
+			code:   0,
+			absent: []string{"these appeared in", "Testimonial"},
+		},
+		{
+			// Digits at the end, but a character no test's name can carry.
+			name:   "a name with a bracket before the digits is left",
+			leaves: "Test[x]2",
+			exit:   0,
+			code:   0,
+			absent: []string{"these appeared in", "Test[x]2"},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tmp := tempdir(t)
@@ -160,6 +228,25 @@ func TestARunThatLeavesSomethingBehindIsRefused(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A t.TempDir's name is whatever the test was called, and a test may well be
+// called something with "-<digits>-<digits>" in it. Read the way our own names
+// are read, that would be a pid — here, the pid of this very process, which is
+// alive — and the directory would be called somebody's still-going work rather
+// than what it is, a leftover nobody can vouch for. So only our own names are
+// asked about their maker.
+func TestATestTempDirIsNeverReadAsSomebodyElsesLiveWork(t *testing.T) {
+	tmp := tempdir(t)
+	leaves := fmt.Sprintf("Test-%d-123456", os.Getpid())
+	var out bytes.Buffer
+	code := run([]string{"sh", "-c", fmt.Sprintf("mkdir %q", filepath.Join(tmp, leaves))}, &out)
+	if code != 1 {
+		t.Errorf("exit = %d, want 1: a t.TempDir left behind is a leftover whoever's pid its name resembles, said:\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), leaves) || strings.Contains(out.String(), "belong to a run still going") {
+		t.Errorf("should be listed as left, not as a run still going, said:\n%s", out.String())
 	}
 }
 
@@ -595,7 +682,8 @@ func TestAnInterruptTheCommandHandlesItselfIsStillCalledAnInterrupt(t *testing.T
 }
 
 // waitForSleeper waits until the `sleep` the command started is running, and
-// not merely until the leak is there. `mkdir` finishes before the sleeper is
+// not merely until the leak is there. A command that leaks nothing passes ""
+// for leak, and then has no second witness to offer. `mkdir` finishes before the sleeper is
 // forked, and a SIGINT that arrives in that window is dropped by the shell while
 // it waits on a foreground job: the sleep then starts with nobody left to
 // interrupt it.
@@ -630,6 +718,11 @@ func waitForSleeper(t *testing.T, pgid int, leak string) {
 			// that never got there. The leak is the one independent witness: if
 			// it exists, the command did run, and the silence is more likely
 			// pgrep's than the command's.
+			if leak == "" {
+				t.Fatalf("no sleeper was ever visible, and with nothing left behind to look for there " +
+					"is no second witness: either the command never got as far as sleeping, or pgrep " +
+					"cannot see processes here — a sandbox that hides them answers exactly like an empty match")
+			}
 			if _, err := os.Stat(leak); err == nil {
 				t.Fatalf("the command leaked but no sleeper was ever visible: either it never got that "+
 					"far, or pgrep cannot see processes here — a sandbox that hides them answers exactly "+
@@ -778,4 +871,155 @@ func childOf(t *testing.T, pid int) int {
 	}
 	t.Fatalf("pid %d never had a child to signal", pid)
 	return 0
+}
+
+// The contract is that a ^C is never read as tests that failed — and until #727
+// it was kept only by a run that had also left something behind. One that left
+// nothing returned the command's own status before the question was asked, so
+// `go test`'s 1 after a ^C came out looking exactly like a red suite.
+func TestAnInterruptWithNothingLeftBehindIsStillCalledOne(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "noleftovers")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("building: %v\n%s", err, out)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		exits int
+		want  int
+	}{
+		{"the command exits 1 after catching it", 1, 1},
+		// A run nobody let finish is not a passing one, even when the command
+		// chose to say 0 about it.
+		{"the command exits 0 after catching it", 0, 1},
+		{"the command exits 7 after catching it", 7, 7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			// No mkdir: the whole point is that nothing appears in tmp.
+			cmd := exec.Command(bin, "sh", "-c", fmt.Sprintf("trap 'exit %d' INT; sleep 300", tc.exits))
+			cmd.Env = append(os.Environ(), "TMPDIR="+tmp)
+			said := saidInto(t, cmd)
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) })
+			waitForSleeper(t, cmd.Process.Pid, "")
+
+			if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGINT); err != nil {
+				t.Fatal(err)
+			}
+			sent := time.Now()
+			_ = cmd.Wait()
+			nothingLeftInTheGroup(t, cmd.Process.Pid)
+			if took := time.Since(sent); took > 30*time.Second {
+				t.Errorf("took %s to come back: the interrupt is not what ended this", took)
+			}
+			if got := cmd.ProcessState.ExitCode(); got == 130 {
+				t.Fatalf("the trap did not take, so the command was signalled rather than choosing "+
+					"its own status: this never entered the situation it guards, said:\n%s", said())
+			}
+			if got := cmd.ProcessState.ExitCode(); got != tc.want {
+				t.Errorf("exit = %d, want %d, said:\n%s", got, tc.want, said())
+			}
+			want := fmt.Sprintf("this run was interrupted; the command handled that itself and exited %d,\n"+
+				"so its status says nothing about whether the tests were going to pass\n", tc.exits)
+			if !strings.Contains(said(), want) {
+				t.Errorf("should say word for word:\n%s\nsaid:\n%s", want, said())
+			}
+			// Nothing appeared, so nothing is listed and nothing "failed as
+			// well" — the words of the other path must not leak into this one.
+			for _, no := range []string{"these appeared in", "it failed as well as leaving these"} {
+				if strings.Contains(said(), no) {
+					t.Errorf("nothing was left behind, so %q has no place here, said:\n%s", no, said())
+				}
+			}
+		})
+	}
+}
+
+// The late copy of the signal (#711) has to be waited for on this path as on
+// the other: the same test as TestAnInterruptThatArrivesAfterTheCommandIsGoneStillCounts
+// with the mkdir taken out.
+func TestAnInterruptWithNothingLeftBehindThatArrivesLateStillCounts(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "noleftovers")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("building: %v\n%s", err, out)
+	}
+	tmp := t.TempDir()
+	cmd := exec.Command(bin, "sh", "-c", "trap 'exit 7' INT; sleep 300")
+	cmd.Env = append(os.Environ(), "TMPDIR="+tmp)
+	said := saidInto(t, cmd)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) })
+	waitForSleeper(t, cmd.Process.Pid, "")
+
+	sh := childOf(t, cmd.Process.Pid)
+	sleeper := childOf(t, sh)
+	for _, pid := range []int{sh, sleeper} {
+		if err := syscall.Kill(pid, syscall.SIGINT); err != nil {
+			t.Fatal(err)
+		}
+	}
+	time.Sleep(150 * time.Millisecond)
+	if err := syscall.Kill(cmd.Process.Pid, syscall.SIGINT); err != nil {
+		t.Fatal(err)
+	}
+	_ = cmd.Wait()
+	nothingLeftInTheGroup(t, cmd.Process.Pid)
+	if got := cmd.ProcessState.ExitCode(); got != 7 {
+		t.Fatalf("exit = %d, want the command's own 7 — an interrupted run keeps the status the command chose, said:\n%s", got, said())
+	}
+	if !strings.Contains(said(), "this run was interrupted") {
+		t.Errorf("a late interrupt should still be read as one, said:\n%s", said())
+	}
+	// Said on the path this is about, and not on the other: a fixture that
+	// left something behind would take the other path, which main already
+	// read a late interrupt on (#722), and this would be guarding nothing.
+	if strings.Contains(said(), "these appeared in") {
+		t.Errorf("something was left behind, so this never entered the situation it guards, said:\n%s", said())
+	}
+}
+
+// A command that did not catch the signal died of it, and with nothing left
+// behind that used to go unsaid too: a bare 130 with no word about the signal.
+func TestACommandTheInterruptKilledWithNothingLeftBehindIsSaidSo(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "noleftovers")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("building: %v\n%s", err, out)
+	}
+	tmp := t.TempDir()
+	cmd := exec.Command(bin, "sh", "-c", "sleep 300")
+	cmd.Env = append(os.Environ(), "TMPDIR="+tmp)
+	said := saidInto(t, cmd)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) })
+	waitForSleeper(t, cmd.Process.Pid, "")
+
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGINT); err != nil {
+		t.Fatal(err)
+	}
+	_ = cmd.Wait()
+	nothingLeftInTheGroup(t, cmd.Process.Pid)
+	if got := cmd.ProcessState.ExitCode(); got != 130 {
+		t.Errorf("exit = %d, want 128+2 for a command the interrupt killed, said:\n%s", got, said())
+	}
+	if !strings.Contains(said(), "the command was killed by interrupt rather than exiting") {
+		t.Errorf("a command the signal killed should be said to have been, said:\n%s", said())
+	}
+	// The same line is said on the other path too, and has been since before
+	// #727 — so this is only a test of anything while nothing was left behind.
+	if strings.Contains(said(), "these appeared in") {
+		t.Errorf("something was left behind, so this never entered the situation it guards, said:\n%s", said())
+	}
 }

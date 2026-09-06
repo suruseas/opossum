@@ -210,6 +210,15 @@ func nullIsAValue(key, path string) bool {
 	if (key == "command" || key == "entrypoint") && !collections[path] {
 		return true
 	}
+	return insideEnvLike(path)
+}
+
+// insideEnvLike reports whether path is an environment / labels / build.args
+// mapping — a place whose keys are variable names the author chose, not
+// fields. A service that happens to be called `environment` is not one: it
+// is an element of a collection, and its own `environment:` field sits one
+// level further down.
+func insideEnvLike(path string) bool {
 	return nullReadsAsUnsetIn[lastSegment(path)] && !collections[parentPath(path)]
 }
 
@@ -280,12 +289,34 @@ func mergeValue(base, over any, key string, path string) any {
 		}
 		return base
 	}
-	// The env-like rule needs no such guard: a collection element is a
-	// mapping, and toEnvMap is the identity on a mapping, so a service called
-	// `environment` merges the same either way (measured; a guard here would be
-	// code nothing can observe). The list rules below (command, ports, volumes)
-	// need none either — they apply to two lists, and an element is never one.
-	if envLikeKeys[key] {
+	// The env-like rule must stay on for a *service* called `environment`
+	// (its own `environment:` field still merges by variable — two list forms
+	// with the same variable must collapse to one) and go off for a
+	// *variable* called `environment` (or `labels`) inside such a field:
+	// `environment: { environment: prod }` is a common naming, and both files
+	// setting it would send the two scalars through toEnvMap, which reads a
+	// scalar as an empty mapping — the variable came out as
+	// `environment=map[]`. insideEnvLike tells the two apart by the path: the
+	// `!collections[parentPath]` term in it is what keeps the rule on for the
+	// service (its parent is `services`), and the lastSegment term is what
+	// turns it off inside the field. Inside an env-like mapping every key is
+	// a variable name, so the scalars merge as scalars there (later wins), as
+	// docker compose reads them (measured against v5.5.0). The list rules
+	// below (command, ports, volumes) need no guard — they apply to two
+	// lists, and an element is never one.
+	if envLikeKeys[key] && !insideEnvLike(path) {
+		// A list item that is not a variable — a bare number, a `- ` — has
+		// no name to merge by, and toEnvMap would drop it: the merged file
+		// would then pass where the file alone is refused (docker compose
+		// refuses both). So an unclean side is handed on as it is, for the
+		// decode of the merged document to refuse; the base first, since
+		// its item is the earlier one.
+		if !envListIsClean(base) {
+			return base
+		}
+		if !envListIsClean(over) {
+			return over
+		}
 		return mergeMap(toEnvMap(base), toEnvMap(over), childPath(path, key))
 	}
 	// The networks rule does: its "an empty entry keeps the other side" would
@@ -461,6 +492,22 @@ func toEnvMap(v any) map[string]any {
 	return map[string]any{}
 }
 
+// envListIsClean reports whether an env-like value can be merged by name: a
+// mapping always can; a list can when every item is a string (a `KEY=value`
+// or a bare `KEY`). A number, a boolean or a null item has no name.
+func envListIsClean(v any) bool {
+	items, ok := v.([]any)
+	if !ok {
+		return true
+	}
+	for _, item := range items {
+		if _, isString := item.(string); !isString {
+			return false
+		}
+	}
+	return true
+}
+
 // dedupSeq drops repeated string entries (keeping the first), leaving non-string
 // entries untouched.
 func dedupSeq(xs []any) []any {
@@ -556,6 +603,21 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 	if len(f.Services) == 0 {
 		return nil, fmt.Errorf("%s defines no services — add a top-level `services:` block with at least one service", mergedName(paths))
 	}
+	// A service key with nothing under it (`web:` alone, or `web: ~`) decodes to
+	// a nil service. Every reader below this line dereferences it, so it is
+	// refused here, in the words docker compose uses for the same file. With
+	// several files this only fires when no file gave the service a body — an
+	// override that writes the bare key keeps the earlier file's service.
+	names := make([]string, 0, len(f.Services))
+	for name := range f.Services {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if f.Services[name] == nil {
+			return nil, fmt.Errorf("service %q must be a mapping — the key has nothing under it; give it at least `image:` or `build:`, or remove the key", name)
+		}
+	}
 
 	p := &Project{
 		Name:        f.Name,
@@ -574,8 +636,21 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 			return nil, fmt.Errorf("network %q: internal and external cannot both be set (an external network is used as-is)", name)
 		}
 	}
-	for name, svc := range f.Services {
+	// In name order: with two services at fault the one reported must not
+	// depend on map iteration, or the same file names a different service
+	// on each run.
+	for _, name := range names {
+		svc := f.Services[name]
 		svc.Name = name
+		// Before the image check: a service that extends another usually has
+		// no image of its own, and "must set image" would send the reader to
+		// look for a typo that is not there. Refused rather than ignored —
+		// with `extends:` dropped, the service would run with a fraction of
+		// its settings, and `config` shows the key's name but not what it
+		// would have brought in.
+		if svc.Extends != nil {
+			return nil, fmt.Errorf("service %q uses extends:%s, which opossum does not read — copy that service's settings into %q and remove extends:", name, svc.Extends.describe(), name)
+		}
 		if svc.Image == "" && svc.Build == nil {
 			return nil, fmt.Errorf("service %q must set either image or build", name)
 		}
@@ -810,6 +885,10 @@ func decodeErr(path string, merged bool, err error) error {
 		return fmt.Errorf("compose file %s sets the same key twice:\n  %w\n  "+
 			"remove one of them", path, err)
 	case errors.As(err, &collected):
+		// What blameService put in front of the decoder's own words — the
+		// service, and the field, the failure is in — would be lost with the
+		// wrapper, so it is kept as a prefix.
+		prefix := strings.TrimSuffix(err.Error(), collected.Error())
 		err = withoutEchoedValues(collected)
 		// Saying "not valid YAML" here sends the reader to look for a syntax
 		// mistake in a file that has none, and "check the indentation and
@@ -826,8 +905,8 @@ func decodeErr(path string, merged bool, err error) error {
 				"written — look for the key it names"
 		}
 		return fmt.Errorf("compose file %s parsed, but a value is not the shape "+
-			"that field takes:\n  %w%s\n  check what that field is set to — if the value came "+
-			"from a `${...}` reference, a variable that is not set leaves it empty", path, err, hint)
+			"that field takes:\n  %s%w%s\n  check what that field is set to — if the value came "+
+			"from a `${...}` reference, a variable that is not set leaves it empty", path, prefix, err, hint)
 	case strings.HasPrefix(err.Error(), "yaml:"):
 		return fmt.Errorf("compose file %s is not valid YAML: %w\n  check the indentation and quoting near the line the parser names above", path, err)
 	}
@@ -1010,4 +1089,18 @@ func blameField(svc *yaml.Node, err error) string {
 	// wrong line, and naming neither would leave a message with no field in it at
 	// all — the reader knows it is one of two, which is what is true.
 	return strings.Join(sharedFields, " or ")
+}
+
+// describe names the extended service and its file for the refusal, as far
+// as `extends:` said them.
+func (e *ExtendsRef) describe() string {
+	switch {
+	case e.Service != "" && e.File != "":
+		return fmt.Sprintf(" (service %q in %s)", e.Service, e.File)
+	case e.Service != "":
+		return fmt.Sprintf(" (service %q)", e.Service)
+	case e.File != "":
+		return fmt.Sprintf(" (a service in %s)", e.File)
+	}
+	return ""
 }

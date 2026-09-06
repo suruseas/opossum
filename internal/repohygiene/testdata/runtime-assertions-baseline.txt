@@ -1,0 +1,13 @@
+# Sentences in public documents that assert what the runtime does with no
+# version or condition on their line, as of 2026-09-06. A ratchet: new ones
+# are refused; fix one and remove it here.
+AGENTS.md: - `OPSM-109` — a bind source is a symlink to a socket, which the runtime refuses to mount.
+AGENTS.md: `container` does not report a container's exit code**, so a crash and a clean exit
+docs/compatibility.md: - **Won't run at all**: composes that need Linux-host kernel access (WireGuard's `NET_ADMIN` + `/lib/modules`) — Apple `container` doesn't provide it (also true of Docker Desktop for the host-path cases).
+docs/compatibility.md: | A database's data directory was a bind mount the runtime can't take ownership of, so it became a named volume | 31 |
+docs/compatibility.md: | Volume seeding | a fresh named/anonymous volume is pre-filled from the image's contents at that path | **emulated by opossum** — Apple `container` mounts a fresh volume empty, so opossum fills one it creates from the image at that path (`cp -a`) before the service starts. See the limits below |
+docs/mcp.md: for that. Apple `container` has no always-on base VM: an on-demand stdio server
+docs/networking.md: `container` exposes no network aliases, so the `<project>` subdomain is what
+docs/troubleshooting.md: `container` mounts a volume as a filesystem mount point holding `lost+found`,
+README.md: Apple's `container` starts one container at a time — no compose file, no
+README.md: is a separate matter: the runtime refuses any bind whose source is a symlink to a

@@ -125,3 +125,19 @@ func TestTheIgnoredFieldsNoteCannotBeMadeIntoTwoLines(t *testing.T) {
 		t.Errorf("a service name started a line of its own:\n%s", out.String())
 	}
 }
+
+// In verbose mode each service's ignored fields are named on a line of their
+// own: the service, then the fields. Both are strings, and printed the other way
+// round the line would call the field a service and list the service as what
+// was ignored (#559).
+func TestTheVerboseIgnoredFieldsLineNamesTheServiceThenTheFields(t *testing.T) {
+	p := &compose.Project{Name: "demo", Services: map[string]*compose.Service{
+		"web": {Name: "web", Image: "alpine:3", Unsupported: []string{"cpu_shares", "dns_search"}},
+	}}
+	var out bytes.Buffer
+	o := New(p, &runtime.Runtime{Verbose: true}, "opossum", &out)
+	o.reportIgnoredFields([]string{"web"}, false)
+	if want := `service "web": ignoring unsupported field(s): cpu_shares, dns_search`; !strings.Contains(out.String(), want) {
+		t.Errorf("the verbose line should read %q, got:\n%s", want, out.String())
+	}
+}

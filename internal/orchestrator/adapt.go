@@ -100,8 +100,12 @@ const mysqlDataDir = "/var/lib/mysql"
 // Other databases' data directories, each verified on the real runtime to fail
 // the same way (the container starts, chowns its data directory, and exits):
 //
-//	clickhouse  chown: /var/lib/clickhouse/: Operation not permitted
+//	clickhouse  chown: changing ownership of '/var/lib/clickhouse/': Operation not permitted
 //	mongo       chown: changing ownership of '/data/db': Operation not permitted
+//
+// (clickhouse printed `chown: /var/lib/clickhouse/: Operation not permitted`
+// until a 2026 image; both spellings are read by chownPathRE, and the capture
+// under testdata/error-wordings carries the current one with its date.)
 //
 // The trap is that `up` reports success and exits 0: the container is created and
 // started, and only then does the entrypoint fail its chown and exit. `opossum ps`
@@ -810,7 +814,7 @@ func (o *Orchestrator) noteNoYAML(name string, svc *compose.Service) []serviceAd
 					"comes through here has not been measured.",
 				},
 				[]string{
-					"expect this service's device-dependent features not to work; no compose",
+					"this service's device-dependent features will not work; no compose",
 					"change grants a VM access to the host's devices.",
 				})
 		}
@@ -1021,6 +1025,49 @@ func (o *Orchestrator) adaptPGDATA(name string, svc *compose.Service, willBeName
 			continue // an external volume is the user's to manage
 		}
 		sub := postgresDataDir + "/pgdata"
+		// What this entry is for depends on where the image keeps its cluster,
+		// and the comment has to say which (#490) — the same three shapes
+		// swapHelpsHere tells apart. At the mount (17 and before, or an image
+		// declaring nothing) it guards against lost+found and nothing else.
+		// Below the mount (the image makes that subdirectory itself and starts
+		// on the mount alone — pg-image-declares-pgdata-below-the-mount.txt) the
+		// entry repeats what the image would do, so the guard wording holds.
+		// Somewhere else (18 keeps the cluster under /var/lib/postgresql) it is
+		// what makes the server use the volume at all: without it the volume
+		// stays unused — 17's entrypoint runs on and leaves it empty
+		// (pg17-service-pgdata-elsewhere.txt), 18's refuses to start
+		// (pg18-named-old-datadir.txt) — and with it the two together start
+		// (pg18-named-old-datadir-with-pgdata.txt). Calling that "belt and
+		// braces" would invite the reader to delete the one line their database
+		// needs.
+		why := []string{
+			"Apple container attaches a named volume as a filesystem mount point, so",
+			"the directory can hold lost+found, which Postgres initdb refuses to",
+			fmt.Sprintf("initialize into. Diagnostic: %s. opossum clears that from the", codePGDATADatadir),
+		}
+		switch d := o.imageDataDir(svc); {
+		case d.source == pgdataRead && d.path != postgresDataDir && !strings.HasPrefix(d.path, postgresDataDir+"/"):
+			why = append(why,
+				"volumes it creates. Here this entry does more than that: this image keeps",
+				fmt.Sprintf("its cluster in %s, not at the mount,", esc(d.path)),
+				"so without it the volume would stay unused — the server keeps its cluster",
+				"inside the container, or, as the Postgres 18 images do, refuses to start",
+				"on finding data at the old path. With it the two together start. The data",
+				"lives inside the volume, one level down.")
+		case d.source == pgdataUnreachable:
+			why = append(why,
+				"volumes it creates, so this is belt and braces: it also covers a volume",
+				"made before that, or by another tool. The image was not here to be asked;",
+				"if it keeps its cluster elsewhere, as Postgres 18 does, this entry is also",
+				"what points the server into the volume, and the two together start where",
+				"the mount alone leaves the volume unused. The data still lives inside the",
+				"same volume, one level down.")
+		default:
+			why = append(why,
+				"volumes it creates, so this is belt and braces: it also covers a volume",
+				"made before that, or by another tool. The data still lives inside the",
+				"same volume, one level down.")
+		}
 		return serviceAdaptation{
 			Adaptation: Adaptation{
 				Service: name,
@@ -1029,14 +1076,7 @@ func (o *Orchestrator) adaptPGDATA(name string, svc *compose.Service, willBeName
 			},
 			comment: commentBlock(
 				fmt.Sprintf("%s service %q: PGDATA moved to a subdirectory of the data volume.", overlayMarker, esc(name)),
-				[]string{
-					"Apple container attaches a named volume as a filesystem mount point, so",
-					"the directory can hold lost+found, which Postgres initdb refuses to",
-					fmt.Sprintf("initialize into. Diagnostic: %s. opossum clears that from the", codePGDATADatadir),
-					"volumes it creates, so this is belt and braces: it also covers a volume",
-					"made before that, or by another tool. The data still lives inside the",
-					"same volume, one level down.",
-				},
+				why,
 				[]string{
 					fmt.Sprintf("after `opossum up`, `opossum logs %s` should show initdb completing", name),
 					"and the database accepting connections.",

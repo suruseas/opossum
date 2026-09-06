@@ -70,9 +70,12 @@ networks:
 // turn into a nameless external volume). The refusal names the line.
 func TestTheMapFormOfExternalRefusesWhatDockerRefuses(t *testing.T) {
 	for name, tc := range map[string]struct{ body, want string }{
-		"conflicting names": {"volumes:\n  v:\n    name: one\n    external:\n      name: other\n", "conflict; only use name"},
+		// Held with both names in their places: which one was `name:` and which
+		// `external.name:` is the whole point of the sentence, and swapped they
+		// would send the reader to fix the wrong key.
+		"conflicting names": {"volumes:\n  v:\n    name: one\n    external:\n      name: other\n", `name "one" and external.name "other" conflict; only use name`},
 		"an unknown key":    {"volumes:\n  v:\n    external:\n      name: x\n      extra: y\n", `unknown key "extra"`},
-		"a network too":     {"networks:\n  n:\n    name: one\n    external:\n      name: two\n", "conflict; only use name"},
+		"a network too":     {"networks:\n  n:\n    name: one\n    external:\n      name: two\n", `name "one" and external.name "two" conflict; only use name`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			p := writeProject(t, "services:\n  a:\n    image: alpine:3\n"+tc.body, "")

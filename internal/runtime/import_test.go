@@ -102,3 +102,31 @@ func TestImportFromDockerRetags(t *testing.T) {
 		t.Errorf("expected a retag, got: %s", string(l))
 	}
 }
+
+// The image loaded but the retag did not: the error names the docker ref, then
+// the tag it was to be given, and repeats both in the command to run by hand.
+// Two refs of one type on one format call — no test reached this line (the
+// swap sweep of #559 reported it unreached), so exchanged they would have read
+// as sound advice with the images the wrong way round.
+func TestARetagFailureNamesTheDockerRefThenTheTarget(t *testing.T) {
+	dir := t.TempDir()
+	docker := filepath.Join(dir, "docker")
+	container := filepath.Join(dir, "container")
+	writeShimFile(t, docker, "#!/bin/sh\n[ \"$1 $2\" = \"image save\" ] && echo TARLINE\nexit 0\n")
+	writeShimFile(t, container, "#!/bin/sh\n[ \"$1 $2\" = \"image load\" ] && cat >/dev/null\n"+
+		"if [ \"$1 $2\" = \"image tag\" ]; then echo 'Error: no such image' >&2; exit 1; fi\nexit 0\n")
+
+	r := &Runtime{Bin: container, DockerBin: docker}
+	err := r.ImportFromDocker("proj-web:latest", "demo-web:latest")
+	if err == nil {
+		t.Fatal("a retag that failed is a failed import")
+	}
+	for _, want := range []string{
+		`the image loaded but tagging "proj-web:latest" as "demo-web:latest" failed:`,
+		"retag it yourself with `container image tag proj-web:latest demo-web:latest`",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error should read %q, got: %v", want, err)
+		}
+	}
+}

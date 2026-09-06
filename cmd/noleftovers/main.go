@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -32,15 +33,27 @@ import (
 )
 
 // interruptGrace is how long the end of a run waits for an interrupt that may
-// still be on its way from the kernel (see the select at the end of run).
+// still be on its way from the kernel (see interruptedExit).
 // Longer than the runtime's hand-off takes on a machine running a whole
 // gate's worth of test binaries at once; shorter than anyone notices.
 const interruptGrace = 500 * time.Millisecond
 
-// Only what this repository names. `opossum-*` covers the three suites that
-// build under $TMPDIR and the dry-run directory the product itself makes; what
-// it leaves out is written down in CONTRIBUTING.md.
+// Only what this repository's runs make. `opossum-*` covers the three suites
+// that build under $TMPDIR and the dry-run directory the product itself makes.
+// The other shape is t.TempDir's — removed by t.Cleanup, which a killed process
+// never reaches, and carrying no pid, so nothing can ask afterwards whether its
+// maker is still alive (#552). Being told it is there is all that is possible.
+// What both leave out is written down in CONTRIBUTING.md.
 const ours = "opossum-*"
+
+// testTempDirGlob gathers t.TempDir's candidates; testTempDir is the shape that
+// keeps them. Go writes the test's name — subtests joined on, "/" dropped,
+// spaces made "_" — keeping letters and digits of any script and the symbols
+// !#$%&()+,-.=@^_{}~, then the digits MkdirTemp adds. A name carrying anything
+// else (a "[" or a ":", say) is not one a test could have had.
+const testTempDirGlob = "Test*"
+
+var testTempDir = regexp.MustCompile(`^Test[\p{L}\p{N}!#$%&()+,\-.=@^_{}~ ]*[0-9]+$`)
 
 func main() {
 	if len(os.Args) < 2 {
@@ -104,9 +117,14 @@ func run(argv []string, w io.Writer) int {
 		if before[d] {
 			continue
 		}
-		if pid, ok := suitedir.MakerPid(filepath.Base(d)); ok && suitedir.Alive(pid) {
-			theirs = append(theirs, fmt.Sprintf("%s (pid %d)", filepath.Base(d), pid))
-			continue
+		// Only our own names carry a pid. A t.TempDir's name is whatever the
+		// test was called, and "-12-345" inside one would read as the pid of a
+		// process that has nothing to do with it — so it is never asked.
+		if strings.HasPrefix(filepath.Base(d), "opossum-") {
+			if pid, ok := suitedir.MakerPid(filepath.Base(d)); ok && suitedir.Alive(pid) {
+				theirs = append(theirs, fmt.Sprintf("%s (pid %d)", filepath.Base(d), pid))
+				continue
+			}
 		}
 		left = append(left, d)
 	}
@@ -120,7 +138,16 @@ func run(argv []string, w io.Writer) int {
 		fmt.Fprintln(w, "(a pid the system has since handed to something else would read the same way)")
 	}
 	if len(left) == 0 {
-		return code
+		if killedBy != 0 {
+			sayKilled(w, killedBy)
+			return code
+		}
+		// Nothing left behind does not mean nothing happened. A ^C ends the
+		// command with a status of its own — `go test` answers 1 — and handing
+		// that back alone reads as tests that failed; until #727 this path did
+		// exactly that, and only a run that had also leaked was told apart.
+		status, _ := interruptedExit(interrupted, w, code)
+		return status
 	}
 	sort.Strings(left)
 
@@ -170,33 +197,11 @@ func run(argv []string, w io.Writer) int {
 	// the Makefile calls this — collapses every non-zero status to 1 on the way
 	// out, so the number is also printed here, where nothing can flatten it.
 	if killedBy != 0 {
-		// Not "exited": it did not. Saying so keeps the reader from reading an
-		// interruption as a failure of the tests.
-		fmt.Fprintf(w, "\nthe command was killed by %s rather than exiting\n", killedBy)
+		sayKilled(w, killedBy)
 		return code
 	}
-	// Asked here rather than inferred from the command's status, because a
-	// command that catches ^C for itself leaves no trace of it in that status
-	// — `go test` answers 1, the same as a run whose tests failed.
-	//
-	// Asked with a grace period rather than at once. A ^C reaches this process
-	// and the command together, and the command can be gone — trapped, exited,
-	// reaped by Run above — before the runtime here has moved the signal from
-	// the kernel to this channel: that hand-off is a goroutine's turn, and
-	// under a loaded machine it comes late. A read that did not wait called
-	// such a run "failed" — one gate in five, measured in the sieve's
-	// container (#711). A run that left nothing behind returns above and
-	// never reaches this; one that did pays this much, once, at the end,
-	// whether or not anyone interrupted it.
-	select {
-	case <-interrupted:
-		fmt.Fprintf(w, "\nthis run was interrupted; the command handled that itself and exited %d,\n", code)
-		fmt.Fprintln(w, "so its status says nothing about whether the tests were going to pass")
-		if code == 0 {
-			return 1
-		}
-		return code
-	case <-time.After(interruptGrace):
+	if status, was := interruptedExit(interrupted, w, code); was {
+		return status
 	}
 	if code == 0 {
 		return 1
@@ -205,14 +210,59 @@ func run(argv []string, w io.Writer) int {
 	return code
 }
 
+// interruptedExit asks whether this run was interrupted and, when it was, says
+// so and hands back the status to end with: the command's own, or 1 for a
+// command that answered 0 — an interrupted run is not a passing one, whatever
+// the command made of the signal. Both ends of run ask this the same way, the
+// one that found leftovers and the one that did not.
+//
+// Asked here rather than inferred from the command's status, because a
+// command that catches ^C for itself leaves no trace of it in that status
+// — `go test` answers 1, the same as a run whose tests failed.
+//
+// Asked with a grace period rather than at once. A ^C reaches this process
+// and the command together, and the command can be gone — trapped, exited,
+// reaped by Run — before the runtime here has moved the signal from the
+// kernel to this channel: that hand-off is a goroutine's turn, and under a
+// loaded machine it comes late. A read that did not wait called such a run
+// "failed" — one gate in five, measured in the sieve's container (#711).
+// Every run whose command exited — rather than dying of a signal, or never
+// starting — pays this much, once, at the end, whether or not anyone
+// interrupted it.
+func interruptedExit(interrupted <-chan os.Signal, w io.Writer, code int) (status int, was bool) {
+	select {
+	case <-interrupted:
+		fmt.Fprintf(w, "\nthis run was interrupted; the command handled that itself and exited %d,\n", code)
+		fmt.Fprintln(w, "so its status says nothing about whether the tests were going to pass")
+		if code == 0 {
+			return 1, true
+		}
+		return code, true
+	case <-time.After(interruptGrace):
+		return code, false
+	}
+}
+
+// sayKilled says that the command died of a signal. Not "exited": it did not.
+// Saying so keeps the reader from reading an interruption as a failure of the
+// tests. Said the same way at both ends of run.
+func sayKilled(w io.Writer, by syscall.Signal) {
+	fmt.Fprintf(w, "\nthe command was killed by %s rather than exiting\n", by)
+}
+
 func snapshot(tmp string) map[string]bool {
 	found := map[string]bool{}
-	names, err := filepath.Glob(filepath.Join(tmp, ours))
-	if err != nil {
-		return found
-	}
-	for _, n := range names {
-		found[n] = true
+	for _, pattern := range []string{ours, testTempDirGlob} {
+		names, err := filepath.Glob(filepath.Join(tmp, pattern))
+		if err != nil {
+			continue
+		}
+		for _, n := range names {
+			if pattern == testTempDirGlob && !testTempDir.MatchString(filepath.Base(n)) {
+				continue
+			}
+			found[n] = true
+		}
 	}
 	return found
 }

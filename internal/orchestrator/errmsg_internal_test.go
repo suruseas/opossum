@@ -392,3 +392,26 @@ func TestARefusedUpIsToldToUpAgain(t *testing.T) {
 		t.Errorf("the advice names `opossum run`, which the reader never typed: %v", err)
 	}
 }
+
+// The dangling-symlink refusal names the service, the link and where the link
+// points, in that order. Three strings on one format call: exchanged, the line
+// would call the link a service or point the reader at the link as its own
+// target, and still read as English (#559).
+func TestADanglingSymlinkRefusalNamesTheServiceTheLinkThenItsTarget(t *testing.T) {
+	dir := t.TempDir()
+	link := filepath.Join(dir, "cfg")
+	gone := filepath.Join(dir, "gone")
+	if err := os.Symlink(gone, link); err != nil {
+		t.Fatal(err)
+	}
+	p := &compose.Project{Name: "demo", BaseDir: t.TempDir(), Services: map[string]*compose.Service{}}
+	o := New(p, &rt.Runtime{}, "", &bytes.Buffer{})
+	err := o.ensureBindDirs("svc", []string{link + ":/data"}, "`opossum up`")
+	if err == nil {
+		t.Fatal("a bind mount through a dangling symlink is refused")
+	}
+	want := "service \"svc\" needs " + link + " for a bind mount, but it is a symlink to \"" + gone + "\", and there is nothing there"
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("the refusal should read %q, got: %v", want, err)
+	}
+}

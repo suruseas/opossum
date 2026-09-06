@@ -1,0 +1,13 @@
+# redis:7-alpine / bind mount at /data (entrypoint chowns .)
+# image digest sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
+# container CLI version 1.3.1 (build: release, commit: unspeci) / 2026-09-06 / bind mount is a host-owned virtiofs directory under $HOME
+
+$ container run -d --name clm480-redis -v /Users/<user>/opossum-dogfood/results/v131-images/bind/redis:/data redis:7-alpine
+clm480-redis
+[exit 0]
+$ container logs clm480-redis
+chown: .: Operation not permitted
+[exit 0]
+$ sh -c container inspect clm480-redis | grep -m1 "\"state\""
+      "state" : "stopped"
+[exit 0]

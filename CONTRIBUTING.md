@@ -188,8 +188,10 @@ sound about code, but a test that fails on environment passes by not running,
 and a cached `ok` reads exactly like one that ran. On the gate, "green" means
 "ran, just now, and passed" — the cache is welcome everywhere else.
 
-Out here the test binary's death is only an exit status. It takes the set of
-`opossum-*` entries in `$TMPDIR` before and after, reports anything new, names
+Out here the test binary's death is only an exit status. Before and after the
+command it takes the set of `opossum-*` entries in `$TMPDIR`, together with the
+directories `t.TempDir()` makes there (`Test`, the test's name, digits), and
+reports anything new, names
 any process still running out of it, and fails a run that would otherwise have
 passed. It survives `^C` on purpose — the signal reaches the whole process
 group, so without that it would be killed alongside the thing it is watching.
@@ -200,7 +202,9 @@ A command that catches `^C` for itself is reported as interrupted too. `go test`
 does exactly that: it handles the signal, tidies up, and exits 1 — the same 1 a
 run whose tests failed would give. Read from that status alone the run looks
 like a failure, so the interrupt is reported from this side, where it was also
-received.
+received. That is said whether or not anything was left behind, and an
+interrupted run is never green: a command that chose 0 after catching `^C`
+comes back as 1.
 
 To run the suite without the second look — while bisecting, say — call `go test`
 directly.
@@ -228,15 +232,19 @@ What it does not catch:
   cannot be told apart from a leak. The report says so, and does not hand over
   an unconditional `rm -rf`. Check that nothing is using a directory before
   removing it.
-- **Anything not named `opossum-*`.** `internal/orchestrator` makes one temp
-  directory with the prefix `sk`, because a Unix socket path has to stay short.
-  No pattern that matches it in a shared `$TMPDIR` would leave strangers alone,
-  so a run that leaks only that one passes.
+- **Anything named neither `opossum-*` nor the way `t.TempDir()` names
+  things** (`Test`, the test's name as Go writes it, digits). `internal/orchestrator`
+  makes one temp directory with the prefix `sk`, because a Unix socket path has
+  to stay short. No pattern that matches it in a shared `$TMPDIR` would leave
+  strangers alone, so a run that leaks only that one passes. So does a run
+  leaking a `Benchmark`'s or a `Fuzz` target's `t.TempDir()`; this tree has none.
+- **Whose a `t.TempDir()` is.** Its name holds no pid, so any other `go test`
+  running at the same time — this repository's own, in another terminal,
+  included — leaves one that reads exactly like ours and turns a green run red.
+  Nothing runs inside a `t.TempDir()`, so the "still running out of" look has
+  nothing to find there either.
 - **A leak a concurrent run tidies up.** The difference is taken across the
   command, so something that appears and disappears while it runs is never seen.
-- **An interrupted run that left nothing behind.** Nothing is printed when there
-  is nothing to report, so `^C` on a clean run is indistinguishable from a run
-  that simply failed.
 - **Any way of being killed but `^C`.** Only an interrupt is survived. `SIGTERM`
   (from `timeout`, a cancelled CI job, a harness) and `SIGHUP` (closing the
   terminal on a run that takes minutes) kill it as silently as they killed the
@@ -250,10 +258,11 @@ What it does not catch:
   directory path, but reads it as a regular expression rather than as text.
 - **The exit status, by the time `make` sees it.** The tool returns the
   command's own status, except that a run which left something behind is never
-  green — a command that succeeded, or that chose 0 after catching `^C`, comes
-  back as 1. `make test` reaches it through `go run`, which collapses
-  every non-zero status to 1. The number is printed as well for that reason —
-  but only when something was left, since that is the only time it prints at all.
+  green, and neither is an interrupted one — a command that succeeded after
+  leaking, or that chose 0 after catching `^C`, comes back as 1. `make test`
+  reaches it through `go run`, which collapses every non-zero status to 1. The
+  number is printed as well for that reason — but only when something was left
+  or the run was interrupted, since those are the only times it prints at all.
   `make` only tells zero from non-zero, so the gate is unaffected — a script
   reading `make test`'s status is not.
 - **`make cover` and the commit hook**, which do not go through it. CI does:

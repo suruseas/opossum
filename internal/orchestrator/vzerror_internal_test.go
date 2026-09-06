@@ -148,6 +148,11 @@ func TestWarnBusyNamedVolumeCrossProject(t *testing.T) {
 			t.Errorf("busy-volume warning missing %q; got: %s", want, s)
 		}
 	}
+	// Service, then volume, then who holds it: three quoted strings that the
+	// checks above would pass in any order (#559).
+	if want := `service "web" mounts named volume "cache", which is already attached to running container "otherapp"`; !strings.Contains(s, want) {
+		t.Errorf("busy-volume warning should read %q; got: %s", want, s)
+	}
 }
 
 func TestWarnBusyNamedVolumeIgnoresOwnContainer(t *testing.T) {

@@ -328,3 +328,25 @@ func TestANoCopyVolumeThatWouldNotPrepareSaysWhichAndWhy(t *testing.T) {
 		t.Errorf("the runtime's own words belong in it:\n%s", s)
 	}
 }
+
+// The same for a volume opossum meant to fill: the warning names the volume, the
+// image it copied from and the mount it copied for, in that order — three
+// strings on one call, and exchanged the line would blame an image called after
+// a volume (#559).
+func TestAVolumeThatWouldNotFillSaysWhichImageAndWhere(t *testing.T) {
+	rt := scriptShim(t, ""+
+		"  system) echo 'status running' ;;\n"+
+		"  volume) if [ \"$2\" = ls ]; then echo 'NAME'; fi ;;\n"+ // the volume does not exist yet
+		"  run) echo 'exec: \"sh\": executable file not found in $PATH' >&2; exit 1 ;;\n")
+	p := &compose.Project{Name: "demo", Services: map[string]*compose.Service{
+		"web": {Name: "web", Image: "web:latest", Volumes: []string{"deps:/app/node_modules"}},
+	}}
+	var out bytes.Buffer
+	o := New(p, rt, "opossum", &out)
+
+	o.seedVolumes("web", p.Services["web"], "web:latest")
+
+	if want := `couldn't fill the new volume "demo_deps" from web:latest at /app/node_modules:`; !strings.Contains(out.String(), want) {
+		t.Errorf("the warning should open with %q, got:\n%s", want, out.String())
+	}
+}

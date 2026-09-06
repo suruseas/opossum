@@ -480,6 +480,12 @@ opossum 自身が書いた compose ではなく、**他リポジトリの本物�
 - **`gh pr create/edit` が org スコープ不足で GraphQL エラー**になる環境がある。PR の作成/編集は
   `gh api -X POST/PATCH repos/<owner>/<repo>/pulls`（本文は `-F body=@file`）で回避する。
 
+## 途中で失敗した `up` の巻き戻し（2026-09-06 実機・container 1.3.1）
+`cache` → `db`（`/mnt/…` を bind、macOS では作れない）で `opossum up`：cache が起動 → db の `OPSM-104` →
+`Rolled back cache — stopped and removed; nothing this `up` started is left running` が出て、
+`container ls -a` と `network ls` にプロジェクトのものは残らない（#768）。docker compose v5.5.0 は同じ形で
+cache を動かしたまま exit 1（`ps -a`: cache running / db created）——巻き戻すのは opossum 側だけ。
+
 ## ES 7.x（elasticsearch-logstash-kibana）— cgroup NPE で不可（2026-07-06 実機）
 awesome-compose/elasticsearch-logstash-kibana をユーザが検証。**elasticsearch が起動直後にクラッシュ**（`opossum ps` が
 `stopped` 表示→原因特定に寄与）。ログ:
@@ -492,3 +498,4 @@ Exception in thread "main" java.lang.NullPointerException:
 **ヒープ明示（ES_JAVA_OPTS=-Xms512m -Xmx512m, compose に既存）より前**の段階で発生し回避不可。`JAVA_TOOL_OPTIONS=
 -XX:-UseContainerSupport` は ES がセキュリティ上無視。**7.16.1・7.17.0 の両方で再現**。→ ランタイム/JDK–VM 非互換で
 opossum 無関係。Kibana は ES 依存のため localhost:5601 も非機能（ES ダウンが根本）。README「Won't run」に記載。
+**2026-09-06 追記（container 1.3.1・kernel 6.18）**：VM は cgroup v2 を controller 無しでマウントしており、NPE は同梱 JDK 17.0.1 の側。**7.16.3・7.17.0（JDK 17.0.1）は 1.3.1 でも同じ NPE、7.17.28（JDK 22.0.2）は `started` まで行き 9200 が応答**。「ES 7.x は不可」ではなく「古い JDK を同梱する patch は不可」。compatibility.md をそのとおりに直した（`~/opossum-dogfood/results/v131-claims/p16-es-cgroup.txt`）。

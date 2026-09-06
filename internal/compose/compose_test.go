@@ -247,22 +247,6 @@ services:
 	}
 }
 
-// A null/empty `networks:` value is benign (no networks), not a parse error.
-func TestLoadNullNetworksIsEmpty(t *testing.T) {
-	p, err := Load(writeTemp(t, `
-services:
-  app:
-    image: app
-    networks:
-`))
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if got := p.Services["app"].Networks; len(got) != 0 {
-		t.Errorf("null networks should be empty, got %v", got)
-	}
-}
-
 func TestLoadRejectsNetworkModeNoneWithNetworks(t *testing.T) {
 	_, err := Load(writeTemp(t, `
 networks:

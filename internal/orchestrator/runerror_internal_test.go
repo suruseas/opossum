@@ -150,6 +150,11 @@ func TestDecodeStartErrorAppendsHint(t *testing.T) {
 	if s := o.decodeStartError("web", runErr("Error: image does not support required platforms")).Error(); !strings.Contains(s, "platform: linux/amd64") {
 		t.Errorf("a recognized run failure should get the decoded hint, got: %s", s)
 	}
+	// The service name opens the line and the hint closes it; both are strings,
+	// and exchanged the hint would be quoted as the service's name (#559).
+	if s := o.decodeStartError("web", runErr("Error: image does not support required platforms")).Error(); !strings.HasPrefix(s, `starting service "web": `) {
+		t.Errorf("the decoded error should open with the service's name, got: %s", s)
+	}
 	if s := o.decodeStartError("web", runErr("random crash")).Error(); !strings.Contains(s, "opossum logs web") {
 		t.Errorf("an unrecognized failure should fall back to startFailed, got: %s", s)
 	}

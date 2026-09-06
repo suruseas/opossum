@@ -208,7 +208,7 @@ func TestWhatCountsAsAMakerNameWithoutThePrefix(t *testing.T) {
 		{"p-123-+456", 123, true},
 		// An empty prefix reads as well: the guard asks for a separator before
 		// the pid, not for anything in front of it. Nothing reaches this — the
-		// caller only asks about names matching `opossum-*`.
+		// caller asks only about names matching `opossum-*`.
 		{"-123-456", 123, true},
 	} {
 		t.Run(tc.base, func(t *testing.T) {

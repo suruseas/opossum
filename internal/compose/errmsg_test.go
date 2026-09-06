@@ -680,6 +680,12 @@ func TestAFieldThatChecksItsOwnValueDoesNotReadItBack(t *testing.T) {
 			keeps: []string{`service "db"`, "healthcheck interval", "not a duration"},
 		},
 		{
+			// Five actions, named in full; the rule is located by its number.
+			name:  "a watch action",
+			body:  "services:\n  app:\n    image: app\n    develop:\n      watch:\n        - path: ./src\n          action: ${SECRET}\n          target: /app\n",
+			keeps: []string{`service "app"`, "develop.watch entry 1", "an action that is not one", "sync+exec"},
+		},
+		{
 			// There are only three types, so naming them is the whole of what the
 			// reader needs to know about the value — but they still have to be told
 			// which mount.

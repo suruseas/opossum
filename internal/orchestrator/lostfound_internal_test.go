@@ -57,6 +57,17 @@ func TestCrashReportDecodesInitdbRefusingALostFoundVolume(t *testing.T) {
 	if !strings.Contains(s, "check nothing else did") {
 		t.Errorf("the destructive option must say what it costs, got:\n%s", s)
 	}
+	// The pieces in their order: code, reason, the volume, then the fix last —
+	// four strings on one format call that the checks above would pass shuffled (#559).
+	for _, want := range []string{
+		"→ [OPSM-101] Postgres will not initialise a data directory that isn't empty",
+		"made elsewhere. The volume is \"demo_pgdata\". Two ways out:",
+		"or keep the data below the mount point by adding `environment: PGDATA=/var/lib/postgresql/data/pgdata` to the service.",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("the hint should read %q in its place, got:\n%s", want, s)
+		}
+	}
 }
 
 // Both gates have to hold. A crash that merely mentions one of the two words is
@@ -129,6 +140,11 @@ func TestInitdbHintNamesNoVolumeItCannotSee(t *testing.T) {
 	// in the quotes.
 	if !strings.Contains(h, "not opossum's to replace") {
 		t.Errorf("the hint should say why it names nothing:\n%s", h)
+	}
+	// The code opens the line, the reason follows it, and the fix closes it —
+	// three strings on one format call, and any two exchanged still read (#559).
+	if !strings.HasPrefix(h, "\n  → [OPSM-101] Postgres will not initialise") || !strings.HasSuffix(h, "so: keep the data below the mount point by adding `environment: PGDATA=/var/lib/postgresql/data/pgdata` to the service.") {
+		t.Errorf("the hint should open with its code and reason and close with the fix:\n%s", h)
 	}
 	if strings.Contains(h, "down -v") || strings.Contains(h, `The volume is ""`) {
 		t.Errorf("with no volume of its own to point at, it must not offer to replace one:\n%s", h)

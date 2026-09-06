@@ -89,8 +89,17 @@ wired: ## say so when this clone's push-time sieve is not wired
 hooks: ## wire the commit and push hooks into this clone (once per clone)
 	git config core.hooksPath .githooks
 
+# The image is built only when it is not there — and that is asked with
+# `image ls`, not `image inspect`. Docker Desktop's Resource Saver stops the
+# VM after a few idle minutes; asked then, `docker info` still answers (the
+# backend does), `image inspect` answers "No such image" without waking the
+# VM, and the build that followed was what woke it — a registry round-trip,
+# which is where this machine's pushes went red, for an image that was there
+# all along (#706). `image ls` woke the daemon and answered once it was up,
+# the one time it was watched; should it ever answer empty while the daemon
+# is still coming up, the build follows, which is what happened before.
 sieve: ## run the regression gate in a clean Linux container (the push-time sieve)
-	@docker image inspect opossum-sieve >/dev/null 2>&1 || \
+	@[ -n "$$(docker image ls -q opossum-sieve:latest 2>/dev/null)" ] || \
 		docker build -t opossum-sieve -f sieve/Dockerfile sieve
 	git bundle create - HEAD | docker run --rm -i \
 		-v opossum-sieve-gomod:/home/sieve/go/pkg/mod \

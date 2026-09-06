@@ -42,14 +42,14 @@ The table below is the same map in detail — each row is one thing you might re
 | Container names / **project isolation** | `<project>-<service>-N`, name-scoped | `<service>.<project>.<domain>` on a per-project network (`<project>-net`); projects stay isolated automatically — see [Running multiple projects](#running-multiple-projects-at-once) |
 | Restricting **internet egress** | no native control (needs an external firewall) | `internal: true` on a network **removes the route to the internet** (host still reachable); `network_mode: none` = loopback only — see [Constraining egress](agent-sandbox.md) |
 | Multiple networks / **external** | supported, with aliases | multiple networks per service (one `--network` each) and `external: true` (reuse a pre-existing network by name) both work |
-| Name resolution **on an `internal:` network** | works | **doesn't** — the DNS resolver sits on the gateway an internal network can't route to, so address peers by **IP** (or reach a host proxy via `${OPOSSUM_HOST_GATEWAY}`) |
+| Name resolution **on an `internal:` network** | works | **doesn't** — a container's resolver is its network's gateway, and an internal network's gateway serves no DNS (queries are refused, though the gateway itself is reachable), so address peers by **IP** (or reach a host proxy via `${OPOSSUM_HOST_GATEWAY}`) |
 | Per-network **aliases** / static IPs (`ipam`) | applied | **not applied** (the `<project>` subdomain is what keeps names unique) |
 
 The three surprises for a docker-compose user, and why:
 
 - **There's no `host.docker.internal`.** Apple `container`'s default network is NAT-only and exposes no host alias, so opossum computes the host's LAN address and hands it to you as `${OPOSSUM_HOST_GATEWAY}`, interpolated into your compose at load time. The host service must listen on `0.0.0.0` (not just loopback) to be reachable from the container.
 - **Bare-name discovery needs a one-time DNS domain.** The runtime's built-in DNS only serves a *registered* domain, so `sudo container system dns create opossum` (once) is what makes `db`/`web` resolve. Skip it and services can't find each other by name (`opossum doctor` flags this, and startup warns with `[OPSM-202]`).
-- **An `internal:` network has no name resolution at all.** Removing the internet route (the point of `internal:`, for agent sandboxes) also removes the route to the DNS resolver — so on an internal network, peers must talk by IP, and the one sanctioned way out is a host proxy at `${OPOSSUM_HOST_GATEWAY}`.
+- **An `internal:` network has no name resolution at all.** A container's resolver is the gateway of the network it sits on, and an internal network's gateway serves no DNS: queries to it are refused, even though the gateway (and the host) still answer pings. So on an internal network, peers must talk by IP, and the one sanctioned way out is a host proxy at `${OPOSSUM_HOST_GATEWAY}`.
 
 `opossum doctor` checks the two things that most often go wrong here — whether the DNS domain is registered and whether outbound networking works — and prints a one-line fix for each.
 

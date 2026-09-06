@@ -104,6 +104,11 @@ type Service struct {
 	// container_name, restart), collected during parsing so it can warn rather
 	// than silently ignore them.
 	Unsupported []string `yaml:"-"`
+	// Extends is set when the service carries an `extends:` key — a service
+	// that pulls its settings from another (in this file or another). opossum
+	// does not read it; the load refuses the service by name rather than
+	// reporting the missing image the reader did not forget (#415).
+	Extends *ExtendsRef `yaml:"-"`
 }
 
 // scalarStr accepts a YAML scalar (number or string) as its string form, so a
@@ -135,6 +140,31 @@ type WatchRule struct {
 	Path   string   `yaml:"path"`   // host path watched (relative to the compose dir)
 	Target string   `yaml:"target"` // container path files sync to (for action: sync)
 	Ignore []string `yaml:"ignore"` // globs (relative to Path) to skip
+}
+
+// rawWatchRule is a watch rule as written: `ignore` takes one glob or a
+// list of them (docker compose reads both).
+type rawWatchRule struct {
+	Action string        `yaml:"action"`
+	Path   string        `yaml:"path"`
+	Target string        `yaml:"target"`
+	Ignore StringOrSlice `yaml:"ignore"`
+}
+
+// UnmarshalYAML reads a watch rule; that the rule has a path is checked
+// where the rule's number is known (Service.UnmarshalYAML's second pass).
+// `action` left out is taken as `sync` by the watcher (docker compose
+// requires it; the leniency predates this and is kept).
+func (w *WatchRule) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind != yaml.MappingNode {
+		return fmt.Errorf("develop.watch: a rule must be a mapping (path, action, target), got %s", kindName(value.Kind))
+	}
+	var raw rawWatchRule
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	*w = WatchRule{Action: raw.Action, Path: raw.Path, Target: raw.Target, Ignore: []string(raw.Ignore)}
+	return nil
 }
 
 // DeployResources is deploy.resources; only limits are used (reservations ignored).
@@ -275,6 +305,292 @@ var serviceKnownKeys = func() map[string]bool {
 	return m
 }()
 
+// stringListFields are the service fields whose value is a string or a list
+// of strings and is read as such with no decoder of its own to check the
+// items: docker compose refuses a number, a boolean or a date in any of them
+// (measured on v5.5.0; `expose` is the one that takes bare numbers, and is
+// not here).
+var stringListFields = map[string]bool{"command": true, "entrypoint": true, "tmpfs": true, "profiles": true, "cap_add": true, "cap_drop": true}
+
+// refuseNonStringInList applies refuseNonString to a field written as a list
+// (each item, aliases followed) or as one scalar.
+func refuseNonStringInList(field string, n *yaml.Node) error {
+	switch n.Kind {
+	case yaml.SequenceNode:
+		for i, item := range n.Content {
+			item = unalias(item)
+			// An item with nothing in it is not a name either (docker compose:
+			// `unexpected type <nil>`); these fields have no decoder of their
+			// own to say so.
+			if item.Kind == yaml.ScalarNode && item.ShortTag() == "!!null" {
+				return fmt.Errorf("%s entry %d of %d is empty — write the value or remove the `- `", field, i+1, len(n.Content))
+			}
+			if err := refuseNonString(field, i, len(n.Content), item); err != nil {
+				return err
+			}
+		}
+	case yaml.ScalarNode:
+		if word := nonStringWord(n); word != "" {
+			return fmt.Errorf("%s must be a string, got %s — quote it (`\"%s\"`) if it is meant literally", field, word, n.Value)
+		}
+	}
+	return nil
+}
+
+// stringFields are the service fields that take one string, checked for a
+// number, a boolean or a date written in their place (measured on docker
+// compose v5.5.0: `must be a string` for a number or a boolean; a date it
+// fails on differently). `restart` is not here: its own validation names
+// the policies. `mem_limit` and `cpus` take numbers.
+var stringFields = map[string]bool{"image": true, "user": true, "working_dir": true, "platform": true, "network_mode": true}
+
+// listOnlyFields are the fields docker compose takes only as a list (`must
+// be a array` for a bare name), unlike tmpfs/command/entrypoint, which take
+// one string as well. `profiles` is such a field too, but its own decoding
+// ([]string) already refuses a bare name as the wrong shape.
+var listOnlyFields = map[string]bool{"cap_add": true, "cap_drop": true}
+
+// nestedShapes are the nested fields opossum reads (or hands to the runtime)
+// whose shape docker compose validates (measured on v5.5.0, `must be a
+// string` / `must be a mapping` / `must be a number or string`), keyed by the
+// service field they sit under. A path's last element is the field, and a
+// `[]` element steps into each item of a list; what the field takes is one
+// of "string", "mapping", "list", "string or list" or "number or string".
+// `reservations` is read by nothing in opossum, so the struct decode says
+// nothing about it and the mapping rows are checked here in full.
+var nestedShapes = map[string][]nestedShape{
+	"build": {
+		{[]string{"context"}, "string", "a path, as in `.`"},
+		{[]string{"dockerfile"}, "string", "a file name, as in `Dockerfile`"},
+		{[]string{"target"}, "string", "a stage name"},
+		{[]string{"args"}, "mapping", ""},
+	},
+	"healthcheck": {
+		{[]string{"test"}, "string or list", "the command, as in `[\"CMD\", \"curl\", \"-f\", \"http://localhost\"]`"},
+		{[]string{"interval"}, "string", "a duration, as in `10s`"},
+		{[]string{"timeout"}, "string", "a duration, as in `5s`"},
+		{[]string{"start_period"}, "string", "a duration, as in `30s`"},
+		{[]string{"retries"}, "number or string", "a count, as in `3`"},
+	},
+	"develop": {
+		{[]string{"watch"}, "list", ""},
+		{[]string{"watch", "[]", "path"}, "string", "a path, as in `./src`"},
+		{[]string{"watch", "[]", "action"}, "string", "`sync`, `rebuild`, `sync+restart`, `restart` or `sync+exec`"},
+		{[]string{"watch", "[]", "target"}, "string", "a path in the container, as in `/app`"},
+		{[]string{"watch", "[]", "ignore"}, "string or list", "a glob or a list of them, as in `[node_modules]`"},
+	},
+	"deploy": {
+		{[]string{"resources"}, "mapping", ""},
+		{[]string{"resources", "limits"}, "mapping", ""},
+		{[]string{"resources", "reservations"}, "mapping", ""},
+		{[]string{"resources", "limits", "memory"}, "string", "a size with a unit, as in `\"512m\"`"},
+		{[]string{"resources", "reservations", "memory"}, "string", "a size with a unit, as in `\"512m\"`"},
+		{[]string{"resources", "limits", "cpus"}, "number or string", "a count, as in `0.5`"},
+		{[]string{"resources", "reservations", "cpus"}, "number or string", "a count, as in `0.5`"},
+	},
+}
+
+type nestedShape struct {
+	path  []string
+	takes string
+	hint  string // what to write instead, "" when the shape word says it
+}
+
+// refuseNestedShapes reads the nested fields under a service field's node
+// and refuses the shapes docker compose refuses. `build:` itself takes a
+// string or a mapping; a number there is caught first.
+func refuseNestedShapes(field string, n yaml.Node) error {
+	if field == "build" && n.Kind == yaml.ScalarNode {
+		if word := nonStringWord(&n); word != "" {
+			return fmt.Errorf("build must be a string or a mapping, got %s — write the context path, as in `build: .`", word)
+		}
+	}
+	for _, shape := range nestedShapes[field] {
+		if err := walkShape(n, field, shape.path, shape); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// walkShape follows shape's path from n, stepping into every item where the
+// path says `[]`, and checks the node at the end. name accumulates the
+// dotted path the refusal prints, with `entry N` for a list item.
+func walkShape(n yaml.Node, name string, path []string, shape nestedShape) error {
+	for i, key := range path {
+		if key == "[]" {
+			// Not a list: the struct decode refused that already (a `[]WatchRule`
+			// takes nothing else), so there is nothing to step into.
+			if n.Kind != yaml.SequenceNode {
+				return nil
+			}
+			for j, item := range n.Content {
+				item = unalias(item)
+				// A `- ` with nothing after it is an empty rule, and would be
+				// read as one (an empty path watches the whole project).
+				if item.Kind == yaml.ScalarNode && item.Tag == "!!null" {
+					return fmt.Errorf("%s entry %d of %d is empty — write the rule or remove the `- `", name, j+1, len(n.Content))
+				}
+				if err := walkShape(*item, fmt.Sprintf("%s entry %d", name, j+1), path[i+1:], shape); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		node, ok := nestedNode(n, key)
+		if !ok {
+			return nil
+		}
+		n = *node
+		name += "." + key
+	}
+	hint := ""
+	if shape.hint != "" {
+		hint = " — write " + shape.hint
+	}
+	if n.Kind == yaml.ScalarNode && n.Tag == "!!null" {
+		return fmt.Errorf("%s must be %s, got nothing%s", name, aOrAn(shape.takes), hint)
+	}
+	switch shape.takes {
+	case "string":
+		if n.Kind != yaml.ScalarNode {
+			return fmt.Errorf("%s must be a string, got %s%s", name, kindName(n.Kind), hint)
+		}
+		if word := nonStringWord(&n); word != "" {
+			return fmt.Errorf("%s must be a string, got %s%s", name, word, hint)
+		}
+	case "mapping":
+		// Where the struct decode read the field (`limits`) it refused a
+		// non-mapping already; where it did not (`reservations`) this is the
+		// only check.
+		if n.Kind != yaml.MappingNode {
+			return fmt.Errorf("%s must be a mapping, got %s", name, kindName(n.Kind))
+		}
+	// "list" and "string or list": a value of another kind is refused before
+	// this runs — a `[]WatchRule` takes nothing but a list, and the item check
+	// on `healthcheck.test` (refuseNonStringInList) refuses a number or a
+	// boolean there — so those rows are read for the bare key only, whose
+	// message names what they take.
+	case "number or string":
+		if n.Kind != yaml.ScalarNode {
+			return fmt.Errorf("%s must be a number or a string, got %s%s", name, kindName(n.Kind), hint)
+		}
+		if word := nonStringWord(&n); word != "" && word != "a number" {
+			return fmt.Errorf("%s must be a number or a string, got %s%s", name, word, hint)
+		}
+	}
+	return nil
+}
+
+// aOrAn puts the article on a shape word ("a string", "a mapping", "a number
+// or string").
+func aOrAn(takes string) string { return "a " + takes }
+
+// watchRuleKeys are the keys a watch rule has; any other is listed as ignored.
+var watchRuleKeys = map[string]bool{"action": true, "path": true, "target": true, "ignore": true}
+
+// watchActions are the actions docker compose takes (opossum automates
+// `sync`, `rebuild` and `sync+restart`; the other two are named at change
+// time as not automated yet), and watchActionCopies the ones that copy
+// files into the container and so need a `target`.
+var (
+	watchActions      = map[string]bool{"sync": true, "rebuild": true, "sync+restart": true, "restart": true, "sync+exec": true}
+	watchActionCopies = map[string]bool{"sync": true, "sync+restart": true, "sync+exec": true}
+)
+
+// retriesCount reads `healthcheck.retries`: 0 when it was left out or null,
+// the count otherwise, or an error for a value that is not a count. The
+// tag decides how the text is read, as docker compose's decoder does — a
+// bare number may be a decimal (truncated), a quoted one must be whole.
+func retriesCount(n *yaml.Node) (int, error) {
+	notACount := func() (int, error) {
+		return 0, fmt.Errorf("healthcheck retries: not a count — use a whole number, as in 3 (got %q)", n.Value)
+	}
+	switch {
+	case n.Kind == 0, n.Kind == yaml.ScalarNode && n.Tag == "!!null":
+		return 0, nil
+	case n.Kind != yaml.ScalarNode:
+		return 0, fmt.Errorf("healthcheck retries: not a count — use a whole number, as in 3 (got %s)", kindName(n.Kind))
+	}
+	var count int
+	switch n.Tag {
+	case "!!int":
+		v, err := strconv.ParseInt(n.Value, 0, 64)
+		if err != nil {
+			return notACount()
+		}
+		count = int(v)
+	case "!!float":
+		f, err := strconv.ParseFloat(n.Value, 64)
+		if err != nil || math.IsInf(f, 0) || math.IsNaN(f) || f > math.MaxInt32 {
+			return notACount()
+		}
+		count = int(f)
+	case "!!str":
+		v, err := strconv.Atoi(n.Value)
+		if err != nil {
+			return notACount()
+		}
+		count = v
+	default:
+		return notACount()
+	}
+	if count < 0 {
+		return notACount()
+	}
+	return count, nil
+}
+
+// nestedNode follows mapping keys down from n (aliases and merge keys
+// resolved by decoding each level into a map), returning the node at the end
+// of the path, if every key is there.
+func nestedNode(n yaml.Node, path ...string) (*yaml.Node, bool) {
+	cur := n
+	for _, key := range path {
+		if cur.Kind != yaml.MappingNode {
+			return nil, false
+		}
+		var m map[string]yaml.Node
+		if err := cur.Decode(&m); err != nil {
+			return nil, false
+		}
+		next, ok := m[key]
+		if !ok {
+			return nil, false
+		}
+		cur = *unalias(&next)
+	}
+	return &cur, true
+}
+
+// bareKeyIsAllowed are the service fields docker compose accepts with nothing
+// after them (measured on v5.5.0, every field the Service struct reads):
+// `command:` and `entrypoint:` mean "no command" (and the -f merge reads them
+// so, see nullIsAValue); `deploy:` and `develop:` are mappings it lets be
+// empty; the `x-` extension is the project's own and is never validated.
+var bareKeyIsAllowed = map[string]bool{"command": true, "entrypoint": true, "deploy": true, "develop": true, "x-opossum-mcp-tools": true}
+
+// fieldShape says, for the refusal of a bare key, what the field takes — in
+// the words docker compose uses for the same file ("must be a array" and so
+// on) for the fields it was measured on; any other field gets the neutral
+// word from shapeOf.
+var fieldShape = map[string]string{
+	"volumes": "a list", "ports": "a list", "networks": "a list or a mapping", "secrets": "a list",
+	"depends_on": "a list or a mapping", "env_file": "a string or a list",
+	"environment": "a mapping or a list", "healthcheck": "a mapping",
+	"build": "a string or a mapping",
+	"image": "a string", "working_dir": "a string", "user": "a string", "restart": "a string",
+	"platform": "a string", "network_mode": "a string",
+	"cap_add": "a list", "cap_drop": "a list", "tmpfs": "a string or a list", "expose": "a list", "profiles": "a list",
+}
+
+func shapeOf(k string) string {
+	if s, ok := fieldShape[k]; ok {
+		return s
+	}
+	return "a value"
+}
+
 // UnmarshalYAML decodes the service via the struct tags and, in a second pass,
 // records any keys opossum doesn't support (so callers can warn).
 func (s *Service) UnmarshalYAML(value *yaml.Node) error {
@@ -308,6 +624,140 @@ func (s *Service) UnmarshalYAML(value *yaml.Node) error {
 	if err := value.Decode(&keys); err != nil {
 		return err
 	}
+	// A field written with nothing after it (`volumes:` alone) decodes to
+	// nothing: the list decoders above are not even called for a null, so the
+	// service loaded as if the key were absent — and a `${VOLS}` that expanded
+	// to nothing read the same way. docker compose refuses the shape
+	// (`services.web.volumes must be a array`), except where it accepts the
+	// bare key (bareKeyIsAllowed). Same here, in key order so the one named
+	// does not depend on map iteration. Across -f
+	// files this sees the merged document, where a later file's bare key has
+	// already kept the earlier file's value (#732), so only a key no file gave
+	// a value to arrives here.
+	names := make([]string, 0, len(keys))
+	for k := range keys {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	for _, k := range names {
+		// Decoded into a yaml.Node, an alias stays an alias (`volumes: *nada`),
+		// so it is followed before the tag is read.
+		n := *unalias(ptr(keys[k]))
+		// The fields read straight into strings — a list of names, or one name
+		// — take whatever YAML made of an item: `profiles: [42]` became the
+		// profile "42" (and the service vanished from `config`, since no such
+		// profile is ever active), `cap_add: [42]` the capability "42". docker
+		// compose refuses these (`services.web.profiles.[0]: unexpected type
+		// int`, `services.web.command.0 must be a string`); so does this —
+		// the decoders have already run above and made text of the number,
+		// so the raw node is what is read here.
+		// The fields that take only a list: docker compose refuses `cap_add:
+		// NET_ADMIN` (`must be a array`) where a bare name was read as a
+		// one-item list here. Before the item check below, so that a bare
+		// `cap_add: 42` is told "a list", not "a string" and then "a list".
+		// A bare key is left to the bare-key check further down.
+		if listOnlyFields[k] && n.Kind == yaml.ScalarNode && n.Tag != "!!null" {
+			return fmt.Errorf("%s must be a list, got a single value — write it as `- %s`", k, n.Value)
+		}
+		if stringListFields[k] {
+			if err := refuseNonStringInList(k, &n); err != nil {
+				return err
+			}
+		}
+		// The fields that take one string: `image: 42` was read as the text
+		// "42", where docker compose refuses it (`services.web.image must be
+		// a string`).
+		if stringFields[k] && n.Kind == yaml.ScalarNode {
+			if word := nonStringWord(&n); word != "" {
+				return fmt.Errorf("%s must be a string, got %s — quote it (`\"%s\"`) if it is meant literally", k, word, n.Value)
+			}
+		}
+		// One level down — `build.context`, `deploy.resources.limits.memory` and
+		// their neighbours — the same three readings apply: a bare key, a
+		// number where a string belongs, a value where a mapping belongs.
+		if err := refuseNestedShapes(k, n); err != nil {
+			return err
+		}
+		// A watch rule's `ignore` items are strings, and a key the rule does
+		// not have is listed with the other ignored fields rather than read
+		// past (docker compose refuses it outright).
+		if k == "develop" {
+			if watch, ok := nestedNode(n, "watch"); ok && watch.Kind == yaml.SequenceNode {
+				for j, item := range watch.Content {
+					item = unalias(item)
+					if item.Kind != yaml.MappingNode {
+						continue
+					}
+					var rule map[string]yaml.Node
+					if err := item.Decode(&rule); err != nil {
+						return err
+					}
+					entry := fmt.Sprintf("develop.watch entry %d", j+1)
+					// A rule needs a path: without one, or with an empty one,
+					// it would watch the whole project directory. A bare
+					// `path:` was named by the shape table above.
+					if path, ok := rule["path"]; !ok {
+						return fmt.Errorf("%s has no path — write the directory to watch, as in `path: ./src`", entry)
+					} else if p := unalias(&path); p.Kind == yaml.ScalarNode && p.Tag == "!!str" && p.Value == "" {
+						return fmt.Errorf("%s has an empty path — write the directory to watch, as in `path: ./src`", entry)
+					}
+					// The action is one of docker compose's five (it refuses any
+					// other word, `SYNC` and `""` included); left out, the
+					// watcher takes `sync`. The three that copy files need a
+					// target — docker compose refuses those without one, and
+					// `rebuild` and `restart` need none.
+					action := "sync"
+					if a, ok := rule["action"]; ok {
+						if p := unalias(&a); p.Kind == yaml.ScalarNode && p.Tag == "!!str" {
+							if !watchActions[p.Value] {
+								// The word is not read back: the entry and the key locate it, and a
+								// `${VAR}` there may hold anything.
+								return fmt.Errorf("%s has an action that is not one — write `sync`, `rebuild`, `sync+restart`, `restart` or `sync+exec`", entry)
+							}
+							action = p.Value
+						}
+					}
+					if watchActionCopies[action] {
+						if tgt, ok := rule["target"]; !ok {
+							return fmt.Errorf("%s has no target — action `%s` copies files into the container; write where, as in `target: /app`", entry, action)
+						} else if p := unalias(&tgt); p.Kind == yaml.ScalarNode && p.Tag == "!!str" && p.Value == "" {
+							return fmt.Errorf("%s has an empty target — action `%s` copies files into the container; write where, as in `target: /app`", entry, action)
+						}
+					}
+					if ig, ok := rule["ignore"]; ok {
+						if err := refuseNonStringInList(entry+".ignore", unalias(&ig)); err != nil {
+							return err
+						}
+					}
+					for key := range rule {
+						if !watchRuleKeys[key] {
+							s.Unsupported = append(s.Unsupported, fmt.Sprintf("%s.%s", entry, key))
+						}
+					}
+				}
+			}
+		}
+		// `healthcheck.test` is the same kind of field one level down. Decoded
+		// into a map the way the service's own keys are, so a `<<:` merge key
+		// and an aliased key are read the same way there.
+		if k == "healthcheck" && n.Kind == yaml.MappingNode {
+			var hc map[string]yaml.Node
+			if err := n.Decode(&hc); err != nil {
+				return err
+			}
+			if test, ok := hc["test"]; ok {
+				if err := refuseNonStringInList("healthcheck.test", unalias(&test)); err != nil {
+					return err
+				}
+			}
+		}
+		if serviceKnownKeys[k] && !bareKeyIsAllowed[k] && n.Kind == yaml.ScalarNode && n.Tag == "!!null" {
+			// A TypeError, so the load's shape-error wording frames it — and,
+			// with several -f files, the note that the line counts in the
+			// merged document.
+			return &yaml.TypeError{Errors: []string{fmt.Sprintf("line %d: %s: expected %s, got nothing — write the value or remove the key", n.Line, k, shapeOf(k))}}
+		}
+	}
 	for k := range keys {
 		if !serviceKnownKeys[k] {
 			s.Unsupported = append(s.Unsupported, k)
@@ -326,14 +776,54 @@ func (s *Service) UnmarshalYAML(value *yaml.Node) error {
 	if nets, ok := keys["networks"]; ok {
 		s.Unsupported = append(s.Unsupported, ignoredServiceNetworkFields(nets)...)
 	}
+	if ext, ok := keys["extends"]; ok {
+		s.Extends = decodeExtends(ext)
+	}
 	sort.Strings(s.Unsupported)
 	return nil
+}
+
+// ExtendsRef is what a service's `extends:` names: the service to copy from,
+// and the file it lives in when it is not this one.
+type ExtendsRef struct {
+	Service string
+	File    string
+}
+
+// decodeExtends reads `extends:` in either of its forms — a bare service name,
+// or a mapping with `service` and an optional `file`. A value of neither shape
+// still marks the service as extending (that is what the key means), with
+// nothing to name.
+func decodeExtends(n yaml.Node) *ExtendsRef {
+	// Decoding into a yaml.Node keeps an alias as an alias (`extends: *x`),
+	// so follow it here — the decoder only resolves aliases for values it
+	// decodes into Go types.
+	for n.Kind == yaml.AliasNode && n.Alias != nil {
+		n = *n.Alias
+	}
+	ref := &ExtendsRef{}
+	switch n.Kind {
+	case yaml.ScalarNode:
+		ref.Service = n.Value
+	case yaml.MappingNode:
+		var m struct {
+			Service string `yaml:"service"`
+			File    string `yaml:"file"`
+		}
+		if n.Decode(&m) == nil {
+			ref.Service, ref.File = m.Service, m.File
+		}
+	}
+	return ref
 }
 
 // ignoredServiceNetworkFields lists the keys under a service's map-form
 // `networks:` entries, all of which are dropped (the entry's name is the only
 // thing acted on). A list-form `networks:` carries no keys and yields nothing.
 func ignoredServiceNetworkFields(n yaml.Node) []string {
+	// Decoding into a yaml.Node keeps an alias as an alias, so `networks:
+	// *nets` arrives here unresolved and would be reported as nothing.
+	n = *unalias(&n)
 	if n.Kind != yaml.MappingNode {
 		return nil
 	}
@@ -439,10 +929,16 @@ func (p *Ports) UnmarshalYAML(value *yaml.Node) error {
 		return fmt.Errorf("ports must be a list, got %s", kindName(value.Kind))
 	}
 	out := make(Ports, 0, len(value.Content))
-	for _, item := range value.Content {
+	for i, item := range value.Content {
+		item = unalias(item)
 		// Short form: a string ("8080:80", "3000") or a bare number (3000) — the
 		// scalar's text is the spec, normalized later.
 		if item.Kind == yaml.ScalarNode {
+			// Same as volumes: an empty item is not a port, and normalizing it
+			// later would publish "" (or "null:null" after a merge).
+			if item.ShortTag() == "!!null" || item.Value == "" {
+				return fmt.Errorf("ports entry %d of %d is empty — write the port (`host:container`, or a mapping with `target:`) or remove the `- `", i+1, len(value.Content))
+			}
 			out = append(out, item.Value)
 			continue
 		}
@@ -500,8 +996,19 @@ func (v *Volumes) UnmarshalYAML(value *yaml.Node) error {
 		return fmt.Errorf("volumes must be a list, got %s", kindName(value.Kind))
 	}
 	out := make(Volumes, 0, len(value.Content))
-	for _, item := range value.Content {
+	for i, item := range value.Content {
+		item = unalias(item)
 		if item.Kind == yaml.ScalarNode {
+			// A dash with nothing after it (`- `, or `- null`, or a `${...}` that
+			// expanded to nothing) is not a mount. Left in, it reaches the runtime as
+			// a mount named "" or "null" — docker refuses it at validation, and so
+			// does this. The count is in the reader's own numbering, from 1.
+			if item.ShortTag() == "!!null" || item.Value == "" {
+				return fmt.Errorf("volumes entry %d of %d is empty — write the mount (`./src:/target`, or a mapping with `target:`) or remove the `- `", i+1, len(value.Content))
+			}
+			if err := refuseNonString("volumes", i, len(value.Content), item); err != nil {
+				return err
+			}
 			// `src:target:nocopy` is the short spelling of the same switch, and
 			// docker accepts it. Left in place it would reach the runtime as a mount
 			// mode, which is not what it is.
@@ -620,13 +1127,26 @@ func externalName(explicit, fromExternal string, at *yaml.Node) (string, error) 
 // shape, naming what was found, rather than left to the decoder's
 // "cannot unmarshal !!map into bool".
 func decodeExternal(n *yaml.Node) (external bool, name string, err error) {
+	// The field was decoded into a yaml.Node, in which an alias stays an alias
+	// (`external: *shared`), so it is followed here. A refusal of the value's
+	// shape names the line the reader wrote the alias on; a refusal of a key
+	// inside the mapping it stands for names that key's own line, since that
+	// is where the key is written and fixed.
+	at := n
+	n = unalias(n)
 	shape := func(got string) error {
-		return &yaml.TypeError{Errors: []string{fmt.Sprintf("line %d: external: expected true/false or a mapping with name, got %s", n.Line, got)}}
+		return &yaml.TypeError{Errors: []string{fmt.Sprintf("line %d: external: expected true/false or a mapping with name, got %s", at.Line, got)}}
 	}
 	switch n.Kind {
 	case 0:
 		return false, "", nil
 	case yaml.ScalarNode:
+		// `external:` with nothing after it is not "not external": docker
+		// compose refuses it (`must be a boolean, mapping or string`), and a
+		// bool decode of a null quietly says false, so it is caught first.
+		if n.Tag == "!!null" {
+			return false, "", shape("nothing")
+		}
 		var b bool
 		if err := n.Decode(&b); err == nil {
 			return b, "", nil
@@ -641,9 +1161,13 @@ func decodeExternal(n *yaml.Node) (external bool, name string, err error) {
 		// Only `name` lives here. docker compose refuses any other key
 		// ("additional properties … not allowed"), and so does this — a typo
 		// for `name` would otherwise turn into a nameless external volume.
+		// A key can be an alias too (`*k: x`), and `<<` brings a mapping's keys
+		// in; the decode below resolves both, so the check reads the key as
+		// decoded and leaves `<<` to it.
 		for i := 0; i+1 < len(n.Content); i += 2 {
-			if k := n.Content[i].Value; k != "name" {
-				return false, "", &yaml.TypeError{Errors: []string{fmt.Sprintf("line %d: external: unknown key %q (only name is allowed here)", n.Content[i].Line, k)}}
+			key := unalias(n.Content[i])
+			if k := key.Value; k != "name" && key.Tag != "!!merge" {
+				return false, "", &yaml.TypeError{Errors: []string{fmt.Sprintf("line %d: external: unknown key %q (only name is allowed here)", key.Line, k)}}
 			}
 		}
 		var m struct {
@@ -725,24 +1249,129 @@ func (n *ServiceNetworks) UnmarshalYAML(value *yaml.Node) error {
 			return nil
 		}
 	case yaml.SequenceNode:
-		var out []string
-		if err := value.Decode(&out); err != nil {
+		// docker compose validates the list form: an item with nothing in it is
+		// not a name, and a name listed twice is an error (`items at 0 and 1 are
+		// equal`), not two `--network` flags. Items are decoded one by one —
+		// decoding the whole list into []string drops a null item, which is
+		// how a bare `- ` used to vanish — and the decoded values are compared,
+		// not the nodes: an alias (`*n`) carries its anchor's name in the node
+		// and the network's name only once decoded. Entries are counted from
+		// 1, as the reader counts them.
+		//
+		// This sees a list only when exactly one -f file wrote the service's
+		// `networks:`. As soon as two files write it — the same names or
+		// different ones — the merge reads both sides as maps keyed by name and
+		// joins them (#720), so a duplicate inside either file is absorbed
+		// there and never reaches this check; docker compose validates each
+		// file first and refuses it. That divergence is pinned in the tests.
+		out := make([]string, 0, len(value.Content))
+		for i, item := range value.Content {
+			if err := refuseNonString("networks", i, len(value.Content), unalias(item)); err != nil {
+				return err
+			}
+			var name string
+			if item.ShortTag() != "!!null" {
+				if err := item.Decode(&name); err != nil {
+					return err
+				}
+			}
+			out = append(out, name)
+		}
+		if err := refuseEmptyOrRepeatedNetwork(out); err != nil {
 			return err
 		}
 		*n = out
 		return nil
 	case yaml.MappingNode:
 		// Keys are the network names; the values (aliases, ipv4_address, …) aren't
-		// acted on. Sort so the parse is deterministic.
+		// acted on. Sort so the parse is deterministic. The YAML decoder never
+		// sees these keys (the node is walked by hand), so a key written twice
+		// is caught here, as it is in the list form.
 		out := make([]string, 0, len(value.Content)/2)
 		for i := 0; i+1 < len(value.Content); i += 2 {
-			out = append(out, value.Content[i].Value)
+			key := unalias(value.Content[i])
+			if word := nonStringWord(key); word != "" {
+				return fmt.Errorf("networks entry %d of %d must be a string, got %s — quote the name (`\"%s\"`) if it is meant literally", i/2+1, len(value.Content)/2, word, key.Value)
+			}
+			var name string
+			if err := key.Decode(&name); err != nil {
+				return err
+			}
+			out = append(out, name)
+		}
+		if err := refuseEmptyOrRepeatedNetwork(out); err != nil {
+			return err
 		}
 		sort.Strings(out)
 		*n = out
 		return nil
 	}
 	return fmt.Errorf("expected a list or a mapping for networks, got %s", kindName(value.Kind))
+}
+
+// refuseNonString is the check docker compose applies to the items of a
+// service's volumes, networks, env_file and environment lists: an item that
+// YAML read as something other than a string (`- 42`, `- true`, `- 1.5`) is
+// refused (`services.web.volumes.0 must be a string`), where reading it as
+// the text it was written as would quietly make a mount, a network or a
+// variable out of a number. Quoting it makes it a string. Ports keep taking
+// bare numbers, and secrets bare names of any spelling, as docker does.
+func refuseNonString(field string, i, total int, item *yaml.Node) error {
+	if word := nonStringWord(item); word != "" {
+		return fmt.Errorf("%s entry %d of %d must be a string, got %s — quote it (`\"%s\"`) if it is meant literally", field, i+1, total, word, item.Value)
+	}
+	return nil
+}
+
+// nonStringWord says, for a scalar YAML read as one of the types docker
+// compose refuses where a string belongs — a number, true/false, a date —
+// what it read it as; "" for a string, for the empty item (refused as such
+// by the callers that have a word for it), for a mapping (read by its own
+// decoder), and for a tag docker compose takes as text (`!!binary`, a
+// custom `!tag`).
+func nonStringWord(item *yaml.Node) string {
+	if item.Kind != yaml.ScalarNode {
+		return ""
+	}
+	switch item.ShortTag() {
+	case "!!int", "!!float":
+		return "a number"
+	case "!!bool":
+		return "true/false"
+	case "!!timestamp":
+		return "a date"
+	}
+	return ""
+}
+
+// unalias follows a YAML alias (`*name`) to the node it stands for. The
+// decoder resolves an alias before it hands a value to UnmarshalYAML, and
+// again inside item.Decode — but the items of a list it hands over are the
+// raw nodes, so a decoder that walks value.Content and branches on an
+// item's Kind sees `*name` as an AliasNode: not the scalar it stands for,
+// so an alias to a string fell through to the mapping branch and failed
+// there (#745). An alias to a mapping already reached Decode and worked.
+func unalias(n *yaml.Node) *yaml.Node {
+	for n.Kind == yaml.AliasNode && n.Alias != nil {
+		n = n.Alias
+	}
+	return n
+}
+
+// refuseEmptyOrRepeatedNetwork is the validation docker compose applies to a
+// service's networks, in either form: no empty name, no name twice.
+func refuseEmptyOrRepeatedNetwork(names []string) error {
+	seen := map[string]int{}
+	for i, name := range names {
+		if name == "" {
+			return fmt.Errorf("networks entry %d of %d is empty — write the network's name or remove the `- `", i+1, len(names))
+		}
+		if first, dup := seen[name]; dup {
+			return fmt.Errorf("networks lists %q twice (entries %d and %d) — list each network once", name, first, i+1)
+		}
+		seen[name] = i + 1
+	}
+	return nil
 }
 
 // Secret is a top-level compose secret. opossum supports only file-based
@@ -788,8 +1417,12 @@ func (s *SecretRefs) UnmarshalYAML(value *yaml.Node) error {
 		return fmt.Errorf("secrets must be a list, got %s", kindName(value.Kind))
 	}
 	out := make(SecretRefs, 0, len(value.Content))
-	for _, item := range value.Content {
+	for i, item := range value.Content {
+		item = unalias(item)
 		if item.Kind == yaml.ScalarNode {
+			if err := refuseNonString("secrets", i, len(value.Content), item); err != nil {
+				return err
+			}
 			out = append(out, SecretRef{Source: item.Value, Target: item.Value})
 			continue
 		}
@@ -887,12 +1520,19 @@ type EnvFiles []EnvFileRef
 func (e *EnvFiles) UnmarshalYAML(value *yaml.Node) error {
 	switch value.Kind {
 	case yaml.ScalarNode:
+		if word := nonStringWord(value); word != "" {
+			return fmt.Errorf("env_file must be a string, got %s — quote it (`\"%s\"`) if it is meant literally", word, value.Value)
+		}
 		*e = EnvFiles{{Path: value.Value, Required: true}}
 		return nil
 	case yaml.SequenceNode:
 		out := make(EnvFiles, 0, len(value.Content))
-		for _, item := range value.Content {
+		for i, item := range value.Content {
+			item = unalias(item)
 			if item.Kind == yaml.ScalarNode {
+				if err := refuseNonString("env_file", i, len(value.Content), item); err != nil {
+					return err
+				}
 				out = append(out, EnvFileRef{Path: item.Value, Required: true})
 				continue
 			}
@@ -976,9 +1616,23 @@ type Environment []string
 func (e *Environment) UnmarshalYAML(value *yaml.Node) error {
 	switch value.Kind {
 	case yaml.SequenceNode:
-		var out []string
-		if err := value.Decode(&out); err != nil {
-			return err
+		// Item by item: decoding the list into []string would turn `- 42`
+		// into the variable "42" and drop a `- ` altogether, where docker
+		// compose refuses both.
+		out := make([]string, 0, len(value.Content))
+		for i, item := range value.Content {
+			item = unalias(item)
+			if item.ShortTag() == "!!null" {
+				return fmt.Errorf("environment entry %d of %d is empty — write the variable (`KEY=value`, or `KEY` to take it from the shell) or remove the `- `", i+1, len(value.Content))
+			}
+			if err := refuseNonString("environment", i, len(value.Content), item); err != nil {
+				return err
+			}
+			var s string
+			if err := item.Decode(&s); err != nil {
+				return err
+			}
+			out = append(out, s)
 		}
 		*e = out
 		return nil
@@ -1082,10 +1736,10 @@ type Healthcheck struct {
 func (h *Healthcheck) UnmarshalYAML(value *yaml.Node) error {
 	var raw struct {
 		Test        StringOrSlice `yaml:"test"`
-		Interval    string        `yaml:"interval"`
-		Timeout     string        `yaml:"timeout"`
-		Retries     int           `yaml:"retries"`
-		StartPeriod string        `yaml:"start_period"`
+		Interval    yaml.Node     `yaml:"interval"`
+		Timeout     yaml.Node     `yaml:"timeout"`
+		Retries     yaml.Node     `yaml:"retries"`
+		StartPeriod yaml.Node     `yaml:"start_period"`
 		Disable     bool          `yaml:"disable"`
 	}
 	if err := value.Decode(&raw); err != nil {
@@ -1120,27 +1774,45 @@ func (h *Healthcheck) UnmarshalYAML(value *yaml.Node) error {
 	}
 
 	var err error
-	if h.Interval, err = parseDuration(raw.Interval, 30*time.Second); err != nil {
+	if h.Interval, err = durationOf(&raw.Interval, 30*time.Second); err != nil {
 		return fmt.Errorf("healthcheck interval: %w", err)
 	}
-	if h.Timeout, err = parseDuration(raw.Timeout, 30*time.Second); err != nil {
+	if h.Timeout, err = durationOf(&raw.Timeout, 30*time.Second); err != nil {
 		return fmt.Errorf("healthcheck timeout: %w", err)
 	}
-	if h.StartPeriod, err = parseDuration(raw.StartPeriod, 0); err != nil {
+	if h.StartPeriod, err = durationOf(&raw.StartPeriod, 0); err != nil {
 		return fmt.Errorf("healthcheck start_period: %w", err)
 	}
-	h.Retries = raw.Retries
+	// A count, the way docker compose reads one: a bare number (`3`, or
+	// `2.5`, which it truncates) or a quoted whole number (`"3"`); a quoted
+	// decimal, a word, a blank, a boolean, a negative — not a count. Left
+	// out (or null, or 0) it is the default.
+	if n, err := retriesCount(unalias(&raw.Retries)); err != nil {
+		return err
+	} else if n > 0 {
+		h.Retries = n
+	}
 	if h.Retries <= 0 {
 		h.Retries = 3
 	}
 	return nil
 }
 
-func parseDuration(s string, def time.Duration) (time.Duration, error) {
-	if s == "" {
+// durationOf reads a healthcheck duration: the default when the key was
+// left out (or written bare — the shape check names that one), the text
+// as a duration otherwise. A blank (`""`, or what an unset `${VAR}`
+// leaves) is not a duration, as docker compose reads it (`invalid duration
+// ""`); it used to be read as the default. A mapping or a list is left to
+// the shape check, which names the field and what belongs there.
+func durationOf(n *yaml.Node, def time.Duration) (time.Duration, error) {
+	n = unalias(n)
+	if n.Kind != yaml.ScalarNode || n.Tag == "!!null" {
 		return def, nil
 	}
-	d, err := time.ParseDuration(s)
+	if strings.TrimSpace(n.Value) == "" {
+		return 0, fmt.Errorf("blank, not a duration — use a unit, e.g. 30s, 1m, or 500ms (an unset `${VAR}` leaves a blank)")
+	}
+	d, err := time.ParseDuration(n.Value)
 	if err != nil {
 		return 0, fmt.Errorf("not a duration — use a unit, e.g. 30s, 1m, or 500ms")
 	}
@@ -1151,8 +1823,12 @@ func parseDuration(s string, def time.Duration) (time.Duration, error) {
 // own decoder happens to use for it. A reader who wrote a mapping where a list
 // belongs cannot act on "yaml kind 4".
 //
-// There is no case for an alias: the decoder resolves one before any of this sees
-// it, so `command: *anchor` arrives as whatever the anchor held (measured).
+// There is no case for an alias: the decoder resolves one before it hands a
+// value to a Go type, so `command: *anchor` arrives as whatever the anchor
+// held (measured). A value kept as a yaml.Node — a list's items, a field read
+// into yaml.Node — still carries the alias: a reader that walks such a node's
+// Kind, Value or Content itself unaliases first, and one that hands the node
+// to Decode need not.
 func kindName(k yaml.Kind) string {
 	switch k {
 	case yaml.ScalarNode:
@@ -1166,3 +1842,7 @@ func kindName(k yaml.Kind) string {
 	}
 	return "something else"
 }
+
+// ptr hands back a pointer to a copy: the map[string]yaml.Node the second
+// pass decodes into is not addressable.
+func ptr(n yaml.Node) *yaml.Node { return &n }

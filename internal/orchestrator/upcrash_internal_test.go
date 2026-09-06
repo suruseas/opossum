@@ -377,10 +377,16 @@ func upWithLog(t *testing.T, runBody string) (error, string) {
 	if err := os.WriteFile(shim, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	err := New(webProject(), &rt.Runtime{Bin: shim}, "", &bytes.Buffer{}).Up(true)
+	var out bytes.Buffer
+	err := New(webProject(), &rt.Runtime{Bin: shim}, "", &out).Up(true)
 	log, _ := os.ReadFile(logf)
+	lastUpOutput = out.String()
 	return err, string(log)
 }
+
+// lastUpOutput is what the last upWithLog printed, for the tests that read the
+// output as well as the invocations.
+var lastUpOutput string
 
 // A post-start crash fails the up but must NOT roll the stack back — the crashed
 // container stays up for inspection (like docker compose). Guards the broughtUp
@@ -394,6 +400,11 @@ func TestUpKeepsContainersOnPostStartCrash(t *testing.T) {
 	if strings.Contains(log, "stop ") {
 		t.Errorf("a post-start crash must not roll back (no `stop`), got invocations:\n%s", log)
 	}
+	// And it must not say it did: the crashed container is left for
+	// inspection, so "nothing is left running" would be the wrong claim.
+	if strings.Contains(lastUpOutput, "Rolled back") || strings.Contains(lastUpOutput, "roll back") {
+		t.Errorf("a post-start crash must not claim a rollback, got output:\n%s", lastUpOutput)
+	}
 }
 
 // The differential: a genuine bring-up failure (the run itself fails) STILL rolls
@@ -406,6 +417,40 @@ func TestUpRollsBackOnBringUpFailure(t *testing.T) {
 	}
 	if !strings.Contains(log, "stop ") {
 		t.Errorf("a bring-up failure must roll back (expected a `stop`), got invocations:\n%s", log)
+	}
+	// This harness's `inspect` keeps answering that the container is there,
+	// which is what a removal that did not take looks like — so the message
+	// must say "still there", not "removed" (#406).
+	if !strings.Contains(lastUpOutput, "Tried to roll back web, but the container is still there — `opossum down` removes it") {
+		t.Errorf("a rollback the runtime did not confirm must say so, got output:\n%s", lastUpOutput)
+	}
+}
+
+// Under --dry-run nothing is started and nothing is torn down, whatever the
+// plan reached before failing — so the rollback message must not appear
+// (it would contradict "no changes will be made").
+func TestADryRunThatFailsDoesNotClaimARollback(t *testing.T) {
+	dir := t.TempDir()
+	shim := filepath.Join(dir, "c.sh")
+	// `image inspect` fails: with --no-build a service that has to be built
+	// is refused, after the plan has "started" the one before it.
+	body := "#!/bin/sh\ncase \"$1\" in\n  system) echo 'status running' ;;\n  image) exit 1 ;;\n  ls) echo '[]' ;;\nesac\nexit 0\n"
+	if err := os.WriteFile(shim, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := &compose.Project{Name: "dry", BaseDir: dir, Services: map[string]*compose.Service{
+		"cache": {Name: "cache", Image: "alpine:3"},
+		"db":    {Name: "db", Build: &compose.Build{Context: "."}, DependsOn: compose.DependsOn{{Name: "cache"}}},
+	}}
+	var out bytes.Buffer
+	o := New(p, &rt.Runtime{Bin: shim}, "", &out)
+	o.SetUpOptions(false, false, true, false, false)
+	o.SetDryRun(true)
+	if err := o.Up(true); err == nil {
+		t.Fatal("db is not built and --no-build was given, so the dry run must fail")
+	}
+	if strings.Contains(out.String(), "oll") {
+		t.Errorf("a dry run must not claim a rollback, got:\n%s", out.String())
 	}
 }
 
@@ -434,5 +479,61 @@ func TestVerifyStartedTakesTheControlCharactersOutOfTheCrashLog(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "boot ok [opossum note]") {
 		t.Errorf("the log should still read as one line with a space where the return was:\n%s", out.String())
+	}
+}
+
+// The per-service warning is the capture first and the hint after it: the
+// reader sees what the container said, then what opossum makes of it. Both are
+// strings handed to one format call, and printed the other way round the hint
+// would lead and the "last log lines:" heading would introduce the hint rather
+// than the logs (#559). A bind mount and a chown failure make the hint fire.
+func TestTheCrashWarningPutsTheLogsBeforeTheHint(t *testing.T) {
+	var out bytes.Buffer
+	p := &compose.Project{Name: "demo", Services: map[string]*compose.Service{
+		"web": {Name: "web", Image: "web:latest", Volumes: []string{"./data:/data"}},
+	}}
+	o := New(p, inspectShim(t, stoppedInspect, "chown: /data: Operation not permitted"), "", &out)
+
+	if err := o.verifyStarted([]string{"web"}, map[string]bool{}); err == nil {
+		t.Fatal("a service that exited right after starting is a failure")
+	}
+	s := out.String()
+	logsAt := strings.Index(s, "chown: /data: Operation not permitted")
+	hintAt := strings.Index(s, "→ [")
+	if logsAt < 0 || hintAt < 0 {
+		t.Fatalf("expected both the capture and a hint, got:\n%s", s)
+	}
+	if hintAt < logsAt {
+		t.Errorf("the hint should follow the capture, not lead it:\n%s", s)
+	}
+}
+
+// The same order holds for a dependency that exited while `up` was waiting on
+// its healthcheck: the capture, then the hint. With no hint the two orders print
+// the same bytes, so the fixture makes one fire (a bind mount and a chown
+// failure) and reads which comes first (#559).
+func TestTheExitedDependencyErrorPutsTheLogsBeforeTheHint(t *testing.T) {
+	shim := scriptShim(t, ""+
+		"  exec) exit 1 ;;\n"+
+		"  inspect) echo '"+stoppedInspect+"' ;;\n"+
+		"  logs) echo 'chown: /data: Operation not permitted' ;;\n")
+	p := &compose.Project{Name: "demo", Services: map[string]*compose.Service{
+		"web": {Name: "web", Image: "web:latest", Volumes: []string{"./data:/data"}},
+	}}
+	o := New(p, shim, "", &bytes.Buffer{})
+	hc := &compose.Healthcheck{Test: []string{"true"}, Interval: time.Millisecond, Retries: 1}
+
+	err := o.waitHealthy("web", hc)
+	if err == nil {
+		t.Fatal("a dependency that exited is a failure")
+	}
+	s := err.Error()
+	logsAt := strings.Index(s, "chown: /data: Operation not permitted")
+	hintAt := strings.Index(s, "→ [")
+	if logsAt < 0 || hintAt < 0 {
+		t.Fatalf("expected both the capture and a hint, got:\n%s", s)
+	}
+	if hintAt < logsAt {
+		t.Errorf("the hint should follow the capture, not lead it:\n%s", s)
 	}
 }

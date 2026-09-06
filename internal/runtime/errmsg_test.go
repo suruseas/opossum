@@ -108,3 +108,16 @@ func TestImportLoadFailureHasHint(t *testing.T) {
 		t.Errorf("load failure should hint at the runtime health, got: %s", s)
 	}
 }
+
+// A `network delete` that failed for a reason other than "already gone" is
+// warned about with the network's name and then the runtime's own words. Two
+// strings on one format call, and no test reached the line (#559's swap sweep
+// reported it unreached): exchanged, the warning would blame a network called
+// after the error.
+func TestANetworkDeleteFailureNamesTheNetworkThenTheRuntimesWords(t *testing.T) {
+	r := replayShim(t, "boom: still attached\n", 1)
+	got := captureStderr(t, func() { r.DeleteNetwork("demo-net") })
+	if want := `warning: could not delete network "demo-net": boom: still attached — a container may still be attached`; !strings.Contains(got, want) {
+		t.Errorf("the warning should read %q, got:\n%s", want, got)
+	}
+}

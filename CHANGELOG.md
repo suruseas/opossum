@@ -6,6 +6,135 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.24.7] - 2026-09-06
+
+### Changed
+
+- When `up` fails partway, the output now says which services it rolled
+  back (stopped and removed), so a service that was reported as starting a
+  moment earlier is not read as still running.
+- The comment `up --from-docker-compose` writes on the `PGDATA` entry
+  (OPSM-101) now says what the entry is for with the image at hand. For an
+  image that keeps its cluster somewhere other than the mount — Postgres 18
+  keeps it under `/var/lib/postgresql/18/docker` — it says the entry is what
+  makes the server use the volume at all: without it the volume stays unused,
+  and the Postgres 18 images refuse to start on finding data at the old path.
+  Before, every image got the same "belt and braces" wording, which invited
+  deleting the one line an 18 database needs. When the image is not here to
+  be asked, the comment says so and keeps both readings.
+- The note `up --from-docker-compose` writes for a service that mounts a host
+  device or session socket (`/dev/...`, an X11 or PulseAudio socket) no longer
+  reads `What to expect: expect ...`; the line now says what will happen: this
+  service's device-dependent features will not work. Same meaning, one word
+  fewer to read twice.
+
+### Fixed
+
+- A service that uses `extends:` is now refused with a message that names
+  it and the service it extends, and says what to do (copy that service's
+  settings in and remove `extends:`). Before, a service without an image of
+  its own failed as `must set either image or build`, pointing at a typo
+  that was not there, and one with its own `image:` loaded and ran without
+  the settings it extended — `config` listed `extends` among the ignored
+  fields, but not what it would have brought in. That second file no
+  longer loads.
+- An item of `volumes:`, `networks:`, `secrets:`, `env_file:` or
+  `environment:` that YAML reads as a number, a boolean or a date (`- 42`,
+  `- true`, `- 2024-01-01`) is now refused, naming the entry and how to
+  quote it, the way docker compose validates it; before, it became a mount,
+  a network, a secret, an env file or a variable named after the number —
+  and, with several `-f` files, a bad `environment:` item fell out of the
+  merge unseen. A bare `- ` under `environment:` is refused too instead of
+  being dropped. `ports:` keeps taking bare numbers.
+- A service whose `networks:` names the same network twice — in the list
+  form, through a YAML alias, or as a repeated key in the map form — is now
+  refused, naming the two entries, the way docker compose validates it;
+  before, the container was started with the `--network` flag repeated. A
+  bare `- ` in the list is refused too instead of being dropped. The check
+  applies when one file writes the service's `networks:`; when several
+  `-f` files do, they are joined by name first and a repeat inside one of
+  them is absorbed by that join.
+- With several `-f` files, a variable named `environment` or `labels` inside
+  a service's `environment:` (map or list form) or `build.args` (map form)
+  now merges like any other variable — the later file's value wins. Before,
+  when both files set it, the value came out as an empty mapping
+  (`environment=map[]`).
+- A service field written with nothing after it (`volumes:` alone, or
+  `ports:`, `networks:`, `environment:`, `depends_on:`, `build:`, …) is now
+  refused, naming the field and what it takes, the way docker compose
+  validates it; `command:` and `entrypoint:` alone still mean "no command".
+  Before, the field loaded as if the key were absent — and a bare
+  `external:` on a volume or network declaration read as "not external",
+  so the volume was created as the project's own instead of being used as
+  the pre-existing one. That is refused too.
+- A service key with nothing under it (`services: {web: }`) is now refused
+  with `service "web" must be a mapping`, the way docker compose reads it.
+  Before, `config` and `up` crashed on it. An empty item in `volumes:` or
+  `ports:` (a bare `- `, a `- null`, a quoted `""`, or a `${...}` that
+  expanded to nothing) is refused too, naming the entry; before, it reached
+  the runtime as an anonymous volume with an empty target, an empty
+  `-p`, or (after a multi-file merge) a mount or port named `null`.
+- `build.context:`, `build.dockerfile:`, `build.target:`, `build.args:` and
+  the `deploy.resources` limits and reservations (the mappings, `memory`
+  with a number, `cpus` with a boolean) are now refused when written with
+  nothing after the key or with a value of the wrong kind, the way docker
+  compose validates them; before, `build.context: 42` built from a context
+  named "42" and a bare `limits:` silently set no limit. A bare number for
+  `build:` itself is refused too.
+- `healthcheck` fields written with nothing after the key (`test`,
+  `interval`, `timeout`, `start_period`, `retries`) are now refused the way
+  docker compose validates them, and so is a bare `develop.watch:`.
+- A watch rule that is empty (a bare `- `), or whose `path`, `action` or
+  `target` is bare or not a string, is refused too; before, an empty rule
+  watched the whole project. `deploy.resources` `memory` and `cpus` (limits
+  and reservations) written as a list or a mapping are refused instead of
+  silently dropping the limit.
+- A number, a boolean or a date written where `image:`, `user:`,
+  `working_dir:`, `platform:` or `network_mode:` expect a string is now
+  refused, naming the field and how to quote it; before, it was read as
+  text (`image: 42` pulled an image named "42"). `cap_add:` and `cap_drop:`
+  written as one bare value are refused too (docker compose takes only a
+  list there), and so is a bare number for `deploy.resources.limits.memory:`
+  (it takes a string with a unit, as in `"512m"`).
+- A number or a boolean written where `profiles:`, `cap_add:`, `cap_drop:`,
+  `tmpfs:`, `command:`, `entrypoint:` or `healthcheck.test:` expect a string
+  (`profiles: [42]`) is now refused, naming the entry and how to quote it,
+  the way docker compose validates it; a date is refused too, and an item
+  with nothing in it. Before, a number became a name — and a numeric
+  profile, never active, made the service disappear from `config` without a
+  word. `expose:` keeps taking bare numbers.
+- A watch rule's `action` is checked at load the way docker compose checks
+  it: only `sync`, `rebuild`, `sync+restart`, `restart` and `sync+exec` are
+  taken (a typo, `SYNC` or `""` is refused, naming the rule but not the word), and the three
+  that copy files are refused without a `target` (or with an empty one).
+  Before, a misspelt action reached `opossum watch`, which named it as not
+  automated at the first change, and `sync` without a target copied files
+  to the container's root. `restart` and `sync+exec` load (docker compose
+  takes them) but are not automated yet, as before.
+- A blank `healthcheck.interval`, `timeout` or `start_period` (`""`, or
+  what an unset `${VAR}` leaves) is now refused as not a duration, as docker
+  compose refuses it; before, a blank was read as the default silently.
+- A watch rule under `develop.watch` is read closer to how docker compose
+  reads it: `ignore:` takes one glob as well as a list, a rule without a
+  `path` (or with an empty one) is refused instead of watching the whole
+  project, a non-string `ignore` item is refused, and a key a rule does
+  not have is listed with the ignored fields (docker compose refuses it).
+- `healthcheck.retries: "3"` (a quoted whole number) is now taken, as docker
+  compose takes it. A word, a blank, a boolean or a negative number there
+  is refused; a negative used to be read as the default silently.
+- A YAML alias (`*name`) that stands for a string, used as an item of
+  `volumes:`, `ports:`, `secrets:` or `env_file:`, is now read as that
+  string. Before, the load failed with a type error, so the usual `x-`
+  anchor reuse worked for whole fields and for mapping items but not for a
+  string item. `networks: *nets` also reports its ignored per-network
+  fields (aliases, addresses) the way the plainly written form does.
+- `external:` on a top-level volume or network can now be written as a YAML
+  alias (`external: *shared`, standing for `true` or for a mapping with
+  `name:`), and the mapping's `name` key may itself come through an alias
+  or a `<<:` merge key. Before, the aliased forms were refused as a value
+  of the wrong shape or as an unknown key. (An external secret is still
+  refused as unsupported, aliased or not.)
+
 ## [0.24.6] - 2026-09-05
 
 ### Fixed
@@ -1155,7 +1284,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.24.6...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.24.7...HEAD
+[0.24.7]: https://github.com/suruseas/opossum/compare/v0.24.6...v0.24.7
 [0.24.6]: https://github.com/suruseas/opossum/compare/v0.24.5...v0.24.6
 [0.24.5]: https://github.com/suruseas/opossum/compare/v0.24.4...v0.24.5
 [0.24.4]: https://github.com/suruseas/opossum/compare/v0.24.3...v0.24.4

@@ -1,0 +1,14 @@
+# postgres:17-alpine / bind mount at the data directory (chown fails)
+# image digest sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
+# container CLI version 1.3.1 (build: release, commit: unspeci) / 2026-09-06 / bind mount is a host-owned virtiofs directory under $HOME
+
+$ container run -d --name clm480-pg17 -e POSTGRES_PASSWORD=x -v /Users/<user>/opossum-dogfood/results/v131-images/bind/pg17:/var/lib/postgresql/data postgres:17-alpine
+clm480-pg17
+[exit 0]
+$ container logs clm480-pg17
+chmod: /var/lib/postgresql/data: Operation not permitted
+chown: /var/lib/postgresql/data: Operation not permitted
+[exit 0]
+$ sh -c container inspect clm480-pg17 | grep -m1 "\"state\""
+      "state" : "stopped"
+[exit 0]

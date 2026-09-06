@@ -378,3 +378,45 @@ func TestSuperviseKeepsWatchingWhileAContainerExists(t *testing.T) {
 		}
 	}
 }
+
+// The giving-up line names the code, then the service, then how many restarts
+// it took and which policy ran out. The code and the service are both strings on
+// one format call: exchanged, the line would open with the service in brackets
+// and give up on the code (#559).
+func TestTheGivingUpLineNamesTheCodeThenTheService(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	st := "stopped"
+	rt, _ := countingShim(t, &st)
+	o := New(superviseProject(t, "on-failure:1"), rt, "opossum", os.Stderr)
+	pols := map[string]compose.RestartPolicy{"web": pol(t, "on-failure:1")}
+	state := map[string]serviceState{"web": {restarts: 1}}
+	var logged strings.Builder
+	logf := func(format string, args ...interface{}) { fmt.Fprintf(&logged, format+"\n", args...) }
+
+	o.superviseAt(time.Now(), pols, state, logf)
+
+	if want := "[" + string(codeSupervisorAction) + `] giving up on "web" after 1 restart(s): its ` + "`restart: on-failure`" + " has no more retries."; !strings.Contains(logged.String(), want) {
+		t.Errorf("the line should read %q, got:\n%s", want, logged.String())
+	}
+}
+
+// The restart line names the code, the service, the attempt and the policy
+// that asked for it. The service and the policy's mode are both strings on one
+// format call: exchanged, the line would restart "always" under a policy called
+// web (#559).
+func TestTheRestartLineNamesTheServiceThenThePolicy(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	st := "stopped"
+	rt, _ := countingShim(t, &st)
+	o := New(superviseProject(t, "always"), rt, "opossum", os.Stderr)
+	pols := map[string]compose.RestartPolicy{"web": pol(t, "always")}
+	state := map[string]serviceState{}
+	var logged strings.Builder
+	logf := func(format string, args ...interface{}) { fmt.Fprintf(&logged, format+"\n", args...) }
+
+	o.superviseAt(time.Now(), pols, state, logf)
+
+	if want := "[" + string(codeSupervisorAction) + `] restarted "web" (attempt 1; ` + "`restart: always`)"; !strings.Contains(logged.String(), want) {
+		t.Errorf("the line should read %q, got:\n%s", want, logged.String())
+	}
+}

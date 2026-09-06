@@ -1,0 +1,34 @@
+# postgres:17-alpine / pre-existing named volume holding lost+found (initdb refuses)
+# image digest sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
+# container CLI version 1.3.1 (build: release, commit: unspeci) / 2026-09-06 / bind mount is a host-owned virtiofs directory under $HOME
+
+$ container volume create clm480-lfvol
+clm480-lfvol
+[exit 0]
+$ container run --rm --name clm480-lf -v clm480-lfvol:/data alpine:3 ls -la /data
+total 12
+drwxr-xr-x    3 root     root          4096 Sep  6 10:50 .
+drwxr-xr-x   21 root     root          4096 Sep  6 10:50 ..
+drwx------    2 root     root          4096 Sep  6 10:50 lost+found
+[exit 0]
+$ container run -d --name clm480-pg17lf -e POSTGRES_PASSWORD=x -v clm480-lfvol:/var/lib/postgresql/data postgres:17-alpine
+clm480-pg17lf
+[exit 0]
+$ container logs clm480-pg17lf
+The files belonging to this database system will be owned by user "postgres".
+This user must also own the server process.
+
+The database cluster will be initialized with locale "en_US.utf8".
+The default database encoding has accordingly been set to "UTF8".
+The default text search configuration will be set to "english".
+
+Data page checksums are disabled.
+
+initdb: error: directory "/var/lib/postgresql/data" exists but is not empty
+initdb: detail: It contains a lost+found directory, perhaps due to it being a mount point.
+initdb: hint: Using a mount point directly as the data directory is not recommended.
+Create a subdirectory under the mount point.
+[exit 0]
+$ sh -c container inspect clm480-pg17lf | grep -m1 "\"state\""
+      "state" : "stopped"
+[exit 0]
