@@ -64,6 +64,14 @@ type Runner struct {
 	pendPath string
 	pendOrig []byte
 	aborted  bool
+	// restoredOnCancel records that the sweep itself put the in-flight file
+	// back after Ctx was cancelled — the interrupt handler cancels first and
+	// asks second, and the toolchain it killed can hand the sweep the lock
+	// before the handler gets there. restoreErrOnCancel is the other half of
+	// the same moment: the sweep tried and failed, and the handler has to be
+	// told that rather than "nothing was in flight".
+	restoredOnCancel   bool
+	restoreErrOnCancel error
 
 	// reach is the baseline's coverage, taken over the tree as it was. Which
 	// lines the tests run is a question about that tree, not about a mutated one,
@@ -293,7 +301,12 @@ func (r *Runner) RestorePending() (restored bool, err error) {
 	defer r.mu.Unlock()
 	r.aborted = true
 	if !r.pending {
-		return false, nil
+		// Nothing to do now — but if the sweep already put the file back
+		// because the cancellation ahead of this call killed its toolchain
+		// run, that file was in flight at the interrupt, and "nothing in
+		// flight" would be the wrong thing to tell the author. If the sweep
+		// tried and could not, that is the answer — the file is still mutated.
+		return r.restoredOnCancel, r.restoreErrOnCancel
 	}
 	err = r.restoreLocked(r.pendPath, r.pendOrig)
 	r.pending = false
@@ -302,6 +315,15 @@ func (r *Runner) RestorePending() (restored bool, err error) {
 
 // errAborted ends a sweep that was interrupted before it wrote its mutation.
 var errAborted = errors.New("interrupted before the mutation was written")
+
+// errInterrupted ends a sweep whose toolchain run was cut short by the
+// cancellation of Ctx. The run's exit status says nothing about the mutation
+// then — a killed `go vet` is not "did not compile" and a killed `go test` is
+// not "inconclusive" — so no Result is made of it.
+var errInterrupted = errors.New("interrupted while a mutation was being measured")
+
+// cancelled reports whether Ctx has been cancelled.
+func (r *Runner) cancelled() bool { return r.Ctx != nil && r.Ctx.Err() != nil }
 
 // armAndWrite registers the restore and writes the mutation as one step, so no
 // interrupt can see one without the other.
@@ -362,6 +384,9 @@ func (r *Runner) one(m Mutation) (res Result, err error) {
 	// all, and reading the resulting red as "the suite caught it" is how a
 	// mutation with no evidence behind it ends up in a pull request.
 	if vetOut, vetErr, buildErr := r.Go(append([]string{"vet"}, m.Packages...)...); buildErr != nil {
+		if r.cancelled() {
+			return Result{}, errInterrupted
+		}
 		return Result{Mutation: m, Outcome: Broken, Detail: whyItWouldNotBuild(vetOut + vetErr)}, nil
 	}
 	// Instrumented the same way the baseline was. Coverage costs time, and a
@@ -380,6 +405,9 @@ func (r *Runner) one(m Mutation) (res Result, err error) {
 	case len(killers) > 0:
 		return Result{Mutation: m, Outcome: Caught, Killers: killers, TestOutput: transcript}, nil
 	case testErr != nil:
+		if r.cancelled() {
+			return Result{}, errInterrupted
+		}
 		// Red, but nobody is named: a panic, a package-level timeout, a toolchain
 		// that could not start. Whatever it was, it is not "the suite is fine
 		// with this defect" — and the mutations worth writing here are the ones
@@ -656,6 +684,13 @@ func (r *Runner) disarmAndRestore() error {
 	}
 	err := r.restoreLocked(r.pendPath, r.pendOrig)
 	r.pending = false
+	if r.cancelled() {
+		if err == nil {
+			r.restoredOnCancel = true
+		} else {
+			r.restoreErrOnCancel = err
+		}
+	}
 	return err
 }
 

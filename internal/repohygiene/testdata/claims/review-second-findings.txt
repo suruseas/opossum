@@ -1,5 +1,5 @@
 - **知見（第2弾）**: opossum は「動かせないもの」も**誠実に扱う** — 未対応 runtime フィールド（cap_add/sysctls/
-  devices/privileged）は警告し、存在しない host パスの bind は明確にエラー伝播。動かない主因は (a) #57 の
+  devices/privileged）は警告し、存在しない host パスの bind は明確にエラー伝播。動かない主因は (a) postgres の named-volume 制約の
   postgres named-volume（頻出・要 PGDATA 回避）、(b) Linux カーネル/特権/docker-socket 依存（Apple container の
   範囲外）で、いずれも opossum のバグではない。docker-socket の部分は 2026-08-27 に狭まった
   ——上の portainer の項を参照。

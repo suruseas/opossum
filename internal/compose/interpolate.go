@@ -288,7 +288,8 @@ func parseDotEnv(path string, scope envScope) (map[string]string, error) {
 			scope.level[key] = v
 			continue
 		}
-		v, err := expandEnvValue(unquote(val), singleQuoted(val), scope, path, i+1)
+		val, literal := cutEnvValue(val)
+		v, err := expandEnvValue(val, literal, scope, path, i+1)
 		if err != nil {
 			return nil, err
 		}
@@ -327,20 +328,34 @@ func splitEnvLine(s string) (key, val string, ok bool) {
 	return "", "", false
 }
 
-// unquote strips a single pair of matching surrounding quotes.
-func unquote(s string) string {
-	if len(s) >= 2 {
-		if (s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'') {
-			return s[1 : len(s)-1]
+// cutEnvValue reads a one-line env-file value the way docker compose
+// (v5.5.0) reads one, and says whether it was single-quoted (which is what
+// suppresses expansion of its contents). A quoted value is what stands
+// between its quotes — the closing quote is the first one not preceded by
+// a backslash, in either style (`"a\"b"`, `'a\'b'`) — and whatever follows
+// it, a comment or anything else, is dropped. The contents are kept as
+// written: docker compose reads `\"` as `"` and `\\` as `\`, and this does
+// not (a difference that predates this). An unquoted value ends at the
+// first ` #` (a space, then a hash: `a#b` is whole, a tab before the hash
+// does not count, and a value that is only `# …` after the `=` is kept),
+// with the blanks before it trimmed. Before this, `H=with # hash` was the
+// value `with # hash`, and `"q" # note` the text `"q" # note`, quotes and
+// all.
+func cutEnvValue(val string) (string, bool) {
+	if len(val) >= 2 && (val[0] == '"' || val[0] == '\'') {
+		for j := 1; j < len(val); j++ {
+			switch val[j] {
+			case '\\':
+				j++
+			case val[0]:
+				return val[1:j], val[0] == '\''
+			}
 		}
 	}
-	return s
-}
-
-// singleQuoted reports whether s is wrapped in a matching pair of single quotes,
-// which is what suppresses expansion of its contents.
-func singleQuoted(s string) bool {
-	return len(s) >= 2 && s[0] == '\'' && s[len(s)-1] == '\''
+	if i := strings.Index(val, " #"); i >= 0 {
+		val = strings.TrimRight(val[:i], " \t")
+	}
+	return val, false
 }
 
 // expandEnvValue expands one env-file value against the scope as it stands right
@@ -451,7 +466,7 @@ func interpolateDocument(raw []byte, lookup varLookup) (interpolated, error) {
 	}
 	if bytes.Contains(raw, []byte(held)) {
 		return interpolated{}, fmt.Errorf("the compose file contains U+E001, a private-use character this uses to " +
-			"carry multi-line values through parsing; remove it (it is not something a compose file needs)")
+			"carry expanded values through parsing; remove it (it is not something a compose file needs)")
 	}
 	var vals []string
 	out, err := expand(raw, lookup, emptied, &vals)
@@ -471,15 +486,17 @@ func interpolateDocument(raw []byte, lookup varLookup) (interpolated, error) {
 	if err := yaml.Unmarshal(out, &doc); err != nil {
 		// Hand the bytes back exactly as they are, and let the caller report the
 		// syntax error in its own words — with the file name it knows, and the hint
-		// about indentation and quoting that this has no business replacing. A file
-		// with its own mistake does not parse before expansion either, and blaming a
-		// variable for an indentation error sends the reader to the wrong place.
+		// about indentation and quoting that this has no business replacing. Only
+		// a file with a mistake of its own gets here: a value rides through parsing
+		// as a marker and an empty reference as a mark, so neither turns a document
+		// that parsed into one that does not (a reference inside an anchor or
+		// alias name never parsed to begin with, there as in docker compose).
 		//
 		// Unchanged means the marks stay in. Taking them out is what would do harm:
 		// a mark stands between what was on either side of it, so removing it JOINS
-		// them — `c: *x${NOPE}y` becomes `c: *xy`, which is valid, points at a
-		// different anchor, and loads without a word. Left in, the bytes fail to
-		// parse for the caller exactly as they failed here, which is the truth.
+		// them (`x${NOPE}y` reads back as `xy`), and the caller would report a file
+		// nobody wrote. Left in, the bytes fail to parse for the caller exactly as
+		// they failed here, which is the truth.
 		return interpolated{raw: out}, nil
 	}
 	unmark(&doc)
@@ -501,8 +518,10 @@ func restore(n *yaml.Node, vals []string) {
 			}
 			return vals[i]
 		})
-		// The tag has to be pinned the way unmark pins it: a value that is now
-		// "3\n0" must not come back as a number.
+		// The parser already resolved the marker as a string and wrote that
+		// tag, so this pin changes nothing for a plain scalar; it is kept so
+		// that a value restored into a scalar the author tagged (`!!int
+		// ${TAG}`) is still the text it is.
 		n.Tag = "!!str"
 	}
 	for _, c := range n.Content {
@@ -554,11 +573,13 @@ func interpolate(raw []byte, lookup varLookup) ([]byte, error) {
 // passes the mark, so the parser can be asked afterwards where the value went; a
 // `.env` value passes "" and simply loses the text, which is what it means.
 //
-// hold, when non-nil, collects values that cannot ride in the text — ones
-// carrying a line break, which the parser would read as structure — and a
-// one-line marker is written in their place for restore to undo after parsing.
-// A `.env` value passes nil: it is not parsed as YAML, so its newlines ride as
-// themselves.
+// hold, when non-nil, collects every expanded value, and a one-line marker
+// is written in its place for restore to undo after parsing, so that what a
+// variable holds is read as text and nothing else — the way docker compose
+// reads an expansion. Written into the text, a value read as YAML: `42` was
+// a number where a string belonged, `[1]` a list, `1.50` the number 1.5,
+// and a line break was structure. A `.env` value passes nil: it is not
+// parsed as YAML, so its text rides as itself.
 func expand(raw []byte, lookup varLookup, emptyAs string, hold *[]string) ([]byte, error) {
 	var out bytes.Buffer
 	s := string(raw)
@@ -637,19 +658,19 @@ func refuseMark(name, val, emptyAs string, hold *[]string) error {
 	}
 	if hold != nil && strings.Contains(val, held) {
 		return fmt.Errorf("the value of %s contains U+E001, a private-use character opossum uses to "+
-			"carry multi-line values through parsing; remove it from that value", name)
+			"carry expanded values through parsing; remove it from that value", name)
 	}
 	return nil
 }
 
 // writeVal writes the expanded value: the mark when there is nothing to write,
-// a one-line marker (the value held aside for restore) when the value carries a
-// line break the parser would read as structure, and the value itself otherwise.
+// a one-line marker (the value held aside for restore) where the document is
+// being expanded, and the value itself where text that is not YAML is.
 func writeVal(out *bytes.Buffer, val, emptyAs string, hold *[]string) {
 	switch {
 	case val == "" && emptyAs != "":
 		out.WriteString(emptyAs)
-	case hold != nil && strings.ContainsAny(val, "\n\r"):
+	case hold != nil:
 		*hold = append(*hold, val)
 		fmt.Fprintf(out, "%s%d%s", held, len(*hold)-1, held)
 	default:

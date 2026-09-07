@@ -2,6 +2,7 @@ package compose
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
@@ -82,12 +83,16 @@ func RenderConfig(p *Project) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		// Shown resolved, as docker compose shows them: a bare `NAME` takes
+		// the shell's value; unset it stays bare in `environment` (the
+		// runtime is still told the name) and is left out of `build.args`
+		// (what `up --build` passes).
 		cs := configService{
 			Image:       svc.Image,
 			Platform:    svc.Platform,
 			Command:     svc.Command,
 			Entrypoint:  svc.Entrypoint,
-			Environment: env,
+			Environment: ResolveBareNames(env, os.LookupEnv, true),
 			Ports:       svc.Ports,
 			Restart:     svc.Restart,
 			Volumes:     volumesWithNoCopy(svc),
@@ -105,7 +110,7 @@ func RenderConfig(p *Project) (string, error) {
 			Networks:    svc.Networks,
 		}
 		if svc.Build != nil {
-			cs.Build = &configBuild{Context: svc.Build.Context, Dockerfile: svc.Build.Dockerfile, Args: svc.Build.Args, Target: svc.Build.Target}
+			cs.Build = &configBuild{Context: svc.Build.Context, Dockerfile: svc.Build.Dockerfile, Args: ResolveBareNames(svc.Build.Args, os.LookupEnv, false), Target: svc.Build.Target}
 		}
 		if len(svc.DependsOn) > 0 {
 			cs.DependsOn = map[string]configDep{}

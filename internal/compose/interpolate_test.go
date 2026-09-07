@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // withoutHostVar removes name from the environment for the duration of the test
@@ -2276,15 +2278,27 @@ func TestSplittingTheFileDoesNotBringTheMarkBack(t *testing.T) {
 // the two apart.
 func TestWhatComesBackFromAnUnparsableDocumentIsTheExpandedText(t *testing.T) {
 	unsetHostVars(t, "NOPE")
-	// The original parses: `a: ${V}` is an ordinary scalar. Expanded, V's value
-	// turns the line into an unterminated flow sequence.
-	raw := "a: ${V}\nb: ${NOPE}\n"
-	out, err := interpolateDocument([]byte(raw), lk(map[string]string{"V": "x: ["}))
+	// A value rides through parsing as text, held aside, and the mark for an
+	// empty reference sits inside a scalar; neither can turn a document that
+	// parsed into one that does not. So the parse-error path is taken only
+	// by a document with a mistake of its own — here an unterminated flow
+	// sequence — and what it hands back must be the expanded text (the
+	// marker standing for V's value, the mark for NOPE's), not the file as
+	// written: the caller reports the syntax error against the bytes it
+	// gets, and a value never lands in them.
+	raw := "a: [${V}\nb: ${NOPE}\n"
+	if err := yaml.Unmarshal([]byte(raw), new(yaml.Node)); err == nil {
+		t.Fatal("the original parses, so this case no longer measures anything")
+	}
+	out, err := interpolateDocument([]byte(raw), lk(map[string]string{"V": "x"}))
 	if err != nil {
 		t.Fatalf("interpolateDocument: %v", err)
 	}
 	if out.node != nil {
 		t.Fatal("the document parsed after expansion, so this case no longer measures anything")
+	}
+	if got := string(out.raw); strings.Contains(got, "${V}") || strings.Contains(got, "x") || !strings.Contains(got, held) || !strings.Contains(got, emptied) {
+		t.Errorf("the bytes handed back should be the expanded text, with the marks in: %q", got)
 	}
 	var got map[string]any
 	if err := out.into(&got); err == nil {

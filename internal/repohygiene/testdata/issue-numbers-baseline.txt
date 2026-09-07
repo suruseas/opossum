@@ -1,0 +1,3 @@
+# Issue numbers (`#NNN`) a public document still carries, counted per file.
+# A file not listed carries none. Lower a count when a reference is removed;
+# never raise one.

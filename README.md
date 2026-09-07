@@ -53,13 +53,13 @@ from, and nothing else does it.
 
 **3. Nothing runs when nothing is running.** Docker Desktop keeps one always-on
 Linux VM; Apple `container` gives each container its own and keeps none at rest.
-Measured on one Mac (macOS 26, Apple silicon; `container` 1.0.0 vs Docker Engine
-29.5.3):
+Measured on one Mac (macOS 26, Apple silicon; `container` 1.3.1 vs Docker Engine
+29.7.2, 2026-09-07):
 
 | | Docker Desktop | Apple `container` (opossum) |
 |---|---|---|
-| Memory at idle | ~373 MB host procs **+ ~7.8 GB provisioned always-on Linux VM** | **~58 MB** helpers, **no always-on VM** |
-| Single-container start | **~0.19 s** | ~0.81 s |
+| Memory at idle | ~551 MB host procs **+ ~8.2 GB provisioned always-on Linux VM** | **~81 MB** helpers, **no always-on VM** (the builder VM, once used, stays until `container builder stop`) |
+| Single-container start | **~0.15 s** | ~0.83 s |
 | Isolation | shared VM kernel | **per-container VM** |
 | License | paid subscription for larger orgs | open source, none |
 

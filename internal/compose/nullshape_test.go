@@ -44,10 +44,13 @@ func TestAScalarServiceIsStillAShapeError(t *testing.T) {
 	}
 }
 
-// The bare key across several -f files is the other reading (#732): an override
-// that writes `web:` keeps the earlier file's service. The refusal fires only
-// when no file gave the service a body.
-func TestABareServiceKeyInAnOverrideKeepsTheBaseButTwoBareKeysAreRefused(t *testing.T) {
+// Across several -f files each file is checked on its own before the
+// merge, as docker compose validates each (v5.5.0, measured): the first
+// file is read as written, so a bare service key there is refused naming
+// that file even when a later file gives the service a body; in a later
+// file a bare key is "not given" and keeps the earlier file's service.
+// Two bare keys leave no body and are refused at the merge.
+func TestABareServiceKeyIsReadAsWrittenInTheFirstFileAndAsNotGivenLater(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name, body string) string {
 		p := filepath.Join(dir, name)
@@ -58,17 +61,48 @@ func TestABareServiceKeyInAnOverrideKeepsTheBaseButTwoBareKeysAreRefused(t *test
 	}
 	base := write("base.yml", "services:\n  web:\n    image: alpine\n")
 	bare := write("bare.yml", "services:\n  web:\n")
-	p, err := LoadFiles([]string{base, bare}, nil)
-	if err != nil {
-		t.Fatalf("a bare key in the override should keep the base service: %v", err)
-	}
-	if p.Services["web"].Image != "alpine" {
-		t.Errorf("image = %q, want the base file's", p.Services["web"].Image)
-	}
-	_, err = LoadFiles([]string{bare, write("bare2.yml", "services:\n  web: ~\n")}, nil)
-	if err == nil || !strings.Contains(err.Error(), `service "web" must be a mapping`) {
-		t.Errorf("two bare keys leave no service body; want the mapping refusal, got: %v", err)
-	}
+	t.Run("the override is bare: the base service stands", func(t *testing.T) {
+		p, err := LoadFiles([]string{base, bare}, nil)
+		if err != nil {
+			t.Fatalf("a bare key in the override should keep the base service: %v", err)
+		}
+		if p.Services["web"].Image != "alpine" {
+			t.Errorf("image = %q, want the base file's", p.Services["web"].Image)
+		}
+	})
+	t.Run("the first file is bare: refused naming it", func(t *testing.T) {
+		_, err := LoadFiles([]string{bare, base}, nil)
+		if err == nil || !strings.Contains(err.Error(), `service "web" must be a mapping`) {
+			t.Fatalf("want the mapping refusal, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "bare.yml") {
+			t.Errorf("the refusal should name the file the bare key is in, got: %v", err)
+		}
+	})
+	t.Run("both are bare: no body anywhere", func(t *testing.T) {
+		_, err := LoadFiles([]string{write("bare1.yml", "services:\n  web: ~\n"), write("bare2.yml", "services:\n  web:\n")}, nil)
+		if err == nil || !strings.Contains(err.Error(), `service "web" must be a mapping`) {
+			t.Fatalf("want the mapping refusal, got: %v", err)
+		}
+	})
+	// A bare *field* in a later file is "not given" too: the earlier value
+	// stands, and the file is not refused for it — where the same line in
+	// the first file is the bare-key mistake it is in a single file.
+	t.Run("a bare field in the override keeps the base value", func(t *testing.T) {
+		p, err := LoadFiles([]string{base, write("field.yml", "services:\n  web:\n    image:\n")}, nil)
+		if err != nil {
+			t.Fatalf("a bare field in the override should keep the base value: %v", err)
+		}
+		if p.Services["web"].Image != "alpine" {
+			t.Errorf("image = %q, want the base file's", p.Services["web"].Image)
+		}
+	})
+	t.Run("a bare field in the first file is refused naming it", func(t *testing.T) {
+		_, err := LoadFiles([]string{write("field1.yml", "services:\n  web:\n    image:\n"), base}, nil)
+		if err == nil || !strings.Contains(err.Error(), "image: expected a string, got nothing") || !strings.Contains(err.Error(), "field1.yml") {
+			t.Fatalf("want the bare-key refusal naming field1.yml, got: %v", err)
+		}
+	})
 }
 
 func TestAnEmptyItemInVolumesOrPortsIsRefused(t *testing.T) {

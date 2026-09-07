@@ -96,6 +96,7 @@ func ignoredTopLevel(doc interpolated) []string {
 	}
 	out = append(out, ignoredVolumeFields(top["volumes"])...)
 	out = append(out, ignoredNetworkFields(top["networks"])...)
+	out = append(out, ignoredSecretFields(top["secrets"])...)
 	sort.Strings(out)
 	return out
 }
@@ -147,6 +148,30 @@ func ignoredVolumeFields(node yaml.Node) []string {
 				continue
 			}
 			out = append(out, fmt.Sprintf("volumes.%s.%s", vol, k))
+		}
+	}
+	return out
+}
+
+// secretDeclFields are the per-secret keys opossum acts on (`external` by
+// refusing it). Anything else (`name`, `labels`, `driver`) is parsed and
+// dropped, and used to be dropped without a word.
+var secretDeclFields = map[string]bool{"file": true, "external": true}
+
+// ignoredSecretFields reports unacted-on keys inside top-level secret
+// declarations as `secrets.<secret>.<key>`, as the two above do.
+func ignoredSecretFields(node yaml.Node) []string {
+	var decls map[string]map[string]yaml.Node
+	if node.IsZero() || node.Decode(&decls) != nil {
+		return nil
+	}
+	var out []string
+	for sec, fields := range decls {
+		for k := range fields {
+			if secretDeclFields[k] || strings.HasPrefix(k, "x-") {
+				continue
+			}
+			out = append(out, fmt.Sprintf("secrets.%s.%s", sec, k))
 		}
 	}
 	return out
@@ -252,7 +277,10 @@ var replaceSeqKeys = map[string]bool{"command": true, "entrypoint": true, "test"
 
 // envLikeKeys accept either a `KEY: value` map or a `- KEY=value` list; both merge
 // by key (later wins), so a base and override merge per variable regardless of form.
-var envLikeKeys = map[string]bool{"environment": true, "labels": true}
+// `build.args` is the third: its two forms merge by variable the same way
+// (measured against docker compose v5.5.0 — a list in one file and a
+// mapping in the next keep every variable, the later file winning by name).
+var envLikeKeys = map[string]bool{"environment": true, "labels": true, "args": true}
 
 // dedupSeqKeys are list fields where a repeated entry (e.g. an override restating a
 // port) should collapse to one, matching docker compose. `volumes` is deliberately
@@ -339,6 +367,37 @@ func mergeValue(base, over any, key string, path string) any {
 			}
 		}
 	}
+	// A service's `depends_on:` comes in two forms — a list of names, or a
+	// mapping keyed by name whose values carry the condition. docker
+	// compose reads the list as `{name: {condition: service_started}}`
+	// before merging (measured against v5.5.0), so a later file's mapping
+	// that writes `condition:` with nothing after it keeps what the list
+	// gave. Read both sides that way. Not for a *service* called
+	// `depends_on`.
+	if key == "depends_on" && !collections[path] {
+		if b, ok := dependsOnAsMap(base); ok {
+			if o, ok := dependsOnAsMap(over); ok {
+				return mergeMap(b, o, childPath(path, key))
+			}
+		}
+	}
+	// A service's `build:` comes in two forms — a context path, or a mapping
+	// with `context` among its keys. docker compose reads the path as
+	// `{context: <path>}` before merging (measured against v5.5.0), so a
+	// file that writes the short form over the long one changes only the
+	// context, and one that writes the long form over the short one keeps
+	// the context. Read both sides that way. Not for a *service* called
+	// `build` (an element of a collection, and a scalar there is a service
+	// that is not a mapping, for the decode to refuse), and not for a
+	// *variable* called `build` inside environment, labels or build.args —
+	// a value there is the variable's, and two strings merge as strings.
+	if key == "build" && !collections[path] && !insideEnvLike(path) {
+		if b, ok := buildAsMap(base); ok {
+			if o, ok := buildAsMap(over); ok {
+				return mergeMap(b, o, childPath(path, key))
+			}
+		}
+	}
 	switch o := over.(type) {
 	case map[string]any:
 		if b, ok := base.(map[string]any); ok {
@@ -357,6 +416,46 @@ func mergeValue(base, over any, key string, path string) any {
 		}
 	}
 	return over
+}
+
+// dependsOnAsMap reads a `depends_on:` value in either form as the mapping
+// form: a list of names becomes `{name: {condition: service_started}}` (the
+// entry docker compose makes of a listed name), a mapping is returned as
+// is. Anything else — a scalar, a list holding something that is not a
+// name — is not a value this can read, and ok is false so the caller falls
+// back to the ordinary merge (and the decode names it).
+func dependsOnAsMap(v any) (map[string]any, bool) {
+	switch x := v.(type) {
+	case map[string]any:
+		return x, true
+	case []any:
+		out := make(map[string]any, len(x))
+		for _, item := range x {
+			name, ok := item.(string)
+			if !ok {
+				return nil, false
+			}
+			out[name] = map[string]any{"condition": ConditionStarted}
+		}
+		return out, true
+	}
+	return nil, false
+}
+
+// buildAsMap reads a `build:` value in either form as the mapping form: a
+// context path becomes `{context: <path>}`, a mapping is returned as is.
+// Anything else — a number, a list — is not a build value this can read,
+// and ok is false so the caller falls back to the ordinary merge: written
+// in the later file it reaches the shape check, which names it; written
+// in the earlier one it is replaced whole, as any value is.
+func buildAsMap(v any) (map[string]any, bool) {
+	switch x := v.(type) {
+	case map[string]any:
+		return x, true
+	case string:
+		return map[string]any{"context": x}, true
+	}
+	return nil, false
 }
 
 // networksAsMap reads a `networks:` value in either form as the map form: a
@@ -576,10 +675,29 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 				// reader hits precisely when they have split their file up.
 				return nil, decodeErr(path, false, err)
 			}
+			// Each file is checked on its own before the merge, as docker
+			// compose validates each before merging: a mistake in one file
+			// is refused naming that file and its line, whether or not a
+			// later file writes over it, and a shape the merge would absorb
+			// (a network listed twice in one file) is refused too. In a
+			// later file a key with nothing after it is "not given" (the
+			// earlier value stands) and is not read as a bare key.
+			if err := validateOne(path, one, merged != nil); err != nil {
+				return nil, err
+			}
 			if merged == nil {
 				merged = m
 			} else {
 				merged = mergeMap(merged, m, "")
+				// What the file adds is checked in what it made of the
+				// earlier files too, as docker compose checks each file's
+				// merge: a key this file writes with nothing after it and
+				// no earlier file gave a value to — a new network's
+				// `internal:`, a `build.context:` no base has — is nothing
+				// in the result, and refused naming this file.
+				if err := validateMerged(path, merged); err != nil {
+					return nil, err
+				}
 			}
 		}
 		// Merging builds a new tree, so there are no positions to keep: the files
@@ -965,6 +1083,134 @@ func withoutEchoedValues(te *yaml.TypeError) *yaml.TypeError {
 		out.Errors[i] = strings.Join(strings.Fields(e[:lo]+e[hi+1:]), " ")
 	}
 	return out
+}
+
+// validateOne decodes one file of several by itself, with every check the
+// merged document gets, and names the file — and the line in it — in what
+// it refuses. The first file is read as written: it is the base, and a key
+// with nothing after it there is the same mistake it is in a single file.
+// A later file is an override, and a key it writes with nothing after it
+// is "not given" (the earlier value stands; measured against docker
+// compose v5.5.0, for a field and for a whole service), so those are
+// taken out before the decode and the bare-key check does not fire on
+// them. The nodes are pruned, not re-rendered, so a failure keeps the
+// line the reader wrote.
+func validateOne(path string, one interpolated, override bool) error {
+	doc := one.node
+	if doc == nil {
+		var parsed yaml.Node
+		if err := yaml.Unmarshal(one.raw, &parsed); err != nil {
+			return decodeErr(path, false, err)
+		}
+		doc = &parsed
+	}
+	// A bare top-level `services:` is a mistake in any file — there is no
+	// service to keep — and docker compose refuses it in each (`services
+	// must be a mapping`); the checks below read it as a file with no
+	// services, which a later file may fill.
+	if root := documentRoot(doc); root != nil {
+		for i := 0; i+1 < len(root.Content); i += 2 {
+			if root.Content[i].Value == "services" && isNothing(root.Content[i+1]) {
+				return fmt.Errorf("compose file %s: services must be a mapping — the key has nothing under it; write the services or remove the key", path)
+			}
+		}
+	}
+	if override {
+		doc = withoutNotGiven(doc)
+	}
+	var f composeFile
+	if err := doc.Decode(&f); err != nil {
+		return decodeErr(path, false, blameService(interpolated{node: doc, raw: one.raw}, err))
+	}
+	// In the first file a service with nothing under it is the mistake it
+	// is in a single file (docker compose refuses it there even when a
+	// later file gives the service a body); in a later file the key was
+	// pruned above as "not given".
+	if !override {
+		names := make([]string, 0, len(f.Services))
+		for name := range f.Services {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			if f.Services[name] == nil {
+				return fmt.Errorf("compose file %s: service %q must be a mapping — the key has nothing under it; give it at least `image:` or `build:`, or remove the key", path, name)
+			}
+		}
+	}
+	return nil
+}
+
+// documentRoot is the document's top-level mapping, or nil.
+func documentRoot(doc *yaml.Node) *yaml.Node {
+	if doc.Kind == yaml.DocumentNode && len(doc.Content) > 0 {
+		doc = doc.Content[0]
+	}
+	if doc.Kind != yaml.MappingNode {
+		return nil
+	}
+	return doc
+}
+
+// validateMerged decodes what the files so far make together and names
+// the file just added in what it refuses.
+func validateMerged(path string, merged map[string]any) error {
+	data, err := yaml.Marshal(merged)
+	if err != nil {
+		return fmt.Errorf("merging compose files: %w", err)
+	}
+	doc := interpolated{raw: data}
+	var f composeFile
+	if err := doc.into(&f); err != nil {
+		return decodeErr(path, true, blameService(doc, err))
+	}
+	return nil
+}
+
+// withoutNotGiven copies a document's tree without the mapping entries
+// whose value is nothing — `services.web:` with nothing under it, and
+// `services.web.ports:` with nothing after it — at any level: in an
+// override, each is the file's way of saying nothing about that key.
+func withoutNotGiven(n *yaml.Node) *yaml.Node {
+	out := *n
+	switch n.Kind {
+	case yaml.DocumentNode:
+		out.Content = make([]*yaml.Node, 0, len(n.Content))
+		for _, c := range n.Content {
+			out.Content = append(out.Content, withoutNotGiven(c))
+		}
+	case yaml.MappingNode:
+		out.Content = make([]*yaml.Node, 0, len(n.Content))
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			k, v := n.Content[i], n.Content[i+1]
+			if isNothing(v) {
+				continue
+			}
+			out.Content = append(out.Content, k, withoutNotGiven(v))
+		}
+	case yaml.AliasNode:
+		// What the alias stands for is pruned the same way — a `<<: *base`
+		// whose anchor carries a bare key, or `ports: *nada` — and put in
+		// its place: an alias would still point at the unpruned anchor.
+		if n.Alias != nil {
+			pruned := withoutNotGiven(n.Alias)
+			if pruned.Kind == yaml.ScalarNode && pruned.Tag == "!!null" {
+				return pruned
+			}
+			pruned.Anchor = ""
+			return pruned
+		}
+	}
+	return &out
+}
+
+// isNothing reports a value written with nothing after the key, through an
+// alias too (`ports: *nada` with `x-nada: &nada ~`).
+func isNothing(v *yaml.Node) bool {
+	if v.Kind == yaml.AliasNode && v.Alias != nil {
+		v = v.Alias
+	}
+	return v.Kind == yaml.ScalarNode && v.Tag == "!!null"
 }
 
 // mergedName names the document a failure at the final decode is about.

@@ -63,8 +63,9 @@ func TestAnEmptyItemInAStringListFieldIsRefused(t *testing.T) {
 	}
 }
 
-// Across -f files a number in a later file's list is still refused (the
-// merge keeps the item's kind).
+// Across -f files a number in a later file's list is refused naming that
+// file, before the merge (each file is checked on its own); the entry is
+// counted in that file's own list.
 func TestANonStringInAStringListFieldIsRefusedAcrossFiles(t *testing.T) {
 	dir := t.TempDir()
 	base := filepath.Join(dir, "base.yml")
@@ -75,8 +76,8 @@ func TestANonStringInAStringListFieldIsRefusedAcrossFiles(t *testing.T) {
 	if err := os.WriteFile(over, []byte("services:\n  web:\n    profiles: [42]\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadFiles([]string{base, over}, nil); err == nil || !strings.Contains(err.Error(), "profiles entry 2 of 2 must be a string, got a number") {
-		t.Errorf("want the refusal after the merge (dev, 42), got: %v", err)
+	if _, err := LoadFiles([]string{base, over}, nil); err == nil || !strings.Contains(err.Error(), "profiles entry 1 of 1 must be a string, got a number") || !strings.Contains(err.Error(), "over.yml") {
+		t.Errorf("want the refusal naming over.yml and its own entry (1 of 1), got: %v", err)
 	}
 }
 

@@ -514,24 +514,22 @@ func TestAFailureNamesTheLineInTheReadersFile(t *testing.T) {
 	}
 }
 
-// Which file a failure is about, when there is more than one.
+// Which file a failure is about. Each file is checked on its own before the
+// merge (as docker compose validates each), so a mistake in one file is
+// named with that file and the line in it — not with every file and a line
+// in a merged document nobody wrote, which is what the merge road used to
+// say. The merged document is still what the final decode reads, and a
+// failure only it can have (none of the files, alone, has it) is named the
+// old way: every file, and the line marked as the merged text's.
 //
-// Several files are merged into a new document before the last check, so the line
-// the parser gives counts in that document and no record survives of which file a
-// value came from. Naming the first file was a guess dressed as a fact: it sent
-// the reader to a file that need not contain the problem, at a line they could not
-// find. Both are named instead, and the line is marked as belonging to the merged
-// text — the number still orders several failures, so it is the claim about WHERE
-// that has to go, not the number.
-//
-// The single-file case is here as the control: it does name one file and one real
-// line, and must keep doing so.
+// The single-file case is here as the control: it names one file and one
+// real line, and must keep doing so.
 func TestWhichFileAFailureIsAbout(t *testing.T) {
 	unsetHostVars(t, "NOPE")
 	dir := t.TempDir()
 	base := filepath.Join(dir, "base.yaml")
 	over := filepath.Join(dir, "override.yaml")
-	// The problem is in override.yaml, which is NOT the file that used to be named.
+	// The problem is in override.yaml, which is NOT the first file.
 	mustWriteFile(t, base, "services:\n  app:\n    image: app\n")
 	mustWriteFile(t, over, "services:\n  app:\n\n    environment:\n      X: ${NOPE}\n\nvolumes:\n  data: \"\"\n")
 
@@ -544,33 +542,33 @@ func TestWhichFileAFailureIsAbout(t *testing.T) {
 		if !strings.Contains(got, "parsed, but a value is not the shape") {
 			t.Fatalf("a different failure got there first:\n%s", got)
 		}
-		for _, want := range []string{"base.yaml", "override.yaml", "merged document"} {
-			if !strings.Contains(got, want) {
-				t.Errorf("the failure should carry %q:\n%s", want, got)
+		if !strings.Contains(got, "override.yaml") || !strings.Contains(got, "line 8") {
+			t.Errorf("the failure should name override.yaml and its own line 8:\n%s", got)
+		}
+		for _, absent := range []string{"base.yaml", "merged document"} {
+			if strings.Contains(got, absent) {
+				t.Errorf("the failure is in one file and should not carry %q:\n%s", absent, got)
 			}
 		}
 	})
 
-	// Three, because the message said "either file" while naming three of them —
-	// an arity the two-file case could not see. Written as a sweep so a fourth
-	// costs nothing.
+	// Three, so the file named is the right one of several, not the first or
+	// the last.
 	t.Run("three files", func(t *testing.T) {
 		third := filepath.Join(dir, "third.yaml")
 		mustWriteFile(t, third, "services:\n  app:\n    user: someone\n")
-		_, err := LoadFiles([]string{base, third, over}, nil)
+		_, err := LoadFiles([]string{base, over, third}, nil)
 		if err == nil {
 			t.Fatal("the three loaded")
 		}
 		got := err.Error()
-		for _, want := range []string{"base.yaml", "third.yaml", "override.yaml", "merged document"} {
-			if !strings.Contains(got, want) {
-				t.Errorf("the failure should carry %q:\n%s", want, got)
-			}
+		if !strings.Contains(got, "override.yaml") {
+			t.Errorf("the failure should name override.yaml:\n%s", got)
 		}
-		// Whatever the message says about how many files there are has to hold for
-		// three as well as two.
-		if strings.Contains(got, "either file") {
-			t.Errorf("three files were named and the message calls them two:\n%s", got)
+		for _, absent := range []string{"base.yaml", "third.yaml", "merged document", "either file"} {
+			if strings.Contains(got, absent) {
+				t.Errorf("the failure is in one file and should not carry %q:\n%s", absent, got)
+			}
 		}
 	})
 

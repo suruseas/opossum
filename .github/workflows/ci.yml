@@ -233,7 +233,7 @@ jobs:
           # same way — that no product code imports it. The checking is not only
           # by hand: internal/repohygiene/gate_test.go pins the set of packages the
           # released binary links, so an exemption that becomes a lie fails there.
-          shipped="$(echo "$changed" | grep -E '^(cmd|internal)/' | grep -v '_test\.go$' | grep -v '/testdata/' | grep -v '^cmd/changelog/' | grep -v '^internal/changelog/' | grep -v '^internal/repohygiene/' | grep -v '^internal/claimcite/' | grep -v '^cmd/mutate/' | grep -v '^internal/mutate/' | grep -v '^cmd/noleftovers/' | grep -v '^cmd/busy/' | grep -v '^internal/suitedir/' || true)"
+          shipped="$(echo "$changed" | grep -E '^(cmd|internal)/' | grep -v '_test\.go$' | grep -v '/testdata/' | grep -v '^cmd/changelog/' | grep -v '^internal/changelog/' | grep -v '^internal/repohygiene/' | grep -v '^internal/claimcite/' | grep -v '^cmd/mutate/' | grep -v '^internal/mutate/' | grep -v '^cmd/noleftovers/' | grep -v '^cmd/busy/' | grep -v '^internal/suitedir/' | grep -v '^internal/site/' || true)"
           if [ -z "$shipped" ]; then
             echo "No shipped code changed — no fragment needed."; exit 0
           fi
@@ -254,6 +254,49 @@ jobs:
           echo "then run 'make changelog'. If the change truly needs no release note,"
           echo "put [skip changelog] in the PR body."
           exit 1
+
+      # ---- the published record stays published ---------------------------
+      #
+      # A merge that resolves a CHANGELOG.md conflict by hand can drop a
+      # released `## [x.y.z]` section, or bring back a changelog.d fragment the
+      # release already folded in — both went unnoticed once and were caught by
+      # eye. Two cheap checks against the base: every released heading it has,
+      # the head keeps; and a fragment this branch adds is not an entry a
+      # released section of the base already carries.
+      - name: released changelog sections stay released
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          base_heads="$(git show "$BASE:CHANGELOG.md" | grep -E '^## \[[0-9]' || true)"
+          head_heads="$(git show "$HEAD:CHANGELOG.md" | grep -E '^## \[[0-9]' || true)"
+          lost="$(comm -23 <(echo "$base_heads" | sort) <(echo "$head_heads" | sort))"
+          if [ -n "$lost" ]; then
+            echo "This PR drops released CHANGELOG.md sections the base has:"
+            echo "$lost" | sed 's/^/  /'
+            echo
+            echo "Released sections are the published record and never change. Take"
+            echo "the base's CHANGELOG.md and run 'make changelog' instead of resolving"
+            echo "the conflict by hand."
+            exit 1
+          fi
+          # A fragment added by this branch whose entry the base's released
+          # sections already carry: the release folded it in, and a merge put
+          # the file back. The first line of the entry is enough to tell.
+          released="$(git show "$BASE:CHANGELOG.md" | sed -n '/^## \[[0-9]/,$p')"
+          for f in $(git diff --name-only --diff-filter=A "$BASE...$HEAD" | grep -E '^changelog\.d/[^/]+\.md$' | grep -v '^changelog\.d/README\.md$' || true); do
+            first="$(git show "$HEAD:$f" | grep -m1 '^- ' || true)"
+            if [ -n "$first" ] && echo "$released" | grep -qF -- "$first"; then
+              echo "This PR adds $f, but its entry is already in a released CHANGELOG.md section:"
+              echo "  $first"
+              echo
+              echo "The release consumed that fragment; a merge brought the file back."
+              echo "Remove it and run 'make changelog'."
+              exit 1
+            fi
+          done
+          echo "Released sections intact; no consumed fragment came back."
 
       # ---- the release configuration still parses ------------------------
       - uses: goreleaser/goreleaser-action@v7

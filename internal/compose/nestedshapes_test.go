@@ -35,7 +35,7 @@ func TestANestedFieldOfTheWrongShapeIsRefused(t *testing.T) {
 		{"reservations.cpus bare", "services:\n  web:\n    image: alpine\n    deploy:\n      resources:\n        reservations:\n          cpus:\n", "deploy.resources.reservations.cpus must be a number or string, got nothing"},
 		{"reservations.cpus as a boolean", "services:\n  web:\n    image: alpine\n    deploy:\n      resources:\n        reservations:\n          cpus: true\n", "deploy.resources.reservations.cpus must be a number or a string, got true/false"},
 		{"build.target as a number", "services:\n  web:\n    build:\n      context: .\n      target: 42\n", "build.target must be a string, got a number — write a stage name"},
-		{"build.args bare", "services:\n  web:\n    build:\n      context: .\n      args:\n", "build.args must be a mapping, got nothing"},
+		{"build.args bare", "services:\n  web:\n    build:\n      context: .\n      args:\n", "build.args must be a mapping or list, got nothing — write the variables, as in `{A: 1}` or `[A=1]`"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := loadErr(t, tc.body)

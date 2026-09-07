@@ -7,10 +7,12 @@ package compose
 // key below except `command:` and `entrypoint:`, where a null means "no
 // command"; the wording of what each field takes follows its message
 // (`services.web.volumes must be a array`). Only fields opossum reads are
-// checked: a bare `labels:` (a field opossum ignores) is listed among the
-// ignored fields as before, where docker refuses it. An earlier test here
-// pinned `networks:` alone as "no networks"; docker refuses that too, so it
-// moved.
+// checked here, plus `labels`, whose shape is checked though nothing reads
+// it (#784): a bare `container_name:` (a field opossum ignores) is listed
+// among the ignored fields as before, where docker refuses it (`must be a
+// string`). An earlier test
+// here pinned `networks:` alone as "no networks"; docker refuses that too,
+// so it moved.
 
 import (
 	"os"
@@ -48,19 +50,22 @@ func TestAServiceFieldWithNothingAfterItIsRefused(t *testing.T) {
 }
 
 // A field opossum reads but has not measured docker's word for gets the
-// neutral word; a field opossum does not read (labels) is not refused at all
-// — it is listed among the ignored fields, as before, where docker refuses it.
+// neutral word; a field opossum does not read (container_name) is not
+// refused at all — it is listed among the ignored fields, as before, where
+// docker refuses it (`must be a string`). (`labels`, which opossum does not
+// read either, is the exception: its shape is checked the way docker checks
+// it, and a bare one is refused — see labelsshape_test.go.)
 func TestAnUnmeasuredFieldSaysAValueAndAnUnreadFieldIsIgnoredNotRefused(t *testing.T) {
 	got := loadErr(t, "services:\n  web:\n    image: alpine\n    init:\n")
 	if !strings.Contains(got, "line 4: init: expected a value, got nothing") {
 		t.Errorf("want the neutral word for an unmeasured field, got:\n%s", got)
 	}
-	p, err := Load(writeTemp(t, "services:\n  web:\n    image: alpine\n    labels:\n"))
+	p, err := Load(writeTemp(t, "services:\n  web:\n    image: alpine\n    container_name:\n"))
 	if err != nil {
-		t.Fatalf("a bare labels: is an ignored field, not a refusal: %v", err)
+		t.Fatalf("a bare container_name: is an ignored field, not a refusal: %v", err)
 	}
-	if got := strings.Join(p.Services["web"].Unsupported, ","); !strings.Contains(got, "labels") {
-		t.Errorf("labels should be listed among the ignored fields, got %q", got)
+	if got := strings.Join(p.Services["web"].Unsupported, ","); !strings.Contains(got, "container_name") {
+		t.Errorf("container_name should be listed among the ignored fields, got %q", got)
 	}
 }
 
@@ -99,7 +104,9 @@ func TestAReferenceThatExpandedToNothingIsStillRefusedAsASingleValue(t *testing.
 }
 
 // Across -f files a later file's bare key keeps the earlier file's value
-// (#732), so it never reaches the refusal; a key no file gave a value to does.
+// (#732), so it never reaches the refusal; the first file is read as
+// written, so a bare key there is refused naming that file and its line
+// (each file is checked on its own before the merge).
 func TestAcrossFilesOnlyAKeyNoFileGaveAValueToIsRefused(t *testing.T) {
 	dir := t.TempDir()
 	base := filepath.Join(dir, "base.yml")
@@ -122,10 +129,13 @@ func TestAcrossFilesOnlyAKeyNoFileGaveAValueToIsRefused(t *testing.T) {
 	}
 	_, err = LoadFiles([]string{base, over}, nil)
 	if err == nil || !strings.Contains(err.Error(), "ports: expected a list, got nothing") {
-		t.Fatalf("both files bare: want the refusal, got: %v", err)
+		t.Fatalf("the first file bare: want the refusal, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "counts in the merged document") {
-		t.Errorf("with several files the line must be said to count in the merged document, got:\n%s", err)
+	if !strings.Contains(err.Error(), "base.yml") || !strings.Contains(err.Error(), "line 4") {
+		t.Errorf("the refusal should name base.yml and its own line 4, got:\n%s", err)
+	}
+	if strings.Contains(err.Error(), "merged document") {
+		t.Errorf("the mistake is in one file; nothing about a merged document belongs here:\n%s", err)
 	}
 }
 

@@ -5011,9 +5011,10 @@ func TestFromDockerComposeAdviceDependsOnWhoWroteTheOverlay(t *testing.T) {
 
 // The override file is picked up without anyone passing `-f`, so the road where
 // several files get merged is the one most people are on without knowing it. A
-// failure there has to name both files, the same as when they were listed by
-// hand — the road, not just the message, is what this holds.
-func TestAFailureNamesBothFilesWhenTheOverrideWasFoundNotPassed(t *testing.T) {
+// failure there has to name the file it is in — the override nobody typed —
+// the same as when the files were listed by hand: each file is checked on its
+// own before the merge. The road, not just the message, is what this holds.
+func TestAFailureNamesTheOverrideFileWhenItWasFoundNotPassed(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name, body string) {
 		t.Helper()
@@ -5031,10 +5032,11 @@ func TestAFailureNamesBothFilesWhenTheOverrideWasFoundNotPassed(t *testing.T) {
 		t.Fatalf("the pair loaded:\n%s", out)
 	}
 	got := err.Error() + out
-	for _, want := range []string{"compose.yaml", "compose.override.yaml", "merged document"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("the failure should carry %q:\n%s", want, got)
-		}
+	if !strings.Contains(got, "compose.override.yaml") || !strings.Contains(got, "line 5") {
+		t.Errorf("the failure should name compose.override.yaml and its own line 5:\n%s", got)
+	}
+	if strings.Contains(got, "merged document") {
+		t.Errorf("the mistake is in one file; nothing about a merged document belongs here:\n%s", got)
 	}
 }
 

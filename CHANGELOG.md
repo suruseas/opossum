@@ -6,6 +6,110 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.24.8] - 2026-09-08
+
+### Changed
+
+- A key opossum does not read in a long-form list item — a port's `mode`
+  or `name`, a bind mount's `bind` options, a secret's `uid`, an env file's
+  `format` — or in a dependency's mapping (`restart`, `required`) is now
+  named among the ignored fields by entry number or dependency name
+  (`ports entry 1.mode`, `depends_on.db.restart`). Before, each was dropped
+  in silence.
+- A long-form mount, port, secret or env file entry that leaves out the
+  key it cannot do without (`target`, `source`, `path`) is refused naming
+  the entry by number and saying what to write, the way other entry
+  refusals do — \`ports entry 2 of 2 has no target — write the container
+  port, as in `target: 80`\` — where it used to say only "port entry is
+  missing a target". The same key written with nothing after it is
+  refused as bare.
+- A key opossum does not read under `build`, `healthcheck`, `deploy` or
+  `develop` is now named in full among the ignored fields — `build.labels`,
+  `healthcheck.start_interval`, `deploy.replicas`,
+  `deploy.resources.limits.pids` — the way a watch rule's extra key already
+  was. Before, a key under `build`, `healthcheck` or `develop` was dropped
+  in silence, and anything extra under `deploy` was reported only as
+  `deploy`. (docker compose refuses a key it does not know; opossum keeps
+  loading the file and says what it left out.)
+- `opossum config` now shows a bare variable name (`environment: [A]`,
+  `build.args: [A]`, or `A:` with nothing after it) with the shell's
+  value, the way docker compose shows it (`A: x`; opossum's list form is
+  `- A=x`): the shell's value when it has one, `A=` when it is empty. Left unset by the shell, the name stays bare under
+  `environment` (the runtime is still told it) and is left out of
+  `build.args` (what `up --build` passes). Before, every bare name was
+  shown as written, which was not what `up` and `build` passed.
+
+### Fixed
+
+- With several `-f` files, each file is now checked on its own before the
+  merge, the way docker compose validates them: a mistake in one file is
+  refused naming that file, even when a later file writes over it, and a
+  shape the merge used to absorb — a network listed twice in one file, a
+  service written with nothing under it in one file — is refused too. A key
+  a later file writes with nothing after it is still "not given" and keeps
+  the earlier file's value.
+- A service's `ports` are checked at load the way docker compose validates
+  them, and a bad one is refused with its entry number and what to write:
+  a container port that is not a number from 1 to 65535 (a word, `80.5`,
+  `0`, `65536`, a padded or hex number), a host port above 65535, a range
+  written high-low, a host address that is not an IP (`localhost:80:80`,
+  a fourth `:` part), a protocol other than tcp, udp or sctp, a container
+  range without a host range of the same length, and a spec with no
+  container port (`80:`). Before, each reached `container run -p` as
+  written — `ports: [a]` was passed as `a:a`. In the long form each key
+  is checked by its own name, so `target: 0`, `published: a` or
+  `protocol: foo` is refused there too (docker compose lets those through
+  and fails at `up`).
+- A build arg written as a bare `NAME` (`args: [A]`, or `A:` with nothing
+  after it) now takes the shell's value, and is left out when the shell
+  has none, as docker compose passes it. Before, it reached
+  `container build --build-arg A` as written, and the builder gave the
+  Dockerfile an empty `A` — even over an `ARG A=default` (measured with
+  `container` 1.3.1).
+- `build.args` written as a list (`[A=1, B]`) is now taken, as docker
+  compose takes it; before, only the mapping form loaded and the list was
+  refused as the wrong shape. A bad item there (`[42]`) or a single value
+  (`args: foo`) is still refused, and the message now names `build.args`
+  rather than `environment`. Across several `-f` files the two forms merge
+  by variable, as `environment` does: a list in one file and a mapping in
+  the next keep every variable, the later file winning by name.
+- A variable written with a list or a mapping as its value in the mapping
+  form of `environment` or `build.args` (`A: [1]`, `A: {b: c}`), or with
+  an infinity or a NaN, is now refused naming the variable, as docker
+  compose refuses it. Before, the value reached the container as Go wrote
+  it out — `A=[1]`, `A=map[b:c]`, `A=+Inf`.
+- `labels` written as one value (`labels: x`), with a list item that is not a string, or with a value that is a list or a mapping (`labels: {a: [1]}`) is now refused at load the way docker compose refuses it, naming what to write instead, rather than being read past and listed among the ignored fields. An empty `env_file` item (`- ` alone) is refused the same way, where before it was read as an empty path and failed opening the project directory.
+- A resource limit written as a list, a mapping or a blank — `cpus: [1]`,
+  `mem_limit: {}`, `cpus: ""`, `deploy.resources.limits.memory: ""` (or
+  what an unset `${VAR}` leaves) — is now refused, naming the field and
+  what to write, as docker compose refuses it. Before, each was read as no
+  limit, in silence: `config` showed nothing and the container ran
+  unlimited.
+- A mount written in the long form without its `type` (`- {source: ./a, target: /x}`, or `type: ""`) is now refused at load the way docker compose refuses it, naming the entry and the three types to choose from, rather than being passed on with the kind of mount left for the runtime to guess.
+- With several `-f` files, a service's `build` now merges as one mapping
+  whichever form each file used, as docker compose merges it: a path
+  (`build: ./other`) written over a mapping changes only the context, and a
+  mapping written over a path keeps the path as its context. Before, the
+  later file replaced the earlier value whole — a path dropped the
+  dockerfile, args and target in silence, and a mapping dropped the path.
+- A key written with nothing after it in a long-form mount (`source:`,
+  `type:`), a port (`published:`), a dependency (`condition:`), a network
+  or volume declaration (`internal:`, `name:`) or a secret (`file:`) is now
+  refused naming the entry and its line, as docker compose refuses it; before, it was
+  read as left out — a mount without a source, a port without a host port,
+  a dependency merely started. With several `-f` files, a bare top-level
+  `services:` in any file is refused too, and a bare key a later file
+  writes that no earlier file gave a value to (a new network's
+  `internal:`, a `build.context:` no base has) is refused naming that file,
+  as docker compose does — where the same key over an earlier value still
+  keeps it.
+- A bind mount written in the long form without its `source` (`- {type: bind, target: /x}`) is now refused at load the way docker compose refuses it, naming the entry and what to write, rather than being started as an anonymous volume — a different kind of mount from the one written.
+- A variable whose name YAML reads as a number, a boolean or null (`environment: {1: a}`, `{~: a}`, `"": a`, and the same under `build.args` and `labels`, a mapping brought in by `<<:` included) is now refused at load the way docker compose refuses it, naming the line or how to quote it, rather than becoming a variable named `1` or an empty name. An `env_file` that is the empty string (`env_file: ""`, or a `${VAR}` that expands to nothing) is refused too, where before it was read as an empty path and failed opening the project directory.
+- A boolean written as the quoted word (`read_only: "true"`, `init: 'True'`, a mount's `read_only: "true"`, an env file's `required: "false"`, a network's `internal: "true"`) is now read as the boolean, the way docker compose reads it, instead of being refused as a string; `"1"`, `"t"` or `""` is still refused, as docker compose refuses it, and a declaration's `external` now refuses those too rather than reading `"1"` as true.
+- A top-level network, volume or secret declaration whose `name`, `file` or `driver` is written as a number, a boolean, a date, a list, a mapping or nothing (`name: 42`, `driver: [a]`, `driver:` alone) is now refused at load the way docker compose refuses it, naming the key and the line, rather than read as the name `42` or passed over. A key in a secret's declaration that opossum does not read is now listed among the ignored fields, as a network's or a volume's already was.
+- What a `${VAR}` reference expands to is now read as text, the way docker compose reads it: `TAG=42` under `image: alpine:${TAG}` is the tag `42` rather than a number refused where a string belongs, `V=[1]` under `environment:` is the value `[1]` rather than a list, `F=1.50` stays `1.50`, and a boolean field takes `RO=true` as the word. A reference written inside an anchor or alias name (`&${NAME}`) is no longer read, as docker compose does not read it either.
+- A `.env` or `env_file` value now ends where docker compose ends it: an unquoted value at the first ` #` (a space, then a hash — `KEY=with # hash` is `with`; `a#b` stays whole), and a quoted value at its closing quote, with a comment after it dropped (`KEY="q" # note` is `q`). Before this the whole rest of the line was the value, quotes included.
+
 ## [0.24.7] - 2026-09-06
 
 ### Changed
@@ -1284,7 +1388,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.24.7...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.24.8...HEAD
+[0.24.8]: https://github.com/suruseas/opossum/compare/v0.24.7...v0.24.8
 [0.24.7]: https://github.com/suruseas/opossum/compare/v0.24.6...v0.24.7
 [0.24.6]: https://github.com/suruseas/opossum/compare/v0.24.5...v0.24.6
 [0.24.5]: https://github.com/suruseas/opossum/compare/v0.24.4...v0.24.5

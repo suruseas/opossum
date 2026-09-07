@@ -1168,8 +1168,21 @@ exit 1
 // character there and finds a backtick or a space instead. The backticks the
 // record already writes are the only edge a path has.
 func TestTheRecordNamesWhatTheSourceHas(t *testing.T) {
-	root := repoRoot(t)
+	for _, p := range recordNamesWhatTheSourceHas(t, repoRoot(t)) {
+		t.Error(p)
+	}
+}
+
+// recordNamesWhatTheSourceHas is the rule above as a function of the tree it reads, so a
+// copy of the tree with something broken in it can be held to the same rule
+// (TestTheRecordRulesReadTheTreeTheyAreGiven). Fatal conditions — the
+// tree not having what the rule reads — stay fatal.
+func recordNamesWhatTheSourceHas(t *testing.T, root string) (problems []string) {
 	record := string(readFile(t, filepath.Join(root, "docs", "real-runtime-review.md")))
+	// A name the record has retired (struck through) is the record saying the
+	// test is gone. It is not the record naming a test the source has, so it
+	// is taken out before anything below looks for a mention.
+	_, record = retiredNames(record)
 
 	pkg := filepath.Join(root, "internal", "orchestrator")
 	fset := token.NewFileSet()
@@ -1209,9 +1222,9 @@ func TestTheRecordNamesWhatTheSourceHas(t *testing.T) {
 			len(conformance), len(prefixes), pkg)
 	}
 	if got := makefileConformanceSelector(t, root); got != conformancePrefix {
-		t.Errorf("the gate selects conformance tests with %q and this reads them by %q. "+
+		problems = append(problems, fmt.Sprintf("the gate selects conformance tests with %q and this reads them by %q. "+
 			"One of the two moved, and whichever it was, the other now reads a "+
-			"different set than the gate runs.", got, conformancePrefix)
+			"different set than the gate runs.", got, conformancePrefix))
 	}
 	// Both halves are after the same thing: a new item satisfying this by being a
 	// piece of an old one. `TestARealSocketBind` is already there as the front of
@@ -1262,16 +1275,16 @@ func TestTheRecordNamesWhatTheSourceHas(t *testing.T) {
 	namedPath := func(s string) bool { return strings.Contains(record, "`"+s+"`") }
 	for _, name := range conformance {
 		if !namedWord(name) {
-			t.Errorf("%s runs against a real runtime and docs/real-runtime-review.md never "+
+			problems = append(problems, fmt.Sprintf("%s runs against a real runtime and docs/real-runtime-review.md never "+
 				"names it. The record says what has been measured; a test it does not "+
-				"know about is a measurement nobody there can see.", name)
+				"know about is a measurement nobody there can see.", name))
 		}
 	}
 	for _, p := range prefixes {
 		if !namedPath(p) {
-			t.Errorf("%s covers the host path %q and docs/real-runtime-review.md does not "+
+			problems = append(problems, fmt.Sprintf("%s covers the host path %q and docs/real-runtime-review.md does not "+
 				"say so. The record explains which paths that note covers, and this one "+
-				"is not among them.", hostDeviceFunc, p)
+				"is not among them.", hostDeviceFunc, p))
 		}
 	}
 	// Judged strings are held to the same edges as paths, and for a sharper
@@ -1283,11 +1296,11 @@ func TestTheRecordNamesWhatTheSourceHas(t *testing.T) {
 	// a test that decides on less has to say so.
 	for _, j := range judged {
 		if !namedPath(j.lit) {
-			t.Errorf("%s decides on %q and docs/real-runtime-review.md does not name it "+
+			problems = append(problems, fmt.Sprintf("%s decides on %q and docs/real-runtime-review.md does not name it "+
 				"between backticks. What a measurement accepts as an answer is the "+
 				"measurement; a record that does not say it cannot tell a reader what "+
 				"was ruled out — and one that says only a longer string containing it "+
-				"reads as though more were required than is.", j.fn, j.lit)
+				"reads as though more were required than is.", j.fn, j.lit))
 		}
 	}
 	if socketPath == "" {
@@ -1295,21 +1308,22 @@ func TestTheRecordNamesWhatTheSourceHas(t *testing.T) {
 			daemonSocketConst, pkg)
 	}
 	if !namedPath(socketPath) {
-		t.Errorf("%s is %q and docs/real-runtime-review.md does not name it. The published "+
+		problems = append(problems, fmt.Sprintf("%s is %q and docs/real-runtime-review.md does not name it. The published "+
 			"claim is about the path the documents name; a measurement that starts "+
-			"somewhere else measures a different claim.", daemonSocketConst, socketPath)
+			"somewhere else measures a different claim.", daemonSocketConst, socketPath))
 	}
 	if len(judged) > 0 && !ranged {
-		t.Errorf("nothing walks %s any more, so holding it against the record above says "+
+		problems = append(problems, fmt.Sprintf("nothing walks %s any more, so holding it against the record above says "+
 			"nothing about what the measurement asks for. A declaration no test reads is "+
-			"a record of an intention, not of a measurement.", daemonMarksVar)
+			"a record of an intention, not of a measurement.", daemonMarksVar))
 	}
 	if len(resolved) != 1 || resolved[0] != daemonSocketConst {
-		t.Errorf("the file holding the daemon measurement resolves %v, and the record is "+
+		problems = append(problems, fmt.Sprintf("the file holding the daemon measurement resolves %v, and the record is "+
 			"written about resolving %s and nothing else. Either one path is resolved "+
 			"there, or the sentence above about which name the measurement starts from "+
-			"describes a different run than the one that happens.", resolved, daemonSocketConst)
+			"describes a different run than the one that happens.", resolved, daemonSocketConst))
 	}
+	return problems
 }
 
 // daemonSocketConst holds the path the daemon measurement resolves before it
@@ -1868,7 +1882,16 @@ const hostDevicePassage = "`OPSM-106` が当たるパス"
 //     the prefixes in it. That is the predicate's own meaning, so the record is
 //     checked against what the code does rather than against a copy of its list.
 func TestTheSourceStillHasWhatTheRecordNames(t *testing.T) {
-	root := repoRoot(t)
+	for _, p := range sourceStillHasWhatTheRecordNames(t, repoRoot(t)) {
+		t.Error(p)
+	}
+}
+
+// sourceStillHasWhatTheRecordNames is the rule above as a function of the tree it reads, so a
+// copy of the tree with something broken in it can be held to the same rule
+// (TestTheRecordRulesReadTheTreeTheyAreGiven). Fatal conditions — the
+// tree not having what the rule reads — stay fatal.
+func sourceStillHasWhatTheRecordNames(t *testing.T, root string) (problems []string) {
 	record := readLines(t, filepath.Join(root, "docs", "real-runtime-review.md"))
 	joined := strings.Join(record, "\n")
 
@@ -1906,18 +1929,18 @@ func TestTheSourceStillHasWhatTheRecordNames(t *testing.T) {
 	// Reading too many names is a false red someone looks at and fixes; reading
 	// too few is silence, so where the two rules differ this one is the loose
 	// side on purpose.
-	named := regexp.MustCompile(`\b(` + conformancePrefix + `[A-Za-z0-9_]*)\b`)
-	found := named.FindAllStringSubmatch(joined, -1)
-	if len(found) == 0 {
+	//
+	// A name written struck through — ~~`TestARealX`~~ — is the record saying
+	// the test is gone, which is the one true sentence the plain rule forbade
+	// (#643). It is held to the opposite: the source must not have it, or the
+	// record is announcing a removal that did not happen.
+	found, outOfStep := namesOutOfStep(joined, have)
+	if found == 0 {
 		t.Fatalf("docs/real-runtime-review.md names no conformance test, so this reads " +
 			"for something that is no longer written there")
 	}
-	for _, m := range found {
-		if !have[m[1]] {
-			t.Errorf("docs/real-runtime-review.md names %s and %s has no such function. "+
-				"A reader looking it up finds nothing; if it was renamed, the record "+
-				"is where the new name goes.", m[1], pkg)
-		}
+	for _, p := range outOfStep {
+		problems = append(problems, fmt.Sprintf("docs/real-runtime-review.md %s (%s)", p, pkg))
 	}
 
 	covered := func(p string) bool {
@@ -1938,12 +1961,269 @@ func TestTheSourceStillHasWhatTheRecordNames(t *testing.T) {
 	}
 	for _, m := range paths {
 		if !covered(m[1]) {
-			t.Errorf("docs/real-runtime-review.md names %q where it says which paths "+
+			problems = append(problems, fmt.Sprintf("docs/real-runtime-review.md names %q where it says which paths "+
 				"%s covers, and %s does not cover it. Every path in that passage has "+
 				"to be one the predicate fires on — a path named there to say it is "+
 				"excluded reads, to someone skimming, as one of the covered ones.",
-				m[1], hostDeviceFunc, hostDeviceFunc)
+				m[1], hostDeviceFunc, hostDeviceFunc))
 		}
+	}
+	return problems
+}
+
+// struckName is how the record writes a conformance test that no longer
+// exists: the name, in backticks, struck through.
+var struckName = regexp.MustCompile("~~`(" + conformancePrefix + "[A-Za-z0-9_]*)`~~")
+
+// brokenStrike is the same thing written with spaces inside the strike-through
+// (~~ `X` ~~). Read as plain text it would satisfy the plain rule whenever X
+// still exists — a "removed" nobody checks — so it is named as the wrong form
+// instead of silently passing.
+var brokenStrike = regexp.MustCompile("~~(?:\\s+`(" + conformancePrefix + "[A-Za-z0-9_]*)`\\s*|\\s*`(" + conformancePrefix + "[A-Za-z0-9_]*)`\\s+)~~")
+
+// retiredNames reads the names the record has struck through, and returns the
+// record with those spans removed — the text in which a name still counts as a
+// mention. Only conformance test names are read this way; a struck-through
+// path or judged string stays as it is, and is still held to the plain rules.
+func retiredNames(record string) (retired map[string]bool, live string) {
+	retired = map[string]bool{}
+	for _, m := range struckName.FindAllStringSubmatch(record, -1) {
+		retired[m[1]] = true
+	}
+	// A space, not nothing: ~~`X`~~ glued between word characters would
+	// otherwise fuse its neighbours into one word and hide a name from `\b`.
+	return retired, struckName.ReplaceAllString(record, " ")
+}
+
+// namesOutOfStep is the record→source rule as a function of its inputs: every
+// plain name the record writes must be a function the source has, and every
+// struck-through name must not be. found is how many names were read at all,
+// so a caller can tell "nothing out of step" from "nothing read".
+//
+// Names are read as words, the loose side on purpose: reading too many is a
+// false red someone looks at and fixes, reading too few is silence. The same
+// name written both ways is out of step with itself and both rules fire.
+func namesOutOfStep(record string, have map[string]bool) (found int, problems []string) {
+	retired, live := retiredNames(record)
+	named := regexp.MustCompile(`\b(` + conformancePrefix + `[A-Za-z0-9_]*)\b`)
+	seen := map[string]bool{}
+	for _, m := range named.FindAllStringSubmatch(live, -1) {
+		found++
+		if seen[m[1]] {
+			continue
+		}
+		seen[m[1]] = true
+		if !have[m[1]] {
+			problems = append(problems, "names "+m[1]+" and the source has no such function. "+
+				"A reader looking it up finds nothing; if it was renamed, the record is where "+
+				"the new name goes, and if it was removed, the record writes it struck through")
+		}
+	}
+	for _, name := range sortedKeys(retired) {
+		found++
+		if have[name] {
+			problems = append(problems, "writes "+name+" struck through — as a test that is gone — "+
+				"and the source still has it. Either the removal did not happen, or the strike-through "+
+				"is on the wrong name")
+		}
+	}
+	for _, m := range brokenStrike.FindAllStringSubmatch(record, -1) {
+		name := m[1] + m[2]
+		problems = append(problems, "writes "+name+" with spaces inside the strike-through, which is "+
+			"not the form and reads as a plain name; write ~~`"+name+"`~~ with nothing between")
+	}
+	return found, problems
+}
+
+// TestARetiredNameIsHeldToTheOppositeRule pins what the two directions make of
+// a struck-through name, on records small enough to read: it must be gone from
+// the source, and it does not count as the record naming a test the source has.
+func TestARetiredNameIsHeldToTheOppositeRule(t *testing.T) {
+	have := map[string]bool{"TestARealAlive": true}
+	for _, tc := range []struct {
+		name, record string
+		wantFound    int
+		wantProblems int
+		wantLive     string // what the source→record direction still sees
+	}{
+		{"a plain name the source has", "measured by `TestARealAlive`.", 1, 0, "measured by `TestARealAlive`."},
+		{"a plain name the source lost", "measured by `TestARealGone`.", 1, 1, "measured by `TestARealGone`."},
+		{"a retired name that is gone", "2026-09-01 に ~~`TestARealGone`~~ を消した。", 1, 0, "2026-09-01 に   を消した。"},
+		{"a retired name the source still has", "~~`TestARealAlive`~~ を消した。", 1, 1, "  を消した。"},
+		{"the same name both ways", "`TestARealAlive` and ~~`TestARealAlive`~~", 2, 1, "`TestARealAlive` and  "},
+		{"a retired name in a fenced example is still retired", "```sh\ngo test -run ~~`TestARealGone`~~\n```", 1, 0, "```sh\ngo test -run  \n```"},
+		{"a plain name in a fence is still a plain name", "```sh\ngo test -run TestARealGone\n```", 1, 1, "```sh\ngo test -run TestARealGone\n```"},
+		{"strike-through without backticks is not the form", "~~TestARealGone~~", 1, 1, "~~TestARealGone~~"},
+		{"strike-through with spaces inside is named as the wrong form, even on a live name", "~~ `TestARealAlive` ~~ を消した。", 1, 1, "~~ `TestARealAlive` ~~ を消した。"},
+		{"strike-through with a space on one side, on a gone name, is the wrong form and a missing name", "~~`TestARealGone` ~~", 1, 2, "~~`TestARealGone` ~~"},
+		{"a strike-through glued between words does not fuse them", "see~~`TestARealGone`~~TestARealAlive", 2, 0, "see TestARealAlive"},
+		{"an empty record", "", 0, 0, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			found, problems := namesOutOfStep(tc.record, have)
+			if found != tc.wantFound || len(problems) != tc.wantProblems {
+				t.Errorf("found %d names, %d problems %v; want %d and %d", found, len(problems), problems, tc.wantFound, tc.wantProblems)
+			}
+			if _, live := retiredNames(tc.record); live != tc.wantLive {
+				t.Errorf("the text the other direction reads = %q, want %q", live, tc.wantLive)
+			}
+		})
+	}
+}
+
+// TestTheRecordRulesReadTheTreeTheyAreGiven holds the wiring of the two record
+// rules, which the table test above cannot: it copies what the rules read out
+// of the real tree — the record, the package it names, the Makefile the
+// conformance selector is read from — and holds the rules to that copy, clean
+// and then broken in each of the ways they exist for. Emptying either rule's
+// findings at the call site used to leave every test green (#793); here it
+// leaves a broken copy unreported.
+func TestTheRecordRulesReadTheTreeTheyAreGiven(t *testing.T) {
+	real := repoRoot(t)
+	root := t.TempDir()
+	for _, rel := range []string{"Makefile", "docs/real-runtime-review.md"} {
+		dst := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(dst, readFile(t, filepath.Join(real, filepath.FromSlash(rel))), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pkg := filepath.Join(root, "internal", "orchestrator")
+	if err := os.MkdirAll(pkg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(filepath.Join(real, "internal", "orchestrator"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	copied := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") {
+			continue
+		}
+		if err := os.WriteFile(filepath.Join(pkg, e.Name()), readFile(t, filepath.Join(real, "internal", "orchestrator", e.Name())), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		copied++
+	}
+	if copied == 0 {
+		t.Fatal("copied no .go files, so the rules below would read an empty package")
+	}
+
+	record := filepath.Join(root, "docs", "real-runtime-review.md")
+	original := string(readFile(t, record))
+	const example = "~~`TestARealExample`~~"
+	if strings.Count(original, example) != 1 {
+		t.Fatalf("the record writes %s %d times; the edits below replace exactly one", example, strings.Count(original, example))
+	}
+	const symlink = "`TestARealSymlinkToASocketIsStillRefused`"
+	if strings.Count(original, symlink) != 2 {
+		t.Fatalf("the record writes %s %d times; the edit below retires the first and drops the second", symlink, strings.Count(original, symlink))
+	}
+	// The source-side edit renames one conformance test in its copy.
+	const socket = "func TestARealSocketBindCarriesTraffic("
+	var socketFile string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") {
+			continue
+		}
+		if strings.Contains(string(readFile(t, filepath.Join(pkg, e.Name()))), socket) {
+			socketFile = filepath.Join(pkg, e.Name())
+		}
+	}
+	if socketFile == "" {
+		t.Fatalf("no copied file declares %s", socket)
+	}
+	socketOriginal := string(readFile(t, socketFile))
+
+	both := func() (source, rec []string) {
+		return recordNamesWhatTheSourceHas(t, root), sourceStillHasWhatTheRecordNames(t, root)
+	}
+	if source, rec := both(); len(source)+len(rec) != 0 {
+		t.Fatalf("the untouched copy of the real tree is reported as out of step — the edits below would measure nothing:\n%v\n%v", source, rec)
+	}
+
+	saying := func(t *testing.T, direction string, got []string, want []string) {
+		t.Helper()
+		if len(want) == 0 {
+			if len(got) != 0 {
+				t.Errorf("%s reported %v; want nothing from that direction", direction, got)
+			}
+			return
+		}
+		for _, w := range want {
+			found := false
+			for _, g := range got {
+				if strings.Contains(g, w) {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("%s did not say %q; it said %v", direction, w, got)
+			}
+		}
+	}
+	for _, tc := range []struct {
+		name       string
+		record     func(string) string
+		source     func(string) string
+		wantSource []string // source → record: what the source has and the record does not name
+		wantRecord []string // record → source: what the record names and the source does not have
+	}{
+		{"a retired name the source still has",
+			func(r string) string {
+				return strings.Replace(r, example, "~~`TestARealSocketBindCarriesTraffic`~~", 1)
+			}, nil,
+			nil, []string{"TestARealSocketBindCarriesTraffic struck through", "source still has it"}},
+		{"a plain name the source does not have",
+			func(r string) string { return strings.Replace(r, example, "`TestARealExample`", 1) }, nil,
+			nil, []string{"names TestARealExample", "no such function"}},
+		{"a strike-through with spaces inside",
+			func(r string) string {
+				return strings.Replace(r, example, "~~ `TestARealSocketBindCarriesTraffic` ~~", 1)
+			}, nil,
+			nil, []string{"TestARealSocketBindCarriesTraffic with spaces inside the strike-through"}},
+		{"a test retired in the record while the source still has it",
+			func(r string) string {
+				i := strings.Index(r, symlink)
+				j := strings.Index(r[i+1:], symlink) + i + 1
+				r = r[:j] + "(removed)" + r[j+len(symlink):]
+				return r[:i] + "~~" + symlink + "~~" + r[i+len(symlink):]
+			}, nil,
+			[]string{"TestARealSymlinkToASocketIsStillRefused runs against a real runtime", "never names it"},
+			[]string{"TestARealSymlinkToASocketIsStillRefused struck through"}},
+		{"a test renamed in the source",
+			nil, func(src string) string {
+				return strings.Replace(src, socket, "func TestARealSocketBindCarriesTrafficX(", 1)
+			},
+			[]string{"TestARealSocketBindCarriesTrafficX runs against a real runtime", "never names it"},
+			[]string{"names TestARealSocketBindCarriesTraffic", "no such function"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.record != nil {
+				if err := os.WriteFile(record, []byte(tc.record(original)), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.source != nil {
+				if err := os.WriteFile(socketFile, []byte(tc.source(socketOriginal)), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			defer func() {
+				if err := os.WriteFile(record, []byte(original), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(socketFile, []byte(socketOriginal), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}()
+			source, rec := both()
+			saying(t, "source → record", source, tc.wantSource)
+			saying(t, "record → source", rec, tc.wantRecord)
+		})
 	}
 }
 

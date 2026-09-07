@@ -3180,9 +3180,14 @@ func (o *Orchestrator) buildOptions(tag string, b *compose.Build, redo string) r
 		Tag:        tag,
 		Context:    resolved,
 		Dockerfile: b.Dockerfile,
-		Args:       b.Args,
-		Target:     b.Target,
-		Redo:       redo,
+		// A bare `NAME` takes the shell's value here, and is left out when
+		// the shell has none: Apple's builder does not read the shell itself
+		// (`container build --build-arg A` gives the Dockerfile an empty A,
+		// over its own `ARG A=default`; measured, container 1.3.1), where
+		// `container run -e A` does.
+		Args:   compose.ResolveBareNames(b.Args, os.LookupEnv, false),
+		Target: b.Target,
+		Redo:   redo,
 	}
 }
 

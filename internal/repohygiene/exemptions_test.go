@@ -26,9 +26,9 @@ func TestTheChangelogGatesExemptionsAreTheOnesWrittenDownHere(t *testing.T) {
 	g := readGate(t, root)
 
 	// Each exemption and its reason. A package that is not here is checked:
-	// internal/site (the docs site users read), cmd/swaps and internal/swaps
-	// among them.
+	// cmd/swaps and internal/swaps among them.
 	want := map[string]string{
+		"internal/site":        "the documentation site's builder: how the pages look is not a change to the product (decided 2026-09-07); the pages' words are docs, checked as docs",
 		"cmd/changelog":        "the fragment assembler: runs over this repository, ships in no binary",
 		"internal/changelog":   "the assembler's library: same",
 		"internal/repohygiene": "this package: checks of the repository, not of the product",

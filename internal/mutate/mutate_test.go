@@ -457,6 +457,118 @@ func TestAnInterruptCannotBeOvertakenByTheMutationItRestored(t *testing.T) {
 	}
 }
 
+// The interrupt handler cancels the toolchain first and asks for the restore
+// second. The killed `go vet` (or `go test`) hands control back to the sweep,
+// whose own deferred restore can take the lock before the handler does — so
+// the handler finds nothing pending and says "no mutation in flight" about a
+// file that was mutated a moment ago. The tree was right, the message was
+// wrong (seen on CI: a probe reported as "did not compile", then "no probe in
+// flight"). Two things hold here: the killed run is not turned into a Result,
+// and the handler is still told the file was put back.
+func TestAnInterruptThatLandsInsideTheToolchainRunIsStillReportedAsPutBack(t *testing.T) {
+	for _, phase := range []string{"vet", "test"} {
+		t.Run("during "+phase, func(t *testing.T) {
+			f := newFake(t, map[string]string{"x.go": "call()"})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			f.Runner.Ctx = ctx
+			f.Runner.Go = func(args ...string) (string, string, error) {
+				if args[0] == phase && mustGet(t, f, "x.go") == "noop()" {
+					// The interrupt: the handler cancels, the child dies with
+					// nothing on its streams, and the sweep gets the lock first.
+					cancel()
+					return "", "", errors.New("signal: interrupt")
+				}
+				return passJSON, "", nil
+			}
+			results, err := f.Sweep([]Mutation{mut()})
+			if !errors.Is(err, errInterrupted) {
+				t.Errorf("Sweep returned %v, want errInterrupted — a killed %s run is not a finding", err, phase)
+			}
+			for _, res := range results {
+				t.Errorf("the killed run was reported as %q (%s); it measured nothing", res.Outcome, res.Detail)
+			}
+			if got := mustGet(t, f, "x.go"); got != "call()" {
+				t.Fatalf("the sweep left the file as %q", got)
+			}
+			restored, rerr := f.RestorePending()
+			if rerr != nil {
+				t.Errorf("RestorePending: %v", rerr)
+			}
+			if !restored {
+				t.Error("RestorePending said nothing was in flight — the file was mutated when " +
+					"the interrupt arrived, and the author is about to be told the tree was never touched")
+			}
+		})
+	}
+}
+
+// The other half of the same moment: the sweep got the lock first, tried to put
+// the file back, and could not. The handler must then be told the file is still
+// mutated — not "put back" (the flag must not be set on a failed restore) and
+// not "nothing in flight" (the failure must be remembered), because the author
+// reads that message and decides whether to look at `git diff`.
+func TestARestoreThatFailsAfterTheCancelIsToldToTheHandler(t *testing.T) {
+	f := newFake(t, map[string]string{"x.go": "call()"})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.Runner.Ctx = ctx
+	f.Runner.Go = func(args ...string) (string, string, error) {
+		if args[0] == "vet" && mustGet(t, f, "x.go") == "noop()" {
+			cancel()
+			return "", "", errors.New("signal: interrupt")
+		}
+		return passJSON, "", nil
+	}
+	inner := f.Runner.Write
+	f.Runner.Write = func(p string, b []byte) error {
+		if string(b) == "call()" && ctx.Err() != nil {
+			return errors.New("disk full")
+		}
+		return inner(p, b)
+	}
+	_, err := f.Sweep([]Mutation{mut()})
+	if err == nil || !strings.Contains(err.Error(), "STILL MUTATED") {
+		t.Errorf("Sweep returned %v, want the failed restore named", err)
+	}
+	if got := mustGet(t, f, "x.go"); got != "noop()" {
+		t.Fatalf("the fixture did not fail the restore: x.go = %q", got)
+	}
+	restored, rerr := f.RestorePending()
+	if restored {
+		t.Error("RestorePending said the file was put back; it is still mutated")
+	}
+	if rerr == nil || !strings.Contains(rerr.Error(), "STILL MUTATED") {
+		t.Errorf("RestorePending err = %v, want the failed restore — the handler reads this to say COULD NOT BE PUT BACK", rerr)
+	}
+}
+
+// The same answer must not appear when nothing was in flight at the interrupt:
+// a run that failed on its own, before any cancellation, is a finding, and a
+// later interrupt finds the tree as the author left it.
+func TestAToolchainFailureBeforeTheInterruptIsStillAFinding(t *testing.T) {
+	f := newFake(t, map[string]string{"x.go": "call()"})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.Runner.Ctx = ctx
+	f.vetFails["noop()"] = true
+	results, err := f.Sweep([]Mutation{mut()})
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if len(results) != 1 || results[0].Outcome != Broken {
+		t.Fatalf("results = %+v, want the one mutation reported as not compiling", results)
+	}
+	cancel()
+	restored, rerr := f.RestorePending()
+	if rerr != nil {
+		t.Errorf("RestorePending: %v", rerr)
+	}
+	if restored {
+		t.Error("RestorePending said a file was put back — nothing was in flight when the interrupt came")
+	}
+}
+
 // A mutation with nowhere to run is not "survived": nothing was ever asked.
 func TestAMutationWithNoPackagesIsRefused(t *testing.T) {
 	f := newFake(t, map[string]string{"x.go": "call()"})

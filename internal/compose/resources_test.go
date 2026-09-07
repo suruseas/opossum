@@ -20,11 +20,11 @@ func TestDeployExtraSurfaced(t *testing.T) {
 	if got := unsupported("image: x\ndeploy:\n  resources:\n    limits:\n      memory: 1g\n      cpus: \"1\"\n"); slices.Contains(got, "deploy") {
 		t.Errorf("deploy with only resources.limits should not be flagged, got %v", got)
 	}
-	if got := unsupported("image: x\ndeploy:\n  replicas: 3\n  resources:\n    limits:\n      memory: 1g\n"); !slices.Contains(got, "deploy") {
-		t.Errorf("deploy.replicas should be surfaced as ignored, got %v", got)
+	if got := unsupported("image: x\ndeploy:\n  replicas: 3\n  resources:\n    limits:\n      memory: 1g\n"); !slices.Contains(got, "deploy.replicas") {
+		t.Errorf("deploy.replicas should be surfaced as ignored, by name, got %v", got)
 	}
-	if got := unsupported("image: x\ndeploy:\n  resources:\n    reservations:\n      memory: 1g\n"); !slices.Contains(got, "deploy") {
-		t.Errorf("deploy.resources.reservations should be surfaced as ignored, got %v", got)
+	if got := unsupported("image: x\ndeploy:\n  resources:\n    reservations:\n      memory: 1g\n"); !slices.Contains(got, "deploy.resources.reservations") {
+		t.Errorf("deploy.resources.reservations should be surfaced as ignored, by name, got %v", got)
 	}
 }
 

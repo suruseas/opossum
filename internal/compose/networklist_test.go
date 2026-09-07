@@ -99,15 +99,15 @@ func TestANetworkRestatedByAnotherFileIsStillOne(t *testing.T) {
 	if _, err := LoadFiles([]string{base, over}, nil); err == nil || !strings.Contains(err.Error(), `lists "back" twice`) {
 		t.Errorf("want the duplicate refusal for the override file's own list, got: %v", err)
 	}
-	// Once two files write the service's `networks:` — the same names or
-	// different ones — the merge reads both sides as maps keyed by name and
-	// joins them before anything decodes the result, so a duplicate inside
-	// either file is absorbed there and not reported. docker compose, which
-	// validates each file first, refuses it. Pinned so the divergence is a
-	// known one rather than a surprise.
-	for _, tc := range []struct{ name, base, over, want string }{
-		{"the later file repeats a name both list", "networks: [back]", "networks: [back, back]", "back"},
-		{"the earlier file has the duplicate, the later a different name", "networks: [back, back]", "networks: [front]", "back,front"},
+	// Each file is checked on its own before the merge, so a duplicate
+	// inside either file is refused naming that file. docker compose
+	// (v5.5.0) refuses it in the first file and, in a later one, reads the
+	// list as a map before checking and so lets it through — a difference
+	// kept on purpose (the same line is a mistake in any file) and named in
+	// the docs. The merge used to join both sides by name and absorb it.
+	for _, tc := range []struct{ name, base, over, file string }{
+		{"the later file repeats a name both list", "networks: [back]", "networks: [back, back]", "over.yml"},
+		{"the earlier file has the duplicate, the later a different name", "networks: [back, back]", "networks: [front]", "base.yml"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := os.WriteFile(base, []byte("services:\n  web:\n    image: alpine\n    "+tc.base+"\nnetworks:\n  back: {}\n  front: {}\n"), 0o644); err != nil {
@@ -116,12 +116,12 @@ func TestANetworkRestatedByAnotherFileIsStillOne(t *testing.T) {
 			if err := os.WriteFile(over, []byte("services:\n  web:\n    "+tc.over+"\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			p, err := LoadFiles([]string{base, over}, nil)
-			if err != nil {
-				t.Fatalf("load: %v", err)
+			_, err := LoadFiles([]string{base, over}, nil)
+			if err == nil || !strings.Contains(err.Error(), "twice") {
+				t.Fatalf("want the duplicate refusal, got: %v", err)
 			}
-			if got := strings.Join(p.Services["web"].Networks, ","); got != tc.want {
-				t.Errorf("networks = %q, want %q", got, tc.want)
+			if !strings.Contains(err.Error(), tc.file) {
+				t.Errorf("the refusal should name %s, got: %v", tc.file, err)
 			}
 		})
 	}

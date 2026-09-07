@@ -39,12 +39,12 @@ Docker Compose ファイル（`docker-compose.yml`）を読み、オープンな
 
 **3. 何も動いていないときは、何も動いていない。** Docker Desktop は常駐の Linux VM を
 1つ抱えますが、Apple `container` はコンテナごとに VM を与え、待機時には1つも抱えません。
-1台の Mac での実測（macOS 26・Apple silicon、`container` 1.0.0 vs Docker Engine 29.5.3）：
+1台の Mac での実測（macOS 26・Apple silicon、`container` 1.3.1 vs Docker Engine 29.7.2、2026-09-07）：
 
 | | Docker Desktop | Apple `container`（opossum） |
 |---|---|---|
-| アイドル時のメモリ | ホストプロセス ~373 MB **＋ 常駐 Linux VM に ~7.8 GB** | ヘルパ **~58 MB**、**常駐 VM なし** |
-| コンテナ1個の起動 | **~0.19 秒** | ~0.81 秒 |
+| アイドル時のメモリ | ホストプロセス ~551 MB **＋ 常駐 Linux VM に ~8.2 GB** | ヘルパ **~81 MB**、**常駐 VM なし**（builder の VM は一度使うと `container builder stop` まで残る） |
+| コンテナ1個の起動 | **~0.15 秒** | ~0.83 秒 |
 | 分離 | VM カーネル共有 | **コンテナごとに VM** |
 | ライセンス | 大きな組織では有償 | オープンソース・不要 |
 
