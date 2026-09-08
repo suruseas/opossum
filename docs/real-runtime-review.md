@@ -166,6 +166,21 @@ go run ../cmd/opossum -f compose.yaml down
 
 この節に書いた実機テストの名前は、ソースにその関数が実在することが検査される。消したテストを記録に残すときは打ち消し線で書く——~~`TestARealExample`~~ のように。打ち消した名前は「もう無い」として検査され（ソースに残っていれば赤）、実在するテストを名指した数には入らない。
 
+- **2026-09-08 — compose の読みを docker と揃えた 20 本あまりのあと、examples を実機で通した（container 1.3.1・main `7a619c6`）**。
+  `examples/hello.yaml`（alpine ×2）、`examples/compose.yaml`（redis:7・postgres:16・one-off の migrate・`./web` を
+  builder で build）、`examples/app-stack`（postgres:16・redis:7・adminer:4・worker）、`examples/mcp-stack`
+  （terraform-http。stdio profile の 2 つは `up` の対象外）の 4 project を `config → up → ps → logs --tail 5 →
+  down -v --remove-orphans` の順に走らせ、**すべて exit 0、各 `down` の後の container・network の残骸 0**。
+  healthcheck の待ち、one-off の完走（`migrate` は `ps` に stopped で残る）、build、port 公開
+  （`0.0.0.0:8080->8080/tcp`）が実機で動く。生出力は `~/opossum-dogfood/sprint-0908/`（段ごとの `.out` と
+  `summary.txt`）。
+
+  同じ回で 2 つ観測した。build context を写し忘れた状態で `up` を打つと、`container build` が
+  `context dir does not exist` で落ち、**先に起動していた cache・db・migrate は巻き戻されて
+  「nothing this `up` started is left running」**——途中で失敗した `up` の巻き戻しの実機確認 2 度目。
+  profile で起動対象外の service を `logs` に名指すと exit 1 で `confirm the service is up with
+  `opossum ps``——動作としては妥当で、記録のみ。
+
 - **2026-08-28 — 「daemon に届いた」を、走るもので測り直した（container 1.2.2）**。
   公開文書の「a Docker daemon was reached that way from inside a container」は、2026-08-27 の
   手書きの記録だけを根拠にしていた。既存の conformance が測っていたのは自前の listener との

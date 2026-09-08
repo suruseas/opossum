@@ -293,7 +293,9 @@ can only be attached to one running container at a time, which is Apple
 `container`'s constraint, not a
 choice. Swarm/`deploy` beyond `resources.limits` and `configs` are ignored, and
 `opossum config` tells you which fields in your file were skipped; a service
-with `extends:` is refused by name, since its inherited settings are not read.
+with `extends:` naming a service of the same file is read as docker compose
+reads it, and one naming another file is refused by name, since the settings
+it would inherit from there are not read.
 
 [The details, and what to do about each →](docs/troubleshooting.md)
 

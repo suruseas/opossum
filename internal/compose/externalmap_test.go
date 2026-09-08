@@ -1,6 +1,8 @@
 package compose
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -76,6 +78,18 @@ func TestTheMapFormOfExternalRefusesWhatDockerRefuses(t *testing.T) {
 		"conflicting names": {"volumes:\n  v:\n    name: one\n    external:\n      name: other\n", `name "one" and external.name "other" conflict; only use name`},
 		"an unknown key":    {"volumes:\n  v:\n    external:\n      name: x\n      extra: y\n", `unknown key "extra"`},
 		"a network too":     {"networks:\n  n:\n    name: one\n    external:\n      name: two\n", `name "one" and external.name "two" conflict; only use name`},
+		// The name is a string (docker compose: `external.name must be a
+		// string`); the decode used to read `name: 42` as "42" and `name:`
+		// as no name.
+		"a name that is a number":                  {"networks:\n  n:\n    external:\n      name: 42\n", "line 7: external: name must be a string, got a number — quote it (`\"42\"`) if it is meant literally"},
+		"a name that is a boolean":                 {"volumes:\n  v:\n    external:\n      name: true\n", "external: name must be a string, got true/false"},
+		"a name that is a list":                    {"networks:\n  n:\n    external:\n      name: [a]\n", "line 7: external: name must be a string, got a list"},
+		"a name with nothing after it":             {"networks:\n  n:\n    external:\n      name:\n", "line 7: external: name has nothing after it — write the name, or remove the key"},
+		"a name through an alias, a number":        {"x-n: &n 42\nnetworks:\n  n:\n    external:\n      name: *n\n", "line 4: external: name must be a string, got a number"},
+		"a name that is a mapping":                 {"networks:\n  n:\n    external:\n      name: {a: b}\n", "line 7: external: name must be a string, got a mapping"},
+		"a name brought in by a merge key":         {"x-m: &m {name: 42}\nnetworks:\n  n:\n    external:\n      <<: *m\n", "line 4: external: name must be a string, got a number"},
+		"an unknown key brought in by a merge key": {"x-m: &m {extra: y}\nnetworks:\n  n:\n    external:\n      name: x\n      <<: *m\n", `unknown key "extra"`},
+		"the second of two merge keys":             {"x-a: &a {name: x}\nx-b: &b {name: [z]}\nnetworks:\n  n:\n    external:\n      <<: [*a, *b]\n", "external: name must be a string, got a list"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			p := writeProject(t, "services:\n  a:\n    image: alpine:3\n"+tc.body, "")
@@ -84,6 +98,103 @@ func TestTheMapFormOfExternalRefusesWhatDockerRefuses(t *testing.T) {
 				t.Errorf("should be refused by name with a line, got: %v", err)
 			}
 		})
+	}
+}
+
+// With several -f files the map form is read the way docker compose reads
+// it before merging — `external: true` with the name lifted to the
+// declaration's `name:` — so a later file's `external: true` keeps the
+// earlier file's name instead of replacing the whole map (#836; measured
+// against docker compose v5.5.0). A later `external: false` keeps the name
+// too, and a later `name:` wins, as there; a later map wins only where no
+// earlier file named the declaration — where one did, and the names
+// differ, docker compose refuses the pair as a conflict, and so does this.
+func TestTheMapFormOfExternalSurvivesALaterFile(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	svc := "services:\n  a:\n    image: alpine:3\n    volumes: [data:/data, more:/more]\n    networks: [back]\n"
+	// Two volumes in the map form: the lift must reach every declaration of
+	// a kind, not just the first.
+	baseMap := write("base-map.yml", svc+"volumes:\n  data:\n    external:\n      name: base-name\n  more:\n    external:\n      name: more-name\nnetworks:\n  back:\n    external:\n      name: base-net\n")
+	baseBool := write("base-bool.yml", svc+"volumes:\n  data:\n    external: true\n  more:\n    external: true\nnetworks:\n  back:\n    external: true\n")
+	baseBoolName := write("base-bool-name.yml", svc+"volumes:\n  data:\n    name: base-name\n    external: true\n  more:\n    external: true\nnetworks:\n  back:\n    name: base-net\n    external: true\n")
+	// A map with no name, and a `name:` beside an empty one: the lift leaves
+	// what it cannot read alone.
+	baseEmpty := write("base-empty.yml", svc+"volumes:\n  data:\n    name: real\n    external: {}\n  more:\n    name: keep\n    external: {name: \"\"}\nnetworks:\n  back:\n    external: {}\n")
+	for _, tc := range []struct {
+		name, base, over           string
+		external                   bool
+		volName, moreName, netName string
+	}{
+		{"a later external: true keeps the map's name", baseMap, "volumes:\n  data:\n    external: true\n  more:\n    external: true\nnetworks:\n  back:\n    external: true\n", true, "base-name", "more-name", "base-net"},
+		{"a later external: false keeps the name and drops external", baseMap, "volumes:\n  data:\n    external: false\n  more:\n    external: false\nnetworks:\n  back:\n    external: false\n", false, "base-name", "more-name", "base-net"},
+		{"a later map with the same name", baseMap, "volumes:\n  data:\n    external: {name: base-name}\nnetworks:\n  back:\n    external: {name: base-net}\n", true, "base-name", "more-name", "base-net"},
+		{"a later name: wins", baseMap, "volumes:\n  data:\n    name: top\nnetworks:\n  back:\n    name: top-net\n", true, "top", "more-name", "top-net"},
+		{"a later bare name: is not given", baseMap, "volumes:\n  data:\n    name:\nnetworks:\n  back:\n    name:\n", true, "base-name", "more-name", "base-net"},
+		{"a map over a bool", baseBool, "volumes:\n  data:\n    external: {name: later}\nnetworks:\n  back:\n    external: {name: later-net}\n", true, "later", "", "later-net"},
+		{"a bare external: in a later file is not given", baseMap, "volumes:\n  data:\n    external:\nnetworks:\n  back:\n    external:\n", true, "base-name", "more-name", "base-net"},
+		{"an empty map, and a name beside one, survive a later true", baseEmpty, "volumes:\n  data:\n    external: true\n  more:\n    external: true\nnetworks:\n  back:\n    external: true\n", true, "real", "keep", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := LoadFiles([]string{tc.base, write("over.yml", tc.over)}, nil)
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if v := p.Volumes["data"]; v.External != tc.external || v.Name != tc.volName {
+				t.Errorf("volume = %+v, want external=%v name=%q", v, tc.external, tc.volName)
+			}
+			if v := p.Volumes["more"]; v.Name != tc.moreName {
+				t.Errorf("second volume = %+v, want name=%q", v, tc.moreName)
+			}
+			if n := p.Networks["back"]; n.External != tc.external || n.Name != tc.netName {
+				t.Errorf("network = %+v, want external=%v name=%q", n, tc.external, tc.netName)
+			}
+		})
+	}
+	// A secret's map is left as it is: nothing reads its name, and lifting
+	// it would list `secrets.s.name` among the ignored fields for a key the
+	// file never wrote.
+	t.Run("a secret's map is not lifted", func(t *testing.T) {
+		base := write("base-secret.yml", "services:\n  a:\n    image: alpine:3\nsecrets:\n  s:\n    external:\n      name: sec-name\n")
+		p, err := LoadFiles([]string{base, write("over-secret.yml", "secrets:\n  s:\n    external: true\n")}, nil)
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if got := strings.Join(p.Unsupported, ","); strings.Contains(got, "secrets.s.name") {
+			t.Errorf("ignored fields = %q: a lifted name the file never wrote", got)
+		}
+	})
+	// A later map whose name differs from the name an earlier file gave —
+	// in its map form or beside `external: true` — is a conflict, as docker
+	// compose reads it (`name and external.name conflict`), named by file.
+	for _, tc := range []struct{ name, base string }{
+		{"over a map", baseMap},
+		{"over a bool with a name", baseBoolName},
+	} {
+		t.Run("a later map with another name conflicts "+tc.name, func(t *testing.T) {
+			_, err := LoadFiles([]string{tc.base, write("over-conflict.yml", "volumes:\n  data:\n    external: {name: other}\n")}, nil)
+			want := `over-conflict.yml: volumes.data: name "base-name" and external.name "other" conflict; only use name`
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Errorf("want %q, got: %v", want, err)
+			}
+		})
+	}
+}
+
+// A quoted number is a string, and the name.
+func TestTheMapFormOfExternalTakesAQuotedNumberAsTheName(t *testing.T) {
+	p, err := Load(writeProject(t, "services:\n  a:\n    image: alpine:3\n    networks: [n]\nnetworks:\n  n:\n    external:\n      name: \"42\"\n", ""))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := p.Networks["n"]; !got.External || got.Name != "42" {
+		t.Errorf("network = %+v, want external with the name 42", got)
 	}
 }
 

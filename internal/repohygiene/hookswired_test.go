@@ -179,3 +179,76 @@ func contains(xs []string, x string) bool {
 	}
 	return false
 }
+
+// Reaching the script is not the same as being heard: a recipe that runs it
+// with its output thrown away (`@sh sieve/wired.sh >/dev/null 2>&1`) still
+// satisfies every test above, which read the script directly and read the
+// Makefile as text. So `make wired` itself is run — the repository's Makefile
+// and script, copied into an unwired clone with the surroundings scrubbed —
+// and the way out has to come back on the terminal (#838). A wired clone,
+// through the same recipe, has to say nothing.
+func TestTheNoticeReachesTheTerminalThroughMake(t *testing.T) {
+	root := repoRoot(t)
+	if _, err := exec.LookPath("make"); err != nil {
+		t.Skip("make is not on PATH")
+	}
+	clone := func(t *testing.T, wired bool) string {
+		t.Helper()
+		dir := t.TempDir()
+		gitIn(t, dir, "init", "-q")
+		for _, rel := range []string{"Makefile", "sieve/wired.sh"} {
+			src, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			dst := filepath.Join(dir, filepath.FromSlash(rel))
+			if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(dst, src, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.MkdirAll(filepath.Join(dir, ".githooks"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".githooks", "pre-push"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if wired {
+			gitIn(t, dir, "config", "core.hooksPath", ".githooks")
+		}
+		return dir
+	}
+	makeWired := func(t *testing.T, dir string) string {
+		t.Helper()
+		// Run as a person types it, not as a sub-make: under a parent make (the
+		// sieve runs this suite from `make test`) GNU make announces
+		// "Entering directory" around the recipe, which is make talking, not
+		// the notice — so the flags and level a parent would hand down are
+		// dropped and the directory chatter is switched off.
+		cmd := exec.Command("make", "--no-print-directory", "wired")
+		cmd.Dir = dir
+		for _, kv := range os.Environ() {
+			if !strings.HasPrefix(kv, "CI=") && !strings.HasPrefix(kv, "GIT_CONFIG_GLOBAL=") &&
+				!strings.HasPrefix(kv, "MAKEFLAGS=") && !strings.HasPrefix(kv, "MAKELEVEL=") && !strings.HasPrefix(kv, "MFLAGS=") {
+				cmd.Env = append(cmd.Env, kv)
+			}
+		}
+		cmd.Env = append(cmd.Env,
+			"GIT_CONFIG_GLOBAL="+filepath.Join(t.TempDir(), "no-global-gitconfig"),
+			"GIT_CEILING_DIRECTORIES="+filepath.Dir(dir))
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("`make wired` must never fail, but exited: %v\n%s", err, out)
+		}
+		return string(out)
+	}
+
+	if got := makeWired(t, clone(t, false)); !strings.Contains(got, "not wired") || !strings.Contains(got, "make hooks") {
+		t.Errorf("`make wired` in an unwired clone should put the notice and the way out on the terminal; printed:\n%q", got)
+	}
+	if got := makeWired(t, clone(t, true)); got != "" {
+		t.Errorf("`make wired` in a wired clone should print nothing; printed:\n%q", got)
+	}
+}

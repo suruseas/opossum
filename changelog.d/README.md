@@ -84,6 +84,12 @@ example: nobody upgrading opossum can see them, so they get no entry.
 `go run ./cmd/changelog release X.Y.Z` folds the fragments into a
 `## [X.Y.Z] - <date>` section and deletes them. Releases are cut by a human.
 
+One thing the tool does not do: on the very first release of a changelog — one
+with no published `## [x.y.z]` section yet — it drops the link-definition block
+at the end of the file and writes no link for the new version. Write that block
+by hand once (`[Unreleased]: …/compare/vX.Y.Z...HEAD` and `[X.Y.Z]: …/releases/tag/vX.Y.Z`);
+every later release carries it forward. This repository is long past that point.
+
 Before folding, hold each fragment up against the version people are upgrading
 from — the section below `[Unreleased]` in `CHANGELOG.md`. A fragment says what
 changed; what a reader can see is the difference from there. To read forward from

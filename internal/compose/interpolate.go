@@ -260,7 +260,7 @@ func parseDotEnv(path string, scope envScope) (map[string]string, error) {
 		// lines (e.g. a PEM key): gather following lines verbatim, preserving the
 		// newlines, until the closing quote. An unterminated value is an error,
 		// matching docker compose.
-		if len(val) > 1 && (val[0] == '"' || val[0] == '\'') && strings.IndexByte(val[1:], val[0]) < 0 {
+		if len(val) > 1 && (val[0] == '"' || val[0] == '\'') && closingQuote(val, val[0], 1) < 0 {
 			q := val[0]
 			literal := q == '\''
 			start := i + 1
@@ -270,7 +270,7 @@ func parseDotEnv(path string, scope envScope) (map[string]string, error) {
 			for i+1 < len(lines) {
 				i++
 				sb.WriteByte('\n')
-				if j := strings.IndexByte(lines[i], q); j >= 0 {
+				if j := closingQuote(lines[i], q, 0); j >= 0 {
 					sb.WriteString(lines[i][:j])
 					closed = true
 					break
@@ -280,7 +280,7 @@ func parseDotEnv(path string, scope envScope) (map[string]string, error) {
 			if !closed {
 				return nil, fmt.Errorf("%s:%d: unterminated quoted value for %q", path, start, key)
 			}
-			v, err := expandEnvValue(sb.String(), literal, scope, path, start)
+			v, err := expandEnvValue(unescapeEnv(sb.String(), literal), literal, scope, path, start)
 			if err != nil {
 				return nil, err
 			}
@@ -333,9 +333,8 @@ func splitEnvLine(s string) (key, val string, ok bool) {
 // suppresses expansion of its contents). A quoted value is what stands
 // between its quotes — the closing quote is the first one not preceded by
 // a backslash, in either style (`"a\"b"`, `'a\'b'`) — and whatever follows
-// it, a comment or anything else, is dropped. The contents are kept as
-// written: docker compose reads `\"` as `"` and `\\` as `\`, and this does
-// not (a difference that predates this). An unquoted value ends at the
+// it, a comment or anything else, is dropped, and the escapes inside are
+// read (unescapeEnv). An unquoted value ends at the
 // first ` #` (a space, then a hash: `a#b` is whole, a tab before the hash
 // does not count, and a value that is only `# …` after the `=` is kept),
 // with the blanks before it trimmed. Before this, `H=with # hash` was the
@@ -343,19 +342,72 @@ func splitEnvLine(s string) (key, val string, ok bool) {
 // all.
 func cutEnvValue(val string) (string, bool) {
 	if len(val) >= 2 && (val[0] == '"' || val[0] == '\'') {
-		for j := 1; j < len(val); j++ {
-			switch val[j] {
-			case '\\':
-				j++
-			case val[0]:
-				return val[1:j], val[0] == '\''
-			}
+		if j := closingQuote(val, val[0], 1); j >= 0 {
+			return unescapeEnv(val[1:j], val[0] == '\''), val[0] == '\''
 		}
 	}
 	if i := strings.Index(val, " #"); i >= 0 {
 		val = strings.TrimRight(val[:i], " \t")
 	}
 	return val, false
+}
+
+// closingQuote is the index in s, at or after from, of the quote q that
+// closes a quoted env-file value — the first one not preceded by a
+// backslash — or -1 when the value does not close on this text.
+func closingQuote(s string, q byte, from int) int {
+	for j := from; j < len(s); j++ {
+		switch s[j] {
+		case '\\':
+			j++
+		case q:
+			return j
+		}
+	}
+	return -1
+}
+
+// unescapeEnv reads the escapes inside a quoted env-file value the way
+// docker compose (v5.5.0) reads them. Between double quotes `\"` and `\\`
+// stand for the character after the backslash, `\$` for a dollar that is
+// not a reference, and `\n`, `\t`, `\r` for the control character (docker
+// compose reads `\a` and `\b` too; this does not); any other pair (`\x`,
+// `\'`) is kept as written. Between single quotes only `\'` is read, and everything else
+// (`\\`, `\n`) is kept as written. An unquoted value is not read here at
+// all: every backslash in it is text.
+func unescapeEnv(s string, single bool) string {
+	if !strings.Contains(s, `\`) {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] != '\\' || i+1 >= len(s) {
+			b.WriteByte(s[i])
+			continue
+		}
+		c := s[i+1]
+		switch {
+		case single && c == '\'':
+			b.WriteByte(c)
+		case !single && (c == '"' || c == '\\'):
+			b.WriteByte(c)
+		case !single && c == '$':
+			// A literal dollar, which expansion would otherwise read as a
+			// reference: written as the `$$` that expansion reads as one `$`.
+			b.WriteString("$$")
+		case !single && c == 'n':
+			b.WriteByte('\n')
+		case !single && c == 't':
+			b.WriteByte('\t')
+		case !single && c == 'r':
+			b.WriteByte('\r')
+		default:
+			b.WriteByte('\\')
+			b.WriteByte(c)
+		}
+		i++
+	}
+	return b.String()
 }
 
 // expandEnvValue expands one env-file value against the scope as it stands right

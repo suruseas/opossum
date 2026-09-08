@@ -7,9 +7,8 @@ package compose
 // kept. A quoted value is what stands between its quotes, and whatever
 // follows the closing quote — a comment or anything else — is dropped:
 // `"q" # note` is `q`; the closing quote is the first one not preceded by a
-// backslash, in either style. (The contents are kept as written — docker
-// compose turns `\"` into `"` and `\\` into `\`, and opossum does not; that
-// predates this.) opossum kept the whole line after the `=`: `with #
+// backslash, in either style (the escapes inside are read the way docker
+// compose reads them — see envescape_test.go). opossum kept the whole line after the `=`: `with #
 // hash`, and `"q" # note` with its quotes still on. The difference showed
 // once expansions were read as text (#824); before that the YAML comment
 // happened to eat ` # hash` in the unquoted case and, wrongly, in the
@@ -42,9 +41,9 @@ func TestADotEnvValueEndsAtItsCommentOrClosingQuote(t *testing.T) {
 		{"quotes inside an unquoted value are text", `OPOSSUM_E_O=a "b" # c`, `a "b"`},
 		{"an empty quoted value is empty", `OPOSSUM_E_P=""`, ""},
 		{"a single-quoted value is still not expanded", `OPOSSUM_E_Q='${OPOSSUM_E_A}' # c`, "${OPOSSUM_E_A}"},
-		{"an escaped double quote does not close the value", `OPOSSUM_E_R="a\"b" # c`, `a\"b`},
-		{"an escaped single quote does not close the value", `OPOSSUM_E_S='a\'b'`, `a\'b`},
-		{"an escaped backslash before the closing quote", `OPOSSUM_E_T="a\\" # c`, `a\\`},
+		{"an escaped double quote does not close the value", `OPOSSUM_E_R="a\"b" # c`, `a"b`},
+		{"an escaped single quote does not close the value", `OPOSSUM_E_S='a\'b'`, `a'b`},
+		{"an escaped backslash before the closing quote", `OPOSSUM_E_T="a\\" # c`, `a\`},
 		{"a tab before the comment is trimmed too", "OPOSSUM_E_U=a\t #b", "a"},
 		{"an empty single-quoted value is empty", `OPOSSUM_E_V=''`, ""},
 	}

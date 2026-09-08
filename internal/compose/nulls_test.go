@@ -92,9 +92,13 @@ func TestABareKeyNoEarlierFileGaveAValueToIsRefusedNamingTheLaterFile(t *testing
 		return p
 	}
 	base := write("base.yml", "services:\n  web:\n    image: alpine\nnetworks:\n  back: {internal: true}\n")
-	for _, tc := range []struct{ name, over, want string }{
-		{"a new network's internal", "networks:\n  other: {internal: }\n", "internal"},
-		{"a build.context no base has", "services:\n  web:\n    build: {context: }\n", "build.context must be a string, got nothing"},
+	for _, tc := range []struct {
+		name, over, want string
+		namesALine       bool
+	}{
+		{"a new network's internal", "networks:\n  other: {internal: }\n", "internal", false},
+		{"a build.context no base has", "services:\n  web:\n    build: {context: }\n", "build.context must be a string, got nothing", false},
+		{"a ports no base has", "services:\n  web:\n    ports:\n", "ports: expected a list, got nothing", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := LoadFiles([]string{base, write("over.yml", tc.over)}, nil)
@@ -105,6 +109,12 @@ func TestABareKeyNoEarlierFileGaveAValueToIsRefusedNamingTheLaterFile(t *testing
 			// part in it.
 			if strings.Contains(err.Error(), "base.yml") {
 				t.Errorf("the refusal should name the later file alone, got: %v", err)
+			}
+			// Where the decoder names a line, it is one of the merged
+			// document, and the message says so (the other two refusals
+			// come from checks that name the key and no line).
+			if tc.namesALine && !strings.Contains(err.Error(), "counts in the merged document") {
+				t.Errorf("a line of the merged document should be said to be one, got: %v", err)
 			}
 		})
 	}

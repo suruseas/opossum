@@ -101,6 +101,58 @@ func ignoredTopLevel(doc interpolated) []string {
 	return out
 }
 
+// liftExternalNames rewrites, in one file's tree before the merge, the map
+// form of a declaration's `external` (`external: {name: x}`) into what docker
+// compose reads it as: `external: true` with the name as the declaration's
+// own `name:`. Merged as written, a later file's `external: true` replaced
+// the whole map and the name went with it, where docker compose keeps
+// `name: x` (measured against v5.5.0; a later `external: false` keeps the
+// name too, a later `name:` wins, and a later map wins only where no
+// earlier file gave the declaration a name — where one did, and the names
+// differ, docker compose refuses the pair as a conflict, and so does this,
+// naming the file). The file has been checked on its own already, so a
+// `name:` in it that conflicts with its own map has been refused, and one
+// that agrees is the same value written twice. Volumes and networks;
+// a secret's name is read by nothing here (an external secret is refused
+// where a service uses it), so a secret's map is left as it is. The lift
+// shortens the merged document by a line per map, which the line a
+// merged-document refusal names counts in.
+func liftExternalNames(path string, doc, earlier map[string]any) error {
+	for _, kind := range []string{"volumes", "networks"} {
+		decls, ok := doc[kind].(map[string]any)
+		if !ok {
+			continue
+		}
+		for declName, d := range decls {
+			decl, ok := d.(map[string]any)
+			if !ok {
+				continue
+			}
+			ext, ok := decl["external"].(map[string]any)
+			if !ok {
+				continue
+			}
+			if name, ok := ext["name"].(string); ok && name != "" {
+				if existing := earlierDeclName(earlier, kind, declName); existing != "" && existing != name {
+					return fmt.Errorf("compose file %s: %s.%s: name %q and external.name %q conflict; only use name", path, kind, declName, existing, name)
+				}
+				decl["name"] = name
+			}
+			decl["external"] = true
+		}
+	}
+	return nil
+}
+
+// earlierDeclName is the `name:` the earlier files' merge gave the
+// declaration kind.declName, or "" when none did.
+func earlierDeclName(earlier map[string]any, kind, declName string) string {
+	decls, _ := earlier[kind].(map[string]any)
+	decl, _ := decls[declName].(map[string]any)
+	name, _ := decl["name"].(string)
+	return name
+}
+
 // networkDeclFields are the per-network keys opossum acts on. Anything else in
 // a declaration (ipam, driver, driver_opts, labels, attachable, enable_ipv6) is
 // parsed and dropped, and used to be dropped without a word — a project that
@@ -655,6 +707,19 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 		if doc, err = interpolateDocument(raw, scope.lookup()); err != nil {
 			return nil, fmt.Errorf("interpolating %s: %w", paths[0], err)
 		}
+		// The file is read as written first — every shape check names the
+		// service and the line the reader wrote — and only then is a
+		// service that extends another resolved, on the plain tree. The
+		// resolved tree decodes as the file did, but for a key that is
+		// still nothing once extends is read, which the resolver refuses.
+		if err := validateOne(paths[0], doc, nil); err != nil {
+			return nil, err
+		}
+		if resolved, err := resolveSameFileExtends(doc, paths[0]); err != nil {
+			return nil, err
+		} else if resolved != nil {
+			doc = *resolved
+		}
 	} else {
 		// Multiple files: merge their YAML trees, then render the merged result.
 		var merged map[string]any
@@ -673,7 +738,7 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 				// here rather than at the final decode, and saying "not valid YAML"
 				// for it was the same wrong advice by a different route — the one a
 				// reader hits precisely when they have split their file up.
-				return nil, decodeErr(path, false, err)
+				return nil, decodeErr(path, asWritten, err)
 			}
 			// Each file is checked on its own before the merge, as docker
 			// compose validates each before merging: a mistake in one file
@@ -682,7 +747,17 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 			// (a network listed twice in one file) is refused too. In a
 			// later file a key with nothing after it is "not given" (the
 			// earlier value stands) and is not read as a bare key.
-			if err := validateOne(path, one, merged != nil); err != nil {
+			if err := validateOne(path, one, merged); err != nil {
+				return nil, err
+			}
+			if err := liftExternalNames(path, m, merged); err != nil {
+				return nil, err
+			}
+			// `extends` within this file is read before the merge, as docker
+			// compose reads it: a service the file itself defines is what it
+			// extends, and an earlier file's version of the extending service
+			// is what this file's resolved version goes over.
+			if _, err := resolveExtendsInTree(path, m); err != nil {
 				return nil, err
 			}
 			if merged == nil {
@@ -695,7 +770,7 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 				// no earlier file gave a value to — a new network's
 				// `internal:`, a `build.context:` no base has — is nothing
 				// in the result, and refused naming this file.
-				if err := validateMerged(path, merged); err != nil {
+				if err := validateMerged(path, merged, asMerged); err != nil {
 					return nil, err
 				}
 			}
@@ -716,7 +791,11 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 
 	var f composeFile
 	if err := doc.into(&f); err != nil {
-		return nil, decodeErr(mergedName(paths), len(paths) > 1, blameService(doc, err))
+		read := asWritten
+		if len(paths) > 1 {
+			read = asMerged
+		}
+		return nil, decodeErr(mergedName(paths), read, blameService(doc, err))
 	}
 	if len(f.Services) == 0 {
 		return nil, fmt.Errorf("%s defines no services — add a top-level `services:` block with at least one service", mergedName(paths))
@@ -767,7 +846,17 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 		// its settings, and `config` shows the key's name but not what it
 		// would have brought in.
 		if svc.Extends != nil {
-			return nil, fmt.Errorf("service %q uses extends:%s, which opossum does not read — copy that service's settings into %q and remove extends:", name, svc.Extends.describe(), name)
+			switch {
+			case svc.Extends.Service == "":
+				// Nothing, `{}`, a list, or `file:` alone (docker compose:
+				// `extends.web.service is required`).
+				return nil, fmt.Errorf("service %q uses extends:%s, which names no service — write the service of this file to extend (`extends: base`, or `extends: {service: base}`), or remove extends:", name, svc.Extends.describe())
+			case svc.Extends.File == "":
+				// A service of this file is resolved before this point, so
+				// what reaches here wrote `file:` with nothing after it.
+				return nil, fmt.Errorf("service %q uses extends:%s with a `file:` that names no file — remove file: to extend a service of this file, name the file, or remove extends:", name, svc.Extends.describe())
+			}
+			return nil, fmt.Errorf("service %q uses extends:%s, which opossum does not read from another file yet — copy that service's settings into %q and remove extends: (extends within the same file is read)", name, svc.Extends.describe(), name)
 		}
 		if svc.Image == "" && svc.Build == nil {
 			return nil, fmt.Errorf("service %q must set either image or build", name)
@@ -993,7 +1082,18 @@ func normalizePort(spec string) (norm string, mirrored bool) {
 // unmarshaler and it has already been got wrong twice by enumerating. What is
 // true is the shape of the rule: only what the decoder collected is classified,
 // and everything else keeps the words it arrived with.
-func decodeErr(path string, merged bool, err error) error {
+// readAs says what document a decode failure's line numbers count in: the
+// file as written, the merge of several files, or a file after its
+// `extends` was read — the last two are documents nobody wrote.
+type readAs int
+
+const (
+	asWritten readAs = iota
+	asMerged
+	asExtended
+)
+
+func decodeErr(path string, read readAs, err error) error {
 	var collected *yaml.TypeError
 	switch {
 	case errors.As(err, &collected) && allDuplicateKeys(collected):
@@ -1018,9 +1118,13 @@ func decodeErr(path string, merged bool, err error) error {
 		// the reader wrote. It goes in the middle of one message rather than into
 		// a second copy of it: two copies is how half of a fix gets applied.
 		hint := ""
-		if merged {
+		switch read {
+		case asMerged:
 			hint = "\n  the line above counts in the merged document, not in any of the files as " +
 				"written — look for the key it names"
+		case asExtended:
+			hint = "\n  the line above counts in the document after extends was read, not in the " +
+				"file as written — look for the key it names"
 		}
 		return fmt.Errorf("compose file %s parsed, but a value is not the shape "+
 			"that field takes:\n  %s%w%s\n  check what that field is set to — if the value came "+
@@ -1095,32 +1199,27 @@ func withoutEchoedValues(te *yaml.TypeError) *yaml.TypeError {
 // taken out before the decode and the bare-key check does not fire on
 // them. The nodes are pruned, not re-rendered, so a failure keeps the
 // line the reader wrote.
-func validateOne(path string, one interpolated, override bool) error {
+func validateOne(path string, one interpolated, earlier map[string]any) error {
+	override := earlier != nil
 	doc := one.node
 	if doc == nil {
 		var parsed yaml.Node
 		if err := yaml.Unmarshal(one.raw, &parsed); err != nil {
-			return decodeErr(path, false, err)
+			return decodeErr(path, asWritten, err)
 		}
 		doc = &parsed
 	}
-	// A bare top-level `services:` is a mistake in any file — there is no
-	// service to keep — and docker compose refuses it in each (`services
-	// must be a mapping`); the checks below read it as a file with no
-	// services, which a later file may fill.
-	if root := documentRoot(doc); root != nil {
-		for i := 0; i+1 < len(root.Content); i += 2 {
-			if root.Content[i].Value == "services" && isNothing(root.Content[i+1]) {
-				return fmt.Errorf("compose file %s: services must be a mapping — the key has nothing under it; write the services or remove the key", path)
-			}
-		}
+	if err := checkTopLevel(path, documentRoot(doc), earlier, override); err != nil {
+		return err
 	}
 	if override {
 		doc = withoutNotGiven(doc)
+	} else {
+		doc = withoutNotGivenInExtending(doc)
 	}
 	var f composeFile
 	if err := doc.Decode(&f); err != nil {
-		return decodeErr(path, false, blameService(interpolated{node: doc, raw: one.raw}, err))
+		return decodeErr(path, asWritten, blameService(interpolated{node: doc, raw: one.raw}, err))
 	}
 	// In the first file a service with nothing under it is the mistake it
 	// is in a single file (docker compose refuses it there even when a
@@ -1152,9 +1251,265 @@ func documentRoot(doc *yaml.Node) *yaml.Node {
 	return doc
 }
 
+// resolveExtendsInTree reads `extends:` where it names a service of the
+// same file, the way docker compose (v5.5.0) reads it: the named service's
+// settings come first and the extending service's own settings go over
+// them, merged by the rules a later -f file merges by — lists such as
+// `ports`, `volumes` and `cap_add` are the other's then its own, mappings
+// such as `environment` and `labels` merge by key with its own winning,
+// a scalar such as `image` or `command` is its own where it has one, and
+// `healthcheck` merges by sub-key (measured; the oracle fixtures are kept
+// with the project's dogfood). A chain (web extends mid extends common)
+// resolves the named service first; a cycle is refused (docker compose:
+// `Circular reference`), and so is a service the file does not define,
+// and one written with nothing under it. `extends: {file: …}` and a value
+// of neither shape are left in place for the decode to refuse. With
+// several -f files this runs on each file before the merge, as docker
+// compose resolves it: what a file extends is what that file defines.
+// Reports whether anything was resolved.
+func resolveExtendsInTree(where string, tree map[string]any) (bool, error) {
+	services, _ := tree["services"].(map[string]any)
+	touched := false
+	done := map[string]bool{}
+	var resolve func(name string, stack []string) error
+	resolve = func(name string, stack []string) error {
+		if done[name] {
+			return nil
+		}
+		svc, ok := services[name].(map[string]any)
+		if !ok {
+			done[name] = true
+			return nil
+		}
+		ext, has := svc["extends"]
+		if !has {
+			done[name] = true
+			return nil
+		}
+		var target string
+		otherFile := false
+		switch e := ext.(type) {
+		case string:
+			target = e
+		case map[string]any:
+			target, _ = e["service"].(string)
+			// A `file:` key, even one with nothing after it, names another
+			// file (docker compose tries to read it and fails).
+			_, otherFile = e["file"]
+		}
+		if otherFile || target == "" {
+			done[name] = true
+			return nil
+		}
+		for _, s := range stack {
+			if s == name {
+				return fmt.Errorf("%s: service %q: extends forms a cycle (%s → %s) — remove extends: from one of them", where, name, strings.Join(stack, " → "), name)
+			}
+		}
+		raw, exists := services[target]
+		if !exists {
+			return fmt.Errorf("%s: service %q extends %q, which the file does not define — name a service this file defines, or remove extends:", where, name, target)
+		}
+		// In a later -f file a service key with nothing under it is "not
+		// given" (the earlier file's stands), but extends reads the service
+		// as this file defines it, and here that is nothing: refused, where
+		// docker compose leaves the key unread and the service without an
+		// image (measured).
+		if _, ok := raw.(map[string]any); !ok {
+			return fmt.Errorf("%s: service %q extends %q, which this file writes with nothing under it — extends reads the service as this file defines it; give it a body here, or remove extends:", where, name, target)
+		}
+		if err := resolve(target, append(stack, name)); err != nil {
+			return err
+		}
+		// The named service has been resolved above; what it still has under
+		// `extends` names another file, which is not read yet. Refused here
+		// naming the named service — copied over, the key would be refused
+		// naming this one, which wrote no `file:`.
+		if left, has := services[target].(map[string]any)["extends"]; has {
+			return fmt.Errorf("%s: service %q extends %q, which itself uses extends:%s — opossum does not read extends from another file yet; copy that service's settings into %q and remove extends:", where, name, target, describeExtendsTree(left), target)
+		}
+		base := deepCopyTree(services[target]).(map[string]any)
+		own := deepCopyTree(svc).(map[string]any)
+		delete(own, "extends")
+		services[name] = mergeMap(base, own, childPath("services", name))
+		done[name] = true
+		touched = true
+		return nil
+	}
+	names := make([]string, 0, len(services))
+	for name := range services {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if err := resolve(name, nil); err != nil {
+			return false, err
+		}
+	}
+	return touched, nil
+}
+
+// describeExtendsTree is ExtendsRef.describe for the plain-tree form of
+// the value, as the resolver sees it.
+func describeExtendsTree(v any) string {
+	ref := &ExtendsRef{}
+	switch e := v.(type) {
+	case string:
+		ref.Service = e
+	case map[string]any:
+		ref.Service, _ = e["service"].(string)
+		ref.File, _ = e["file"].(string)
+	}
+	return ref.describe()
+}
+
+// resolveSameFileExtends is resolveExtendsInTree for a single file: the
+// tree comes back re-marshalled only when something was resolved, so a
+// file with no such service keeps its positions for the failures that
+// name a line (a file with one has been checked as written already).
+func resolveSameFileExtends(doc interpolated, where string) (*interpolated, error) {
+	var tree map[string]any
+	if err := doc.into(&tree); err != nil {
+		return nil, nil // the decode below says so in its own words
+	}
+	touched, err := resolveExtendsInTree(where, tree)
+	if err != nil || !touched {
+		return nil, err
+	}
+	// A key that is still nothing once extends is read — bare in the
+	// extending service, absent from the named one — is refused here, as
+	// docker compose refuses it (`must be a array`).
+	if err := validateMerged(where, tree, asExtended); err != nil {
+		return nil, err
+	}
+	data, err := yaml.Marshal(tree)
+	if err != nil {
+		return nil, fmt.Errorf("reading extends in %s: %w", where, err)
+	}
+	return &interpolated{raw: data}, nil
+}
+
+// deepCopyTree copies a decoded YAML tree (mappings, lists and scalars) so
+// that merging into the copy leaves the original service as it was.
+func deepCopyTree(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, val := range x {
+			out[k] = deepCopyTree(val)
+		}
+		return out
+	case []any:
+		out := make([]any, len(x))
+		for i, val := range x {
+			out[i] = deepCopyTree(val)
+		}
+		return out
+	}
+	return v
+}
+
+// parsedRoot is the document's root mapping, parsing the expanded bytes
+// when expansion left the tree unbuilt; nil when the document is not a
+// mapping (the decode says so in its own words).
+func parsedRoot(one interpolated) (*yaml.Node, error) {
+	doc := one.node
+	if doc == nil {
+		var parsed yaml.Node
+		if err := yaml.Unmarshal(one.raw, &parsed); err != nil {
+			return nil, err
+		}
+		doc = &parsed
+	}
+	return documentRoot(doc), nil
+}
+
+// topLevelDecls are the top-level mappings of declarations: written with
+// nothing under them, docker compose refuses each (`networks must be a
+// mapping`), where reading them as "none" would let the file through.
+var topLevelDecls = map[string]bool{"networks": true, "volumes": true, "secrets": true, "configs": true}
+
+// checkTopLevel reads the shapes of a file's top-level keys the way docker
+// compose (v5.5.0) checks them before anything runs. A bare `services:`
+// is a mistake in any file — there is no service to keep — and so is a
+// bare `networks:`, `volumes:`, `secrets:`, `configs:` or `name:` in the
+// first file; in a later file such a bare key is "not given" where an
+// earlier file gave the key a value (pruned before this), and refused
+// where none did, as docker compose refuses it — and a bare `version:`
+// in a later file is refused whatever came before, as there. A
+// declaration mapping written as a list or a scalar (`networks: [a]`) is
+// refused naming the key, where the decode named a Go type. A `name:`
+// or `version:` that is not a string — a number, a boolean, a list, a
+// mapping — is refused (`name must be a string`); read as written,
+// `name: 42` was the project "42" and a bare `name:` the directory's.
+// `include` with something in it is refused outright:
+// opossum does not read it, and listing it as ignored left the services
+// the named files hold out of the project in silence — the files can be
+// passed with -f instead (an empty or bare `include:` names nothing, and
+// docker compose takes it). A mapping brought in by `<<:` is walked the
+// same way; earlier is the earlier files' merge, nil for the first.
+func checkTopLevel(path string, root *yaml.Node, earlier map[string]any, override bool) error {
+	if root == nil {
+		return nil
+	}
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		key := unalias(root.Content[i])
+		if key.Tag == "!!merge" {
+			merged := unalias(root.Content[i+1])
+			maps := []*yaml.Node{merged}
+			if merged.Kind == yaml.SequenceNode {
+				maps = merged.Content
+			}
+			for _, m := range maps {
+				if m = unalias(m); m.Kind == yaml.MappingNode {
+					if err := checkTopLevel(path, m, earlier, override); err != nil {
+						return err
+					}
+				}
+			}
+			continue
+		}
+		k, v := key.Value, unalias(root.Content[i+1])
+		bare := isNothing(root.Content[i+1])
+		givenBefore := override && earlier[k] != nil
+		switch {
+		case k == "services" && bare:
+			return fmt.Errorf("compose file %s: services must be a mapping — the key has nothing under it; write the services or remove the key", path)
+		case k == "include":
+			if bare || (v.Kind == yaml.SequenceNode && len(v.Content) == 0) {
+				continue
+			}
+			return fmt.Errorf("compose file %s: include is not read — the files it names would be left out of the project; pass them with -f instead (`-f %s -f <other>`) and remove include", path, filepath.Base(path))
+		case k == "version" && bare:
+			return fmt.Errorf("compose file %s: version must be a string — the key has nothing after it; write the value or remove the key", path)
+		case k == "name" && bare:
+			if !givenBefore {
+				return fmt.Errorf("compose file %s: name must be a string — the key has nothing after it; write the value or remove the key", path)
+			}
+		case k == "name" || k == "version":
+			if v.Kind != yaml.ScalarNode {
+				return fmt.Errorf("compose file %s: %s must be a string, got %s (line %d)", path, k, kindName(v.Kind), key.Line)
+			}
+			if word := nonStringWord(v); word != "" {
+				return fmt.Errorf("compose file %s: %s must be a string, got %s (line %d) — quote it (`\"%s\"`) if it is meant literally", path, k, word, v.Line, v.Value)
+			}
+		case topLevelDecls[k] && bare:
+			if !givenBefore {
+				return fmt.Errorf("compose file %s: %s must be a mapping — the key has nothing under it; write the declarations or remove the key", path, k)
+			}
+		case topLevelDecls[k] && v.Kind != yaml.MappingNode:
+			// A list or a scalar where the declarations belong: docker
+			// compose says `networks must be a mapping`; the decode said it
+			// in YAML's words, with the Go type standing in for the field.
+			return fmt.Errorf("compose file %s: %s must be a mapping, got %s (line %d) — write the declarations as `name: {…}`", path, k, kindName(v.Kind), key.Line)
+		}
+	}
+	return nil
+}
+
 // validateMerged decodes what the files so far make together and names
 // the file just added in what it refuses.
-func validateMerged(path string, merged map[string]any) error {
+func validateMerged(path string, merged map[string]any, read readAs) error {
 	data, err := yaml.Marshal(merged)
 	if err != nil {
 		return fmt.Errorf("merging compose files: %w", err)
@@ -1162,9 +1517,58 @@ func validateMerged(path string, merged map[string]any) error {
 	doc := interpolated{raw: data}
 	var f composeFile
 	if err := doc.into(&f); err != nil {
-		return decodeErr(path, true, blameService(doc, err))
+		return decodeErr(path, read, blameService(doc, err))
 	}
 	return nil
+}
+
+// withoutNotGivenInExtending copies the document with the bare keys of each
+// service that extends another pruned: there a key with nothing after it is
+// "not given" — the named service's value stands — as it is in a later -f
+// file (docker compose reads extends before it checks the shapes, measured).
+// What is still nothing once extends is read is refused then.
+func withoutNotGivenInExtending(doc *yaml.Node) *yaml.Node {
+	root := documentRoot(doc)
+	if root == nil {
+		return doc
+	}
+	newRoot := copyMapping(root)
+	for i := 0; i+1 < len(newRoot.Content); i += 2 {
+		if newRoot.Content[i].Value != "services" || newRoot.Content[i+1].Kind != yaml.MappingNode {
+			continue
+		}
+		services := copyMapping(newRoot.Content[i+1])
+		for j := 0; j+1 < len(services.Content); j += 2 {
+			if svc := services.Content[j+1]; svc.Kind == yaml.MappingNode && hasKey(svc, "extends") {
+				services.Content[j+1] = withoutNotGiven(svc)
+			}
+		}
+		newRoot.Content[i+1] = services
+	}
+	if root == doc {
+		return newRoot
+	}
+	out := *doc
+	out.Content = []*yaml.Node{newRoot}
+	return &out
+}
+
+// copyMapping is a mapping node with its own copy of the entry list, so
+// that replacing an entry leaves the original node as it was.
+func copyMapping(n *yaml.Node) *yaml.Node {
+	out := *n
+	out.Content = append([]*yaml.Node(nil), n.Content...)
+	return &out
+}
+
+// hasKey reports whether the mapping node has an entry under key.
+func hasKey(m *yaml.Node, key string) bool {
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value == key {
+			return true
+		}
+	}
+	return false
 }
 
 // withoutNotGiven copies a document's tree without the mapping entries

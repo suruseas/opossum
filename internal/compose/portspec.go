@@ -8,6 +8,60 @@ import (
 	"strings"
 )
 
+// normalizePortSpec writes a checked short-form port the way the runtime
+// takes it, dropping the parts that are written as nothing: an empty host
+// address (`::80`, `:8080:80` — a host address of `:` or nothing) and an
+// empty protocol after a `/` (`80/`, `80:80/`); an empty host port left
+// behind (`:80`) is mirrored from the container port later, as a lone
+// container port is. docker compose reads each
+// as the ports that are there (`::80` and `80/` are the container port 80,
+// `:8080:80` and `80:80/` are `8080:80` and `80:80`; measured on v5.5.0);
+// Apple `container run -p` refuses the spellings (`invalid publish
+// value`, measured on 1.3.1), so passed on — as written, or as `:80:80`
+// where the mirroring of a lone container port kept the empty address —
+// they failed at `up`. A real address is kept, and an IPv6 one written
+// without brackets is bracketed (`::1:8080:80` → `[::1]:8080:80`; see
+// below). Called after checkPortSpec: dropping the empty
+// parts first would fold an address that is only colons (`:::80`) into a
+// port the check would then pass.
+func normalizePortSpec(spec string) string {
+	s, proto := spec, ""
+	if i := strings.IndexByte(s, '/'); i >= 0 {
+		s, proto = s[:i], s[i+1:]
+	}
+	parts := strings.Split(s, ":")
+	// An IPv6 host address written without brackets (`::1:8080:80`, which
+	// docker compose reads as the address `::1`) is passed bracketed, the
+	// only spelling the runtime takes (`container run -p '::1:8080:80'` is
+	// `invalid publish value`, `[::1]:8080:80` runs; measured on 1.3.1) —
+	// as the long form already passes an unbracketed `host_ip`. Before
+	// the empty parts are dropped, so that the any address written as
+	// nothing but colons (`:::8080:80`, the address `::` to docker
+	// compose) is an address, not two empty parts.
+	if len(parts) > 2 {
+		if addr := strings.Join(parts[:len(parts)-2], ":"); strings.Contains(addr, ":") && !strings.HasPrefix(addr, "[") {
+			parts = append([]string{"[" + addr + "]"}, parts[len(parts)-2:]...)
+		}
+	}
+	if len(parts) > 2 {
+		empty := true
+		for _, a := range parts[:len(parts)-2] {
+			if a != "" {
+				empty = false
+				break
+			}
+		}
+		if empty {
+			parts = parts[len(parts)-2:]
+		}
+	}
+	s = strings.Join(parts, ":")
+	if proto != "" {
+		s += "/" + proto
+	}
+	return s
+}
+
 // checkPortSpec reads a short-form port (`[host_ip:]host:container[/proto]`,
 // each port a number or a `low-high` range) the way docker compose validates
 // one, and says what is wrong without reading the value back — a `${VAR}`

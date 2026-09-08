@@ -6,6 +6,26 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-09-09
+
+### Added
+
+- A service may now `extends:` another service of the same file, read the way docker compose reads it: the named service's settings come first and the extending service's own go over them, merged by the rules a later `-f` file merges by (lists appended, mappings merged by key, `healthcheck` by sub-key); chains resolve in order, and a cycle or an undefined service is refused by name. With several `-f` files, each file's `extends` is resolved against the services that file defines, before the files are merged, as docker compose does. `extends: {file: …}` is still refused.
+
+### Changed
+
+- A value under a boolean field that is not a boolean (`read_only: "1"`, `init: maybe`, an env file's `required: 0`) is now refused naming the key and the line, with `true`/`false` as the way out, rather than in YAML's own words (`cannot unmarshal !!str into bool`); the value itself is not repeated, since it may have come from a variable. The YAML 1.1 `y`/`n` are read as booleans, as they were.
+- A top-level `networks`, `volumes` or `secrets` written as a list or a single value is now refused naming the key and the line, with `name: {…}` as the way out, rather than in YAML's own words with a Go type standing in for the field.
+
+### Fixed
+
+- Escapes inside a quoted `.env` or `env_file` value are now read the way docker compose reads them: between double quotes `\"`, `\\`, `\$` stand for the character itself and `\n`, `\t`, `\r` for the control character (`KEY="say \"hi\""` is `say "hi"`); between single quotes only `\'` is read. Before this every backslash was kept as written.
+- In the older map form of `external` (`external: {name: x}`), a `name` written as a number, a boolean, a list, a mapping or nothing is now refused at load the way docker compose refuses it, naming the line and how to quote it, rather than read as the name `42` or as no name.
+- With several `-f` files, a later file's `external: true` no longer drops the name an earlier file gave in the map form (`external: {name: x}`): the map form is read as `external: true` with `name: x` before the merge, the way docker compose reads it, so the name survives, a later `name:` still wins, and a later map with a different name is refused as a conflict, as docker compose refuses it.
+- A short-form port with a part written as nothing (`::80`, `:8080:80`, `80/`, `80:80/`) is now read as the ports that are there, the way docker compose reads it, rather than passed to the runtime as written, where `container run -p` refused it at `up`.
+- A short-form port with an IPv6 host address written without brackets (`::1:8080:80`, which docker compose reads as the address `::1`) is now passed to the runtime bracketed (`[::1]:8080:80`), the spelling `container run -p` takes, rather than as written, where the runtime refused it at `up`.
+- A top-level `name:` or `version:` that is not a string (`name: 42`, a bare `name:`), a top-level `networks:`, `volumes:`, `secrets:` or `configs:` with nothing under it, and `configs` that is not a mapping are now refused at load the way docker compose refuses them, rather than read as the project `42`, the directory's name, or nothing. A file with `include:` is refused by name — opossum does not read it, and the files it names were left out of the project in silence; pass them with `-f` instead.
+
 ## [0.24.8] - 2026-09-08
 
 ### Changed
@@ -1388,7 +1408,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.24.8...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.25.0...HEAD
+[0.25.0]: https://github.com/suruseas/opossum/compare/v0.24.8...v0.25.0
 [0.24.8]: https://github.com/suruseas/opossum/compare/v0.24.7...v0.24.8
 [0.24.7]: https://github.com/suruseas/opossum/compare/v0.24.6...v0.24.7
 [0.24.6]: https://github.com/suruseas/opossum/compare/v0.24.5...v0.24.6

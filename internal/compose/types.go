@@ -789,7 +789,9 @@ func shapeOf(k string) string {
 func (s *Service) UnmarshalYAML(value *yaml.Node) error {
 	type raw Service // no UnmarshalYAML -> default struct decoding
 	var r raw
-	readQuotedBools(value, "init", "read_only", "ssh")
+	if err := readQuotedBools(value, "init", "read_only", "ssh"); err != nil {
+		return err
+	}
 	if err := value.Decode(&r); err != nil {
 		return err
 	}
@@ -1028,7 +1030,11 @@ func decodeExtends(n yaml.Node) *ExtendsRef {
 	ref := &ExtendsRef{}
 	switch n.Kind {
 	case yaml.ScalarNode:
-		ref.Service = n.Value
+		// `extends: ~` names no service, as `extends:` alone does; the
+		// node's text would be "~" or "null".
+		if n.Tag != "!!null" {
+			ref.Service = n.Value
+		}
 	case yaml.MappingNode:
 		var m struct {
 			Service string `yaml:"service"`
@@ -1133,7 +1139,7 @@ func (p *Ports) UnmarshalYAML(value *yaml.Node) error {
 			if err := checkPortSpec(item.Value); err != nil {
 				return fmt.Errorf("ports entry %d of %d: %v", i+1, len(value.Content), err)
 			}
-			out = append(out, item.Value)
+			out = append(out, normalizePortSpec(item.Value))
 			continue
 		}
 		// Long form: {target, published, protocol, host_ip}. target/published are
@@ -1247,9 +1253,13 @@ func (v *Volumes) UnmarshalYAML(value *yaml.Node) error {
 		if err := bareKeysIn(fmt.Sprintf("volumes entry %d of %d", i+1, len(value.Content)), item, "type", "source", "target"); err != nil {
 			return err
 		}
-		readQuotedBools(item, "read_only")
+		if err := readQuotedBools(item, "read_only"); err != nil {
+			return fmt.Errorf("volumes entry %d of %d: %w", i+1, len(value.Content), err)
+		}
 		if vol, ok := mappingValue(item, "volume"); ok {
-			readQuotedBools(vol, "nocopy")
+			if err := readQuotedBools(vol, "nocopy"); err != nil {
+				return fmt.Errorf("volumes entry %d of %d: volume.%w", i+1, len(value.Content), err)
+			}
 		}
 		var lf struct {
 			Type string `yaml:"type"`
@@ -1412,6 +1422,51 @@ func wantMapping(value *yaml.Node, decl string) error {
 	return &yaml.TypeError{Errors: []string{fmt.Sprintf("line %d: cannot unmarshal %s into compose.%s", value.Line, value.ShortTag(), decl)}}
 }
 
+// checkExternalMap reads the keys of the map form of `external` before
+// the decode: only `name` lives here — docker compose refuses any other
+// key (`additional properties … not allowed`), and a typo for `name`
+// would otherwise turn into a nameless external volume — and the name is
+// a string: docker compose refuses a number, a boolean, a list, a
+// mapping or nothing there (`external.name must be a string`), where the
+// decode read `name: 42` as the name "42" and `name:` as no name at all.
+// A mapping brought in by `<<:` (or a list of them) is walked the same
+// way, since its keys end up here; a key can be an alias too (`*k: x`).
+func checkExternalMap(n *yaml.Node) error {
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		key := unalias(n.Content[i])
+		if key.Tag == "!!merge" {
+			merged := unalias(n.Content[i+1])
+			maps := []*yaml.Node{merged}
+			if merged.Kind == yaml.SequenceNode {
+				maps = merged.Content
+			}
+			for _, m := range maps {
+				if m = unalias(m); m.Kind == yaml.MappingNode {
+					if err := checkExternalMap(m); err != nil {
+						return err
+					}
+				}
+			}
+			continue
+		}
+		if k := key.Value; k != "name" {
+			return &yaml.TypeError{Errors: []string{fmt.Sprintf("line %d: external: unknown key %q (only name is allowed here)", key.Line, k)}}
+		}
+		v := unalias(n.Content[i+1])
+		switch {
+		case v.Kind == yaml.ScalarNode && v.ShortTag() == "!!null":
+			return &yaml.TypeError{Errors: []string{fmt.Sprintf("line %d: external: name has nothing after it — write the name, or remove the key", key.Line)}}
+		case v.Kind == yaml.ScalarNode:
+			if word := nonStringWord(v); word != "" {
+				return &yaml.TypeError{Errors: []string{fmt.Sprintf("line %d: external: name must be a string, got %s — quote it (`\"%s\"`) if it is meant literally", v.Line, word, v.Value)}}
+			}
+		default:
+			return &yaml.TypeError{Errors: []string{fmt.Sprintf("line %d: external: name must be a string, got %s", key.Line, kindName(v.Kind))}}
+		}
+	}
+	return nil
+}
+
 // externalName settles the name between an explicit `name:` and the map
 // form's `external.name`. docker compose accepts both when they agree and
 // refuses the file when they differ (measured on v5.4.0: "name and
@@ -1463,17 +1518,8 @@ func decodeExternal(n *yaml.Node) (external bool, name string, err error) {
 		}
 		return false, "", shape(fmt.Sprintf("%q", n.Value))
 	case yaml.MappingNode:
-		// Only `name` lives here. docker compose refuses any other key
-		// ("additional properties … not allowed"), and so does this — a typo
-		// for `name` would otherwise turn into a nameless external volume.
-		// A key can be an alias too (`*k: x`), and `<<` brings a mapping's keys
-		// in; the decode below resolves both, so the check reads the key as
-		// decoded and leaves `<<` to it.
-		for i := 0; i+1 < len(n.Content); i += 2 {
-			key := unalias(n.Content[i])
-			if k := key.Value; k != "name" && key.Tag != "!!merge" {
-				return false, "", &yaml.TypeError{Errors: []string{fmt.Sprintf("line %d: external: unknown key %q (only name is allowed here)", key.Line, k)}}
-			}
+		if err := checkExternalMap(n); err != nil {
+			return false, "", err
 		}
 		var m struct {
 			Name string `yaml:"name"`
@@ -1533,7 +1579,9 @@ func (d *NetworkDecl) UnmarshalYAML(value *yaml.Node) error {
 	if err := refuseNonStringDeclKeys("a network's declaration", value, "name", "driver"); err != nil {
 		return err
 	}
-	readQuotedBools(value, "internal")
+	if err := readQuotedBools(value, "internal"); err != nil {
+		return fmt.Errorf("a network's declaration: %w", err)
+	}
 	var raw rawNetworkDecl
 	if err := value.Decode(&raw); err != nil {
 		return err
@@ -1886,7 +1934,9 @@ func (e *EnvFiles) UnmarshalYAML(value *yaml.Node) error {
 			if err := bareKeysIn(fmt.Sprintf("env_file entry %d of %d", i+1, len(value.Content)), item, "path"); err != nil {
 				return err
 			}
-			readQuotedBools(item, "required")
+			if err := readQuotedBools(item, "required"); err != nil {
+				return fmt.Errorf("env_file entry %d of %d: %w", i+1, len(value.Content), err)
+			}
 			var lf struct {
 				Path     string `yaml:"path"`
 				Required *bool  `yaml:"required"`
@@ -2068,14 +2118,14 @@ func refuseNonScalarValue(what string, n *yaml.Node) error {
 
 // boolWord reads a word the way docker compose (v5.5.0) reads a boolean
 // written as text: `true`/`false` in any case, and the YAML 1.1 words
-// `yes`/`no`/`on`/`off` (with a warning there) in any case. Anything else
-// — `1`, `t`, `maybe`, the empty string — is not a boolean (`invalid
-// boolean`).
+// `yes`/`no`/`on`/`off`/`y`/`n` (with a warning there) in any case.
+// Anything else — `1`, `t`, `maybe`, the empty string — is not a boolean
+// (`invalid boolean`).
 func boolWord(s string) (value, ok bool) {
 	switch strings.ToLower(s) {
-	case "true", "yes", "on":
+	case "true", "yes", "on", "y":
 		return true, true
-	case "false", "no", "off":
+	case "false", "no", "off", "n":
 		return false, true
 	}
 	return false, false
@@ -2087,23 +2137,40 @@ func boolWord(s string) (value, ok bool) {
 // compose reads it. To YAML a quoted word is a string; a bool field took
 // the YAML 1.1 words in their usual spellings (`"yes"`, `"Off"`) and
 // refused the rest (`cannot unmarshal !!str into bool`), `"true"` itself
-// included, where docker compose went on. What boolWord does not read
-// stays a string and is refused, as docker compose refuses it. A value
-// that is an alias is left alone: its target may be read elsewhere as
-// the string it is.
-func readQuotedBools(n *yaml.Node, keys ...string) {
+// included, where docker compose went on. A scalar boolWord does not
+// read — `"1"`, `"t"`, `""`, `maybe`, the number 1 — is refused here,
+// naming the key and the line but not the value (it may have come from a
+// `${...}` reference, where a secret lives — the place, not the
+// contents), as docker compose refuses it (`invalid boolean: maybe` for a
+// word, `must be a boolean or string` for a number); the struct decode
+// used to refuse it in YAML's own words, with no field and no way out. A
+// key with nothing after it is left to the bare-key checks, and a value
+// that is an alias is left alone (still refused in YAML's words when it
+// does not fit): its target may be read elsewhere as the string it is.
+func readQuotedBools(n *yaml.Node, keys ...string) error {
 	if n == nil || n.Kind != yaml.MappingNode {
-		return
+		return nil
 	}
 	for i := 0; i+1 < len(n.Content); i += 2 {
-		if !slices.Contains(keys, n.Content[i].Value) {
+		k := n.Content[i].Value
+		if !slices.Contains(keys, k) {
 			continue
 		}
 		v := n.Content[i+1]
-		if b, ok := boolWord(v.Value); ok && v.Kind == yaml.ScalarNode {
-			v.Tag, v.Value, v.Style = "!!bool", strconv.FormatBool(b), 0
+		if v.Kind != yaml.ScalarNode || v.ShortTag() == "!!null" {
+			continue
 		}
+		b, ok := boolWord(v.Value)
+		if !ok {
+			got := "a word that is not one"
+			if w := nonStringWord(v); w != "" {
+				got = w
+			}
+			return fmt.Errorf("%s must be true or false, got %s (line %d) — write `true` or `false`", k, got, v.Line)
+		}
+		v.Tag, v.Value, v.Style = "!!bool", strconv.FormatBool(b), 0
 	}
+	return nil
 }
 
 // mappingValue is the value written directly under key in mapping n —
@@ -2304,7 +2371,9 @@ func (h *Healthcheck) UnmarshalYAML(value *yaml.Node) error {
 		StartPeriod yaml.Node     `yaml:"start_period"`
 		Disable     bool          `yaml:"disable"`
 	}
-	readQuotedBools(value, "disable")
+	if err := readQuotedBools(value, "disable"); err != nil {
+		return fmt.Errorf("healthcheck.%w", err)
+	}
 	if err := value.Decode(&raw); err != nil {
 		return err
 	}
