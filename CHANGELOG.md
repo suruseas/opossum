@@ -6,6 +6,23 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-09-09
+
+### Added
+
+- `extends` now reads a service from another file too (`extends: {file: base.yml, service: common}`), the way docker compose reads it: the named file is read from the project directory (the first `-f` file's, or the include entry's), the service's own `extends` is resolved first (a chain may run on into a third file, found from the named file's directory; a cycle through files is refused), and the paths it wrote relative to its file — `build`, a bind mount's source, `env_file`, `develop.watch` paths — resolve against that file's directory. Only the service comes over: the named file's top-level `volumes`, `networks` and `secrets` declarations do not. A missing file or service is refused naming the file. Measured against docker compose v5.5.0.
+- A compose file may now `include:` other files, read the way docker compose reads them: each entry names a file (or, in the long form, one or several under `path`, with `project_directory` and `env_file`), read as a project of its own — its relative paths (including a nested `include` and a secret's `file`) count from its project directory, its own `include` and `extends` are resolved, and its variables come from that directory's `.env` (or the entry's `env_file`) under the including project's shell and `.env`; its services and its `volumes`/`networks`/`secrets`/`configs` declarations come over (not its `name`), merged in order under the including file, whose settings win where both define a service, and a service of the including file may `extends:` an included one. A file that is not there, an include that comes back to a file, and an `include:` that is not a list are refused naming the file. Until now a file with `include:` was refused outright.
+
+### Changed
+
+- Verified against Apple `container` 1.4.1: the command outputs opossum reads were re-taken on it and nothing it reads changed — `container system status` gained rows (client, host, server, paths, resource counts) but still carries the `status running` line the readiness check looks for, the JSON fields `inspect` and `ls --format json` are read from are all still there (only `/` is no longer escaped), and the error wordings are the same. The fake runtime used by the tests now prints the 1.4.1 status table. Nothing 1.4.1-specific needed fixing.
+- `doctor` and the commands that check the runtime is up now read `container system status --format json` (Apple `container` 1.4.1) before the table, so the check does not depend on the table's rows; `doctor` reports the server's version and how many containers and images the system holds, and warns — with the restart as the fix — when the client and the server run different versions (an apiserver kept running across an upgrade). Where the JSON form is not there (1.3.1), the table is read as before.
+
+### Fixed
+
+- `env_file` written as an absolute path is read from that path. Before, the project directory was put in front of it, and the file was reported as not found under the project.
+- `extends: {file: …}` now finds a relative path from the project directory — the first `-f` file's, or the include entry's — as docker compose does, where it was taken from the extending file's own directory (a file the named one extends in turn is still found from the named file's directory). And a service key an including file writes with nothing under it is the included service where one defines it, as in a later `-f` file, instead of a refusal.
+
 ## [0.25.0] - 2026-09-09
 
 ### Added
@@ -1408,7 +1425,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.25.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.26.0...HEAD
+[0.26.0]: https://github.com/suruseas/opossum/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/suruseas/opossum/compare/v0.24.8...v0.25.0
 [0.24.8]: https://github.com/suruseas/opossum/compare/v0.24.7...v0.24.8
 [0.24.7]: https://github.com/suruseas/opossum/compare/v0.24.6...v0.24.7

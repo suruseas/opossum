@@ -13,8 +13,9 @@ opossum は二層で検証する:
 
 ## いま検証されている `container` の版
 
-**2026-09-04 / `container CLI version 1.3.1`（Homebrew formula `1.3.1`）/ macOS 26。**
-（1.2.2 → 1.3.1 の差分と、1.3.1 で引き直していない主張は `testdata/real-cli-output.md` の冒頭に索引がある。）
+**2026-09-09 / `container CLI version 1.4.1`（Homebrew formula `1.4.1`）/ macOS 26。**
+（1.3.1 → 1.4.1 の差分と、1.4.1 で引き直していない節は `testdata/real-cli-output.md` の冒頭に索引がある。
+1.4.1 固有の非互換は見つかっていない——`system status` の行は増えたが opossum が読む `status running` は残った。）
 更新は `brew upgrade container`（Apple の pkg ではない）。更新後は `container system start`。
 
 上の表の「日々」が意味を持つのは、fake が**現実の版と一致している**あいだだけ。その根拠は
@@ -165,6 +166,19 @@ go run ../cmd/opossum -f compose.yaml down
 ## 実機検証の記録
 
 この節に書いた実機テストの名前は、ソースにその関数が実在することが検査される。消したテストを記録に残すときは打ち消し線で書く——~~`TestARealExample`~~ のように。打ち消した名前は「もう無い」として検査され（ソースに残っていれば赤）、実在するテストを名指した数には入らない。
+
+- **2026-09-09 — `container` 1.4.1 への追従（main `9633a64`）**。`brew upgrade container`（1.3.1 → 1.4.1、1.4.0 は
+  tag 破棄）のあと apiserver は止まっていて（`container system status` が exit 1・`apiserver is not running and not
+  registered with launchd`）、`container system start` で上がった。golden をパーサの読むコマンドについて採り直し
+  （`~/opossum-dogfood/results/v141-recapture/`、78 ファイル、`testdata/real-cli-output.md` の冒頭に 1.3.1 → 1.4.1 の
+  索引）、**opossum が読む形で変わったものは無い**——`system status` は行が増えたが `status running` は残り、
+  `inspect`／`ls -a --format json`／`network inspect` の key は消えていない、JSON の `\/` が `/` になった、
+  文言（not found・no such container・volume in use・exit 64）は同じ。examples 4 project を 9/8 と同じ harness で
+  `config → up → ps → logs --tail 5 → down -v --remove-orphans`：**すべて exit 0（mcp-stack の `logs` だけ、profile
+  外の service を名指すので exit 1——9/8 と同じ）、各 `down` の後の残骸 0**。`doctor` は 8 項目とも通る
+  （network も——9/4 の 1.3.1 更新直後に出た「containers can't reach the internet」は今回は出なかった）。
+  生出力は `~/opossum-dogfood/sprint-0909/`。引き直していない節（`--platform`・port-attempt・OPSM の再現・build の
+  失敗系・DNS spike）は golden の索引に名指ししてある。
 
 - **2026-09-08 — compose の読みを docker と揃えた 20 本あまりのあと、examples を実機で通した（container 1.3.1・main `7a619c6`）**。
   `examples/hello.yaml`（alpine ×2）、`examples/compose.yaml`（redis:7・postgres:16・one-off の migrate・`./web` を

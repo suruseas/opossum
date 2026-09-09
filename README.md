@@ -53,13 +53,13 @@ from, and nothing else does it.
 
 **3. Nothing runs when nothing is running.** Docker Desktop keeps one always-on
 Linux VM; Apple `container` gives each container its own and keeps none at rest.
-Measured on one Mac (macOS 26, Apple silicon; `container` 1.3.1 vs Docker Engine
-29.7.2, 2026-09-07):
+Measured on one Mac (macOS 26, Apple silicon; `container` 1.4.1 vs Docker Engine
+29.7.2, 2026-09-09):
 
 | | Docker Desktop | Apple `container` (opossum) |
 |---|---|---|
-| Memory at idle | ~551 MB host procs **+ ~8.2 GB provisioned always-on Linux VM** | **~81 MB** helpers, **no always-on VM** (the builder VM, once used, stays until `container builder stop`) |
-| Single-container start | **~0.15 s** | ~0.83 s |
+| Memory at idle | ~470 MB host procs **+ ~8.2 GB provisioned always-on Linux VM** | **~65 MB** helpers, **no always-on VM** (the builder VM, once used, stays until `container builder stop`) |
+| Single-container start | **~0.15 s** | ~0.84 s |
 | Isolation | shared VM kernel | **per-container VM** |
 | License | paid subscription for larger orgs | open source, none |
 
@@ -70,7 +70,7 @@ the lighter thing to leave installed. [Full method and caveats →](docs/benchma
 
 - macOS 26+ on Apple silicon
 - [`container`](https://github.com/apple/container) installed, started
-  (`container system start`), and on `PATH` — verified against `container` 1.3.1
+  (`container system start`), and on `PATH` — verified against `container` 1.4.1
 - Go 1.25+ (to build)
 
 ## Install
@@ -292,10 +292,9 @@ on that path about these containers. A named volume
 can only be attached to one running container at a time, which is Apple
 `container`'s constraint, not a
 choice. Swarm/`deploy` beyond `resources.limits` and `configs` are ignored, and
-`opossum config` tells you which fields in your file were skipped; a service
-with `extends:` naming a service of the same file is read as docker compose
-reads it, and one naming another file is refused by name, since the settings
-it would inherit from there are not read.
+`opossum config` tells you which fields in your file were skipped; `extends:`
+— naming a service of the same file or of another file, in a chain — is read
+as docker compose reads it.
 
 [The details, and what to do about each →](docs/troubleshooting.md)
 

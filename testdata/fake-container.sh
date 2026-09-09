@@ -69,6 +69,17 @@ case "$1" in
     if [ "$2" = dns ] && [ "$3" = list ]; then
       printf 'DOMAIN\n%s\n' "${FAKE_DNS_DOMAIN:-opossum}"
     fi
+    # `system status`: the daemon-liveness report (container 1.4.1). With
+    # `--format json` the JSON the readers prefer (status, versions, counts);
+    # without it the table, of which the readers look only for the
+    # `status running` row.
+    if [ "$2" = status ]; then
+      if [ "$3" = --format ] && [ "$4" = json ]; then
+        printf '{"client":{"appName":"container","build":"release","commit":"unspecified","version":"1.4.1"},"host":{"architecture":"arm64","cpus":8,"operatingSystem":"Version 26.6.2 (Build 25G83)"},"paths":{"appRoot":"/Users/<user>/Library/Application Support/com.apple.container/","installRoot":"/opt/homebrew/Cellar/container/1.4.1/"},"resources":{"containersRunning":0,"containersTotal":1,"images":18},"server":{"appName":"container-apiserver","build":"release","commit":"unspecified","version":"1.4.1"},"status":"running"}\n'
+      else
+        printf 'FIELD               VALUE\nstatus              running\nclient.version      1.4.1\nserver.version      1.4.1\n'
+      fi
+    fi
     ;;
   inspect)
     # $INSPECT_ABSENT names containers that do not exist (exit 1, like the real CLI).

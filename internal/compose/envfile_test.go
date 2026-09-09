@@ -222,3 +222,29 @@ services:
 		t.Errorf("Restart = %q, want unless-stopped", got)
 	}
 }
+
+// An env_file written as an absolute path is read from there; the project
+// directory used to be put in front of it, and the file reported as not
+// found under the project.
+func TestAnAbsoluteEnvFilePathIsReadAsWritten(t *testing.T) {
+	dir := t.TempDir()
+	elsewhere := filepath.Join(t.TempDir(), "abs.env")
+	if err := os.WriteFile(elsewhere, []byte("ABS=yes\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "compose.yaml")
+	if err := os.WriteFile(p, []byte("services:\n  web:\n    image: web\n    env_file: "+elsewhere+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	proj, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	env, err := proj.Services["web"].ResolvedEnv()
+	if err != nil {
+		t.Fatalf("ResolvedEnv: %v", err)
+	}
+	if got := strings.Join(env, ","); !strings.Contains(got, "ABS=yes") {
+		t.Errorf("env = %v, want ABS=yes from %s", env, elsewhere)
+	}
+}

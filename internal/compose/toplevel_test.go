@@ -8,10 +8,11 @@ package compose
 // not a mapping — and so is `networks`/`volumes`/`secrets` that is not
 // one, which opossum refused too but in YAML's words, naming a Go type
 // (`cannot unmarshal !!seq into map[string]compose.NetworkDecl`) — and an
-// `include` that is not a list (a list it reads and includes). opossum read `name: 42` as the project "42", a bare `name:`
+// `include` that is not a list (a list it reads and includes — see
+// include_test.go). opossum read `name: 42` as the project "42", a bare `name:`
 // as the directory's name, a bare declaration mapping as none, any shape
-// of `configs` as ignored, and `include` — which it does not read — as an
-// ignored field, leaving the services of the named files out in silence.
+// of `configs` as ignored, and `include` as an ignored field, leaving the
+// services of the named files out in silence.
 // (An empty or bare `include:` names nothing, and docker compose takes it.)
 // With several files, docker compose reads a later file's bare
 // `networks:`/`name:` as "not given" only where an earlier file gave the
@@ -46,8 +47,9 @@ func TestATopLevelKeyOfTheWrongShapeIsRefused(t *testing.T) {
 		{"networks that is an empty list", svc + "networks: []\n", "networks must be a mapping, got a list"},
 		{"networks that is a block list", svc + "networks:\n  - a\n", "networks must be a mapping, got a list (line 4)"},
 		{"configs that is a string", svc + "configs: x\n", "configs must be a mapping, got a single value"},
-		{"an include", svc + "include:\n  - other.yml\n", "include is not read — the files it names would be left out of the project; pass them with -f instead"},
-		{"an include that is not a list", svc + "include: other.yml\n", "include is not read"},
+		{"an include naming a file that is not there", svc + "include:\n  - other.yml\n", "include names "},
+		{"an include that is not a list", svc + "include: other.yml\n", "include must be a list, got a single value (line 4) — write the files to include as `- other.yml`"},
+		{"an include that is a mapping", svc + "include: {path: other.yml}\n", "include must be a list, got a mapping (line 4)"},
 		{"a name through an alias, a number", "x-n: &n 42\n" + svc + "name: *n\n", "name must be a string, got a number (line 1)"},
 		{"a name through an alias, nothing", "x-n: &n ~\n" + svc + "name: *n\n", "name must be a string — the key has nothing after it"},
 		{"networks through an alias, nothing", "x-n: &n ~\n" + svc + "networks: *n\n", "networks must be a mapping — the key has nothing under it"},
@@ -95,7 +97,7 @@ func TestATopLevelKeyOfTheWrongShapeIsRefused(t *testing.T) {
 		{"a later version: 3", "version: 3\n", "version must be a string, got a number"},
 		{"a later bare version:", "version:\n", "version must be a string — the key has nothing after it"},
 		{"a later bare volumes: no earlier file gave", "volumes:\n", "volumes must be a mapping — the key has nothing under it"},
-		{"a later include", "include: [x.yml]\n", "include is not read"},
+		{"a later include naming a file that is not there", "include: [x.yml]\n", "include names "},
 		{"a later networks: [a]", "networks: [a]\n", "networks must be a mapping, got a list (line 1) — write the declarations as"},
 	} {
 		t.Run(tc.name+" is refused naming that file", func(t *testing.T) {

@@ -168,26 +168,44 @@ func RunJSON(w io.Writer, rt Runner, dnsDomain string, project *compose.Project,
 	return rep.Healthy, nil
 }
 
+// checkRuntime reads `system status` the way runtime.SystemStatus does:
+// `--format json` first (container 1.4.1), the table where that is not
+// there. With the JSON in hand it also says which version the server runs
+// and how many containers and images the system holds, and warns where
+// the client and the server run different versions — a shape the report
+// allows (an apiserver kept running across an upgrade), not one measured
+// here: today's upgrade stopped the apiserver instead.
 func checkRuntime(rt Runner) check {
-	out, err := rt.Output("system", "status")
-	if err != nil {
-		return check{"runtime", fail, "Apple `container` isn't available or its system isn't running",
-			"install Apple container and run `container system start`"}
-	}
-	if systemRunning(out) {
-		return check{"runtime", ok, "Apple container system is running", ""}
-	}
-	return check{"runtime", fail, "the container system is not running", "run `container system start`"}
-}
-
-func systemRunning(out string) bool {
-	for _, line := range strings.Split(out, "\n") {
-		f := strings.Fields(line)
-		if len(f) >= 2 && f[0] == "status" && strings.EqualFold(f[1], "running") {
-			return true
+	out, err := rt.Output("system", "status", "--format", "json")
+	st, fromJSON := runtime.ParseSystemStatusJSON(out)
+	if !fromJSON {
+		if err != nil {
+			if out, err = rt.Output("system", "status"); err != nil {
+				return check{"runtime", fail, "Apple `container` isn't available or its system isn't running",
+					"install Apple container and run `container system start`"}
+			}
 		}
+		st = runtime.SystemStatusFromTable(out)
 	}
-	return false
+	if !st.Running {
+		return check{"runtime", fail, "the container system is not running", "run `container system start`"}
+	}
+	// The table road leaves the versions and counts empty, and says only
+	// that the system is running; so does a JSON report without them.
+	if st.ClientVersion != "" && st.ServerVersion != "" && st.ClientVersion != st.ServerVersion {
+		return check{"runtime", warn,
+			fmt.Sprintf("Apple container system is running, but the client is %s and the server %s — the apiserver is running a different build than the CLI", st.ClientVersion, st.ServerVersion),
+			"container system stop && container system start"}
+	}
+	detail := "Apple container system is running"
+	if st.ServerVersion != "" {
+		detail += " (" + st.ServerVersion
+		if st.ContainersTotal >= 0 {
+			detail += fmt.Sprintf("; %d of %d containers running, %d images", st.ContainersRunning, st.ContainersTotal, st.Images)
+		}
+		detail += ")"
+	}
+	return check{"runtime", ok, detail, ""}
 }
 
 func checkDNS(rt Runner, domain string) check {

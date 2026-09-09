@@ -15,6 +15,8 @@ import (
 // mock is a fake Runner returning canned output per top-level `container` command.
 type mock struct {
 	status, builder, probe, df string
+	statusJSON                 string // what `system status --format json` prints; "" means the flag is not there (1.3.1)
+	statusJSONErr              bool   // that call exits non-zero (the apiserver down: exit 1 with its JSON)
 	nets                       []runtime.NetworkSummary
 	ctrs                       []runtime.ContainerSummary
 	statusErr                  bool
@@ -35,6 +37,17 @@ func (m mock) Output(args ...string) (string, error) {
 		}
 		if len(args) > 1 && args[1] == "df" {
 			return m.df, nil
+		}
+		if len(args) > 3 && args[2] == "--format" {
+			if m.statusJSON == "" {
+				// The refusal as the runtime hands it over: the CLI's words
+				// (stderr, folded into the output) and the error.
+				return "Error: Unknown option '--format'\nUsage: container system status [--debug]\n", errors.New("exit status 64")
+			}
+			if m.statusJSONErr {
+				return m.statusJSON, errors.New("exit status 1")
+			}
+			return m.statusJSON, nil
 		}
 		return m.status, nil
 	case "builder":
@@ -318,4 +331,62 @@ func TestParseBuilder(t *testing.T) {
 	if mb, _ := parseBuilder("buildkit img running 4 8 GB\n"); mb != 8192 {
 		t.Errorf("GB should convert to MB; got %d", mb)
 	}
+}
+
+// With `--format json` (container 1.4.1) the runtime check reads the JSON:
+// running with the versions and counts in the detail; the client and server
+// on different versions is a warning with the restart as the fix (after
+// `brew upgrade container` the apiserver keeps the old build); the
+// apiserver down (`{"status":"unregistered"}`, exit 1) is the failure.
+// Without the flag (1.3.1 refuses it) the table is read as before.
+func TestRuntimeCheckReadsTheJSONStatusFirst(t *testing.T) {
+	const up = `{"client":{"version":"1.4.1"},"resources":{"containersRunning":0,"containersTotal":1,"images":18},"server":{"version":"1.4.1"},"status":"running"}`
+	t.Run("running, with the server version and the counts", func(t *testing.T) {
+		c := checkRuntime(mock{statusJSON: up, status: "status stopped\n"})
+		if c.status != ok || !strings.Contains(c.detail, "1.4.1") || !strings.Contains(c.detail, "0 of 1 containers running, 18 images") {
+			t.Errorf("want ok with the version and counts from the JSON (not the table), got %+v", c)
+		}
+	})
+	t.Run("client and server on different versions", func(t *testing.T) {
+		c := checkRuntime(mock{statusJSON: `{"client":{"version":"1.4.1"},"server":{"version":"1.3.1"},"status":"running"}`})
+		if c.status != warn || !strings.Contains(c.detail, "client is 1.4.1 and the server 1.3.1") || !strings.Contains(c.fix, "container system stop && container system start") {
+			t.Errorf("want the version mismatch warned with the restart as the fix, got %+v", c)
+		}
+	})
+	t.Run("the apiserver down", func(t *testing.T) {
+		c := checkRuntime(mock{statusJSON: `{"status":"unregistered"}`, statusJSONErr: true, status: "status running\n"})
+		if c.status != fail || !strings.Contains(c.fix, "container system start") {
+			t.Errorf("want the not-running failure from the JSON (not the table), got %+v", c)
+		}
+	})
+	t.Run("no --format: the table", func(t *testing.T) {
+		c := checkRuntime(mock{status: "status running\n"})
+		if c.status != ok || c.detail != "Apple container system is running" {
+			t.Errorf("want ok from the table, without a version, got %+v", c)
+		}
+	})
+	t.Run("JSON without versions or counts says only that it is running", func(t *testing.T) {
+		c := checkRuntime(mock{statusJSON: `{"status":"running"}`})
+		if c.status != ok || c.detail != "Apple container system is running" {
+			t.Errorf("want ok with no empty parentheses or -1 counts, got %+v", c)
+		}
+	})
+	t.Run("JSON with versions but no counts shows the version alone", func(t *testing.T) {
+		c := checkRuntime(mock{statusJSON: `{"status":"running","client":{"version":"1.4.1"},"server":{"version":"1.4.1"}}`})
+		if c.status != ok || c.detail != "Apple container system is running (1.4.1)" {
+			t.Errorf("want the version and no -1 counts, got %+v", c)
+		}
+	})
+	t.Run("JSON with the server version alone does not warn", func(t *testing.T) {
+		c := checkRuntime(mock{statusJSON: `{"status":"running","server":{"version":"1.4.1"}}`})
+		if c.status != ok || strings.Contains(c.detail, "client is") {
+			t.Errorf("want ok without a mismatch against an empty client version, got %+v", c)
+		}
+	})
+	t.Run("JSON with the client version alone does not warn", func(t *testing.T) {
+		c := checkRuntime(mock{statusJSON: `{"status":"running","client":{"version":"1.4.1"}}`})
+		if c.status != ok || strings.Contains(c.detail, "client is") {
+			t.Errorf("want ok without a mismatch against an empty server version, got %+v", c)
+		}
+	})
 }

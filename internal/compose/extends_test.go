@@ -10,10 +10,10 @@ package compose
 // service first; a cycle and a service the file does not define are
 // refused. With several -f files each file's extends is resolved before
 // the merge, against the services that file defines. `extends: {file: …}`
-// is still refused by name (#415): until it was, a service that extended
-// another usually failed as "must set either image or build", which reads
-// as a typo in the wrong file. The oracle fixtures and docker's output are
-// kept with the dogfood.
+// reads the named file (second part, below); before either was read, a
+// service that extended another usually failed as "must set either image
+// or build", which reads as a typo in the wrong file. The oracle fixtures
+// and docker's output are kept with the dogfood.
 
 import (
 	"os"
@@ -181,26 +181,24 @@ func TestExtendsIsRefusedWhereItNamesNothingOfThisFile(t *testing.T) {
 			`service "web" uses extends:, which names no service`,
 		},
 		{
-			// The named service's own extends names another file: the
-			// refusal names the named service, not the one that extends
-			// it (whose copy of the settings would otherwise carry the
-			// key). The extending service comes first by name, so it is
-			// resolved first.
-			"a service whose named service extends another file",
+			// The named service's own extends names another file, which is
+			// read when the named service is resolved: here it is not
+			// there, and the refusal names the named service and the file
+			// as docker compose does (`cannot extend service … file not found`).
+			"a service whose named service extends a file that is not there",
 			"services:\n  a:\n    extends: z\n  z:\n    extends: {file: other.yml, service: s}\n",
-			`service "a" extends "z", which itself uses extends: (service "s" in other.yml) — opossum does not read extends from another file yet; copy that service's settings into "z" and remove extends:`,
+			`service "z" extends "s" of `,
 		},
 		{
-			"long form, another file",
+			"long form, another file that is not there",
 			"services:\n  web:\n    extends:\n      file: common.yml\n      service: base\n",
-			`service "web" uses extends: (service "base" in common.yml), which opossum does not read from another file yet`,
+			`common.yml, which cannot be read`,
 		},
 		{
-			// The second decoding pass keeps the value as a yaml.Node, in
-			// which an alias stays an alias; the name must still come out.
+			// The plain tree resolves the alias; the file is looked for.
 			"through an alias",
 			"x-ext: &x {service: base, file: common.yml}\nservices:\n  web:\n    image: alpine\n    extends: *x\n",
-			`service "web" uses extends: (service "base" in common.yml)`,
+			`service "web" extends "base" of `,
 		},
 		{
 			// docker compose tries to read "" and fails.
@@ -348,9 +346,10 @@ func TestAcrossFilesExtendsIsResolvedInEachFileBeforeTheMerge(t *testing.T) {
 	})
 }
 
-// Across -f files the file form survives the merge, so an override that adds
-// the image the base lacks does not make the extended settings appear either.
-func TestExtendsInAnEarlierFileIsStillRefusedAfterAnOverride(t *testing.T) {
+// The earlier file's extends is resolved before the merge, so a file it
+// names that is not there is refused there, whether or not a later file
+// writes the service over.
+func TestExtendsOfAMissingFileInAnEarlierFileIsRefusedBeforeTheMerge(t *testing.T) {
 	dir := t.TempDir()
 	base := filepath.Join(dir, "base.yml")
 	over := filepath.Join(dir, "over.yml")
@@ -361,7 +360,325 @@ func TestExtendsInAnEarlierFileIsStillRefusedAfterAnOverride(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := LoadFiles([]string{base, over}, nil)
-	if err == nil || !strings.Contains(err.Error(), `service "web" uses extends: (service "base" in common.yml)`) {
-		t.Errorf("want the extends refusal after the merge, got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), `service "web" extends "base" of `) || !strings.Contains(err.Error(), `common.yml, which cannot be read`) {
+		t.Errorf("want the missing file refused before the merge, got: %v", err)
 	}
+}
+
+// `extends: {file: …}` (#853, second part). docker compose reads the named
+// file from the project directory (a further hop from the named file's own
+// directory — see TestALaterFilesExtendsIsFoundFromTheFirstFilesDirectory),
+// takes the service with that
+// file's own extends resolved first, and merges it under the extending
+// service by the same rules as within one file. Only the service comes
+// over: the named file's declarations do not. Paths the service wrote
+// relative to its file — build, a bind mount's source, env_file — resolve
+// against that file's directory, while the extending service's own paths
+// resolve against the project's. Measured on v5.5.0; the fixtures and
+// docker's output are with the dogfood.
+func TestAServiceThatExtendsAnotherFileIsReadAsDockerReadsIt(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	write("base2.yml", "services:\n  common:\n    image: alpine:3\n    environment: {A: base, B: base}\n    ports: [\"8080:80\"]\n    volumes: [\"./data:/data\"]\n    labels: {l1: base}\n    command: [\"sh\", \"-c\", \"base\"]\n    healthcheck: {test: [\"CMD\", \"true\"], interval: 10s}\n    cap_add: [NET_ADMIN]\n")
+	of := write("of.yml", "services:\n  web:\n    extends: {file: base2.yml, service: common}\n    environment: {B: web, C: web}\n    ports: [\"9090:90\"]\n    volumes: [\"./logs:/logs\"]\n    labels: {l2: web}\n    cap_add: [SYS_TIME]\n    healthcheck: {interval: 5s}\n")
+	p, err := Load(of)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	web := p.Services["web"]
+	for _, tc := range []struct{ name, got, want string }{
+		{"image is inherited", web.Image, "alpine:3"},
+		{"a mapping merges by key, its own winning", strings.Join(web.Environment, ","), "A=base,B=web,C=web"},
+		{"a list is the other's then its own", strings.Join(web.Ports, ","), "8080:80,9090:90"},
+		{"the other file's bind source resolves against that file's directory; its own stays as written", strings.Join(web.Volumes, ","), filepath.Join(dir, "data") + ":/data,./logs:/logs"},
+		{"cap_add too", strings.Join(web.CapAdd, ","), "NET_ADMIN,SYS_TIME"},
+		{"command is inherited", strings.Join(web.Command, " "), "sh -c base"},
+		{"a healthcheck merges by sub-key", strings.Join(web.Healthcheck.Test, " ") + " " + web.Healthcheck.Interval.String(), "true 5s"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.got != tc.want {
+				t.Errorf("got %q, want %q", tc.got, tc.want)
+			}
+		})
+	}
+	if _, has := p.Services["common"]; has {
+		t.Errorf("the named file's other services must not come over; got %v", p.Services["common"])
+	}
+	if got := strings.Join(web.Unsupported, ","); strings.Contains(got, "extends") {
+		t.Errorf("extends should not be listed as ignored once read, got %q", got)
+	}
+
+	t.Run("paths resolve against the named file's directory, from a relative file: path", func(t *testing.T) {
+		write("sub/base3.yml", "services:\n  common:\n    build: ./ctx\n    volumes: [\"./data:/data\", \"named:/n\", {type: bind, source: ./long, target: /long}]\n    env_file: ./sub.env\n    develop: {watch: [{path: ./src, action: sync, target: /app}]}\n")
+		write("sub/sub.env", "X=fromsub\n")
+		paths2 := write("paths2.yml", "services:\n  web:\n    extends: {file: sub/base3.yml, service: common}\n    volumes: [\"./logs:/logs\"]\n")
+		p, err := Load(paths2)
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		web := p.Services["web"]
+		sub := filepath.Join(dir, "sub")
+		if web.Build == nil || web.Build.Context != filepath.Join(sub, "ctx") {
+			t.Errorf("build context = %+v, want %s", web.Build, filepath.Join(sub, "ctx"))
+		}
+		if got, want := strings.Join(web.Volumes, ","), filepath.Join(sub, "data")+":/data,named:/n,"+filepath.Join(sub, "long")+":/long:rw,./logs:/logs"; !strings.HasPrefix(got, filepath.Join(sub, "data")+":/data,named:/n,") || !strings.Contains(got, filepath.Join(sub, "long")) || !strings.HasSuffix(got, "./logs:/logs") {
+			t.Errorf("volumes = %q, want the bind sources under %s, the named volume untouched, own path as written (~ %q)", got, sub, want)
+		}
+		env, err := web.ResolvedEnv()
+		if err != nil {
+			t.Fatalf("ResolvedEnv: %v", err)
+		}
+		if !strings.Contains(strings.Join(env, ","), "X=fromsub") {
+			t.Errorf("env_file must be read from the named file's directory; env = %v", env)
+		}
+		if web.Develop == nil || len(web.Develop.Watch) != 1 || web.Develop.Watch[0].Path != filepath.Join(sub, "src") {
+			t.Errorf("develop.watch path = %+v, want %s", web.Develop, filepath.Join(sub, "src"))
+		}
+	})
+
+	t.Run("a chain runs on into the named file's own extends", func(t *testing.T) {
+		chain := write("chain.yml", "services:\n  mid:\n    extends: {file: base2.yml, service: common}\n    environment: {B: mid}\n  web:\n    extends: mid\n    environment: {C: web}\n")
+		p, err := Load(chain)
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if got := strings.Join(p.Services["web"].Environment, ","); got != "A=base,B=mid,C=web" {
+			t.Errorf("web env = %q, want A=base,B=mid,C=web", got)
+		}
+		write("far.yml", "services:\n  far:\n    image: alpine:far\n    environment: {F: far}\n")
+		write("near.yml", "services:\n  near:\n    extends: {file: far.yml, service: far}\n    environment: {N: near}\n")
+		two := write("two.yml", "services:\n  web:\n    extends: {file: near.yml, service: near}\n    environment: {W: web}\n")
+		p, err = Load(two)
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if got := p.Services["web"].Image + " " + strings.Join(p.Services["web"].Environment, ","); got != "alpine:far F=far,N=near,W=web" {
+			t.Errorf("web through two files = %q", got)
+		}
+	})
+
+	t.Run("the named file's declarations do not come over", func(t *testing.T) {
+		write("decl.yml", "volumes:\n  named: {}\nnetworks:\n  back: {}\nservices:\n  common:\n    image: alpine:3\n    volumes: [\"named:/n\"]\n    networks: [back]\n")
+		usesDecl := write("usesdecl.yml", "networks:\n  back: {}\nservices:\n  web:\n    extends: {file: decl.yml, service: common}\n")
+		p, err := Load(usesDecl)
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if _, has := p.Volumes["named"]; has {
+			t.Errorf("the named file's volume declaration came over: %v", p.Volumes)
+		}
+	})
+
+	t.Run("depends_on comes over and is held to this project", func(t *testing.T) {
+		write("withdep.yml", "services:\n  common:\n    image: alpine:3\n    depends_on: [dep]\n  dep:\n    image: alpine:3\n")
+		nodep := write("nodep.yml", "services:\n  web:\n    extends: {file: withdep.yml, service: common}\n")
+		if _, err := Load(nodep); err == nil || !strings.Contains(err.Error(), `depends on unknown service "dep"`) {
+			t.Errorf("want the inherited depends_on refused against this project, got: %v", err)
+		}
+		hasdep := write("hasdep.yml", "services:\n  web:\n    extends: {file: withdep.yml, service: common}\n  dep:\n    image: alpine:3\n")
+		p, err := Load(hasdep)
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if got := p.Services["web"].DependsOn.Names(); len(got) != 1 || got[0] != "dep" {
+			t.Errorf("depends_on = %v, want [dep]", got)
+		}
+	})
+
+	t.Run("with several -f files the first file's extends reads its file before the merge", func(t *testing.T) {
+		a := write("mf-a.yml", "services:\n  web:\n    extends: {file: base2.yml, service: common}\n    ports: [\"1:1\"]\n")
+		b := write("mf-b.yml", "services:\n  web:\n    ports: [\"2:2\"]\n    environment: {B: over}\n")
+		p, err := LoadFiles([]string{a, b}, nil)
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		web := p.Services["web"]
+		if got := web.Image + " " + strings.Join(web.Ports, ",") + " " + strings.Join(web.Environment, ","); got != "alpine:3 8080:80,1:1,2:2 A=base,B=over" {
+			t.Errorf("web = %q", got)
+		}
+	})
+
+	for _, tc := range []struct{ name, extending, want string }{
+		{"a service the named file does not define", "services:\n  web:\n    extends: {file: base2.yml, service: nope}\n", `service "web" extends "nope" of `},
+		{"a file that is not there", "services:\n  web:\n    extends: {file: gone.yml, service: common}\n", `gone.yml, which cannot be read`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := write("ref-"+strings.ReplaceAll(tc.name, " ", "-")+".yml", tc.extending)
+			_, err := Load(f)
+			if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "remove extends:") {
+				t.Errorf("want %q with the way out, got: %v", tc.want, err)
+			}
+		})
+	}
+	t.Run("a mistake in the named file is refused naming that file", func(t *testing.T) {
+		write("broken.yml", "services:\n  common:\n    image: alpine:3\n    ports: 80\n")
+		f := write("usesbroken.yml", "services:\n  web:\n    extends: {file: broken.yml, service: common}\n")
+		_, err := Load(f)
+		// The path separator and the named service pin which file spoke:
+		// the extending file is "usesbroken.yml", which contains the
+		// other's name, and the merged tree would fail the same shape
+		// check naming "web" in that file.
+		if err == nil || !strings.Contains(err.Error(), "/broken.yml: service \"common\"") {
+			t.Errorf("want the named file's mistake refused naming broken.yml and its service, got: %v", err)
+		}
+	})
+	t.Run("a service may extend one of its own name in another file", func(t *testing.T) {
+		// Each link of the chain has the extending service's name, and
+		// each but the last has an extends of its own, so a cycle check
+		// that compared names alone would refuse the second link.
+		write("samebase2.yml", "services:\n  web:\n    image: alpine:same\n")
+		write("samebase.yml", "services:\n  web:\n    extends: {file: samebase2.yml, service: web}\n    environment: {S: base}\n")
+		same := write("same.yml", "services:\n  web:\n    extends: {file: samebase.yml, service: web}\n    environment: {S: same}\n")
+		p, err := Load(same)
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if got := p.Services["web"].Image; got != "alpine:same" {
+			t.Errorf("image = %q, want alpine:same", got)
+		}
+	})
+	t.Run("each file of a chain is found from the file that names it, and each is rebased against its own directory", func(t *testing.T) {
+		write("a/b/c/far.yml", "services:\n  far:\n    image: alpine:3\n    volumes: [\"./fardata:/f\"]\n")
+		write("a/b/near.yml", "services:\n  near:\n    extends: {file: c/far.yml, service: far}\n    volumes: [\"./neardata:/n\"]\n")
+		two := write("a/two.yml", "services:\n  web:\n    extends: {file: b/near.yml, service: near}\n    volumes: [\"./own:/o\"]\n")
+		p, err := Load(two)
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		want := filepath.Join(dir, "a/b/c/fardata") + ":/f," + filepath.Join(dir, "a/b/neardata") + ":/n,./own:/o"
+		if got := strings.Join(p.Services["web"].Volumes, ","); got != want {
+			t.Errorf("volumes = %q, want %q", got, want)
+		}
+	})
+	t.Run("every written form is rebased: build.context, ../ and . sources, env_file list and path: form", func(t *testing.T) {
+		write("sub2/forms.yml", "services:\n  common:\n    build: {context: ../ctx2}\n    volumes: [\"../up:/up\", \".:/app\", \"..:/parent\", {type: bind, source: ., target: /appl}]\n    env_file: [./a.env, {path: ./b.env, required: true}]\n")
+		write("sub2/a.env", "Y=froma\n")
+		write("sub2/b.env", "Z=fromb\n")
+		forms := write("forms.yml", "services:\n  web:\n    extends: {file: sub2/forms.yml, service: common}\n")
+		p, err := Load(forms)
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		web := p.Services["web"]
+		if web.Build == nil || web.Build.Context != filepath.Join(dir, "ctx2") {
+			t.Errorf("build context = %+v, want %s", web.Build, filepath.Join(dir, "ctx2"))
+		}
+		sub2 := filepath.Join(dir, "sub2")
+		if got, want := strings.Join(web.Volumes, ","), filepath.Join(dir, "up")+":/up,"+sub2+":/app,"+dir+":/parent,"+sub2+":/appl"; got != want {
+			t.Errorf("volumes = %q, want %q", got, want)
+		}
+		env, err := web.ResolvedEnv()
+		if err != nil {
+			t.Fatalf("ResolvedEnv: %v", err)
+		}
+		if got := strings.Join(env, ","); !strings.Contains(got, "Y=froma") || !strings.Contains(got, "Z=fromb") {
+			t.Errorf("env_file list and path: form must be read from sub2; env = %v", env)
+		}
+	})
+	t.Run("a variable the named file needs is refused naming that file", func(t *testing.T) {
+		write("needs.yml", "services:\n  common:\n    image: \"${OPOSSUM_TEST_EXTENDS_MUST_BE_SET:?needed}\"\n")
+		f := write("usesneeds.yml", "services:\n  web:\n    extends: {file: needs.yml, service: common}\n")
+		_, err := Load(f)
+		if err == nil || !strings.Contains(err.Error(), "/needs.yml (extended by service \"web\"") || !strings.Contains(err.Error(), "OPOSSUM_TEST_EXTENDS_MUST_BE_SET") {
+			t.Errorf("want the named file's interpolation failure, naming it, got: %v", err)
+		}
+	})
+	t.Run("a relative -f path still rebases to absolute paths", func(t *testing.T) {
+		write("deploy/rbase.yml", "services:\n  common:\n    build: ./ctx\n    volumes: [\"./data:/data\"]\n    env_file: ./x.env\n")
+		write("deploy/x.env", "R=rel\n")
+		write("deploy/rof.yml", "services:\n  web:\n    extends: {file: rbase.yml, service: common}\n")
+		t.Chdir(dir)
+		p, err := Load("deploy/rof.yml")
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		web := p.Services["web"]
+		if web.Build == nil || !filepath.IsAbs(web.Build.Context) || !strings.HasSuffix(web.Build.Context, "/deploy/ctx") {
+			t.Errorf("build context = %+v, want an absolute path ending in /deploy/ctx", web.Build)
+		}
+		if got := strings.Join(web.Volumes, ","); !filepath.IsAbs(got) || !strings.HasSuffix(got, "/deploy/data:/data") {
+			t.Errorf("volumes = %q, want an absolute source ending in /deploy/data", got)
+		}
+		env, err := web.ResolvedEnv()
+		if err != nil || !strings.Contains(strings.Join(env, ","), "R=rel") {
+			t.Errorf("env_file must be found from the named file's directory; env = %v, err = %v", env, err)
+		}
+		// A cycle through files is seen on the first return, not one
+		// round late with the relative and the absolute name both shown.
+		write("cy/a.yml", "services:\n  web:\n    extends: {file: b.yml, service: s}\n")
+		write("cy/b.yml", "services:\n  s:\n    extends: {file: a.yml, service: web}\n")
+		_, err = Load("cy/a.yml")
+		// Its own file's service is shown bare, the other file's with its
+		// file, whichever way this file was named.
+		if err == nil || !strings.Contains(err.Error(), "extends forms a cycle") || strings.Count(err.Error(), "→") != 2 || !strings.Contains(err.Error(), "(web → s (") || strings.Contains(err.Error(), "a.yml)") {
+			t.Errorf("want the cycle refused once as (web → s (<b.yml>) → web), got: %v", err)
+		}
+		// A cycle within this file, named by a relative path, shows bare
+		// names too.
+		write("cy/same.yml", "services:\n  a:\n    extends: b\n  b:\n    extends: a\n")
+		_, err = Load("cy/same.yml")
+		if err == nil || !strings.Contains(err.Error(), "(a → b → a)") {
+			t.Errorf("want the same-file cycle shown as (a → b → a), got: %v", err)
+		}
+	})
+	t.Run("a cycle through another file is refused", func(t *testing.T) {
+		write("cyc-a.yml", "services:\n  web:\n    extends: {file: cyc-b.yml, service: s}\n")
+		write("cyc-b.yml", "services:\n  s:\n    extends: {file: cyc-a.yml, service: web}\n")
+		_, err := Load(filepath.Join(dir, "cyc-a.yml"))
+		if err == nil || !strings.Contains(err.Error(), "extends forms a cycle") {
+			t.Errorf("want the cycle refused, got: %v", err)
+		}
+	})
+}
+
+// Across -f files a later file's `extends: {file: …}` is found from the
+// project directory — the first file's — not from the later file's own
+// (docker compose, measured: `-f a.yml -f sub/b.yml` with base.yml in both
+// places reads a.yml's neighbour). A single -f in sub/ reads sub's, since
+// that is the project directory then.
+func TestALaterFilesExtendsIsFoundFromTheFirstFilesDirectory(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	a := write("a.yml", "services:\n  web:\n    image: nginx\n")
+	write("base.yml", "services:\n  base:\n    image: alpine:root\n")
+	write("sub/base.yml", "services:\n  base:\n    image: alpine:sub\n")
+	b := write("sub/b.yml", "services:\n  web:\n    extends: {file: base.yml, service: base}\n")
+	t.Run("with -f, the first file's directory", func(t *testing.T) {
+		p, err := LoadFiles([]string{a, b}, nil)
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if got := p.Services["web"].Image; got != "alpine:root" {
+			t.Errorf("web = %q, want the base.yml next to a.yml", got)
+		}
+	})
+	t.Run("alone, its own directory is the project directory", func(t *testing.T) {
+		p, err := Load(b)
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if got := p.Services["web"].Image; got != "alpine:sub" {
+			t.Errorf("web = %q, want sub/base.yml", got)
+		}
+	})
 }

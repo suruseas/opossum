@@ -213,10 +213,20 @@ func TestFidelityDNSDomainExists(t *testing.T) {
 
 func TestFidelitySystemRunning(t *testing.T) {
 	// The real `container system status` output when the daemon is up: a table with
-	// a `status running` field. SystemRunning must read that as running.
-	const realStatus = "FIELD              VALUE\nstatus             running\nappRoot            /Users/<user>\n"
+	// a `status running` field. SystemRunning must read that as running — on
+	// 1.4.1, where the rows under it were renamed and more were added, as on
+	// 1.3.1.
+	const realStatus = "FIELD               VALUE\nstatus              running\nclient.version      1.4.1\nclient.build        release\nhost.architecture   arm64\nserver.version      1.4.1\npaths.appRoot       /Users/<user>/Library/Application Support/com.apple.container/\ncontainers.total    1\ncontainers.running  0\nimages.total        17\n"
 	if !replayShim(t, realStatus, 0).SystemRunning() {
 		t.Error("SystemRunning should be true for a `status running` report")
+	}
+	const realStatus131 = "FIELD              VALUE\nstatus             running\nappRoot            /Users/<user>\n"
+	if !replayShim(t, realStatus131, 0).SystemRunning() {
+		t.Error("SystemRunning should be true for the 1.3.1 `status running` report too")
+	}
+	// 1.4.1 with the daemon down: exit 1 and a sentence, no table.
+	if replayShim(t, "apiserver is not running and not registered with launchd\n", 1).SystemRunning() {
+		t.Error("SystemRunning should be false for the 1.4.1 not-running report")
 	}
 	// A stopped system (some builds print `status stopped`, others error) is not running.
 	if replayShim(t, "status             stopped\n", 0).SystemRunning() {
@@ -224,6 +234,76 @@ func TestFidelitySystemRunning(t *testing.T) {
 	}
 	if replayShim(t, "Error: ...", 1).SystemRunning() {
 		t.Error("SystemRunning should be false when `system status` errors")
+	}
+}
+
+// The `--format json` report (container 1.4.1) is read first: `status`
+// "running" is up, with the versions and counts; "unregistered" (exit 1,
+// the apiserver down) is not. Where the flag is not there (1.3.1 refuses
+// it with an error), the table is read as before.
+func TestFidelitySystemStatusJSON(t *testing.T) {
+	const realJSON = `{"client":{"appName":"container","build":"release","commit":"unspecified","version":"1.4.1"},"host":{"architecture":"arm64","cpus":8,"operatingSystem":"Version 26.6.2 (Build 25G83)"},"paths":{"appRoot":"/Users/<user>/Library/Application Support/com.apple.container/","installRoot":"/opt/homebrew/Cellar/container/1.4.1/"},"resources":{"containersRunning":0,"containersTotal":1,"images":18},"server":{"appName":"container-apiserver","build":"release","commit":"unspecified","version":"1.4.1"},"status":"running"}` + "\n"
+	st := replayShim(t, realJSON, 0).SystemStatus()
+	if !st.Running || !st.FromJSON {
+		t.Errorf("the real JSON report should read as running, from JSON: %+v", st)
+	}
+	if st.ClientVersion != "1.4.1" || st.ServerVersion != "1.4.1" {
+		t.Errorf("versions = %q / %q, want 1.4.1 / 1.4.1", st.ClientVersion, st.ServerVersion)
+	}
+	if st.ContainersRunning != 0 || st.ContainersTotal != 1 || st.Images != 18 {
+		t.Errorf("counts = %d/%d/%d, want 0/1/18", st.ContainersRunning, st.ContainersTotal, st.Images)
+	}
+	// Down: exit 1 and `{"status":"unregistered"}`.
+	if st := replayShim(t, "{\"status\":\"unregistered\"}\n", 1).SystemStatus(); st.Running || !st.FromJSON {
+		t.Errorf("the unregistered report should read as not running, from JSON: %+v", st)
+	}
+	// A JSON status other than running is not running either, whatever the
+	// exit code says.
+	if replayShim(t, "{\"status\":\"stopped\"}\n", 0).SystemStatus().Running {
+		t.Error("a JSON status of stopped should not read as running")
+	}
+	// Without `--format` (1.3.1) the same shim answers the table for both
+	// calls: read as the table, not as JSON, and running.
+	const realStatus131 = "FIELD              VALUE\nstatus             running\nappRoot            /Users/<user>\n"
+	if st := replayShim(t, realStatus131, 0).SystemStatus(); !st.Running || st.FromJSON || st.Images != -1 {
+		t.Errorf("the 1.3.1 table should read as running, not from JSON, counts unknown: %+v", st)
+	}
+	// Text that starts like JSON but is not the report is not read as one.
+	if st, ok := ParseSystemStatusJSON("{\"foo\":1}"); ok || st.Running {
+		t.Errorf("JSON without a status should not be the report: %+v %v", st, ok)
+	}
+	// A CLI that refuses the flag (1.3.1: an error and no table for the
+	// first call) is asked again without it, and read as the table.
+	dir := t.TempDir()
+	script := filepath.Join(dir, "container131")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nfor a in \"$@\"; do [ \"$a\" = --format ] && { echo \"Error: Unknown option '--format'\" >&2; exit 64; }; done\nprintf 'FIELD              VALUE\\nstatus             running\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if st := (&Runtime{Bin: script}).SystemStatus(); !st.Running || st.FromJSON {
+		t.Errorf("a CLI without --format should be read as the table on the second call: %+v", st)
+	}
+	// A CLI that answers JSON only when asked for it (1.4.1): the flag must
+	// be sent, or the table comes back and the versions are lost.
+	both := filepath.Join(dir, "container141")
+	if err := os.WriteFile(both, []byte("#!/bin/sh\nfor a in \"$@\"; do [ \"$a\" = json ] && { printf '%s\\n' '"+`{"status":"running","client":{"version":"1.4.1"},"server":{"version":"1.4.1"}}`+"'; exit 0; }; done\nprintf 'FIELD              VALUE\\nstatus             running\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if st := (&Runtime{Bin: both}).SystemStatus(); !st.FromJSON || st.ServerVersion != "1.4.1" {
+		t.Errorf("the flag was not sent, or its answer not read: %+v", st)
+	}
+	// The callers go through SystemRunning: a CLI whose table says stopped
+	// but whose JSON says running reads as running there too — the JSON is
+	// what is read, not the table.
+	dis := filepath.Join(dir, "container141dis")
+	if err := os.WriteFile(dis, []byte("#!/bin/sh\nfor a in \"$@\"; do [ \"$a\" = json ] && { printf '%s\\n' '{\"status\":\"running\"}'; exit 0; }; done\nprintf 'FIELD  VALUE\\nstatus  stopped\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !(&Runtime{Bin: dis}).SystemRunning() {
+		t.Error("SystemRunning should read the JSON (running), not the table (stopped)")
+	}
+	// A report without resources leaves the counts unknown (-1), not 0.
+	if st := replayShim(t, "{\"status\":\"unregistered\"}\n", 1).SystemStatus(); st.Images != -1 || st.ContainersTotal != -1 {
+		t.Errorf("counts should be -1 without resources: %+v", st)
 	}
 }
 

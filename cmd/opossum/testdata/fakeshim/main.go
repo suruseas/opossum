@@ -104,10 +104,23 @@ func main() {
 			fmt.Print("DOMAIN\nopossum\n")
 		}
 		// `system status` is the daemon-liveness probe; report running (or stopped
-		// under SYSTEM_STOPPED until `system start` runs).
+		// under SYSTEM_STOPPED until `system start` runs). The running table is
+		// container 1.4.1's (the rows under `status` are what it prints; the
+		// readers only look for the `status running` row).
 		if arg(1) == "status" {
+			// With `--format json` the JSON container 1.4.1 prints (the
+			// readers prefer it); down, exit 1 and `{"status":"unregistered"}`.
+			if arg(2) == "--format" && arg(3) == "json" {
+				if systemRunning() {
+					fmt.Println(`{"client":{"appName":"container","build":"release","commit":"unspecified","version":"1.4.1"},"host":{"architecture":"arm64","cpus":8,"operatingSystem":"Version 26.6.2 (Build 25G83)"},"paths":{"appRoot":"/Users/<user>/Library/Application Support/com.apple.container/","installRoot":"/opt/homebrew/Cellar/container/1.4.1/"},"resources":{"containersRunning":0,"containersTotal":1,"images":3},"server":{"appName":"container-apiserver","build":"release","commit":"unspecified","version":"1.4.1"},"status":"running"}`)
+				} else {
+					fmt.Println(`{"status":"unregistered"}`)
+					os.Exit(1)
+				}
+				return
+			}
 			if systemRunning() {
-				fmt.Print("FIELD  VALUE\nstatus  running\n")
+				fmt.Print("FIELD               VALUE\nstatus              running\nclient.version      1.4.1\nserver.version      1.4.1\npaths.appRoot       /Users/<user>/Library/Application Support/com.apple.container/\ncontainers.total    1\ncontainers.running  0\nimages.total        3\n")
 			} else {
 				fmt.Print("FIELD  VALUE\nstatus  stopped\n")
 			}

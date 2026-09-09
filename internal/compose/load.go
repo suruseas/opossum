@@ -697,7 +697,10 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 	}
 
 	var doc interpolated
-	if len(paths) == 1 {
+	// The files the project was read from: the -f paths, with the files
+	// each includes before it. What a failure in the merged document names.
+	loaded := paths
+	if len(paths) == 1 && !hasInclude(paths[0]) {
 		// Single file: read the interpolated document directly (no merge
 		// round-trip), so the positions a failure names are the ones in the file.
 		raw, err := os.ReadFile(paths[0])
@@ -715,51 +718,25 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 		if err := validateOne(paths[0], doc, nil); err != nil {
 			return nil, err
 		}
-		if resolved, err := resolveSameFileExtends(doc, paths[0]); err != nil {
+		if resolved, err := resolveSameFileExtends(doc, paths[0], baseDir, scope.lookup()); err != nil {
 			return nil, err
 		} else if resolved != nil {
 			doc = *resolved
 		}
 	} else {
-		// Multiple files: merge their YAML trees, then render the merged result.
+		// Several files, or one with `include:`: merge their YAML trees,
+		// then render the merged result.
 		var merged map[string]any
+		loaded = nil
 		for _, path := range paths {
-			raw, err := os.ReadFile(path)
+			// Every -f file belongs to the project whose directory is the
+			// first file's: its include paths and its `extends: {file}`
+			// count from there (docker compose, measured), not from its own.
+			m, files, err := loadUnit(path, baseDir, scope, merged, nil)
 			if err != nil {
-				return nil, fmt.Errorf("reading compose file: %w", err)
-			}
-			one, err := interpolateDocument(raw, scope.lookup())
-			if err != nil {
-				return nil, fmt.Errorf("interpolating %s: %w", path, err)
-			}
-			var m map[string]any
-			if err := one.into(&m); err != nil {
-				// The same words as the single-file road. A key set twice is found
-				// here rather than at the final decode, and saying "not valid YAML"
-				// for it was the same wrong advice by a different route — the one a
-				// reader hits precisely when they have split their file up.
-				return nil, decodeErr(path, asWritten, err)
-			}
-			// Each file is checked on its own before the merge, as docker
-			// compose validates each before merging: a mistake in one file
-			// is refused naming that file and its line, whether or not a
-			// later file writes over it, and a shape the merge would absorb
-			// (a network listed twice in one file) is refused too. In a
-			// later file a key with nothing after it is "not given" (the
-			// earlier value stands) and is not read as a bare key.
-			if err := validateOne(path, one, merged); err != nil {
 				return nil, err
 			}
-			if err := liftExternalNames(path, m, merged); err != nil {
-				return nil, err
-			}
-			// `extends` within this file is read before the merge, as docker
-			// compose reads it: a service the file itself defines is what it
-			// extends, and an earlier file's version of the extending service
-			// is what this file's resolved version goes over.
-			if _, err := resolveExtendsInTree(path, m); err != nil {
-				return nil, err
-			}
+			loaded = append(loaded, files...)
 			if merged == nil {
 				merged = m
 			} else {
@@ -792,13 +769,13 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 	var f composeFile
 	if err := doc.into(&f); err != nil {
 		read := asWritten
-		if len(paths) > 1 {
+		if len(loaded) > 1 {
 			read = asMerged
 		}
-		return nil, decodeErr(mergedName(paths), read, blameService(doc, err))
+		return nil, decodeErr(mergedName(loaded), read, blameService(doc, err))
 	}
 	if len(f.Services) == 0 {
-		return nil, fmt.Errorf("%s defines no services — add a top-level `services:` block with at least one service", mergedName(paths))
+		return nil, fmt.Errorf("%s defines no services — add a top-level `services:` block with at least one service", mergedName(loaded))
 	}
 	// A service key with nothing under it (`web:` alone, or `web: ~`) decodes to
 	// a nil service. Every reader below this line dereferences it, so it is
@@ -856,7 +833,7 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 				// what reaches here wrote `file:` with nothing after it.
 				return nil, fmt.Errorf("service %q uses extends:%s with a `file:` that names no file — remove file: to extend a service of this file, name the file, or remove extends:", name, svc.Extends.describe())
 			}
-			return nil, fmt.Errorf("service %q uses extends:%s, which opossum does not read from another file yet — copy that service's settings into %q and remove extends: (extends within the same file is read)", name, svc.Extends.describe(), name)
+			return nil, fmt.Errorf("service %q uses extends:%s, which could not be read as a service of another file — write `extends: {file: <path>, service: <name>}` with the path as text, or remove extends: (extends within the same file and from another file is read)", name, svc.Extends.describe())
 		}
 		if svc.Image == "" && svc.Build == nil {
 			return nil, fmt.Errorf("service %q must set either image or build", name)
@@ -1267,10 +1244,37 @@ func documentRoot(doc *yaml.Node) *yaml.Node {
 // several -f files this runs on each file before the merge, as docker
 // compose resolves it: what a file extends is what that file defines.
 // Reports whether anything was resolved.
-func resolveExtendsInTree(where string, tree map[string]any) (bool, error) {
+func resolveExtendsInTree(where, projectDir string, tree map[string]any, lookup varLookup) (bool, error) {
+	return resolveExtends(where, projectDir, tree, lookup, nil)
+}
+
+// extendsID names one service of one file on the resolution stack, so that
+// a cycle that runs through another file is seen as the cycle it is.
+func extendsID(where, name string) string { return where + "#" + name }
+
+// resolveExtends is resolveExtendsInTree with the stack of services being
+// resolved, which a service of another file joins. stack entries are
+// extendsIDs; the cycle message shows the names, with the file where it
+// is not this one.
+func resolveExtends(where, projectDir string, tree map[string]any, lookup varLookup, stack []string) (bool, error) {
 	services, _ := tree["services"].(map[string]any)
 	touched := false
 	done := map[string]bool{}
+	// The ids are absolute so that a file reached from another file (whose
+	// path is made absolute there) is the same id as the one a relative -f
+	// named it by; otherwise a cycle through files is seen one round late
+	// and shown twice.
+	absWhere := where
+	if a, err := filepath.Abs(where); err == nil {
+		absWhere = a
+	}
+	showID := func(id string) string {
+		file, name, _ := strings.Cut(id, "#")
+		if file == absWhere {
+			return name
+		}
+		return name + " (" + file + ")"
+	}
 	var resolve func(name string, stack []string) error
 	resolve = func(name string, stack []string) error {
 		if done[name] {
@@ -1286,7 +1290,7 @@ func resolveExtendsInTree(where string, tree map[string]any) (bool, error) {
 			done[name] = true
 			return nil
 		}
-		var target string
+		var target, file string
 		otherFile := false
 		switch e := ext.(type) {
 		case string:
@@ -1295,40 +1299,62 @@ func resolveExtendsInTree(where string, tree map[string]any) (bool, error) {
 			target, _ = e["service"].(string)
 			// A `file:` key, even one with nothing after it, names another
 			// file (docker compose tries to read it and fails).
-			_, otherFile = e["file"]
-		}
-		if otherFile || target == "" {
-			done[name] = true
-			return nil
-		}
-		for _, s := range stack {
-			if s == name {
-				return fmt.Errorf("%s: service %q: extends forms a cycle (%s → %s) — remove extends: from one of them", where, name, strings.Join(stack, " → "), name)
+			if f, has := e["file"]; has {
+				otherFile = true
+				file, _ = f.(string)
 			}
 		}
-		raw, exists := services[target]
-		if !exists {
-			return fmt.Errorf("%s: service %q extends %q, which the file does not define — name a service this file defines, or remove extends:", where, name, target)
+		if target == "" || (otherFile && file == "") {
+			done[name] = true // the decode refuses these in its own words
+			return nil
 		}
-		// In a later -f file a service key with nothing under it is "not
-		// given" (the earlier file's stands), but extends reads the service
-		// as this file defines it, and here that is nothing: refused, where
-		// docker compose leaves the key unread and the service without an
-		// image (measured).
-		if _, ok := raw.(map[string]any); !ok {
-			return fmt.Errorf("%s: service %q extends %q, which this file writes with nothing under it — extends reads the service as this file defines it; give it a body here, or remove extends:", where, name, target)
+		id := extendsID(absWhere, name)
+		for _, s := range stack {
+			if s == id {
+				shown := make([]string, 0, len(stack)+1)
+				for _, s := range stack {
+					shown = append(shown, showID(s))
+				}
+				return fmt.Errorf("%s: service %q: extends forms a cycle (%s → %s) — remove extends: from one of them", where, name, strings.Join(shown, " → "), name)
+			}
 		}
-		if err := resolve(target, append(stack, name)); err != nil {
-			return err
+		var base map[string]any
+		if otherFile {
+			// The named file is read from the project directory of the
+			// unit this file belongs to — the first -f file's directory,
+			// or an include entry's — as docker compose reads it (measured:
+			// `-f a.yml -f sub/b.yml` reads sub/b.yml's `file: base.yml`
+			// from a.yml's directory; a file it names in turn is found from
+			// the named file's own directory), and the service is taken from
+			// it with that file's own extends resolved first and its
+			// relative paths made absolute against that file's directory.
+			path := file
+			if !filepath.IsAbs(path) {
+				path = filepath.Join(projectDir, path)
+			}
+			b, err := extendedServiceFromFile(where, name, path, target, lookup, append(stack, id))
+			if err != nil {
+				return err
+			}
+			base = b
+		} else {
+			raw, exists := services[target]
+			if !exists {
+				return fmt.Errorf("%s: service %q extends %q, which the file does not define — name a service this file defines, or remove extends:", where, name, target)
+			}
+			// In a later -f file a service key with nothing under it is "not
+			// given" (the earlier file's stands), but extends reads the service
+			// as this file defines it, and here that is nothing: refused, where
+			// docker compose leaves the key unread and the service without an
+			// image (measured).
+			if _, ok := raw.(map[string]any); !ok {
+				return fmt.Errorf("%s: service %q extends %q, which this file writes with nothing under it — extends reads the service as this file defines it; give it a body here, or remove extends:", where, name, target)
+			}
+			if err := resolve(target, append(stack, id)); err != nil {
+				return err
+			}
+			base = deepCopyTree(services[target]).(map[string]any)
 		}
-		// The named service has been resolved above; what it still has under
-		// `extends` names another file, which is not read yet. Refused here
-		// naming the named service — copied over, the key would be refused
-		// naming this one, which wrote no `file:`.
-		if left, has := services[target].(map[string]any)["extends"]; has {
-			return fmt.Errorf("%s: service %q extends %q, which itself uses extends:%s — opossum does not read extends from another file yet; copy that service's settings into %q and remove extends:", where, name, target, describeExtendsTree(left), target)
-		}
-		base := deepCopyTree(services[target]).(map[string]any)
 		own := deepCopyTree(svc).(map[string]any)
 		delete(own, "extends")
 		services[name] = mergeMap(base, own, childPath("services", name))
@@ -1342,37 +1368,146 @@ func resolveExtendsInTree(where string, tree map[string]any) (bool, error) {
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		if err := resolve(name, nil); err != nil {
+		if err := resolve(name, stack); err != nil {
 			return false, err
 		}
 	}
 	return touched, nil
 }
 
-// describeExtendsTree is ExtendsRef.describe for the plain-tree form of
-// the value, as the resolver sees it.
-func describeExtendsTree(v any) string {
-	ref := &ExtendsRef{}
-	switch e := v.(type) {
-	case string:
-		ref.Service = e
-	case map[string]any:
-		ref.Service, _ = e["service"].(string)
-		ref.File, _ = e["file"].(string)
+// extendedServiceFromFile reads the file `extends: {file: …}` names and
+// returns a copy of the named service as docker compose (v5.5.0) hands it
+// to the extending service: the file is expanded in the same scope as the
+// project's own files and checked as written, its own extends is resolved
+// first (a chain may run on into a third file; a cycle through files is
+// refused), and the paths the service writes relative to its file —
+// `build`, a bind mount's source, `env_file`, `develop.watch` paths — are
+// made absolute against that file's directory, since the project resolves
+// relative paths against its first file. Only the service comes over: the
+// file's top-level declarations do not (measured).
+func extendedServiceFromFile(where, name, path, target string, lookup varLookup, stack []string) (map[string]any, error) {
+	// A relative -f leaves `where` relative, and so this path; the paths
+	// rebased below must be absolute, since the project resolves relative
+	// ones against its own directory (a relative one would be doubled).
+	if a, err := filepath.Abs(path); err == nil {
+		path = a
 	}
-	return ref.describe()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("%s: service %q extends %q of %s, which cannot be read: %v — name the file by a path from the project directory (the first file's, or the include entry's), or remove extends:", where, name, target, path, err)
+	}
+	doc, err := interpolateDocument(raw, lookup)
+	if err != nil {
+		return nil, fmt.Errorf("interpolating %s (extended by service %q of %s): %w", path, name, where, err)
+	}
+	if err := validateOne(path, doc, nil); err != nil {
+		return nil, err
+	}
+	var tree map[string]any
+	if err := doc.into(&tree); err != nil {
+		return nil, decodeErr(path, asWritten, err)
+	}
+	// A file the extends reached is read on its own terms: what it
+	// extends in turn is found from its own directory (docker compose,
+	// measured: a/two.yml → b/near.yml → c/far.yml reads a/b/c/far.yml,
+	// where the first hop from a -f file counts from the project
+	// directory).
+	if _, err := resolveExtends(path, filepath.Dir(path), tree, lookup, stack); err != nil {
+		return nil, err
+	}
+	services, _ := tree["services"].(map[string]any)
+	svc, ok := services[target].(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("%s: service %q extends %q of %s, and that file does not define it — name a service %s defines, or remove extends:", where, name, target, path, path)
+	}
+	base := deepCopyTree(svc).(map[string]any)
+	rebasePaths(base, filepath.Dir(path))
+	return base, nil
+}
+
+// rebasePaths makes the host paths a service writes relative to its own
+// file absolute against dir, so that a project whose first file lives
+// elsewhere resolves them where docker compose does. What is rebased is
+// what docker compose rebases when it extends across files: `build` (as a
+// path or its `context`), a bind mount's source in the short form (only
+// one written as `.`, `..`, `./…` or `../…`, the host paths the runtime
+// side reads as such — a bare name is a named volume) and the long form,
+// `env_file` in every form, and `develop.watch` paths.
+func rebasePaths(svc map[string]any, dir string) {
+	abs := func(p string) string {
+		if p == "" || filepath.IsAbs(p) || strings.HasPrefix(p, "~") || strings.Contains(p, "://") || strings.HasPrefix(p, "git@") {
+			return p
+		}
+		return filepath.Join(dir, p)
+	}
+	switch b := svc["build"].(type) {
+	case string:
+		svc["build"] = abs(b)
+	case map[string]any:
+		if c, ok := b["context"].(string); ok {
+			b["context"] = abs(c)
+		}
+	}
+	if vols, ok := svc["volumes"].([]any); ok {
+		for i, v := range vols {
+			switch m := v.(type) {
+			case string:
+				if src, rest, found := strings.Cut(m, ":"); found && relativeHostPath(src) {
+					vols[i] = abs(src) + ":" + rest
+				}
+			case map[string]any:
+				typ, _ := m["type"].(string)
+				if src, ok := m["source"].(string); ok && (typ == "bind" || typ == "") && relativeHostPath(src) {
+					m["source"] = abs(src)
+				}
+			}
+		}
+	}
+	switch ef := svc["env_file"].(type) {
+	case string:
+		svc["env_file"] = abs(ef)
+	case []any:
+		for i, e := range ef {
+			switch x := e.(type) {
+			case string:
+				ef[i] = abs(x)
+			case map[string]any:
+				if p, ok := x["path"].(string); ok {
+					x["path"] = abs(p)
+				}
+			}
+		}
+	}
+	if dev, ok := svc["develop"].(map[string]any); ok {
+		if watch, ok := dev["watch"].([]any); ok {
+			for _, w := range watch {
+				if m, ok := w.(map[string]any); ok {
+					if p, ok := m["path"].(string); ok {
+						m["path"] = abs(p)
+					}
+				}
+			}
+		}
+	}
+}
+
+// relativeHostPath reports whether a volume source is written as a path
+// relative to a file — the forms the runtime side reads as a host path
+// rather than a named volume (`.`, `..`, `./…`, `../…`).
+func relativeHostPath(s string) bool {
+	return s == "." || s == ".." || strings.HasPrefix(s, "./") || strings.HasPrefix(s, "../")
 }
 
 // resolveSameFileExtends is resolveExtendsInTree for a single file: the
 // tree comes back re-marshalled only when something was resolved, so a
 // file with no such service keeps its positions for the failures that
 // name a line (a file with one has been checked as written already).
-func resolveSameFileExtends(doc interpolated, where string) (*interpolated, error) {
+func resolveSameFileExtends(doc interpolated, where, projectDir string, lookup varLookup) (*interpolated, error) {
 	var tree map[string]any
 	if err := doc.into(&tree); err != nil {
 		return nil, nil // the decode below says so in its own words
 	}
-	touched, err := resolveExtendsInTree(where, tree)
+	touched, err := resolveExtendsInTree(where, projectDir, tree, lookup)
 	if err != nil || !touched {
 		return nil, err
 	}
@@ -1476,10 +1611,12 @@ func checkTopLevel(path string, root *yaml.Node, earlier map[string]any, overrid
 		case k == "services" && bare:
 			return fmt.Errorf("compose file %s: services must be a mapping — the key has nothing under it; write the services or remove the key", path)
 		case k == "include":
-			if bare || (v.Kind == yaml.SequenceNode && len(v.Content) == 0) {
+			// A list is read (see loadUnit); nothing after the key names no
+			// file. docker compose: "`include` must be a list".
+			if bare || v.Kind == yaml.SequenceNode {
 				continue
 			}
-			return fmt.Errorf("compose file %s: include is not read — the files it names would be left out of the project; pass them with -f instead (`-f %s -f <other>`) and remove include", path, filepath.Base(path))
+			return fmt.Errorf("compose file %s: include must be a list, got %s (line %d) — write the files to include as `- other.yml`", path, kindName(v.Kind), key.Line)
 		case k == "version" && bare:
 			return fmt.Errorf("compose file %s: version must be a string — the key has nothing after it; write the value or remove the key", path)
 		case k == "name" && bare:
@@ -1505,6 +1642,326 @@ func checkTopLevel(path string, root *yaml.Node, earlier map[string]any, overrid
 		}
 	}
 	return nil
+}
+
+// hasInclude reports whether the file names files to include — a
+// top-level `include:` with something in it. Read cheaply, before the file
+// is read for what it says: such a file is a merge of several, and takes
+// the merge road even when it is the only -f.
+func hasInclude(path string) bool {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var top struct {
+		Include []any `yaml:"include"`
+	}
+	return yaml.Unmarshal(raw, &top) == nil && len(top.Include) > 0
+}
+
+// includeEntry is one item of a file's `include:`, in either form: a path,
+// or a mapping with `path` (one, or a list), `project_directory` and
+// `env_file` (one, or a list).
+type includeEntry struct {
+	paths      []string
+	projectDir string
+	envFiles   []string
+}
+
+// includeEntries reads a file's `include:` from the plain tree, as docker
+// compose (v5.5.0) reads it: a string names a file; a mapping names one or
+// several under `path`, with `project_directory` the directory the
+// included files' relative paths count from (the first path's directory
+// when not given) and `env_file` the files their variables are read from
+// (that directory's `.env` when not given); a mapping with no `path` names
+// nothing and is taken. Anything else is refused.
+func includeEntries(path string, inc any) ([]includeEntry, error) {
+	list, ok := inc.([]any)
+	if !ok {
+		return nil, nil // not a list: refused as written, before this
+	}
+	strings := func(v any, what string, i int) ([]string, error) {
+		switch x := v.(type) {
+		case string:
+			return []string{x}, nil
+		case []any:
+			out := make([]string, 0, len(x))
+			for _, e := range x {
+				str, ok := e.(string)
+				if !ok {
+					return nil, fmt.Errorf("compose file %s: include entry %d: %s must be a path or a list of paths — got %s in the list", path, i+1, what, kindOf(e))
+				}
+				out = append(out, str)
+			}
+			return out, nil
+		}
+		return nil, fmt.Errorf("compose file %s: include entry %d: %s must be a path or a list of paths, got %s", path, i+1, what, kindOf(v))
+	}
+	var entries []includeEntry
+	for i, item := range list {
+		switch x := item.(type) {
+		case string:
+			entries = append(entries, includeEntry{paths: []string{x}})
+		case map[string]any:
+			var e includeEntry
+			if p, has := x["path"]; has {
+				paths, err := strings(p, "path", i)
+				if err != nil {
+					return nil, err
+				}
+				e.paths = paths
+			}
+			if d, has := x["project_directory"]; has {
+				dir, ok := d.(string)
+				if !ok {
+					return nil, fmt.Errorf("compose file %s: include entry %d: project_directory must be a path, got %s", path, i+1, kindOf(d))
+				}
+				e.projectDir = dir
+			}
+			if f, has := x["env_file"]; has {
+				files, err := strings(f, "env_file", i)
+				if err != nil {
+					return nil, err
+				}
+				e.envFiles = files
+			}
+			entries = append(entries, e)
+		default:
+			return nil, fmt.Errorf("compose file %s: include entry %d must be a path or a mapping with path, got %s", path, i+1, kindOf(item))
+		}
+	}
+	return entries, nil
+}
+
+// kindOf names a plain-tree value the way the shape refusals do.
+func kindOf(v any) string {
+	switch v.(type) {
+	case nil:
+		return "nothing"
+	case string:
+		return "a single value"
+	case []any:
+		return "a list"
+	case map[string]any:
+		return "a mapping"
+	}
+	return "a single value"
+}
+
+// includedPart is what an included file brings into the including
+// project, as docker compose takes it: its services, with their paths
+// made absolute against projectDir, and its volumes, networks, secrets
+// and configs declarations, a secret's or config's `file` made absolute
+// the same way. Its `name`, `version` and extension fields stay behind.
+func includedPart(whole map[string]any, projectDir string) map[string]any {
+	part := map[string]any{}
+	if services, ok := whole["services"].(map[string]any); ok {
+		for _, svc := range services {
+			if svc, ok := svc.(map[string]any); ok {
+				rebasePaths(svc, projectDir)
+			}
+		}
+		part["services"] = services
+	}
+	for _, k := range []string{"volumes", "networks", "secrets", "configs"} {
+		decls, ok := whole[k]
+		if !ok {
+			continue
+		}
+		if k == "secrets" || k == "configs" {
+			if m, ok := decls.(map[string]any); ok {
+				for _, d := range m {
+					if d, ok := d.(map[string]any); ok {
+						if f, ok := d["file"].(string); ok && f != "" && !filepath.IsAbs(f) {
+							d["file"] = filepath.Join(projectDir, f)
+						}
+					}
+				}
+			}
+		}
+		part[k] = decls
+	}
+	return part
+}
+
+// loadUnit reads one -f file as the project sees it: the file, with the
+// files its `include:` names read before it and merged under it, as docker
+// compose (v5.5.0) reads them — each included file is a project of its own
+// whose relative paths count from its project directory (made absolute
+// here, since this project resolves relative ones from its own directory),
+// with its own `include` and `extends` resolved, and its variables read
+// from that directory's `.env` (or the entry's `env_file`) under this
+// project's: the shell and this project's `.env` win. Only what docker
+// compose takes from an included file comes over — its services and its
+// volumes, networks, secrets and configs declarations (a secret's or
+// config's file counting from its project directory) — not its `name`,
+// `version` or extension fields. Where an included file and this one
+// define the same service, this file's settings go over the included
+// (measured: not a refusal). A service of this file may extend an
+// included one. An included file is checked as a project of its own (a
+// bare service key is refused there, as in a first file). A file that
+// includes itself, through however many files, is refused. Returns the
+// merged tree and the files it was read from, included first.
+//
+// projectDir is the directory this file's own include entries and
+// `extends: {file}` count from — the project directory of the unit the
+// file belongs to, which is the first -f file's directory for a -f file
+// and the entry's for an included one ("" says the file's own) (docker compose, measured: a nested include's paths count
+// from the project directory, not from the file that names them).
+func loadUnit(path, projectDir string, scope envScope, earlier map[string]any, stack []string) (map[string]any, []string, error) {
+	abs := path
+	if a, err := filepath.Abs(path); err == nil {
+		abs = a
+	}
+	if projectDir == "" {
+		projectDir = filepath.Dir(abs)
+	}
+	for _, s := range stack {
+		if s == abs {
+			shown := make([]string, 0, len(stack)+1)
+			for _, s := range stack {
+				shown = append(shown, filepath.Base(s))
+			}
+			return nil, nil, fmt.Errorf("compose file %s: include forms a cycle (%s → %s) — remove the include that closes it", path, strings.Join(shown, " → "), filepath.Base(abs))
+		}
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if len(stack) > 0 {
+			return nil, nil, fmt.Errorf("compose file %s: include names %s, which cannot be read: %v — a relative path is resolved from the project directory (the first file's, or the include entry's)", stack[len(stack)-1], path, err)
+		}
+		return nil, nil, fmt.Errorf("reading compose file: %w", err)
+	}
+	one, err := interpolateDocument(raw, scope.lookup())
+	if err != nil {
+		return nil, nil, fmt.Errorf("interpolating %s: %w", path, err)
+	}
+	var m map[string]any
+	if err := one.into(&m); err != nil {
+		// The same words as the single-file road. A key set twice is found
+		// here rather than at the final decode, and saying "not valid YAML"
+		// for it was the same wrong advice by a different route — the one a
+		// reader hits precisely when they have split their file up.
+		return nil, nil, decodeErr(path, asWritten, err)
+	}
+	files := []string{path}
+	// The included files come first, so that this file is checked
+	// against them below.
+	var group map[string]any
+	var included []string
+	if inc, has := m["include"]; has {
+		delete(m, "include")
+		entries, err := includeEntries(path, inc)
+		if err != nil {
+			return nil, nil, err
+		}
+		dir := projectDir
+		for _, e := range entries {
+			if len(e.paths) == 0 {
+				continue
+			}
+			subDir := e.projectDir
+			if subDir == "" {
+				subDir = filepath.Dir(e.paths[0])
+			}
+			if !filepath.IsAbs(subDir) {
+				subDir = filepath.Join(dir, subDir)
+			}
+			envFiles := make([]string, 0, len(e.envFiles))
+			for _, f := range e.envFiles {
+				if !filepath.IsAbs(f) {
+					f = filepath.Join(dir, f)
+				}
+				envFiles = append(envFiles, f)
+			}
+			// The included project's variables: its directory's `.env` (or
+			// the entry's env_file) at a level under this project's, whose
+			// shell and `.env` win. The built-in stays last, under both.
+			sub, err := loadEnv(subDir, envFiles)
+			if err != nil {
+				return nil, nil, fmt.Errorf("compose file %s: include: %w", path, err)
+			}
+			sub.outer = chainLookup(scope.outer, mapLookup(scope.level))
+			sub.builtin = scope.builtin
+			for _, p := range e.paths {
+				if !filepath.IsAbs(p) {
+					p = filepath.Join(dir, p)
+				}
+				// Checked as a project of its own: no earlier file makes
+				// its bare keys "not given".
+				whole, subFiles, err := loadUnit(p, subDir, sub, nil, append(stack, abs))
+				if err != nil {
+					return nil, nil, err
+				}
+				tree := includedPart(whole, subDir)
+				included = append(included, subFiles...)
+				if group == nil {
+					group = tree
+				} else {
+					group = mergeMap(group, tree, "")
+				}
+			}
+		}
+	}
+	// Each file is checked on its own before the merge, as docker
+	// compose validates each before merging: a mistake in one file
+	// is refused naming that file and its line, whether or not a
+	// later file writes over it, and a shape the merge would absorb
+	// (a network listed twice in one file) is refused too. In a
+	// later file a key with nothing after it is "not given" (the
+	// earlier value stands) and is not read as a bare key — and so
+	// it is in a file with includes, where an included file may have
+	// given the key its value (docker compose, measured: `services:
+	// {common: }` over an include that defines common is that
+	// service); what is still nothing after the merge is refused.
+	before := earlier
+	if group != nil {
+		before = group
+		if earlier != nil {
+			before = mergeMap(deepCopyTree(earlier).(map[string]any), group, "")
+		}
+	}
+	if err := validateOne(path, one, before); err != nil {
+		return nil, nil, err
+	}
+	if err := liftExternalNames(path, m, before); err != nil {
+		return nil, nil, err
+	}
+	if group != nil {
+		m = mergeMap(group, m, "")
+		files = append(included, files...)
+		// What is still nothing once the includes — and the earlier -f
+		// files, which count as much here as they do in LoadFiles — are
+		// under this file is refused naming this file: a bare service
+		// key nobody defines, or a field no file gave a value to.
+		whole := m
+		if earlier != nil {
+			whole = mergeMap(deepCopyTree(earlier).(map[string]any), m, "") // merging reads m, and writes only the copy
+		}
+		if services, ok := whole["services"].(map[string]any); ok {
+			names := make([]string, 0, len(services))
+			for name := range services {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			for _, name := range names {
+				if services[name] == nil {
+					return nil, nil, fmt.Errorf("compose file %s: service %q must be a mapping — the key has nothing under it; give it at least `image:` or `build:`, or remove the key", path, name)
+				}
+			}
+		}
+		if err := validateMerged(path, whole, asMerged); err != nil {
+			return nil, nil, err
+		}
+	}
+	// `extends` within this file is read before the merge with earlier -f
+	// files, as docker compose reads it: a service this file defines — or
+	// includes — is what it extends, and an earlier file's version of the
+	// extending service is what this file's resolved version goes over.
+	if _, err := resolveExtendsInTree(path, projectDir, m, scope.lookup()); err != nil {
+		return nil, nil, err
+	}
+	return m, files, nil
 }
 
 // validateMerged decodes what the files so far make together and names

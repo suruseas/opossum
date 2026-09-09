@@ -54,7 +54,11 @@ func run(args []string) int {
 		// `system status` is the daemon-liveness probe (Ps/Images call it before
 		// rendering); report running (the stopped case is handled above).
 		if arg(1) == "status" {
-			fmt.Println("status running")
+			if arg(2) == "--format" && arg(3) == "json" {
+				fmt.Println(`{"client":{"version":"1.4.1"},"resources":{"containersRunning":0,"containersTotal":1,"images":3},"server":{"version":"1.4.1"},"status":"running"}`)
+			} else {
+				fmt.Println("status running")
+			}
 		}
 	case "delete", "rm":
 		// Remember it as gone, so a later `inspect` can answer "not there". Gated on

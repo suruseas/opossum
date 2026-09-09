@@ -39,12 +39,12 @@ Docker Compose ファイル（`docker-compose.yml`）を読み、オープンな
 
 **3. 何も動いていないときは、何も動いていない。** Docker Desktop は常駐の Linux VM を
 1つ抱えますが、Apple `container` はコンテナごとに VM を与え、待機時には1つも抱えません。
-1台の Mac での実測（macOS 26・Apple silicon、`container` 1.3.1 vs Docker Engine 29.7.2、2026-09-07）：
+1台の Mac での実測（macOS 26・Apple silicon、`container` 1.4.1 vs Docker Engine 29.7.2、2026-09-09）：
 
 | | Docker Desktop | Apple `container`（opossum） |
 |---|---|---|
-| アイドル時のメモリ | ホストプロセス ~551 MB **＋ 常駐 Linux VM に ~8.2 GB** | ヘルパ **~81 MB**、**常駐 VM なし**（builder の VM は一度使うと `container builder stop` まで残る） |
-| コンテナ1個の起動 | **~0.15 秒** | ~0.83 秒 |
+| アイドル時のメモリ | ホストプロセス ~470 MB **＋ 常駐 Linux VM に ~8.2 GB** | ヘルパ **~65 MB**、**常駐 VM なし**（builder の VM は一度使うと `container builder stop` まで残る） |
+| コンテナ1個の起動 | **~0.15 秒** | ~0.84 秒 |
 | 分離 | VM カーネル共有 | **コンテナごとに VM** |
 | ライセンス | 大きな組織では有償 | オープンソース・不要 |
 
@@ -54,7 +54,7 @@ Docker Compose ファイル（`docker-compose.yml`）を読み、オープンな
 ## 必要環境
 
 - Apple silicon の macOS 26 以降
-- [`container`](https://github.com/apple/container) がインストール済みで起動済み（`container system start`）、かつ `PATH` 上にあること — `container` 1.3.1 で検証済み
+- [`container`](https://github.com/apple/container) がインストール済みで起動済み（`container system start`）、かつ `PATH` 上にあること — `container` 1.4.1 で検証済み
 - Go 1.25 以降（ソースからビルドする場合）
 
 ## インストール
@@ -232,7 +232,8 @@ named volume は同時に1つの稼働コンテナにしか接続できません
 `container` の制約であって
 選択ではありません。`resources.limits` を超える Swarm/`deploy` と `configs` は
 無視され、`opossum config` がファイル内のどのフィールドを飛ばしたかを教えます。
-`extends:` を持つサービスは、継承する設定を読まないため名前を挙げて拒否します。
+`extends:`——同じファイルのサービスでも、別のファイルのサービスでも、その連鎖でも——は
+docker compose と同じ意味で読みます。
 
 [詳細と、それぞれへの対処（英語）→](docs/troubleshooting.md)
 

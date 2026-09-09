@@ -5,13 +5,33 @@ stdout+stderr と exit code の golden。`testdata/fake-container.sh` はこれ�
 返し、`internal/runtime/runtime_test.go` の忠実性 eval はこの文字列を各パーサに流して
 整合を確認する。**CLI 更新時はここを再採取して同期すること。**
 
-**最終検証: 2026-09-04 / `container CLI version 1.3.1`（Homebrew formula `1.3.1`）。**
-下記の節を実機で採り直した（生出力は `~/opossum-dogfood/results/v131-recapture/`、68 ファイル、
+**最終検証: 2026-09-09 / `container CLI version 1.4.1`（Homebrew formula `1.4.1`）。**
+パーサが読むコマンドを実機で採り直した（生出力は `~/opossum-dogfood/results/v141-recapture/`、78 ファイル、
+`capture.sh` で採り `compare.sh` で 1.3.1 の同名ファイルと比べる。1.3.1 の分は `v131-recapture/`、68 ファイル。
 各ファイルは `$ <コマンド>` → `--- exit code:` → `--- stdout ---` → `--- stderr ---` の形）。各節に
-付いている古い採取日は、その記述が**最初に**確かめられた日。**1.3.1 で引き直していない主張**は
-節の中で名指ししてある（`stats` のストリーミング既定）。「DNS 解決の挙動」の前半と `stats` の
-`--format` は 2026-09-05 に引いた（末尾の「公開文書の実機主張」の節）。
+付いている古い採取日は、その記述が**最初に**確かめられた日。**1.4.1 で引き直していない節**は下の索引に
+名指ししてある。「DNS 解決の挙動」の前半と `stats` の `--format` は 2026-09-05 に 1.3.1 で引いた
+（末尾の「公開文書の実機主張」の節）。
 
+**1.3.1 → 1.4.1 で変わったもの（索引）**：
+- `system status`：表のまま行が増え、名前が変わった——`appRoot`/`installRoot`/`logRoot` は `paths.*` に、
+  `apiserver.*` は `server.*` に（`server.version` は版だけ）、`client.*`・`host.*`・`containers.total`・
+  `containers.running`・`images.total` が増えた。**`status running` の行はそのまま**（opossum が読むのはこれだけ）。
+  止まっているときは exit 1 で `apiserver is not running and not registered with launchd`（下の節）
+- JSON 出力（`inspect`・`ls --format json`・`network inspect`）で `/` が `\/` とエスケープされなくなった
+  （Go の decoder は両方読む）。パーサが読む key は 1 つも消えていない（label・mount・published port・
+  network の付いたコンテナで 1.3.1 の `inspect` と like-for-like に比べた）。`network ls --format json` の
+  builtin `default` に `configuration.labels.com.apple.container.resource.role: builtin` が増えた
+- `container --help` に `clean`（`Clean one or more running containers`、`container clean [<container-ids> ...]`）が増えた。opossum は使わない
+- 文言は同じ：`container not found: <name>`・`network not found: <name>`・`image not found: <ref>`・
+  `stats` の `no such container: <name>`（exit 1、呼び出し全体が失敗）・volume in use の 2 行・
+  `images ls`（複数形）の `Plugin 'container-images' not found.`（exit 64）・`run` の exit code 伝播（0/3）
+- **1.4.1 で引き直していない節**：`run --platform`（rosetta・arm64 の無い image）、`port-attempt`（53・loopback）、
+  `OPSM-103/107/201` の再現、`row6–9`（build の cache/resource/disk-full・volume in use via opossum）、
+  DNS spike（複数 project の分離）、`builder status`（running 側）、`parser-ps-mixed`、`net-after-restart`。
+  これらの節の主張は 1.3.1（または初出の版）の採取のまま
+
+**1.2.2 → 1.3.1 で変わったもの（節ごとの注記が正、ここは索引）**：
 **1.2.2 → 1.3.1 で変わったもの（節ごとの注記が正、ここは索引）**：
 - `network inspect` / `network ls --format json`：`status.ipv6Subnet` が増えた（キー増のみ）
 - `inspect` / `ls -a --format json`：`publishedPorts[].count`・`status.networks[].mtu`・
@@ -41,6 +61,56 @@ stdout+stderr と exit code の golden。`testdata/fake-container.sh` はこれ�
 以前は 1.0.0 採取のまま2節だけが 1.1.0 で更新されており、版が混在していた。混在した
 ゴールデンは「差分が出たとき、どの版で変わったのか」を答えられない——fake が現実と
 一致していることの根拠がここ1枚にかかっている以上、更新のたびに**全節**を採り直す。
+
+## `container system status`  (初出 2026-09-09、1.4.1)
+
+opossum は `--format json`（1.4.1 で追加）を先に読み（`runtime.go` `SystemStatus`・`doctor.go` `checkRuntime`：
+`status` が `"running"`、`client.version`／`server.version`、`resources.*`）、JSON が取れない版（1.3.1 には
+`--format` が無い）では表の `status` 行だけを読む（`FIELD` が `status` で `VALUE` が `running`）。1.3.1 の表は
+`status`・`appRoot`・`installRoot`・`logRoot`・`apiserver.*` の 9 行だった。1.4.1 の JSON（上がっているとき、exit 0）：
+
+```
+$ container system status --format json
+{"client":{"appName":"container","build":"release","commit":"unspecified","version":"1.4.1"},"host":{"architecture":"arm64","cpus":8,"operatingSystem":"Version 26.6.2 (Build 25G83)"},"paths":{"appRoot":"/Users/<user>/Library/Application Support/com.apple.container/","installRoot":"/opt/homebrew/Cellar/container/1.4.1/"},"resources":{"containersRunning":0,"containersTotal":1,"images":18},"server":{"appName":"container-apiserver","build":"release","commit":"unspecified","version":"1.4.1"},"status":"running"}
+```
+
+1.4.1 の表：
+
+```
+$ container system status
+FIELD               VALUE
+status              running
+client.version      1.4.1
+client.build        release
+client.commit       unspecified
+host.os             Version 26.6.2 (Build 25G83)
+host.architecture   arm64
+host.cpus           8
+server.version      1.4.1
+server.build        release
+server.commit       unspecified
+server.appName      container-apiserver
+paths.appRoot       /Users/<user>/Library/Application Support/com.apple.container/
+paths.installRoot   /opt/homebrew/Cellar/container/1.4.1/
+paths.logRoot       
+containers.total    1
+containers.running  0
+images.total        17
+```
+
+止まっているとき（`brew upgrade` 直後、`container system start` 前）は **exit 1**：
+
+```
+$ container system status
+apiserver is not running and not registered with launchd
+$ container system status --format json
+{"status":"unregistered"}
+```
+
+このとき `ls`・`image ls`・`network ls` も exit 1（`XPC connection error: Connection invalid` ＋
+`Ensure container system service has been started with `container system start`.`）。
+`system start` は `Launching container-apiserver... / Testing access... / Verifying machine API server is running...`
+の 3 行。
 
 ## `container system dns list`  (exit 0)
 ```

@@ -94,9 +94,19 @@ jobs:
       # takes the version and the file it reads it from as separate inputs, and
       # what it does when both are given, or when one is given empty, is not
       # something this should be relying on.
+      # `cache: false` on both setup-go steps: by default the action saves
+      # GOMODCACHE and GOCACHE to the Actions cache after the job (about
+      # 2.2 GB each, some 9 minutes per step on this runner) and restores
+      # them before it. On the self-hosted runner both directories are on
+      # the runner's own disk and survive between jobs, so the save and the
+      # restore move data the next run already has — 18 of a 23-minute run
+      # went to the two uploads, and the repository's 10 GB cache quota was
+      # full of copies. On a fresh runner the first build compiles from
+      # scratch, once.
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+          cache: false
       # Not a formality. setup-go reads the `go` directive with a pattern of
       # its own that wants a literal space, so a tab or a leading space — both
       # of which the go tool accepts — leave it with nothing; and with nothing
@@ -157,6 +167,7 @@ jobs:
         if: ${{ !cancelled() }}
         with:
           go-version: stable
+          cache: false
       # When the two sections run the same compiler, everything they exist to
       # catch — coverage boundaries moving, gofmt changing its mind — cannot
       # show up in a green run. In the matrix this claim took two half-checks

@@ -176,19 +176,98 @@ func (r *Runtime) Available() bool {
 	return err == nil
 }
 
+// SystemStatus is what `container system status` reports: whether the
+// daemon is up, and — when the report was JSON (container 1.4.1 and later)
+// — the client and server versions and the counts under `resources`.
+// Counts are -1 where the report did not carry them.
+type SystemStatus struct {
+	Running                      bool
+	ClientVersion, ServerVersion string
+	ContainersRunning            int
+	ContainersTotal              int
+	Images                       int
+	FromJSON                     bool
+}
+
 // SystemRunning reports whether the container system (daemon) is actually up —
 // not merely installed. Available only checks the CLI is on PATH; the system can
 // be present but stopped, in which case every real call fails. A read-only
 // command that silently returns "nothing" when the system is down (an empty `ps`
 // table, `PRESENT=no`) would be lying, so those commands probe with this first.
 // `container system status` is the canonical liveness signal — doctor uses the
-// same one — printing a `status running` line when the daemon is up.
+// same one.
 func (r *Runtime) SystemRunning() bool {
-	out, err := r.capture("system", "status")
-	if err != nil {
-		return false
+	return r.SystemStatus().Running
+}
+
+// SystemStatus reads `container system status` in two steps: `--format json`
+// first (container 1.4.1; measured — `{"status":"running",…}` with the
+// versions and counts when up, exit 1 and `{"status":"unregistered"}` when
+// the apiserver is down), and the table without the flag where the JSON
+// form is not there (1.3.1 has no `--format` and refuses it), where a
+// `status running` row means the daemon is up. The streams are read
+// folded together, as the table always was; the JSON can be, because 1.4.1
+// prints it on stdout with nothing on stderr (measured).
+func (r *Runtime) SystemStatus() SystemStatus {
+	out, err := r.capture("system", "status", "--format", "json")
+	if st, ok := ParseSystemStatusJSON(out); ok {
+		return st
 	}
-	// Mirror doctor's parse: a `status running` field means the daemon is up.
+	if err == nil {
+		// The flag was taken but the answer is not JSON: read it as the
+		// table rather than asking again.
+		return SystemStatusFromTable(out)
+	}
+	out, err = r.capture("system", "status")
+	if err != nil {
+		return SystemStatusFromTable("")
+	}
+	return SystemStatusFromTable(out)
+}
+
+// ParseSystemStatusJSON reads the `--format json` report. The status word is
+// what counts: "running" is up, anything else ("unregistered" when the
+// apiserver is down) is not. Reports false where the text is not that JSON.
+func ParseSystemStatusJSON(out string) (SystemStatus, bool) {
+	var rep struct {
+		Status string `json:"status"`
+		Client struct {
+			Version string `json:"version"`
+		} `json:"client"`
+		Server struct {
+			Version string `json:"version"`
+		} `json:"server"`
+		Resources *struct {
+			ContainersRunning int `json:"containersRunning"`
+			ContainersTotal   int `json:"containersTotal"`
+			Images            int `json:"images"`
+		} `json:"resources"`
+	}
+	if json.Unmarshal([]byte(strings.TrimSpace(out)), &rep) != nil || rep.Status == "" {
+		return SystemStatus{}, false
+	}
+	st := SystemStatus{
+		Running:           rep.Status == "running",
+		ClientVersion:     rep.Client.Version,
+		ServerVersion:     rep.Server.Version,
+		ContainersRunning: -1, ContainersTotal: -1, Images: -1,
+		FromJSON: true,
+	}
+	if rep.Resources != nil {
+		st.ContainersRunning, st.ContainersTotal, st.Images = rep.Resources.ContainersRunning, rep.Resources.ContainersTotal, rep.Resources.Images
+	}
+	return st, true
+}
+
+// SystemStatusFromTable is the status the table report gives: running or
+// not, with no versions and the counts unknown.
+func SystemStatusFromTable(out string) SystemStatus {
+	return SystemStatus{Running: SystemStatusTableRunning(out), ContainersRunning: -1, ContainersTotal: -1, Images: -1}
+}
+
+// SystemStatusTableRunning reads the table report: a `status running` row
+// means the daemon is up (the rows around it differ between versions).
+func SystemStatusTableRunning(out string) bool {
 	for _, line := range strings.Split(out, "\n") {
 		f := strings.Fields(line)
 		if len(f) >= 2 && f[0] == "status" && strings.EqualFold(f[1], "running") {

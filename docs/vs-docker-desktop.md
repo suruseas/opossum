@@ -6,7 +6,7 @@ opossum, some favor Docker, and a few are gaps we can close.
 
 Measured on an Apple silicon Mac (M2, 8 cores, 16 GB), Docker Desktop 29.5.3 vs
 Apple `container` 1.1.0 with opossum; the throwaway-run and rebuild rows were
-re-measured on 2026-09-07 with Docker Engine 29.7.2 vs `container` 1.3.1 and
+re-measured on 2026-09-09 with Docker Engine 29.7.2 vs `container` 1.4.1 and
 are marked. Numbers are indicative of one machine —
 reproduce with the commands shown. See also
 [benchmarks.md](benchmarks.md) for idle footprint and single-run startup.
@@ -97,10 +97,10 @@ The decisive dev-stack difference is speed, not memory.
 
 | Dimension | Docker Desktop | opossum / `container` | Takeaway |
 |-----------|----------------|------------------------|----------|
-| **10× `run --rm` (throwaway), sequential** | 1.6 s (1.3.1 re-measure; 2.1 s on 1.1.0) | 8.3 s (8.3 s) | ~5× slower — each container is a VM |
-| **10× `run --rm`, in parallel** | 0.6 s (0.75 s) | 7.4 s (7.6 s) | gap widens to ~12× — a shared daemon parallelizes, per-container VMs don't |
+| **10× `run --rm` (throwaway), sequential** | 1.6 s (1.4.1 re-measure; 2.1 s on 1.1.0) | 8.6 s (8.3 s) | ~5× slower — each container is a VM |
+| **10× `run --rm`, in parallel** | 0.7 s (0.75 s) | 7.7 s (7.6 s) | gap widens to ~12× — a shared daemon parallelizes, per-container VMs don't |
 | **First build in a session** | BuildKit always warm | +~6 s builder-VM cold start | the on-demand builder VM boots on first use |
-| **Cached rebuild (no changes)** | 0.20 s (1.3.1 re-measure; 0.21 s on 1.1.0) | 0.18 s (0.17 s) | parity — layer caching works |
+| **Cached rebuild (no changes)** | 0.25 s (1.4.1 re-measure; 0.21 s on 1.1.0) | 0.18 s (0.17 s) | parity — layer caching works |
 | **Disk usage view / cleanup** | `system df` + `system prune` | `system df` (aggregate + reclaimable) + `image prune` / `volume prune`; no single `system prune` | parity on the view; cleanup is split per-resource. `opossum doctor` flags large reclaimable storage |
 
 ```sh

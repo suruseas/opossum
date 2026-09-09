@@ -30,7 +30,10 @@ func resolveEnvFiles(dir string, files EnvFiles, env []string, scope envScope) (
 	var fromFiles []string
 	inner := scope.inner(explicitEnv(env))
 	for _, f := range files {
-		p := filepath.Join(dir, f.Path)
+		p := f.Path
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(dir, p)
+		}
 		if _, err := os.Stat(p); err != nil {
 			if !f.Required {
 				continue // optional and absent — skip
