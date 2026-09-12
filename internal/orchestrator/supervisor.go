@@ -31,9 +31,11 @@ import (
 // State lives outside the user's project directory on purpose: a repository
 // should not grow pid files because someone ran `up` in it.
 
-// supervisorStateDir is where a project's supervisor keeps its pid and log.
-// XDG_STATE_HOME is honoured so a test — or a user with opinions — can move it.
-func supervisorStateDir(project string) (string, error) {
+// projectStateDir is where opossum keeps a project's own files on the host:
+// the supervisor's pid and log, and the files it writes for `content:` and
+// `environment:` configs. XDG_STATE_HOME is honoured so a test — or a user
+// with opinions — can move it.
+func projectStateDir(project string) (string, error) {
 	base := os.Getenv("XDG_STATE_HOME")
 	if base == "" {
 		home, err := os.UserHomeDir()
@@ -48,6 +50,10 @@ func supervisorStateDir(project string) (string, error) {
 	// trusting every present and future caller to have sanitised it.
 	return filepath.Join(base, "opossum", compose.SanitizeName(project)), nil
 }
+
+// supervisorStateDir is projectStateDir under its older name, for the
+// supervisor's callers.
+func supervisorStateDir(project string) (string, error) { return projectStateDir(project) }
 
 func supervisorPidFile(project string) (string, error) {
 	dir, err := supervisorStateDir(project)

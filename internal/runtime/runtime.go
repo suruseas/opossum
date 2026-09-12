@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"strconv"
@@ -402,19 +403,96 @@ func (r *Runtime) NetworkExists(name string) bool {
 }
 
 func (r *Runtime) EnsureNetwork(name string, internal bool) (created bool, err error) {
+	return r.EnsureNetworkLabeled(name, internal, nil, NetworkSubnets{})
+}
+
+// NetworkSubnets are the subnets a network is created with (`--subnet`,
+// `--subnet-v6`), each in CIDR form or "" for the runtime's own choice.
+type NetworkSubnets struct {
+	V4 string
+	V6 string
+}
+
+// EnsureNetworkLabeled is EnsureNetwork with the labels the network is
+// created with (`--label key=value`, one per entry) and its subnets; they
+// apply only when the network is created here.
+func (r *Runtime) EnsureNetworkLabeled(name string, internal bool, labels []string, subnets NetworkSubnets) (created bool, err error) {
 	args := []string{"network", "create"}
 	if internal {
 		args = append(args, "--internal")
+	}
+	for _, l := range labels {
+		args = append(args, "--label", l)
+	}
+	if subnets.V4 != "" {
+		args = append(args, "--subnet", subnets.V4)
+	}
+	if subnets.V6 != "" {
+		args = append(args, "--subnet-v6", subnets.V6)
 	}
 	args = append(args, name)
 	out, cerr := r.capture(args...)
 	if cerr == nil {
 		return true, nil
 	}
-	if strings.Contains(strings.ToLower(out), "exist") {
+	// The real refusal for a name in use is `Error: network <name> already
+	// exists`. Matching the bare word `exist` read the subnet-overlap refusal
+	// (`… overlaps an existing network with subnet …`, container 1.4.1) as
+	// "already there", so a project whose subnet clashed with another's went
+	// on to start containers on a network that was never made.
+	if strings.Contains(strings.ToLower(out), "already exists") {
 		return false, nil // already there — fine
 	}
 	return false, fmt.Errorf("creating network %q: %w\n%s", name, cerr, strings.TrimSpace(out))
+}
+
+// InspectNetworkSubnets reads the subnets an existing network has, from
+// `network inspect`: the ones it was created with (`configuration.ipv4Subnet`
+// / `ipv6Subnet`, present when `--subnet` was given), else the ones the
+// runtime chose (`status.ipv4Subnet` / `ipv6Subnet`, the latter written with
+// the gateway's address on `container` 1.4.1 — `fd00:1::1/64` — so it is
+// read as the prefix it names). ok is false when the network cannot be
+// inspected or the output has neither.
+func (r *Runtime) InspectNetworkSubnets(name string) (subnets NetworkSubnets, ok bool) {
+	out, err := r.capture("network", "inspect", name)
+	if err != nil {
+		return NetworkSubnets{}, false
+	}
+	var nets []struct {
+		Configuration struct {
+			IPv4Subnet string `json:"ipv4Subnet"`
+			IPv6Subnet string `json:"ipv6Subnet"`
+		} `json:"configuration"`
+		Status struct {
+			IPv4Subnet string `json:"ipv4Subnet"`
+			IPv6Subnet string `json:"ipv6Subnet"`
+		} `json:"status"`
+	}
+	if json.Unmarshal([]byte(out), &nets) != nil || len(nets) == 0 {
+		return NetworkSubnets{}, false
+	}
+	n := nets[0]
+	subnets.V4 = prefixOf(n.Configuration.IPv4Subnet)
+	if subnets.V4 == "" {
+		subnets.V4 = prefixOf(n.Status.IPv4Subnet)
+	}
+	subnets.V6 = prefixOf(n.Configuration.IPv6Subnet)
+	if subnets.V6 == "" {
+		subnets.V6 = prefixOf(n.Status.IPv6Subnet)
+	}
+	return subnets, subnets.V4 != "" || subnets.V6 != ""
+}
+
+// prefixOf canonicalises a CIDR to the network it names (`fd00:1::1/64` →
+// `fd00:1::/64`); a value that is not a CIDR is returned as it is.
+func prefixOf(cidr string) string {
+	if cidr == "" {
+		return ""
+	}
+	if _, ipnet, err := net.ParseCIDR(cidr); err == nil {
+		return ipnet.String()
+	}
+	return cidr
 }
 
 // DeleteNetwork removes a network as part of best-effort teardown. It stays
@@ -604,6 +682,37 @@ func (r *Runtime) ListVolumes() []string {
 		names = append(names, f[0])
 	}
 	return names
+}
+
+// VolumeRow is one line of `container volume ls`: the volume's name and its
+// driver (the NAME and DRIVER columns of NAME / TYPE / DRIVER / OPTIONS).
+type VolumeRow struct {
+	Name   string
+	Driver string
+}
+
+// ListVolumeRows returns every volume the runtime lists with its driver, or nil
+// when the runtime cannot be asked (as ListVolumes does). The driver is the
+// third column; a line without one is kept with an empty driver rather than
+// dropped, so a volume is never hidden by the shape of its row.
+func (r *Runtime) ListVolumeRows() []VolumeRow {
+	out, err := r.capture("volume", "ls")
+	if err != nil {
+		return nil
+	}
+	var rows []VolumeRow
+	for i, line := range strings.Split(out, "\n") {
+		f := strings.Fields(line)
+		if len(f) == 0 || (i == 0 && strings.EqualFold(f[0], "name")) {
+			continue // the header row
+		}
+		row := VolumeRow{Name: f[0]}
+		if len(f) >= 3 {
+			row.Driver = f[2]
+		}
+		rows = append(rows, row)
+	}
+	return rows
 }
 
 // VolumeListed reports whether a volume is present, and separately whether the
@@ -911,6 +1020,7 @@ type RunOptions struct {
 	Image      string
 	Platform   string   // --platform (e.g. linux/amd64); amd64 also enables --rosetta
 	Networks   []string // one --network per entry (a service may join several); "none" for full isolation
+	MacAddress string   // the MAC for the first network, as `--network <name>,mac=<addr>` (the runtime takes it per network)
 	DNSDomain  string   // --dns-domain (the registered local domain)
 	DNSSearch  string   // --dns-search (per-project subdomain for bare-name resolution)
 	Env        []string
@@ -939,6 +1049,8 @@ type RunOptions struct {
 	WorkingDir string   // --workdir
 	Init       bool     // --init (reap zombies)
 	ReadOnly   bool     // --read-only root filesystem
+	ShmSize    string   // --shm-size, a byte count (the runtime takes 64M/1G spellings too)
+	Ulimits    []string // one --ulimit per entry, as name=soft or name=soft:hard
 	CapAdd     []string // --cap-add
 	CapDrop    []string // --cap-drop
 }
@@ -980,6 +1092,12 @@ func (r *Runtime) Run(o RunOptions) error {
 	if o.ReadOnly {
 		args = append(args, "--read-only")
 	}
+	if o.ShmSize != "" {
+		args = append(args, "--shm-size", o.ShmSize)
+	}
+	for _, u := range o.Ulimits {
+		args = append(args, "--ulimit", u)
+	}
 	if o.User != "" {
 		args = append(args, "--user", o.User)
 	}
@@ -1009,7 +1127,10 @@ func (r *Runtime) Run(o RunOptions) error {
 	if o.CPUs != "" {
 		args = append(args, "-c", o.CPUs)
 	}
-	for _, n := range o.Networks {
+	for i, n := range o.Networks {
+		if i == 0 && o.MacAddress != "" && n != "none" {
+			n += ",mac=" + o.MacAddress
+		}
 		args = append(args, "--network", n)
 	}
 	if o.DNSDomain != "" {

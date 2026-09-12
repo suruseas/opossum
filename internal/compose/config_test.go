@@ -125,8 +125,8 @@ networks:
   backend: {}
 volumes:
   data: {}
-configs:
-  appcfg: {}
+models:
+  llm: {}
 x-custom: ignore-me
 services:
   web:
@@ -140,15 +140,16 @@ services:
 	// created) nor volumes — a volume declaration drives `external: true` and a
 	// volume's real `name:`, so calling it "not acted on" was wrong, and noisy
 	// besides, since almost every real project declares named volumes. `configs`
-	// genuinely is ignored, so it's the one that should be listed.
-	if got := proj.Unsupported; len(got) != 1 || got[0] != "configs" {
-		t.Fatalf("top-level Unsupported = %v, want [configs]", got)
+	// is read too since #872; `models` (a compose key opossum does not read)
+	// is the one that should be listed.
+	if got := proj.Unsupported; len(got) != 1 || got[0] != "models" {
+		t.Fatalf("top-level Unsupported = %v, want [models]", got)
 	}
 	out, err := RenderConfig(proj)
 	if err != nil {
 		t.Fatalf("RenderConfig: %v", err)
 	}
-	if !strings.Contains(out, "(top-level): configs") {
+	if !strings.Contains(out, "(top-level): models") {
 		t.Errorf("config should list top-level ignored keys, got:\n%s", out)
 	}
 }

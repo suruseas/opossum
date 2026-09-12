@@ -82,18 +82,18 @@ func TestAWatchRuleIsReadTheWayDockerReadsIt(t *testing.T) {
 	}
 }
 
-// A key a rule does not have is listed with the ignored fields (docker
-// compose refuses it); `action` left out stays `sync` — a leniency docker
-// compose does not share, pinned so it is a known one.
-func TestAnUnknownWatchRuleKeyIsListedAndAMissingActionDefaults(t *testing.T) {
+// A rule key docker compose takes that opossum does not read (`exec`) is
+// listed with the ignored fields; `action` left out stays `sync` — a
+// leniency docker compose does not share, pinned so it is a known one.
+func TestAnUnreadWatchRuleKeyIsListedAndAMissingActionDefaults(t *testing.T) {
 	// The rule comes in through an alias: the listing must see through it.
-	p, err := Load(writeTemp(t, "x-r: &r\n  path: ./src\n  target: /app\n  bogus: 1\nservices:\n  web:\n    build: .\n    develop:\n      watch:\n        - *r\n"))
+	p, err := Load(writeTemp(t, "x-r: &r\n  path: ./src\n  target: /app\n  exec: {command: echo}\nservices:\n  web:\n    build: .\n    develop:\n      watch:\n        - *r\n"))
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
 	web := p.Services["web"]
-	if got := strings.Join(web.Unsupported, ","); !strings.Contains(got, "develop.watch entry 1.bogus") {
-		t.Errorf("the unknown key should be listed among the ignored fields, got %q", got)
+	if got := strings.Join(web.Unsupported, ","); !strings.Contains(got, "develop.watch entry 1.exec") {
+		t.Errorf("the unread key should be listed among the ignored fields, got %q", got)
 	}
 	if web.Develop.Watch[0].Action != "" {
 		t.Errorf("action left out is left empty here (the watcher reads it as sync), got %q", web.Develop.Watch[0].Action)

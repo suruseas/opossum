@@ -19,7 +19,7 @@ import (
 func TestAKeyOpossumDoesNotReadInAListItemIsNamedAmongTheIgnoredFields(t *testing.T) {
 	for _, tc := range []struct{ name, body, want string }{
 		{"a port's mode", "ports:\n  - {target: 80, published: 8080, mode: host}\n", "ports entry 1.mode"},
-		{"a port's unknown key", "ports:\n  - {target: 80, bogus: 1}\n", "ports entry 1.bogus"},
+		{"a port's app_protocol", "ports:\n  - {target: 80, app_protocol: http}\n", "ports entry 1.app_protocol"},
 		{"the second port", "ports:\n  - \"8080:80\"\n  - {target: 81, name: web}\n", "ports entry 2.name"},
 		{"a bind mount's bind options", "volumes:\n  - {type: bind, source: ., target: /app, bind: {create_host_path: true}}\n", "volumes entry 1.bind"},
 		{"a volume's consistency", "volumes:\n  - {type: volume, source: data, target: /data, consistency: cached}\n", "volumes entry 1.consistency"},

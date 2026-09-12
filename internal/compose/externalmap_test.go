@@ -3,6 +3,7 @@ package compose
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -61,7 +62,7 @@ networks:
 		"n": {External: true, Name: "bar"},
 		"m": {External: true, Name: "explicit"},
 	} {
-		if got := proj.Networks[name]; got != want {
+		if got := proj.Networks[name]; !reflect.DeepEqual(got, want) {
 			t.Errorf("network %s = %+v, want %+v", name, got, want)
 		}
 	}

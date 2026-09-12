@@ -3,11 +3,13 @@ package compose
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -17,6 +19,7 @@ type composeFile struct {
 	Name     string                 `yaml:"name"`
 	Services map[string]*Service    `yaml:"services"`
 	Secrets  map[string]Secret      `yaml:"secrets"`
+	Configs  map[string]Config      `yaml:"configs"`
 	Volumes  map[string]VolumeDecl  `yaml:"volumes"`
 	Networks map[string]NetworkDecl `yaml:"networks"`
 }
@@ -88,7 +91,7 @@ func ignoredTopLevel(doc interpolated) []string {
 		// declaration that opossum *doesn't* act on are reported individually below,
 		// so nothing is silently dropped. `networks` goes the same way: acted on
 		// for external/name/internal, with the rest reported per field.
-		case k == "name" || k == "services" || k == "version" || k == "secrets" || k == "networks" || k == "volumes":
+		case k == "name" || k == "services" || k == "version" || k == "secrets" || k == "configs" || k == "networks" || k == "volumes":
 		case strings.HasPrefix(k, "x-"):
 		default:
 			out = append(out, k)
@@ -97,6 +100,7 @@ func ignoredTopLevel(doc interpolated) []string {
 	out = append(out, ignoredVolumeFields(top["volumes"])...)
 	out = append(out, ignoredNetworkFields(top["networks"])...)
 	out = append(out, ignoredSecretFields(top["secrets"])...)
+	out = append(out, ignoredConfigFields(top["configs"])...)
 	sort.Strings(out)
 	return out
 }
@@ -157,7 +161,7 @@ func earlierDeclName(earlier map[string]any, kind, declName string) string {
 // a declaration (ipam, driver, driver_opts, labels, attachable, enable_ipv6) is
 // parsed and dropped, and used to be dropped without a word — a project that
 // pins a subnet under `ipam` got a plain project network and nothing said so.
-var networkDeclFields = map[string]bool{"external": true, "name": true, "internal": true}
+var networkDeclFields = map[string]bool{"external": true, "name": true, "internal": true, "labels": true, "ipam": true}
 
 // ignoredNetworkFields reports unacted-on keys inside top-level network
 // declarations as `networks.<net>.<key>`, the way ignoredVolumeFields does for
@@ -224,6 +228,30 @@ func ignoredSecretFields(node yaml.Node) []string {
 				continue
 			}
 			out = append(out, fmt.Sprintf("secrets.%s.%s", sec, k))
+		}
+	}
+	return out
+}
+
+// configDeclFields are the per-config keys opossum acts on (`external` by
+// refusing it). Anything else (`name`, `labels`) is parsed and dropped,
+// and named here so it is not dropped in silence.
+var configDeclFields = map[string]bool{"file": true, "content": true, "environment": true, "external": true}
+
+// ignoredConfigFields reports unacted-on keys inside top-level config
+// declarations as `configs.<config>.<key>`, as the secrets one does.
+func ignoredConfigFields(node yaml.Node) []string {
+	var decls map[string]map[string]yaml.Node
+	if node.IsZero() || node.Decode(&decls) != nil {
+		return nil
+	}
+	var out []string
+	for cfg, fields := range decls {
+		for k := range fields {
+			if configDeclFields[k] || strings.HasPrefix(k, "x-") {
+				continue
+			}
+			out = append(out, fmt.Sprintf("configs.%s.%s", cfg, k))
 		}
 	}
 	return out
@@ -325,7 +353,12 @@ func childPath(path, key string) string {
 
 // replaceSeqKeys are sequence fields that represent a single value, so an override
 // replaces rather than appends them (docker compose parity).
-var replaceSeqKeys = map[string]bool{"command": true, "entrypoint": true, "test": true}
+// `config` is a network's `ipam.config`: a later file's list replaces the
+// earlier one (docker compose v5.5.0 gives the merged network the later
+// file's entries only), where appending would read as a second subnet of the
+// same family and be refused. No other list in a compose file is keyed
+// `config` (the spec's tables have it under `networks.*.ipam` alone).
+var replaceSeqKeys = map[string]bool{"command": true, "entrypoint": true, "test": true, "config": true}
 
 // envLikeKeys accept either a `KEY: value` map or a `- KEY=value` list; both merge
 // by key (later wins), so a base and override merge per variable regardless of form.
@@ -798,10 +831,20 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 		BaseDir:     baseDir,
 		Services:    f.Services,
 		Secrets:     f.Secrets,
+		Configs:     f.Configs,
 		Volumes:     f.Volumes,
 		Networks:    f.Networks,
 		Unsupported: ignoredTopLevel(doc),
 	}
+	// `ipam` is read for its subnets; the keys under it opossum reads past
+	// (`driver`, an entry's `gateway`) are named the way the other
+	// declaration keys are, by their full names.
+	for _, name := range sortedKeys(f.Networks) {
+		for _, k := range f.Networks[name].IPAM.Ignored() {
+			p.Unsupported = append(p.Unsupported, fmt.Sprintf("networks.%s.%s", name, k))
+		}
+	}
+	sort.Strings(p.Unsupported)
 	// A declared network can't be both host-only (internal) and external: an
 	// external network is used as-is, so `internal` would be silently dropped —
 	// and with it the egress guarantee a caller likely set `internal` to get.
@@ -919,6 +962,64 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 			svc.envFileErr = fmt.Errorf("service %q: %w", name, err)
 		} else {
 			svc.Environment = env
+		}
+
+		// `shm_size` is read like `mem_limit` (`1gb`, `64M`, a bare byte
+		// count) and carried as the byte count docker compose normalises it
+		// to (`config` shows `"1073741824"`); the runtime takes bytes.
+		if s := strings.TrimSpace(string(svc.ShmSize)); s != "" {
+			b, err := parseMemoryBytes(s)
+			if err != nil || int64(b) <= 0 {
+				return nil, fmt.Errorf("service %q: shm_size %q is not a size — write it as 64M, 1gb, or a byte count", name, s)
+			}
+			svc.ShmSize = scalarStr(strconv.FormatInt(int64(b), 10))
+		}
+		// `mac_address` reaches the runtime as `--network <name>,mac=XX:XX:XX:XX:XX:XX`
+		// on the service's first network. The runtime refuses any other
+		// spelling (`invalid MAC address format …, expected format:
+		// XX:XX:XX:XX:XX:XX`) and docker compose refuses it when the
+		// container is made (`invalid MAC address`); both are said here, at
+		// load, and a service with no network to carry it is refused too.
+		if svc.MacAddress != "" {
+			hw, err := net.ParseMAC(svc.MacAddress)
+			if err != nil || len(hw) != 6 {
+				return nil, fmt.Errorf("service %q: mac_address %q is not a 48-bit MAC address — write six hex pairs, as in 02:42:ac:11:00:02", name, svc.MacAddress)
+			}
+			// The runtime takes only the colon form (`expected format:
+			// XX:XX:XX:XX:XX:XX`); a dashed or dotted spelling is a MAC
+			// address too, so it is carried in the form the runtime reads.
+			svc.MacAddress = hw.String()
+			if svc.NetworkMode == NetworkModeNone {
+				return nil, fmt.Errorf("service %q sets mac_address with network_mode: none — there is no network interface to give the address to; remove one of them", name)
+			}
+		}
+		// An `environment:` config takes the variable's value from the
+		// project's environment — the shell over `.env`, the scope every
+		// `${VAR}` in the file is read from — as docker compose does
+		// (measured: a value only in `.env` is placed; an unset one is
+		// refused when the container is made).
+		for cname, cfg := range f.Configs {
+			if cfg.EnvVar != "" {
+				cfg.EnvValue, cfg.EnvSet = scope.lookup()(cfg.EnvVar)
+				f.Configs[cname] = cfg
+			}
+		}
+		// Every referenced config must be a declared top-level config that
+		// opossum can place: not external. docker compose refuses the
+		// undefined reference at `config` time (`service "web" refers to
+		// undefined config x`) and the external one when the container is
+		// created (`unsupported external config x`); both are refused here.
+		for _, ref := range svc.Configs {
+			cfg, ok := f.Configs[ref.Source]
+			if !ok {
+				return nil, fmt.Errorf("service %q refers to undefined config %q — declare it under top-level configs: with a file:, content: or environment:, or remove the reference", name, ref.Source)
+			}
+			if cfg.External {
+				return nil, fmt.Errorf("service %q: external config %q is not supported — declare it with a file:, content: or environment:", name, ref.Source)
+			}
+			if strings.Contains(ref.Target, "..") {
+				return nil, fmt.Errorf("service %q: config target %q must not contain `..`", name, ref.Target)
+			}
 		}
 
 		// Every referenced secret must be a defined, file-based top-level secret.
@@ -1639,6 +1740,42 @@ func checkTopLevel(path string, root *yaml.Node, earlier map[string]any, overrid
 			// compose says `networks must be a mapping`; the decode said it
 			// in YAML's words, with the Go type standing in for the field.
 			return fmt.Errorf("compose file %s: %s must be a mapping, got %s (line %d) — write the declarations as `name: {…}`", path, k, kindName(v.Kind), key.Line)
+		case topLevelDecls[k]:
+			// Inside each declaration, a key docker compose does not take
+			// there (`volumes.data.foo`) is refused as docker compose refuses
+			// it; a key it takes that opossum does not act on is listed among
+			// the ignored fields later, as before.
+			if err := checkDeclKeys(path, k, v); err != nil {
+				return err
+			}
+		case !specKnows("", k):
+			// A top-level key docker compose does not take — `servcies:` for
+			// `services:` — is refused as docker compose refuses it, naming
+			// the line, rather than read past and listed as ignored.
+			return fmt.Errorf("compose file %s: %q is not a top-level key docker compose takes (line %d) — check the spelling, or write it as `x-%s` to keep it as a note", path, k, key.Line, k)
+		}
+	}
+	return nil
+}
+
+// checkDeclKeys refuses, in a top-level `volumes:`/`networks:`/`secrets:`/
+// `configs:` mapping, a key inside a declaration that docker compose does
+// not take there (see specKnows), naming the file and the line.
+func checkDeclKeys(path, kind string, decls *yaml.Node) error {
+	for i := 0; i+1 < len(decls.Content); i += 2 {
+		name := unalias(decls.Content[i])
+		decl := unalias(decls.Content[i+1])
+		if name.Tag == "!!merge" || decl.Kind != yaml.MappingNode {
+			continue
+		}
+		for j := 0; j+1 < len(decl.Content); j += 2 {
+			key := unalias(decl.Content[j])
+			if key.Tag == "!!merge" {
+				continue
+			}
+			if !specKnows(kind+".*", key.Value) {
+				return fmt.Errorf("compose file %s: %s.%s: %q is not a key docker compose takes (line %d) — check the spelling, or write it as `x-%s` to keep it as a note", path, kind, name.Value, key.Value, key.Line, key.Value)
+			}
 		}
 	}
 	return nil

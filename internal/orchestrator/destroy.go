@@ -354,6 +354,15 @@ func generatedOverlay(path string) bool {
 // teardown. The error is reserved for a failure that leaves the user's own files
 // in doubt, which is why only path removal can produce one.
 func (o *Orchestrator) Destroy(p DestroyPlan) error {
+	// The same lock as Up and Down (see projectLock): a destroy under an `up`
+	// would remove what the `up` is starting, and the `up` would report it
+	// started. Taken here, at the removal, not at the plan — the plan only
+	// reads, and the confirmation in between is the user's time.
+	lock, err := lockProject(o.Project.Name)
+	if err != nil {
+		return err
+	}
+	defer lock.release()
 	if p.SupervisorRunning {
 		if StopSupervisor(o.Project.Name) {
 			o.logf("Stopped the restart supervisor\n")

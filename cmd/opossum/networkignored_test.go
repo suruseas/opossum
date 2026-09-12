@@ -13,7 +13,7 @@ import (
 func TestDroppedNetworkFieldsReachTheReader(t *testing.T) {
 	fakeShim(t)
 	dir := t.TempDir()
-	body := "name: p\nservices:\n  web:\n    image: app:1\n    networks:\n      back:\n        aliases: [db-alias]\nnetworks:\n  back:\n    ipam:\n      config:\n        - subnet: 10.0.0.0/24\n"
+	body := "name: p\nservices:\n  web:\n    image: app:1\n    networks:\n      back:\n        aliases: [db-alias]\nnetworks:\n  back:\n    ipam:\n      driver: default\n      config:\n        - subnet: 10.0.0.0/24\n"
 	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -23,7 +23,7 @@ func TestDroppedNetworkFieldsReachTheReader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("config: %v", err)
 	}
-	for _, want := range []string{"networks.back.aliases", "networks.back.ipam"} {
+	for _, want := range []string{"networks.back.aliases", "networks.back.ipam.driver"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("config should list %s among the ignored fields, got:\n%s", want, out)
 		}
@@ -49,7 +49,7 @@ func TestDroppedNetworkFieldsReachTheReader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("config with two files: %v", err)
 	}
-	for _, want := range []string{"networks.back.aliases", "networks.back.ipam"} {
+	for _, want := range []string{"networks.back.aliases", "networks.back.ipam.driver"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the merged project should still list %s, got:\n%s", want, out)
 		}
@@ -62,7 +62,7 @@ func TestDroppedNetworkFieldsReachTheReader(t *testing.T) {
 	if !strings.Contains(out, "[OPSM-502]") || !strings.Contains(out, "networks.back.aliases") {
 		t.Errorf("--verbose should warn per field with the dropped alias named, got:\n%s", out)
 	}
-	if !strings.Contains(out, "[OPSM-501]") || !strings.Contains(out, "networks.back.ipam") {
-		t.Errorf("--verbose should warn about the top-level ipam by name, got:\n%s", out)
+	if !strings.Contains(out, "[OPSM-501]") || !strings.Contains(out, "networks.back.ipam.driver") {
+		t.Errorf("--verbose should warn about the top-level ipam.driver by name, got:\n%s", out)
 	}
 }

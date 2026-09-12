@@ -128,7 +128,13 @@ opossum
 ```
 Error: network <name> already exists
 ```
-→ `EnsureNetwork`: 出力に `exist` を含めば「既存＝OK」として nil。
+→ `EnsureNetwork`: 出力に `already exists` を含めば「既存＝OK」として nil（2026-09-12 まで素の `exist` で判定していて、下の overlap も「既存」と読んでいた）。
+
+## `container network create --subnet <cidr> <name>`  （subnet が既存 network と重なる, exit 1 / 2026-09-12 に 1.4.1 で採取）
+```
+Error: IPv4 subnet 10.91.0.0/24 overlaps an existing network with subnet 10.91.0.0/24
+```
+→ network は作られない。`EnsureNetworkLabeled` はこれを失敗として返す（`up` は `couldn't create network` で止まる）。docker compose の同じ場面は `Pool overlaps with other one on this address space`。`--subnet 10.96.0.0`（CIDR でない）は usage error（`See 'container network create --help'`）、`--subnet` を 2 つ渡すと後の 1 つだけが効く。`--subnet-v6` だけを渡すと IPv4 は runtime が選ぶ。`network inspect` は `--subnet` で作った network の subnet を `configuration.ipv4Subnet`／`ipv6Subnet` に、選ばれた方を `status.*` に置き、status の IPv6 は gateway の address 形（`fd00:1::1/64`）で書く。
 
 ## `container network delete <name>`  （存在, exit 0）
 ```
@@ -141,6 +147,13 @@ Error: failed to delete one or more networks: ["<name>"]
 ```
 → `DeleteNetwork`: この文字列は **`not found` を含まない**。`networkAlreadyGone` が
 `failed to delete one or more networks` も「既に無い」と見なして誤警告を抑制する。
+
+## `container network delete <name>`  （container が attach、running でも stopped でも同じ, exit 1 / 2026-09-12 に 1.4.1 で採取）
+```
+failed to delete network: ["id": <name>, "error": invalidState: "cannot delete subnet <name> with referring containers: <container>"]
+Error: delete failed for one or more networks: ["<name>"]
+```
+→ 不在との違いは **`failed to delete one or more` と `delete failed for one or more` の語順だけ**（`networkAlreadyGone` は前者だけを「無い」と読む）。runtime が文言を揃えたら不在＝使用中になる側なので、`TestFidelityNetworkAlreadyGone` にこの実文言を置いてある（#902）。
 
 ## `container network inspect <name>`  （存在, exit 0）
 ```
@@ -194,7 +207,7 @@ Error: container not found: <name>
   bare `db` を**自プロジェクトの** `db.<proj>.opossum` に解決する（実機で proj1/proj2 が別 IP に
   解決することを確認）。→ opossum はこれで単一ドメインのまま複数プロジェクトを自動分離する。
 
-## `container inspect <name>`  （終了済み, exit 0）— **終了コードは出ない**
+## `container inspect <name>`  （終了済み, exit 0）— **終了コードは出ない**（2026-09-09 に 1.4.1 で再確認：`v141-recapture/inspect-stopped-exit3.txt`、`exit 3` のコンテナに終了コードの field は無い）
 プロセスが終了したコンテナは `status.state: "stopped"` になり、`status.networks` は空配列。
 採取（`run --name X alpine:3.20 sh -c 'exit N'` 後に inspect）で確認した重要事実:
 **exit 0 のコンテナと exit 3 のコンテナの inspect 出力は `state:"stopped"` で完全に一致し、
@@ -214,7 +227,10 @@ Error: no volumes specified and --all not supplied
 # 1.2.2 までは USAGE: container volume delete [--all] [--debug] [<names> ...] のブロックだった
 ```
 （`delete` は `rm` エイリアスあり。使用中の volume は `volume 'X' is currently in use and cannot be
-accessed by another container, or deleted` ＋ `Error: delete failed for one or more volumes: [...]`・exit 1）
+accessed by another container, or deleted` ＋ `Error: delete failed for one or more volumes: [...]`・exit 1。
+1.4.1（2026-09-12 採取）：不在は `Error: failed to delete one or more volumes: ["<name>"]`、使用中は
+`failed to delete volume: ["id": <name>, "error": invalidArgument: "volume '<name>' is currently in use and cannot be accessed by another container, or deleted"]` ＋ `Error: delete failed for one or more volumes: ["<name>"]`——
+running でも stopped でも同じ。`resourceInUse` は `in use` で使用中だけを警告、不在は静か（`TestFidelityResourceInUse`、#902））
 実機ラウンドトリップ（初出時は `container CLI version 1.0.0`）:
 ```
 $ container volume create opossum-review-vol   # 作成

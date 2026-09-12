@@ -39,12 +39,14 @@ networks:
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	for _, want := range []string{"networks.back.ipam", "networks.back.driver"} {
+	for _, want := range []string{"networks.back.driver"} {
 		if !slices.Contains(proj.Unsupported, want) {
 			t.Errorf("top-level %s should be reported as ignored, got %v", want, proj.Unsupported)
 		}
 	}
-	for _, quiet := range []string{"networks.back.x-team", "networks.front.internal", "networks"} {
+	// `ipam` is acted on now (its subnet goes to the runtime), so it is not
+	// listed whole; only the keys under it opossum reads past would be.
+	for _, quiet := range []string{"networks.back.ipam", "networks.back.x-team", "networks.front.internal", "networks"} {
 		if slices.Contains(proj.Unsupported, quiet) {
 			t.Errorf("%s is acted on or an extension and must not be reported, got %v", quiet, proj.Unsupported)
 		}

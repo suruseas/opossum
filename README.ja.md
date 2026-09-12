@@ -139,7 +139,7 @@ opossum down          # 停止＋削除（-v で named volume も削除）
 
 **Apple のビルダーでビルドしたい場合は**、`--from-docker-compose` を外して `opossum up` を実行すれば、opossum が `build:` を持つサービスを自前でビルドします（重いビルドには時間がかかることがあります。[ビルドのトラブルシュート（英語）](docs/troubleshooting.md#troubleshooting-builds)参照）。どちらの場合も、先に `opossum config` を実行すると、補間を解決した後の設定と、opossum が無視するフィールド（`dns_search`、`container_name` など）を確認できます。
 
-**サービスが起動しないときは**、よくある原因は `up` の時点で警告として表示され、対処も併記されます——DNS ドメインの未登録、opossum が作っていない volume 上の Postgres データ、ホストポートの使用中（macOS で 5000/7000 が埋まっているのはたいてい AirPlay レシーバー）、`/private/tmp` 配下のビルドコンテキスト。
+**サービスが起動しないときは**、よくある原因は `up` の時点で警告として表示され、対処も併記されます——DNS ドメインの未登録、opossum が作っていない volume 上の Postgres データ、ホストポートの使用中（macOS で 5000/7000 が埋まっているのはたいてい AirPlay レシーバー）。
 [それぞれの対処（英語）→](docs/troubleshooting.md)
 
 ### きれいに消すには
@@ -168,6 +168,9 @@ opossum up                 # ビルド＋全サービス起動（デタッチ）
 opossum up web             # web とその依存だけ起動
 opossum up web --foreground  # 単一サービスをフォアグラウンドでアタッチ実行
 opossum ps                 # サービス / コンテナ / IP / ポート / 状態
+opossum port web 3000      # 公開ポートが載ったホスト側の address:port を表示
+opossum ls                 # このマシンの opossum project 一覧（-a で停止中も）
+opossum volumes            # runtime 上に実在する、この project の volume 一覧
 opossum logs               # 全サービスのログ
 opossum logs web --follow  # 1サービスのログを追う（-n N で tail 行数）
 opossum stats              # サービスごとのライブ CPU/メモリ/net/IO（--no-stream で1回だけ）
@@ -230,7 +233,7 @@ opossum が扱う／無視する／拒否する compose フィールドの全て
 動いているコンテナについて答えるものが、その先に無いからです。
 named volume は同時に1つの稼働コンテナにしか接続できませんが、これは Apple
 `container` の制約であって
-選択ではありません。`resources.limits` を超える Swarm/`deploy` と `configs` は
+選択ではありません。`resources.limits` を超える Swarm/`deploy` は
 無視され、`opossum config` がファイル内のどのフィールドを飛ばしたかを教えます。
 `extends:`——同じファイルのサービスでも、別のファイルのサービスでも、その連鎖でも——は
 docker compose と同じ意味で読みます。

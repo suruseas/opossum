@@ -6,6 +6,29 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-09-13
+
+### Added
+
+- `configs` is now read, the way docker compose reads it: a top-level config becomes a read-only file in the container — from a host file (`file:`), from text in the compose file (`content:`, interpolated like any value), or from a variable's value (`environment:`) — and a service names the ones it takes, at `/<name>` or at its own `target`. A reference to an undeclared config, a declaration with none or more than one of the three forms, and a `configs` that is not a list are refused with the reason; `external` configs are refused; `uid`, `gid` and `mode` are read and listed as ignored, as docker compose ignores them. Before this the key was ignored and only listed by `opossum config`.
+- `mac_address` is now given to the container: the address goes to the service's first network (`container run --network <name>,mac=…`), so a service that must keep a fixed MAC — for a licence tied to it, or a DHCP reservation — gets it, as under docker compose. Any usual spelling is taken and passed in the colon form; an address that is not a 48-bit MAC, or one on a service with `network_mode: none`, is refused with the reason. Before this the key was ignored and only listed by `opossum config`.
+- Service `labels` are now put on the container, in the mapping form or the list form (a bare `key` is the empty value, as docker compose reads it), with the values interpolated like the rest of the file, and shown by `opossum config`. opossum's own labels are added after them, so a label spelled like one of ours is overridden by ours — as docker compose's own labels win over a clash. A network declaration's `labels` go on the network when opossum creates it. Before this both were ignored and only listed by `opossum config`.
+- `shm_size` and `ulimits` are now given to the container: `shm_size` sets the size of `/dev/shm` (written as `64M`, `1gb` or a byte count, as under docker compose), and `ulimits` sets resource limits, a number for soft and hard alike or `{soft, hard}` to set them apart — so a database or browser image that needs a larger `/dev/shm` or more open files gets it. A `shm_size` that is not a size, a `ulimits` that is not a mapping, and a limit that is not a whole number are refused with the reason. Before this both keys were ignored and only listed by `opossum config`.
+- `opossum port <service> <container-port>` prints the host side of a published port on one line (`0.0.0.0:65345`), as `docker compose port` does, with `--protocol tcp|udp`. opossum maps `ports: - "3000"` to 3000 on the host when that is free and to a free port when it is not, so the host port is not always the one in the file; this is the way to read it from a script. A port that is not published is refused with the list of those that are, and a service whose container is absent or stopped with `service "web" is not running`.
+- `opossum ls` lists the opossum projects on this machine — every project that has containers, found by the label opossum puts on them — as a NAME / STATUS table with a count of containers by state (`running(2)`, or `running(1), stopped(1)`), the way `docker compose ls` does, and needs no compose file. A project with no running container appears only with `--all`; `-q` prints names only and `--format json` an array of `{Name, Status}`. Until now the only way to see what was running across projects was to read `container ls` and pick the names apart.
+- `opossum volumes [service…]` lists the volumes the file's services mount that exist on the runtime, under the names the runtime knows them by (`<project>_<volume>`), as a DRIVER / VOLUME NAME table, the way `docker compose volumes` does; named services narrow it to what they mount, `-q` prints names only and `--format json` an array of `{Name, Driver}`. A volume appears once a service mounting it has started; external volumes, and volumes the file no longer mounts, are not listed. Until now the only way to find a project's volumes was to read `container volume ls` and pick the prefixed names apart.
+- A top-level network's `ipam.config` subnet is now given to the runtime (`container network create --subnet`, or `--subnet-v6` for an IPv6 one), so a project can pin the address range its network uses, as under docker compose. One IPv4 and one IPv6 subnet at most; a subnet not in CIDR form, or a second one of the same family, is refused at load naming the network, where docker compose refuses them when the network is made. A project network that already exists with another subnet is kept and `up` says so (`OPSM-207`): `down`, then `up`, recreates it. Until now `ipam` was listed as ignored.
+
+### Changed
+
+- `up` no longer warns about a build context under `/private/tmp` or reached through a symlink (the former `OPSM-301`/`OPSM-302` notes): since Apple `container` 1.4.1 the builder is sent the context as an archive and reads both, measured with a `COPY` from each. opossum does not resolve symlinks in the path (a relative context is still taken from the compose file's directory, as before).
+- A key docker compose does not take — a typo such as `enviroment:` on a service, a `build.foo`, a top-level `servcies:` — is now refused before anything runs, naming the key and, for a top-level key or a declaration's, the line, as docker compose refuses it (`additional properties 'foo' not allowed`). Until now such a key was read past and listed among the ignored fields, so a service could start without its variables and the mistake surfaced later. A key docker compose takes that opossum does not act on is still listed rather than refused, and an `x-` key is taken anywhere. The keys come from the compose specification's schema.
+
+### Fixed
+
+- `--profile '*'` and `COMPOSE_PROFILES=*` now activate every profile, as docker compose reads them, so every gated service starts (a gated dependency resolves too). `*` is special only there: a partial pattern such as `to*` is an ordinary profile name, and a service declaring `profiles: ["*"]` stays gated until something activates it. A `profiles` written as one value instead of a list is refused naming the field, rather than in the decoder's words.
+- Two `opossum up`s (or an `up` and a `down` or `destroy`) for one project no longer overlap: the second is refused at once with `[OPSM-208] another opossum command is changing project …`, naming the other's pid. Before this, an `up` started a second apart could lose the race for a container, fail, and roll back a service the other `up` had just reported as up to date — leaving the project short a service while that other `up` exited 0. The lock is held by the running command and released by the OS when it exits, so a command killed midway leaves nothing to clean up. The lock file lives under the project's state directory, which `up`, `down` and `destroy` now create if it is not there yet.
+
 ## [0.26.0] - 2026-09-09
 
 ### Added
@@ -1425,7 +1448,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.26.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.27.0...HEAD
+[0.27.0]: https://github.com/suruseas/opossum/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/suruseas/opossum/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/suruseas/opossum/compare/v0.24.8...v0.25.0
 [0.24.8]: https://github.com/suruseas/opossum/compare/v0.24.7...v0.24.8

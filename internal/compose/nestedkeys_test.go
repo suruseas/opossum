@@ -19,12 +19,11 @@ import (
 func TestAKeyOpossumDoesNotReadUnderAMappingIsNamedAmongTheIgnoredFields(t *testing.T) {
 	for _, tc := range []struct{ name, body, want string }{
 		{"build.labels", "build:\n  context: .\n  labels: {a: b}\n", "build.labels"},
-		{"an unknown key under build", "build:\n  context: .\n  bogus: 1\n", "build.bogus"},
+		{"build.cache_from, which docker compose takes", "build:\n  context: .\n  cache_from: [a]\n", "build.cache_from"},
 		{"healthcheck.start_interval", "healthcheck:\n  test: [CMD, \"true\"]\n  start_interval: 5s\n", "healthcheck.start_interval"},
 		{"deploy.replicas", "deploy:\n  replicas: 3\n", "deploy.replicas"},
 		{"deploy.resources.reservations", "deploy:\n  resources:\n    reservations:\n      memory: 1g\n", "deploy.resources.reservations"},
 		{"deploy.resources.limits.pids", "deploy:\n  resources:\n    limits:\n      memory: 1g\n      pids: 100\n", "deploy.resources.limits.pids"},
-		{"an unknown key under develop", "develop:\n  watch: []\n  bogus: 1\n", "develop.bogus"},
 		{"through an alias", "build: *b\n", "build.labels"},
 		{"through a merge key", "build:\n  <<: *b\n  dockerfile: Dockerfile\n", "build.labels"},
 	} {

@@ -64,8 +64,8 @@ func TestATopLevelKeyOfTheWrongShapeIsRefused(t *testing.T) {
 			}
 		})
 	}
-	// Taken: a quoted number is a string; `configs` as a mapping is ignored
-	// as before; a version that is a string is read past; an empty or bare
+	// Taken: a quoted number is a string; `configs` as a mapping is read
+	// (#872); a version that is a string is read past; an empty or bare
 	// `include:` names nothing; an empty declaration mapping is a mapping.
 	p, err := Load(writeTemp(t, svc+"name: \"42\"\nversion: \"3.9\"\nconfigs: {c: {file: ./c}}\ninclude: []\nnetworks: {}\nvolumes: {}\n"))
 	if err != nil {
@@ -74,8 +74,8 @@ func TestATopLevelKeyOfTheWrongShapeIsRefused(t *testing.T) {
 	if p.Name != "42" {
 		t.Errorf("name = %q, want the quoted text", p.Name)
 	}
-	if got := strings.Join(p.Unsupported, ","); !strings.Contains(got, "configs") {
-		t.Errorf("ignored fields = %q, want configs listed", got)
+	if got := strings.Join(p.Unsupported, ","); strings.Contains(got, "configs") {
+		t.Errorf("ignored fields = %q, configs is read and must not be listed", got)
 	}
 	// With several -f files a later file's bare key is "not given" and the
 	// earlier file's value stands; a wrong shape in a later file is refused

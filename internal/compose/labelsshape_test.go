@@ -1,7 +1,8 @@
 package compose
 
-// The two shapes the service-key sweep left (#784): `labels`, which opossum
-// reads nothing of, and an empty `env_file` item. docker compose (v5.5.0)
+// The two shapes the service-key sweep left (#784): `labels` (read since
+// #882; the shape check stays in front of the read) and an empty `env_file`
+// item. docker compose (v5.5.0)
 // refuses `labels` written as one value (`labels: x`, `labels: 1`, a bare
 // `labels:` — `must be a mapping`), a list item that is not a string
 // (`[42]`, `[{a: b}]`, `- ` — `unexpected type int`, `map[string]interface
@@ -46,8 +47,8 @@ func TestLabelsWrittenInAShapeDockerComposeRefusesAreRefused(t *testing.T) {
 			}
 		})
 	}
-	// Taken, as docker compose takes them — and still listed as ignored,
-	// since nothing reads them.
+	// Taken, as docker compose takes them — and read (so not listed as
+	// ignored); the values are checked in labels_test.go.
 	for _, tc := range []struct{ name, head, value string }{
 		{"a list of names", "", "[a, b=c]"},
 		{"a mapping of scalars", "", "{a: 1, b: true, c: ~, d: \"\"}"},
@@ -61,8 +62,9 @@ func TestLabelsWrittenInAShapeDockerComposeRefusesAreRefused(t *testing.T) {
 			if err != nil {
 				t.Fatalf("load: %v", err)
 			}
-			if got := p.Services["web"].Unsupported; len(got) != 1 || got[0] != "labels" {
-				t.Errorf("ignored fields = %v, want [labels]", got)
+			// Read since #882: an accepted shape is not listed as ignored.
+			if got := p.Services["web"].Unsupported; len(got) != 0 {
+				t.Errorf("ignored fields = %v, want none (labels is read)", got)
 			}
 		})
 	}

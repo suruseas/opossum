@@ -59,7 +59,7 @@ func newRootCmd() *cobra.Command {
 	root.PersistentFlags().StringArrayVar(&envFiles, "env-file", nil, "env file(s) for ${VAR} interpolation, replacing the default .env (repeatable; later files win)")
 
 	root.AddCommand(
-		upCmd(), downCmd(), psCmd(), imagesCmd(), logsCmd(), statsCmd(),
+		upCmd(), downCmd(), psCmd(), portCmd(), lsCmd(), volumesCmd(), imagesCmd(), logsCmd(), statsCmd(),
 		stopCmd(), restartCmd(), startCmd(), execCmd(),
 		buildCmd(), pullCmd(), killCmd(), runCmd(),
 		importCmd(), configCmd(), doctorCmd(), cpCmd(), watchCmd(), wsCmd(),
@@ -107,7 +107,7 @@ func newRootCmd() *cobra.Command {
 // answer is itself meaningful. They report a stopped runtime (OPSM-405) themselves
 // (see Ps/Images). Every other command needs the runtime up to do useful work, so
 // it auto-starts; logs/stats included, since they'd otherwise just fail.
-var runtimeReadOnly = map[string]bool{"ps": true, "images": true}
+var runtimeReadOnly = map[string]bool{"ps": true, "port": true, "ls": true, "volumes": true, "images": true}
 
 func cmdReadOnlyRuntime(cmd *cobra.Command) bool {
 	if runtimeReadOnly[cmd.Name()] {
@@ -557,7 +557,7 @@ func upCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&foreground, "foreground", false, "run a single service attached in the foreground instead of detached (rejected for multiple long-running services)")
-	cmd.Flags().StringArrayVar(&profiles, "profile", nil, "enable services gated behind this compose profile (repeatable; also honors COMPOSE_PROFILES)")
+	cmd.Flags().StringArrayVar(&profiles, "profile", nil, "enable services gated behind this compose profile (repeatable; '*' enables every profile; also honors COMPOSE_PROFILES)")
 	cmd.Flags().BoolVar(&forceRecreate, "force-recreate", false, "recreate containers even if their configuration is unchanged")
 	cmd.Flags().BoolVar(&build, "build", false, "build images before starting, even if already present")
 	cmd.Flags().BoolVar(&noBuild, "no-build", false, "don't build images (error if one is missing)")
@@ -882,6 +882,93 @@ func psCmd() *cobra.Command {
 	}
 }
 
+func portCmd() *cobra.Command {
+	var protocol string
+	cmd := &cobra.Command{
+		Use:   "port <service> <container-port>",
+		Short: "Print the host address and port a service's published port landed on",
+		Long: `Print the host side of a published port on one line, as host:port
+(for example 0.0.0.0:65345), the way docker compose port does.
+
+opossum maps "ports: - 3000" to 3000 on the host when that is free and to a free
+port when it is not, so the host port is not always the one in the compose file;
+this is the way to read it from a script:
+
+  HOST=$(opossum port web 3000)`,
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			port, err := strconv.Atoi(args[1])
+			if err != nil || port < 1 || port > 65535 {
+				return fmt.Errorf("container port must be a number from 1 to 65535, got %q", args[1])
+			}
+			if protocol != "tcp" && protocol != "udp" {
+				return fmt.Errorf("--protocol must be tcp or udp, got %q", protocol)
+			}
+			o, err := loadOrchestrator(cmd.OutOrStdout())
+			if err != nil {
+				return err
+			}
+			return o.Port(args[0], port, protocol)
+		},
+	}
+	cmd.Flags().StringVar(&protocol, "protocol", "tcp", "tcp or udp")
+	return cmd
+}
+
+func lsCmd() *cobra.Command {
+	var opts orchestrator.LsOptions
+	cmd := &cobra.Command{
+		Use:   "ls",
+		Short: "List the opossum projects on this machine with their containers' states",
+		Long: `List every project on this machine that has containers, found by the
+label opossum puts on each one, with a count of its containers by state
+(running(2), or running(1), stopped(1)) — the way docker compose ls does.
+Projects with no running container are shown only with --all.
+
+Needs no compose file: it looks at the machine, not at a project.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if opts.Format != "table" && opts.Format != "json" {
+				return fmt.Errorf("--format must be table or json, got %q", opts.Format)
+			}
+			rt := runtime.New()
+			rt.Verbose = verbose
+			return orchestrator.Ls(rt, cmd.OutOrStdout(), opts)
+		},
+	}
+	cmd.Flags().BoolVarP(&opts.All, "all", "a", false, "count every container by state, not only the running ones, and so show projects with no running container too")
+	cmd.Flags().BoolVarP(&opts.Quiet, "quiet", "q", false, "print project names only")
+	cmd.Flags().StringVar(&opts.Format, "format", "table", "table or json")
+	return cmd
+}
+
+func volumesCmd() *cobra.Command {
+	var opts orchestrator.VolumesOptions
+	cmd := &cobra.Command{
+		Use:   "volumes [service...]",
+		Short: "List the volumes the project's services mount that exist on the runtime, with their drivers",
+		Long: `List the volumes this project's services mount (or the named services'
+volumes) that exist on the runtime, under the names the runtime knows them by
+(<project>_<volume>), as a DRIVER / VOLUME NAME table — the way docker compose
+volumes does. A volume appears once a service that mounts it has been started;
+external volumes are the user's, not the project's, and are not listed, and
+neither is a volume the file no longer mounts.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if opts.Format != "table" && opts.Format != "json" {
+				return fmt.Errorf("--format must be table or json, got %q", opts.Format)
+			}
+			o, err := loadOrchestrator(cmd.OutOrStdout())
+			if err != nil {
+				return err
+			}
+			return o.Volumes(args, opts)
+		},
+	}
+	cmd.Flags().BoolVarP(&opts.Quiet, "quiet", "q", false, "print volume names only")
+	cmd.Flags().StringVar(&opts.Format, "format", "table", "table or json")
+	return cmd
+}
+
 func configCmd() *cobra.Command {
 	var servicesOnly bool
 	var profiles []string
@@ -939,7 +1026,7 @@ func configCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&servicesOnly, "services", false, "print only the service names")
-	cmd.Flags().StringArrayVar(&profiles, "profile", nil, "include services gated behind this compose profile (repeatable; also honors COMPOSE_PROFILES)")
+	cmd.Flags().StringArrayVar(&profiles, "profile", nil, "include services gated behind this compose profile (repeatable; '*' enables every profile; also honors COMPOSE_PROFILES)")
 	return cmd
 }
 
@@ -1017,7 +1104,7 @@ func runCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&rm, "rm", false, "remove the container after it exits")
 	cmd.Flags().BoolVar(&noDeps, "no-deps", false, "don't start linked services")
 	cmd.Flags().BoolVarP(&noTTY, "no-tty", "T", false, "don't allocate a pseudo-terminal, so piped output (e.g. opossum run web cmd | jq) stays clean")
-	cmd.Flags().StringArrayVar(&profiles, "profile", nil, "enable services gated behind this compose profile (repeatable; also honors COMPOSE_PROFILES)")
+	cmd.Flags().StringArrayVar(&profiles, "profile", nil, "enable services gated behind this compose profile (repeatable; '*' enables every profile; also honors COMPOSE_PROFILES)")
 	cmd.Flags().BoolVar(&ssh, "ssh", false, "forward the host SSH agent into the container, so private git over SSH works with your host keys")
 	cmd.Flags().BoolVar(&audit, "audit", false, "after the run, report what it did (workspace file diff, egress, exit) — the container's stdout goes to stderr so the report owns stdout")
 	cmd.Flags().StringVar(&auditFormat, "audit-format", "text", "audit report format: text (human summary) or json")

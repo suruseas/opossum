@@ -37,9 +37,15 @@ func TestANonStringInAStringFieldIsRefused(t *testing.T) {
 }
 
 func TestAListOnlyFieldWrittenAsOneValueIsRefused(t *testing.T) {
-	for _, field := range []string{"cap_add", "cap_drop"} {
+	// `profiles` is one of these too (docker compose: `services.web.profiles
+	// must be a array`); its decode into []string refused it as well, but in
+	// the decoder's words, naming the Go type.
+	for _, field := range []string{"cap_add", "cap_drop", "profiles"} {
 		t.Run(field, func(t *testing.T) {
 			got := loadErr(t, "services:\n  web:\n    image: alpine\n    "+field+": NET_ADMIN\n")
+			if strings.Contains(got, "[]string") || strings.Contains(got, "unmarshal") {
+				t.Errorf("the refusal should not name a Go type or the decoder, got:\n%s", got)
+			}
 			if !strings.Contains(got, field+" must be a list, got a single value — write it as `- NET_ADMIN`") {
 				t.Errorf("want the list refusal, got:\n%s", got)
 			}

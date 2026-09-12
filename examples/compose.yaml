@@ -39,6 +39,14 @@ services:
     build: ./web
     ports:
       - "${WEB_HOST_PORT:-8080}:8080"
+    # `opossum watch` copies a changed file under ./web/www into the container's
+    # served directory, so an edit shows up on the next request without a
+    # rebuild (the rule does nothing under a plain `up`).
+    develop:
+      watch:
+        - path: ./web/www
+          action: sync
+          target: /www
     environment:
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-secret}@db:5432/app
       REDIS_URL: redis://cache:6379

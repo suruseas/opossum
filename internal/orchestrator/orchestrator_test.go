@@ -591,69 +591,48 @@ func TestUpBuildTargetFlag(t *testing.T) {
 	}
 }
 
-func TestBuildContextUnreadableWarns(t *testing.T) {
-	// A build context the container builder can't read gets a hint, not a silent
-	// failure at COPY time (#83): under /private/tmp, or a symlinked directory.
-	t.Run("under /private/tmp", func(t *testing.T) {
-		rt, _ := fakeShim(t)
-		setShimEnv(rt, "IMAGE_ABSENT=demo-api:latest")
-		var out bytes.Buffer
-		p := project("demo", map[string]*compose.Service{
-			"api": {Build: &compose.Build{Context: "/private/tmp/ctx"}},
+func TestBuildContextUnderTmpOrASymlinkIsBuiltWithoutResolvingSymlinks(t *testing.T) {
+	// Apple's builder once could not read a context under /private/tmp or
+	// reached through a symlink, and opossum warned (OPSM-301/302). Since
+	// `container` 1.4.1 the builder is sent the context as a tarball and reads
+	// both (measured, with a COPY), so there is nothing to warn about, and no
+	// reason to resolve the symlink: the path goes to the builder as the
+	// compose file names it. A relative context is still taken from the
+	// compose file's directory, as it always was.
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real")
+	if err := os.Mkdir(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	for name, tc := range map[string]struct{ ctx, want string }{
+		"under /private/tmp":                 {"/private/tmp/ctx", "/private/tmp/ctx"},
+		"a symlinked directory":              {link, link},
+		"relative to the compose file's dir": {"app", filepath.Join(testBaseDir, "app")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rt, log := fakeShim(t)
+			setShimEnv(rt, "IMAGE_ABSENT=demo-api:latest")
+			var out bytes.Buffer
+			p := project("demo", map[string]*compose.Service{
+				"api": {Build: &compose.Build{Context: tc.ctx}},
+			})
+			if err := orchestrator.New(p, rt, "opossum", &out).Up(true); err != nil {
+				t.Fatalf("Up: %v", err)
+			}
+			// By code as well as by wording: a warning brought back under other
+			// words would still carry a 3xx code.
+			if strings.Contains(out.String(), "build context") || strings.Contains(out.String(), "[OPSM-3") {
+				t.Errorf("no warning about the build context any more, got:\n%s", out.String())
+			}
+			if !hasLine(log(), "build --progress plain -t demo-api:latest "+tc.want) {
+				t.Errorf("context %q must be built as %q, got %v", tc.ctx, tc.want, log())
+			}
 		})
-		o := orchestrator.New(p, rt, "opossum", &out)
-		if err := o.Up(true); err != nil {
-			t.Fatalf("Up: %v", err)
-		}
-		if !strings.Contains(out.String(), "under /private/tmp") {
-			t.Errorf("expected a /private/tmp build-context warning, got:\n%s", out.String())
-		}
-	})
-
-	t.Run("symlinked context", func(t *testing.T) {
-		dir := t.TempDir()
-		real := filepath.Join(dir, "real")
-		if err := os.Mkdir(real, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		link := filepath.Join(dir, "link")
-		if err := os.Symlink(real, link); err != nil {
-			t.Fatal(err)
-		}
-		rt, _ := fakeShim(t)
-		setShimEnv(rt, "IMAGE_ABSENT=demo-api:latest")
-		var out bytes.Buffer
-		p := project("demo", map[string]*compose.Service{
-			"api": {Build: &compose.Build{Context: link}},
-		})
-		o := orchestrator.New(p, rt, "opossum", &out)
-		if err := o.Up(true); err != nil {
-			t.Fatalf("Up: %v", err)
-		}
-		if !strings.Contains(out.String(), "is a symlink") {
-			t.Errorf("expected a symlink build-context warning, got:\n%s", out.String())
-		}
-	})
-
-	t.Run("normal context: no warning", func(t *testing.T) {
-		dir := t.TempDir()
-		ctx := filepath.Join(dir, "app") // a real, non-symlink dir (not under /private/tmp)
-		if err := os.Mkdir(ctx, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		rt, _ := fakeShim(t)
-		var out bytes.Buffer
-		p := project("demo", map[string]*compose.Service{
-			"api": {Build: &compose.Build{Context: ctx}},
-		})
-		o := orchestrator.New(p, rt, "opossum", &out)
-		if err := o.Up(true); err != nil {
-			t.Fatalf("Up: %v", err)
-		}
-		if strings.Contains(out.String(), "warning: build context") {
-			t.Errorf("a normal build context must not warn, got:\n%s", out.String())
-		}
-	})
+	}
 }
 
 func TestUpMountsFileSecrets(t *testing.T) {
@@ -2404,6 +2383,10 @@ func TestUpRecreatesOnConfigChange(t *testing.T) {
 		{"cap_drop", func(s *compose.Service) { s.CapDrop = compose.StringOrSlice{"ALL"} }},
 		{"network_mode", func(s *compose.Service) { s.NetworkMode = compose.NetworkModeNone }},
 		{"networks", func(s *compose.Service) { s.Networks = compose.ServiceNetworks{"other"} }},
+		{"labels", func(s *compose.Service) { s.Labels = compose.Labels{"app.tier=back"} }},
+		{"mac_address", func(s *compose.Service) { s.MacAddress = "02:42:ac:11:00:77" }},
+		{"shm_size", func(s *compose.Service) { s.ShmSize = "67108864" }},
+		{"ulimits", func(s *compose.Service) { s.Ulimits = compose.Ulimits{"nofile": {Soft: 1024, Hard: 1024}} }},
 	}
 	for _, c := range cases {
 		t.Run(c.field, func(t *testing.T) {
@@ -2647,6 +2630,71 @@ func TestUpProfilesActivatedStart(t *testing.T) {
 	if !startedDebug(t, o, log) {
 		t.Error("a profiled service should start when its profile is active")
 	}
+}
+
+// `*` is every profile at once (docker compose: `--profile '*'` and
+// `COMPOSE_PROFILES=*` start every gated service, whatever its profiles are
+// named). It is only special where a profile is activated: a service that
+// declares `profiles: ["*"]` has an ordinary profile of that name.
+func TestUpProfilesStarEnablesEveryGatedService(t *testing.T) {
+	t.Run("a gated service starts under *", func(t *testing.T) {
+		rt, log := fakeShim(t)
+		o := orchestrator.New(profilesProject(), rt, "opossum", &bytes.Buffer{})
+		o.EnableProfiles([]string{"*"})
+		if !startedDebug(t, o, log) {
+			t.Error("`--profile '*'` should start a service gated behind any profile")
+		}
+	})
+	t.Run("* alongside a named profile", func(t *testing.T) {
+		rt, log := fakeShim(t)
+		p := project("demo", map[string]*compose.Service{
+			"web":   {Image: "web:latest"},
+			"debug": {Image: "debug:latest", Profiles: []string{"debug"}},
+			"other": {Image: "other:latest", Profiles: []string{"tools", "extra"}},
+		})
+		o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
+		o.EnableProfiles([]string{"debug", "*"})
+		if err := o.Up(true); err != nil {
+			t.Fatalf("Up: %v", err)
+		}
+		if indexOf(log(), "run -d --name other.demo.opossum") < 0 {
+			t.Errorf("a service gated behind other profiles (two of them) should start under *, got %v", log())
+		}
+	})
+	t.Run("a gated dependency resolves under *", func(t *testing.T) {
+		rt, _ := fakeShim(t)
+		p := project("demo", map[string]*compose.Service{
+			"web":    {Image: "web:latest", DependsOn: compose.DependsOn{{Name: "helper"}}},
+			"helper": {Image: "helper:latest", Profiles: []string{"opt"}},
+		})
+		o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
+		o.EnableProfiles([]string{"*"})
+		if err := o.Up(true); err != nil {
+			t.Errorf("a gated dependency should resolve under *, got: %v", err)
+		}
+	})
+	t.Run("a partial glob is a name, not a pattern", func(t *testing.T) {
+		rt, log := fakeShim(t)
+		o := orchestrator.New(profilesProject(), rt, "opossum", &bytes.Buffer{})
+		o.EnableProfiles([]string{"deb*"})
+		if startedDebug(t, o, log) {
+			t.Error("`deb*` is a profile name, not a pattern (docker compose reads no partial glob)")
+		}
+	})
+	t.Run("declaring profiles: [*] does not enable the service", func(t *testing.T) {
+		rt, log := fakeShim(t)
+		p := project("demo", map[string]*compose.Service{
+			"web":     {Image: "web:latest"},
+			"starred": {Image: "starred:latest", Profiles: []string{"*"}},
+		})
+		o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
+		if err := o.Up(true); err != nil {
+			t.Fatalf("Up: %v", err)
+		}
+		if indexOf(log(), "run -d --name starred.demo.opossum") >= 0 {
+			t.Errorf("`profiles: [\"*\"]` is an ordinary profile name and stays gated, got %v", log())
+		}
+	})
 }
 
 func TestUpProfilesNamedServiceEnables(t *testing.T) {

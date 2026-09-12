@@ -188,7 +188,7 @@ opossum ignores (`dns_search`, `container_name`, …).
 **If a service doesn't come up**, opossum warns about the usual causes at `up`
 time and names the fix — an unregistered DNS domain, Postgres data on a volume
 opossum didn't create, a host port already taken (on macOS a busy 5000/7000 is often AirPlay
-Receiver), a build context under `/private/tmp`.
+Receiver).
 [Each one, and what to do →](docs/troubleshooting.md)
 
 ### Removing it cleanly
@@ -225,6 +225,9 @@ opossum up                 # build + start everything (detached)
 opossum up web             # start only web and its dependencies
 opossum up web --foreground  # run a single service attached in the foreground
 opossum ps                 # show service / container / IP / ports / status
+opossum port web 3000      # print the host address:port a published port landed on
+opossum ls                 # list the opossum projects on this machine (-a to include stopped ones)
+opossum volumes            # list the volumes the services mount that exist on the runtime
 opossum logs               # show logs for all services
 opossum logs web --follow  # follow one service's logs (-n N to tail)
 opossum stats              # live CPU/memory/net/IO per service (--no-stream for one snapshot)
@@ -291,7 +294,7 @@ socket, whoever owns it. `up` warns about the rest, because nothing here answers
 on that path about these containers. A named volume
 can only be attached to one running container at a time, which is Apple
 `container`'s constraint, not a
-choice. Swarm/`deploy` beyond `resources.limits` and `configs` are ignored, and
+choice. Swarm/`deploy` beyond `resources.limits` is ignored, and
 `opossum config` tells you which fields in your file were skipped; `extends:`
 — naming a service of the same file or of another file, in a chain — is read
 as docker compose reads it.

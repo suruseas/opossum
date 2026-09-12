@@ -307,6 +307,32 @@ func TestFidelitySystemStatusJSON(t *testing.T) {
 	}
 }
 
+// `network inspect` on container 1.4.1: a network made with --subnet carries
+// it under configuration, one the runtime chose only under status, and the
+// IPv6 one under status is written with the gateway's address (`fd00:1::1/64`).
+func TestInspectNetworkSubnets(t *testing.T) {
+	for _, tc := range []struct {
+		name, out string
+		exit      int
+		want      NetworkSubnets
+		ok        bool
+	}{
+		// The declared subnets win over the status ones — written here as
+		// different values so that reading the wrong side is seen.
+		{"declared subnets under configuration", `[{"configuration":{"name":"a","ipv4Subnet":"10.99.0.0/24","ipv6Subnet":"fd00:1::/64"},"status":{"ipv4Subnet":"10.98.0.0/24","ipv6Subnet":"fd00:2::1/64"}}]`, 0, NetworkSubnets{V4: "10.99.0.0/24", V6: "fd00:1::/64"}, true},
+		{"runtime-chosen subnets under status only", `[{"configuration":{"name":"a"},"status":{"ipv4Gateway":"192.168.66.1","ipv4Subnet":"192.168.66.0/24","ipv6Subnet":"fd7a:1::1/64"}}]`, 0, NetworkSubnets{V4: "192.168.66.0/24", V6: "fd7a:1::/64"}, true},
+		{"a network that is not there", "Error: network not found: a", 1, NetworkSubnets{}, false},
+		{"output with no subnet", `[{"configuration":{"name":"a"},"status":{}}]`, 0, NetworkSubnets{}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := replayShim(t, tc.out, tc.exit).InspectNetworkSubnets("a")
+			if ok != tc.ok || got != tc.want {
+				t.Errorf("got %+v ok=%v, want %+v ok=%v", got, ok, tc.want, tc.ok)
+			}
+		})
+	}
+}
+
 func TestFidelityEnsureNetwork(t *testing.T) {
 	// Real "already exists" failure must be treated as success, and reported as
 	// NOT created (so callers don't roll it back).
@@ -321,6 +347,13 @@ func TestFidelityEnsureNetwork(t *testing.T) {
 	if _, err := replayShim(t, "Error: something went wrong", 1).EnsureNetwork("demo-net", false); err == nil {
 		t.Error("EnsureNetwork should surface an unexpected error")
 	}
+	// The subnet-overlap refusal (container 1.4.1) names an *existing* network
+	// but is a failure: the network was not made. It must surface, wording
+	// and all, rather than pass as "already there".
+	overlap := "Error: IPv4 subnet 10.91.0.0/24 overlaps an existing network with subnet 10.91.0.0/24"
+	if _, err := replayShim(t, overlap, 1).EnsureNetworkLabeled("demo-net", false, nil, NetworkSubnets{V4: "10.91.0.0/24"}); err == nil || !strings.Contains(err.Error(), "overlaps an existing network") {
+		t.Errorf("a subnet overlap is a failure, not an existing network; got err=%v", err)
+	}
 }
 
 func TestFidelityNetworkAlreadyGone(t *testing.T) {
@@ -332,8 +365,39 @@ func TestFidelityNetworkAlreadyGone(t *testing.T) {
 	if !networkAlreadyGone("Error: network demo-net not found") {
 		t.Error("networkAlreadyGone should also recognize a 'not found' phrasing")
 	}
+	// The real in-use refusal (container 1.4.1, a container attached, running
+	// or stopped): two lines, neither carrying the absent wording — the
+	// runtime says `delete failed for` here and `failed to delete` there, and
+	// that word order is all that tells the two apart. A network that could
+	// not be removed is a warning, not silence.
+	const realInUse = "failed to delete network: [\"id\": demo-net, \"error\": invalidState: \"cannot delete subnet demo-net with referring containers: web\"]\n" +
+		"Error: delete failed for one or more networks: [\"demo-net\"]"
+	if networkAlreadyGone(realInUse) {
+		t.Error("networkAlreadyGone must NOT swallow the real in-use refusal (the network is still there)")
+	}
 	if networkAlreadyGone("Error: network is still in use by container x") {
 		t.Error("networkAlreadyGone must NOT swallow an unrelated failure")
+	}
+}
+
+// `volume delete` on container 1.4.1: the absent volume and the in-use one
+// share the shape `… one or more volumes: […]` and differ, as networks do, by
+// `failed to delete` against `delete failed for` — and the in-use one alone
+// says `in use`. Only that one earns the warning.
+func TestFidelityResourceInUse(t *testing.T) {
+	const realAbsent = `Error: failed to delete one or more volumes: ["demo_data"]`
+	if resourceInUse(realAbsent) {
+		t.Error("an absent volume is not in use; a clean re-run of `down -v` must stay quiet")
+	}
+	const realInUse = "failed to delete volume: [\"id\": demo_data, \"error\": invalidArgument: \"volume 'demo_data' is currently in use and cannot be accessed by another container, or deleted\"]\n" +
+		"Error: delete failed for one or more volumes: [\"demo_data\"]"
+	if !resourceInUse(realInUse) {
+		t.Error("the real in-use refusal must earn the warning")
+	}
+	// A volume removed cleanly echoes its name (exit 0) and never reaches
+	// the check; the network wording for in-use must not be mistaken for it.
+	if resourceInUse(`Error: delete failed for one or more networks: ["demo-net"]`) {
+		t.Error("a network refusal without `in use` is not a volume in use")
 	}
 }
 
@@ -385,6 +449,33 @@ func lastLine(t *testing.T, read func() []string) string {
 		t.Fatal("no invocation was recorded")
 	}
 	return lines[len(lines)-1]
+}
+
+// The MAC rides on the first --network as `,mac=`; `none` has no interface
+// to carry it, so it stays bare there (the load refuses that pair, and the
+// runtime layer holds the line on its own).
+func TestRunPutsTheMacOnTheFirstNetworkAndNotOnNone(t *testing.T) {
+	rt, read := loggingShim(t)
+	if err := rt.Run(RunOptions{Name: "w", Image: "a", Networks: []string{"demo-net", "back"}, MacAddress: "02:42:ac:11:00:77"}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := lastLine(t, read); !strings.Contains(got, "--network demo-net,mac=02:42:ac:11:00:77 --network back ") {
+		t.Errorf("want the MAC on the first network only, got: %s", got)
+	}
+	// One network is still the first network — the guard is on `none`, not
+	// on there being several.
+	if err := rt.Run(RunOptions{Name: "w", Image: "a", Networks: []string{"demo-net"}, MacAddress: "02:42:ac:11:00:77"}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := lastLine(t, read); !strings.Contains(got, "--network demo-net,mac=02:42:ac:11:00:77 ") {
+		t.Errorf("want the MAC on a lone network, got: %s", got)
+	}
+	if err := rt.Run(RunOptions{Name: "w", Image: "a", Networks: []string{"none"}, MacAddress: "02:42:ac:11:00:77"}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := lastLine(t, read); !strings.Contains(got, "--network none ") || strings.Contains(got, "mac=") {
+		t.Errorf("want --network none bare, got: %s", got)
+	}
 }
 
 func TestRunAssemblesFullArgv(t *testing.T) {
@@ -1341,6 +1432,28 @@ func TestListVolumes(t *testing.T) {
 	}
 
 	if got := replayShim(t, "boom\n", 1).ListVolumes(); got != nil {
+		t.Errorf("a failed listing must report nothing rather than guess, got %v", got)
+	}
+}
+
+func TestListVolumeRows(t *testing.T) {
+	// The shape `container volume ls` prints (recorded from the real CLI): a
+	// header, then NAME / TYPE / DRIVER / OPTIONS. The header is not a row, the
+	// driver is the third column and not the second, and a short row keeps its
+	// name with no driver rather than being dropped.
+	real := "NAME                                  TYPE       DRIVER  OPTIONS\n" +
+		"vz_tmp                                named      local\n" +
+		"53f55c9f-57c1-40da-bebc-6ba37f66d917  anonymous  other\n" +
+		"sized                                 named      local   size=1g\n" +
+		"bare\n"
+	got := replayShim(t, real, 0).ListVolumeRows()
+	// The driver is the third column, not the last: a volume made with --opt
+	// has a fourth.
+	want := []VolumeRow{{Name: "vz_tmp", Driver: "local"}, {Name: "53f55c9f-57c1-40da-bebc-6ba37f66d917", Driver: "other"}, {Name: "sized", Driver: "local"}, {Name: "bare"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ListVolumeRows() = %v, want %v", got, want)
+	}
+	if got := replayShim(t, "boom\n", 1).ListVolumeRows(); got != nil {
 		t.Errorf("a failed listing must report nothing rather than guess, got %v", got)
 	}
 }

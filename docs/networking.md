@@ -43,7 +43,8 @@ The table below is the same map in detail — each row is one thing you might re
 | Restricting **internet egress** | no native control (needs an external firewall) | `internal: true` on a network **removes the route to the internet** (host still reachable); `network_mode: none` = loopback only — see [Constraining egress](agent-sandbox.md) |
 | Multiple networks / **external** | supported, with aliases | multiple networks per service (one `--network` each) and `external: true` (reuse a pre-existing network by name) both work |
 | Name resolution **on an `internal:` network** | works | **doesn't** — a container's resolver is its network's gateway, and an internal network's gateway serves no DNS (queries are refused, though the gateway itself is reachable), so address peers by **IP** (or reach a host proxy via `${OPOSSUM_HOST_GATEWAY}`) |
-| Per-network **aliases** / static IPs (`ipam`) | applied | **not applied** (the `<project>` subdomain is what keeps names unique) |
+| Per-network **aliases** / static IPs (`ipv4_address`) | applied | **not applied** — `container run` has no flag for either (the `<project>` subdomain is what keeps names unique) |
+| A network's **subnet** (`ipam.config[].subnet`) | applied | applied — `container network create --subnet` / `--subnet-v6`, one of each at most; two projects declaring the same subnet are refused by the runtime, as by docker |
 
 The three surprises for a docker-compose user, and why:
 

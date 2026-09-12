@@ -13,6 +13,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -135,6 +136,26 @@ func run(args []string) int {
 					fmt.Fprintf(os.Stderr, "Error: network not found: %s\n", arg(2))
 					return 1
 				}
+			}
+			// $NETWORK_SUBNETS gives an existing network its subnets, as
+			// `name=v4[,v6]` pairs, in the shape the real `network inspect`
+			// prints them (1.4.1: `configuration.ipv4Subnet` when created with
+			// `--subnet`, and `status.ipv4Subnet` / `ipv6Subnet` — the latter
+			// written with the gateway's address). Without it the inspect answers
+			// nothing, as the shim always did, which opossum reads as "unknown".
+			for _, pair := range strings.Fields(os.Getenv("NETWORK_SUBNETS")) {
+				name, subs, ok := strings.Cut(pair, "=")
+				if !ok || name != arg(2) {
+					continue
+				}
+				v4, v6, _ := strings.Cut(subs, ",")
+				conf := fmt.Sprintf(`"ipv4Subnet":%q`, v4)
+				status := fmt.Sprintf(`"ipv4Gateway":"10.0.0.1","ipv4Subnet":%q`, v4)
+				if v6 != "" {
+					conf += fmt.Sprintf(`,"ipv6Subnet":%q`, v6)
+					status += fmt.Sprintf(`,"ipv6Subnet":%q`, strings.Replace(v6, "::/", "::1/", 1))
+				}
+				fmt.Printf(`[{"configuration":{"name":%q,%s},"status":{%s}}]`+"\n", name, conf, status)
 			}
 		}
 		if arg(1) == "create" {
@@ -321,6 +342,27 @@ func run(args []string) int {
 		}
 		switch arg(1) {
 		case "ls":
+			// $VOLUME_LS_TABLE is the whole table the real CLI prints — a NAME /
+			// TYPE / DRIVER / OPTIONS header and one row per volume — for a test
+			// that reads more than the name (the driver). The volumes opossum has
+			// made since are rows too, as `named local`, the way the runtime would
+			// list them. Same idea as $CONTAINER_LS: a document, not a list of
+			// names, when the shape of the row is what the code under test reads.
+			if table := os.Getenv("VOLUME_LS_TABLE"); table != "" {
+				fmt.Println(table)
+				listed := map[string]bool{}
+				for _, line := range strings.Split(table, "\n") {
+					if f := strings.Fields(line); len(f) > 0 {
+						listed[f[0]] = true
+					}
+				}
+				for _, v := range madeVolumes() {
+					if !listed[v] {
+						fmt.Printf("%s  named  local\n", v)
+					}
+				}
+				return 0
+			}
 			// One name per line, as the real `container volume ls` prints them. A
 			// single line holding several names would answer "exists" only for the
 			// first — the parser reads the first field of each line — and a test that
@@ -358,6 +400,18 @@ func run(args []string) int {
 		fmt.Printf("log-line %s\n", last)
 
 	case "ls":
+		// $CONTAINER_LS is a whole `ls -a --format json` document, for a test that
+		// needs states other than running or more than one project — the same
+		// knob the CLI shim has. `-a` is honoured: without it only the running
+		// entries are answered, as the real CLI does, so a caller that drops the
+		// flag sees fewer containers here too.
+		if doc := os.Getenv("CONTAINER_LS"); doc != "" {
+			if !hasArg("-a") {
+				doc = onlyRunning(doc)
+			}
+			fmt.Println(doc)
+			return 0
+		}
 		var items []string
 		for _, n := range strings.Fields(os.Getenv("LS_CONTAINERS")) {
 			items = append(items, fmt.Sprintf(`{"status":{"state":"running"},"configuration":{"id":"%s","labels":{"opossum.project":"%s"}}}`, n, os.Getenv("LS_PROJECT")))
@@ -468,4 +522,35 @@ func publishedPorts(name string) string {
 		return `{"containerPort":8080,"hostAddress":"0.0.0.0","hostPort":8080,"proto":"tcp"}`
 	}
 	return strings.Join(out, ",")
+}
+
+// hasArg reports whether the invocation carried this word.
+func hasArg(want string) bool {
+	for _, a := range os.Args[1:] {
+		if a == want {
+			return true
+		}
+	}
+	return false
+}
+
+// onlyRunning keeps the entries of a `ls --format json` document whose state is
+// running — what the real CLI answers without `-a`.
+func onlyRunning(doc string) string {
+	var entries []map[string]any
+	if err := json.Unmarshal([]byte(doc), &entries); err != nil {
+		return doc
+	}
+	kept := []map[string]any{}
+	for _, e := range entries {
+		st, _ := e["status"].(map[string]any)
+		if st != nil && st["state"] == "running" {
+			kept = append(kept, e)
+		}
+	}
+	b, err := json.Marshal(kept)
+	if err != nil {
+		return doc
+	}
+	return string(b)
 }

@@ -47,8 +47,8 @@ const (
 	codePGVersionedLayout     diagCode = "OPSM-110" // Postgres 18+ wants the mount one level above the old data directory
 	codeDataDirNotThisMount   diagCode = "OPSM-111" // the cluster does not land in a mounted data directory, and the overlay left it alone
 	codeHostPortRemapped      diagCode = "OPSM-206" // a container-only port's mirrored host port was taken, so opossum picked a free one
-	codeBuildTmpContext       diagCode = "OPSM-301" // build context under /private/tmp (builder can't read it)
-	codeBuildSymlink          diagCode = "OPSM-302" // build context is a symlink (builder may reject it)
+	codeNetworkSubnetChanged  diagCode = "OPSM-207" // the project network exists with a subnet other than the one `ipam` now declares
+	codeProjectBusy           diagCode = "OPSM-208" // another opossum command holds the project's lock (an `up` or `down` is under way)
 	codeDepNotRunning         diagCode = "OPSM-401" // a dependency's container exited before becoming healthy
 	codeOrphans               diagCode = "OPSM-402" // containers left by services no longer in the compose
 	codeDepNoHealth           diagCode = "OPSM-403" // a service_healthy dependency defines no healthcheck
@@ -77,7 +77,7 @@ var allDiagCodes = []diagCode{
 	codeBindFilePlaceholder, codeVolumeNotSeeded, codeSymlinkedSocket, codePGVersionedLayout,
 	codeDataDirNotThisMount,
 	codeHostPortInUse, codeDNSDomainAbsent, codeInternalEgress, codeDockerSocket, codeExternalNetAbsent, codeHostPortRemapped,
-	codeBuildTmpContext, codeBuildSymlink,
+	codeNetworkSubnetChanged, codeProjectBusy,
 	codeDepNotRunning, codeOrphans, codeDepNoHealth,
 	codeIgnoredTopField, codeIgnoredField, codeRuntimeAbsent, codeRuntimeStopped, codeRuntimeAutoStart, codeServiceExited, codeSupervisorStarted, codeSupervisorAction, codeImageNoArm64,
 	codeSupervisorLogTrimmed, codeSupervisorLogUncapped,

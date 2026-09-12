@@ -23,6 +23,7 @@ type Project struct {
 	BaseDir  string // directory the compose file lives in; build/volume paths resolve against it
 	Services map[string]*Service
 	Secrets  map[string]Secret      // top-level file-based secrets, mounted at /run/secrets/<name> (#76)
+	Configs  map[string]Config      // top-level configs, placed in the container as files (file, content or environment form)
 	Volumes  map[string]VolumeDecl  // top-level volume declarations; only `external` is acted on (#64)
 	Networks map[string]NetworkDecl // top-level network declarations; opossum acts on `internal`/`external`/`name`
 
@@ -78,19 +79,24 @@ type Service struct {
 	// tmpfs, so the marker never escapes.
 	NoCopy      []string        `yaml:"-"`
 	Secrets     SecretRefs      `yaml:"secrets"`
+	Configs     ConfigRefs      `yaml:"configs"`
 	DependsOn   DependsOn       `yaml:"depends_on"`
 	Healthcheck *Healthcheck    `yaml:"healthcheck"`
-	Profiles    []string        `yaml:"profiles"`     // service starts only when one of these profiles is active (empty = always)
+	Profiles    StringOrSlice   `yaml:"profiles"`     // service starts only when one of these profiles is active (empty = always); the type takes a bare name so the shape check below refuses it in the field's own words, not the decoder's
 	MemLimit    scalarStr       `yaml:"mem_limit"`    // legacy memory limit ("512m", "2g", …)
 	CPUs        scalarStr       `yaml:"cpus"`         // legacy CPU limit (may be fractional)
 	SSH         bool            `yaml:"ssh"`          // forward the host SSH agent (--ssh) for private git over SSH
 	User        string          `yaml:"user"`         // --user (name|uid[:gid]) the process runs as
 	WorkingDir  string          `yaml:"working_dir"`  // --workdir the process starts in
 	Init        bool            `yaml:"init"`         // --init: run a tini-like init as PID 1 to reap zombies
+	ShmSize     scalarStr       `yaml:"shm_size"`     // size of /dev/shm (`1gb`, `64M`, bytes) → --shm-size <bytes>
+	Ulimits     Ulimits         `yaml:"ulimits"`      // resource limits (`nofile: 65536` or `{soft, hard}`) → --ulimit name=soft:hard
 	ReadOnly    bool            `yaml:"read_only"`    // --read-only root filesystem
 	CapAdd      StringOrSlice   `yaml:"cap_add"`      // --cap-add Linux capabilities
 	CapDrop     StringOrSlice   `yaml:"cap_drop"`     // --cap-drop Linux capabilities
 	NetworkMode string          `yaml:"network_mode"` // only "none" acted on: full network isolation (--network none)
+	MacAddress  string          `yaml:"mac_address"`  // the container's MAC on its first network (`--network <name>,mac=…`)
+	Labels      Labels          `yaml:"labels"`       // put on the container as `-l key=value`, before opossum's own labels (which win on a clash, as docker compose's own do)
 	Networks    ServiceNetworks `yaml:"networks"`     // declared networks this service joins (one --network each; aliases/static IPs not applied)
 
 	Deploy  *Deploy  `yaml:"deploy"`  // only deploy.resources.limits.{memory,cpus} is acted on
@@ -397,9 +403,9 @@ func refuseNotANumberOrString(name string, n *yaml.Node, hint string) error {
 
 // listOnlyFields are the fields docker compose takes only as a list (`must
 // be a array` for a bare name), unlike tmpfs/command/entrypoint, which take
-// one string as well. `profiles` is such a field too, but its own decoding
-// ([]string) already refuses a bare name as the wrong shape.
-var listOnlyFields = map[string]bool{"cap_add": true, "cap_drop": true}
+// one string as well. `profiles` is one: its own decoding into []string
+// refuses a bare name too, but in the decoder's words, naming the Go type.
+var listOnlyFields = map[string]bool{"cap_add": true, "cap_drop": true, "profiles": true}
 
 // nestedShapes are the nested fields opossum reads (or hands to the runtime)
 // whose shape docker compose validates (measured on v5.5.0, `must be a
@@ -578,6 +584,7 @@ var itemKnownKeys = map[string][]string{
 	"ports":      {"target", "published", "protocol", "host_ip"},
 	"volumes":    {"type", "source", "target", "read_only", "volume"},
 	"secrets":    {"source", "target"},
+	"configs":    {"source", "target"},
 	"env_file":   {"path", "required"},
 	"depends_on": {"condition"},
 	// One level down, where an item's key is a mapping opossum reads part
@@ -589,24 +596,38 @@ var itemKnownKeys = map[string][]string{
 // mapping items (`<field> entry N.<key>`), or, for `depends_on` written
 // as a mapping, in each dependency's mapping (`depends_on.<name>.<key>`).
 // A scalar item — the short form — has no keys to name.
-func ignoredItemKeys(field string, n *yaml.Node) []string {
+func ignoredItemKeys(field string, n *yaml.Node) ([]string, error) {
 	known := itemKnownKeys[field]
 	n = unalias(n)
+	// Where docker compose's schema names the item's keys: a list's long-form
+	// item (`services.*.ports[]`), or a dependency's mapping.
+	specPath := "services.*." + field + "[]"
+	if field == "depends_on" {
+		specPath = "services.*.depends_on.*"
+	}
 	var out []string
+	var refused error
 	name := func(item *yaml.Node, prefix string) {
 		item = unalias(item)
-		if item.Kind != yaml.MappingNode {
+		if item.Kind != yaml.MappingNode || refused != nil {
 			return
 		}
 		var fields map[string]yaml.Node
 		if item.Decode(&fields) != nil {
 			return
 		}
-		for key := range fields {
+		for _, key := range sortedKeys(fields) {
 			if strings.HasPrefix(key, "x-") {
 				continue
 			}
 			if !slices.Contains(known, key) {
+				// A key docker compose does not take in such an item is
+				// refused as it refuses it (`services.web.ports.0 additional
+				// properties 'foo' not allowed`); one it takes is listed.
+				if !specKnows(specPath, key) {
+					refused = unknownKeyErr(prefix, key)
+					return
+				}
 				out = append(out, prefix+"."+key)
 				continue
 			}
@@ -618,10 +639,15 @@ func ignoredItemKeys(field string, n *yaml.Node) []string {
 				if c := unalias(&child); c.Kind == yaml.MappingNode {
 					var subFields map[string]yaml.Node
 					if c.Decode(&subFields) == nil {
-						for k := range subFields {
-							if !strings.HasPrefix(k, "x-") && !slices.Contains(sub, k) {
-								out = append(out, prefix+"."+key+"."+k)
+						for _, k := range sortedKeys(subFields) {
+							if strings.HasPrefix(k, "x-") || slices.Contains(sub, k) {
+								continue
 							}
+							if !specKnows(specPath+"."+key, k) {
+								refused = unknownKeyErr(prefix+"."+key, k)
+								return
+							}
+							out = append(out, prefix+"."+key+"."+k)
 						}
 					}
 				}
@@ -635,35 +661,46 @@ func ignoredItemKeys(field string, n *yaml.Node) []string {
 		}
 	case yaml.MappingNode:
 		if field != "depends_on" {
-			return nil
+			return nil, nil
 		}
 		var deps map[string]yaml.Node
 		if n.Decode(&deps) != nil {
-			return nil
+			return nil, nil
 		}
-		for dep := range deps {
+		for _, dep := range sortedKeys(deps) {
 			d := deps[dep]
 			name(&d, field+"."+dep)
 		}
 	}
-	return out
+	return out, refused
+}
+
+// sortedKeys is a map's keys in name order, for a walk whose first refusal
+// must not depend on the map's order.
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // ignoredNestedKeys names the keys under prefix's mapping that opossum
 // does not read, walking into the mappings it does. A node that is not a
 // mapping is left to the shape checks.
-func ignoredNestedKeys(prefix string, n *yaml.Node) []string {
+func ignoredNestedKeys(prefix string, n *yaml.Node) ([]string, error) {
 	known, ok := nestedKnownKeys[prefix]
 	n = unalias(n)
 	if !ok || n.Kind != yaml.MappingNode {
-		return nil
+		return nil, nil
 	}
 	var fields map[string]yaml.Node
 	if n.Decode(&fields) != nil {
-		return nil
+		return nil, nil
 	}
 	var out []string
-	for key := range fields {
+	for _, key := range sortedKeys(fields) {
 		// An `x-` extension is the file's own note, not a field opossum
 		// left out — docker compose takes one anywhere, and the per-network
 		// listing skips them the same way.
@@ -672,13 +709,23 @@ func ignoredNestedKeys(prefix string, n *yaml.Node) []string {
 		}
 		full := prefix + "." + key
 		if !slices.Contains(known, key) {
+			// A key docker compose does not take here is refused as it
+			// refuses it (`services.web.build additional properties 'foo'
+			// not allowed`); one it takes is listed.
+			if !specKnows("services.*."+prefix, key) {
+				return nil, unknownKeyErr(prefix, key)
+			}
 			out = append(out, full)
 			continue
 		}
 		child := fields[key]
-		out = append(out, ignoredNestedKeys(full, &child)...)
+		more, err := ignoredNestedKeys(full, &child)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, more...)
 	}
-	return out
+	return out, nil
 }
 
 // watchActions are the actions docker compose takes (opossum automates
@@ -769,7 +816,7 @@ var bareKeyIsAllowed = map[string]bool{"command": true, "entrypoint": true, "dep
 var fieldShape = map[string]string{
 	"volumes": "a list", "ports": "a list", "networks": "a list or a mapping", "secrets": "a list",
 	"depends_on": "a list or a mapping", "env_file": "a string or a list",
-	"environment": "a mapping or a list", "healthcheck": "a mapping",
+	"environment": "a mapping or a list", "healthcheck": "a mapping", "ulimits": "a mapping", "shm_size": "a size",
 	"build": "a string or a mapping",
 	"image": "a string", "working_dir": "a string", "user": "a string", "restart": "a string",
 	"platform": "a string", "network_mode": "a string",
@@ -935,10 +982,14 @@ func (s *Service) UnmarshalYAML(value *yaml.Node) error {
 							return err
 						}
 					}
-					for key := range rule {
-						if !watchRuleKeys[key] {
-							s.Unsupported = append(s.Unsupported, fmt.Sprintf("%s.%s", entry, key))
+					for _, key := range sortedKeys(rule) {
+						if watchRuleKeys[key] || strings.HasPrefix(key, "x-") {
+							continue
 						}
+						if !specKnows("services.*.develop.watch[]", key) {
+							return unknownKeyErr(entry, key)
+						}
+						s.Unsupported = append(s.Unsupported, fmt.Sprintf("%s.%s", entry, key))
 					}
 				}
 			}
@@ -957,9 +1008,9 @@ func (s *Service) UnmarshalYAML(value *yaml.Node) error {
 				}
 			}
 		}
-		// `labels` is read by nothing here, but its shape is checked the way
-		// docker compose checks it, so a mistake in it is not read past as
-		// "labels" in the ignored list.
+		// `labels` is read (Labels), and its shape is checked the way docker
+		// compose checks it before the decode, so a mistake in it is refused
+		// naming the field rather than read past.
 		if k == "labels" {
 			if err := refuseLabelsShape(&n); err != nil {
 				return err
@@ -972,10 +1023,22 @@ func (s *Service) UnmarshalYAML(value *yaml.Node) error {
 			return &yaml.TypeError{Errors: []string{fmt.Sprintf("line %d: %s: expected %s, got nothing — write the value or remove the key", n.Line, k, shapeOf(k))}}
 		}
 	}
-	for k := range keys {
-		if !serviceKnownKeys[k] {
-			s.Unsupported = append(s.Unsupported, k)
+	// In name order, not map order: with two typos the refusal names the
+	// same one every time, and the loader's second decode, which finds the
+	// service to blame by matching the error, sees the same error.
+	for _, k := range sortedKeys(keys) {
+		if serviceKnownKeys[k] || strings.HasPrefix(k, "x-") {
+			continue
 		}
+		// A key docker compose does not take for a service — a typo like
+		// `enviroment:` — is refused as docker compose refuses it, rather
+		// than read past and listed: listed, the service started without
+		// its variables and the mistake surfaced later. A key docker compose
+		// takes that opossum does not act on is listed, as before.
+		if !specKnows("services.*", k) {
+			return unknownKeyErr("", k)
+		}
+		s.Unsupported = append(s.Unsupported, k)
 	}
 	// The mappings opossum reads only part of — `deploy` (resources.limits),
 	// `build`, `healthcheck`, `develop` — name each key they carry that
@@ -984,7 +1047,11 @@ func (s *Service) UnmarshalYAML(value *yaml.Node) error {
 	for field := range nestedKnownKeys {
 		if !strings.Contains(field, ".") {
 			if n, ok := keys[field]; ok {
-				s.Unsupported = append(s.Unsupported, ignoredNestedKeys(field, &n)...)
+				more, err := ignoredNestedKeys(field, &n)
+				if err != nil {
+					return err
+				}
+				s.Unsupported = append(s.Unsupported, more...)
 			}
 		}
 	}
@@ -992,7 +1059,11 @@ func (s *Service) UnmarshalYAML(value *yaml.Node) error {
 	// `bind` options — and for a dependency's mapping.
 	for field := range itemKnownKeys {
 		if n, ok := keys[field]; ok {
-			s.Unsupported = append(s.Unsupported, ignoredItemKeys(field, &n)...)
+			more, err := ignoredItemKeys(field, &n)
+			if err != nil {
+				return err
+			}
+			s.Unsupported = append(s.Unsupported, more...)
 		}
 	}
 	// `networks` in its map form carries per-network settings (aliases,
@@ -1000,7 +1071,11 @@ func (s *Service) UnmarshalYAML(value *yaml.Node) error {
 	// names. Each dropped key is named here as `networks.<net>.<key>`, so an
 	// alias that never resolves was announced rather than discovered.
 	if nets, ok := keys["networks"]; ok {
-		s.Unsupported = append(s.Unsupported, ignoredServiceNetworkFields(nets)...)
+		more, err := ignoredServiceNetworkFields(nets)
+		if err != nil {
+			return err
+		}
+		s.Unsupported = append(s.Unsupported, more...)
 	}
 	if ext, ok := keys["extends"]; ok {
 		s.Extends = decodeExtends(ext)
@@ -1050,27 +1125,34 @@ func decodeExtends(n yaml.Node) *ExtendsRef {
 // ignoredServiceNetworkFields lists the keys under a service's map-form
 // `networks:` entries, all of which are dropped (the entry's name is the only
 // thing acted on). A list-form `networks:` carries no keys and yields nothing.
-func ignoredServiceNetworkFields(n yaml.Node) []string {
+func ignoredServiceNetworkFields(n yaml.Node) ([]string, error) {
 	// Decoding into a yaml.Node keeps an alias as an alias, so `networks:
 	// *nets` arrives here unresolved and would be reported as nothing.
 	n = *unalias(&n)
 	if n.Kind != yaml.MappingNode {
-		return nil
+		return nil, nil
 	}
 	var decls map[string]map[string]yaml.Node
 	if n.Decode(&decls) != nil {
-		return nil
+		return nil, nil
 	}
 	var out []string
-	for net, fields := range decls {
-		for k := range fields {
+	for _, net := range sortedKeys(decls) {
+		fields := decls[net]
+		for _, k := range sortedKeys(fields) {
 			if strings.HasPrefix(k, "x-") {
 				continue
+			}
+			// A key docker compose does not take for a service's network
+			// (`ipv4_adress:`) is refused as it refuses it; the ones it takes
+			// (`aliases`, `ipv4_address`, …) are listed, as before.
+			if !specKnows("services.*.networks.*", k) {
+				return nil, unknownKeyErr("networks."+net, k)
 			}
 			out = append(out, fmt.Sprintf("networks.%s.%s", net, k))
 		}
 	}
-	return out
+	return out, nil
 }
 
 // tmpfsMarker tags a `type: tmpfs` entry inside the parsed Volumes list so
@@ -1545,10 +1627,18 @@ type (
 		Internal bool      `yaml:"internal"`
 		External yaml.Node `yaml:"external"`
 		Name     string    `yaml:"name"`
+		Labels   Labels    `yaml:"labels"`
+		IPAM     IPAM      `yaml:"ipam"`
 	}
 	rawSecret struct {
 		File     string    `yaml:"file"`
 		External yaml.Node `yaml:"external"`
+	}
+	rawConfig struct {
+		File        string    `yaml:"file"`
+		Content     *string   `yaml:"content"`
+		Environment string    `yaml:"environment"`
+		External    yaml.Node `yaml:"external"`
 	}
 )
 
@@ -1565,6 +1655,133 @@ type NetworkDecl struct {
 	Internal bool   `yaml:"internal"`
 	External bool   `yaml:"external"`
 	Name     string `yaml:"name"`
+	Labels   Labels `yaml:"labels"` // given to `container network create --label` when opossum creates the network
+	IPAM     IPAM   `yaml:"ipam"`   // the subnets given to `container network create --subnet` / `--subnet-v6`
+}
+
+// IPAM is a network declaration's `ipam:` as opossum reads it: the subnet of
+// each `config` entry, one IPv4 and one IPv6 at most — what `container
+// network create --subnet` / `--subnet-v6` take. docker compose takes the
+// same shape and refuses a second IPv4 subnet when the network is made
+// (`bridge driver doesn't support multiple subnets`, measured on v5.5.0)
+// and a subnet that is not in CIDR form (`invalid subnet: … no '/'`); here
+// both are refused at load, naming the network. The other keys of `ipam`
+// (`driver`, `options`) and of an entry (`gateway`, `ip_range`,
+// `aux_addresses`) are read past and listed among the ignored fields by
+// their full names.
+type IPAM struct {
+	Subnet   string // the IPv4 subnet, in CIDR form, or ""
+	SubnetV6 string // the IPv6 subnet, in CIDR form, or ""
+	ignored  []string
+}
+
+// Ignored names the `ipam` keys opossum read past, prefixed by `ipam.`.
+func (i IPAM) Ignored() []string { return i.ignored }
+
+// UnmarshalYAML reads `ipam:`: a mapping whose `config:` is a list of
+// mappings, each with a `subnet:`. A key docker compose does not take under
+// `ipam` or in an entry is refused as it refuses it; the keys it takes that
+// opossum does not act on are collected for the ignored-fields listing.
+func (i *IPAM) UnmarshalYAML(value *yaml.Node) error {
+	// A bare `ipam:` never reaches here (the decoder is not called for a
+	// null); the declaration's bare-key check refuses it first.
+	value = unalias(value)
+	if value.Kind != yaml.MappingNode {
+		return fmt.Errorf("ipam must be a mapping, got %s — write `ipam: {config: [{subnet: 10.0.0.0/24}]}`", kindName(value.Kind))
+	}
+	var fields map[string]yaml.Node
+	if err := value.Decode(&fields); err != nil {
+		return err
+	}
+	for _, k := range sortedKeys(fields) {
+		if k == "config" || strings.HasPrefix(k, "x-") {
+			continue
+		}
+		if !specKnows("networks.*.ipam", k) {
+			return unknownKeyErr("ipam", k)
+		}
+		i.ignored = append(i.ignored, "ipam."+k)
+	}
+	cfg, ok := fields["config"]
+	if !ok {
+		return nil
+	}
+	list := unalias(&cfg)
+	if list.Kind == yaml.ScalarNode && list.Tag == "!!null" {
+		return nil // `config:` with nothing after it names no subnet, as docker compose reads it
+	}
+	if list.Kind != yaml.SequenceNode {
+		return fmt.Errorf("ipam.config must be a list, got %s — write the subnets as `- subnet: 10.0.0.0/24`", kindName(list.Kind))
+	}
+	for n, item := range list.Content {
+		item = unalias(item)
+		entry := fmt.Sprintf("ipam.config entry %d", n+1)
+		if item.Kind != yaml.MappingNode {
+			return fmt.Errorf("%s must be a mapping, got %s — write it as `- subnet: 10.0.0.0/24`", entry, kindName(item.Kind))
+		}
+		var ef map[string]yaml.Node
+		if err := item.Decode(&ef); err != nil {
+			return err
+		}
+		for _, k := range sortedKeys(ef) {
+			if k == "subnet" || strings.HasPrefix(k, "x-") {
+				continue
+			}
+			if !specKnows("networks.*.ipam.config[]", k) {
+				return unknownKeyErr(entry, k)
+			}
+			i.ignored = append(i.ignored, entry+"."+k)
+		}
+		sub, ok := ef["subnet"]
+		if !ok {
+			continue
+		}
+		v := unalias(&sub)
+		if v.Kind != yaml.ScalarNode || v.Tag != "!!str" || v.Value == "" {
+			return fmt.Errorf("%s: subnet must be a string in CIDR form, got %s — write it as `subnet: 10.0.0.0/24`", entry, scalarKind(v))
+		}
+		ip, ipnet, err := net.ParseCIDR(v.Value)
+		if err != nil {
+			return fmt.Errorf("%s: subnet %q is not in CIDR form — write it as `subnet: 10.0.0.0/24` (docker compose refuses it when the network is made: `invalid subnet`)", entry, v.Value)
+		}
+		// Kept as the network it names (`10.7.0.1/24` → `10.7.0.0/24`,
+		// `fd00:0007::/64` → `fd00:7::/64`): that is what the runtime is given
+		// and what `network inspect` shows back, so a spelling with host bits
+		// set is not read as a change on the next `up`.
+		canonical := ipnet.String()
+		if ip.To4() != nil {
+			if i.Subnet != "" {
+				return fmt.Errorf("%s: a second IPv4 subnet (%q after %q) — the runtime takes one IPv4 subnet per network, as docker's bridge driver does (`doesn't support multiple subnets`)", entry, v.Value, i.Subnet)
+			}
+			i.Subnet = canonical
+		} else {
+			if i.SubnetV6 != "" {
+				return fmt.Errorf("%s: a second IPv6 subnet (%q after %q) — the runtime takes one IPv6 subnet per network", entry, v.Value, i.SubnetV6)
+			}
+			i.SubnetV6 = canonical
+		}
+	}
+	return nil
+}
+
+// scalarKind names a value the way the shape refusals do: a list, a mapping,
+// or the YAML kind of a scalar (`a number`, `a boolean`, `nothing`).
+func scalarKind(n *yaml.Node) string {
+	switch n.Kind {
+	case yaml.SequenceNode:
+		return "a list"
+	case yaml.MappingNode:
+		return "a mapping"
+	}
+	switch n.Tag {
+	case "!!null":
+		return "nothing"
+	case "!!int", "!!float":
+		return "a number"
+	case "!!bool":
+		return "a boolean"
+	}
+	return "a single value"
 }
 
 // UnmarshalYAML: see VolumeDecl — the map form of `external` is read the
@@ -1573,7 +1790,7 @@ func (d *NetworkDecl) UnmarshalYAML(value *yaml.Node) error {
 	if err := wantMapping(value, "NetworkDecl"); err != nil {
 		return err
 	}
-	if err := bareKeysIn("a network's declaration", value, "internal", "name", "driver"); err != nil {
+	if err := bareKeysIn("a network's declaration", value, "internal", "name", "driver", "ipam"); err != nil {
 		return err
 	}
 	if err := refuseNonStringDeclKeys("a network's declaration", value, "name", "driver"); err != nil {
@@ -1584,13 +1801,18 @@ func (d *NetworkDecl) UnmarshalYAML(value *yaml.Node) error {
 	}
 	var raw rawNetworkDecl
 	if err := value.Decode(&raw); err != nil {
+		// An `ipam` refusal is opossum's own sentence; the declaration is named
+		// the way its other refusals name it.
+		if strings.HasPrefix(err.Error(), "ipam") {
+			return fmt.Errorf("a network's declaration: %w", err)
+		}
 		return err
 	}
 	ext, name, err := decodeExternal(&raw.External)
 	if err != nil {
 		return err
 	}
-	d.Internal, d.External = raw.Internal, ext
+	d.Internal, d.External, d.Labels, d.IPAM = raw.Internal, ext, raw.Labels, raw.IPAM
 	d.Name, err = externalName(raw.Name, name, &raw.External)
 	return err
 }
@@ -1764,6 +1986,118 @@ func (s *Secret) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	s.File, s.External = raw.File, ext
+	return nil
+}
+
+// Config is a top-level compose config: a file placed in the container, as
+// docker compose (v5.5.0) places it — from a host file (`file:`), from the
+// text written in the compose file (`content:`, interpolated like any
+// value), or from the value of a variable (`environment:`). Exactly one of
+// the three is set; `external` configs are not resolved.
+type Config struct {
+	File     string
+	Content  *string // nil when the form is not `content:` (an empty content is refused as no form: docker compose drops it and places an empty directory)
+	EnvVar   string  // the `environment:` form: the variable whose value is the file's content
+	EnvValue string  // that variable's value, read at load from the project's environment (the shell over `.env`, as docker compose reads it)
+	EnvSet   bool    // whether the variable was set; an unset one is refused when the container is made, as docker compose refuses it
+	External bool
+}
+
+// UnmarshalYAML reads a config declaration the way docker compose checks
+// one: a mapping, whose `file`, `content`, `environment` and `name` are
+// strings, and which sets exactly one of file, content and environment
+// (`one of file|environment|content must be set`; `file|environment|content
+// attributes are mutually exclusive`, both measured). An empty `content: ""`
+// is "not set" here: docker compose reads it past and then places an empty
+// directory at the target (measured), which no one means. The map form of
+// `external` marks the config external, refused as such by the load.
+func (c *Config) UnmarshalYAML(value *yaml.Node) error {
+	if err := wantMapping(value, "Config"); err != nil {
+		return err
+	}
+	if err := bareKeysIn("a config's declaration", value, "file", "content", "environment", "name"); err != nil {
+		return err
+	}
+	if err := refuseNonStringDeclKeys("a config's declaration", value, "file", "content", "environment", "name"); err != nil {
+		return err
+	}
+	var raw rawConfig
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	ext, _, err := decodeExternal(&raw.External)
+	if err != nil {
+		return err
+	}
+	forms := 0
+	if raw.File != "" {
+		forms++
+	}
+	if raw.Content != nil && *raw.Content != "" {
+		forms++
+	}
+	if raw.Environment != "" {
+		forms++
+	}
+	if !ext && forms == 0 {
+		return fmt.Errorf("a config's declaration must set one of file, content or environment — write `file: ./app.conf`, `content: |` with the text, or `environment: VAR`")
+	}
+	if forms > 1 {
+		return fmt.Errorf("a config's declaration sets more than one of file, content and environment — they are mutually exclusive; keep one")
+	}
+	c.File, c.Content, c.EnvVar, c.External = raw.File, raw.Content, raw.Environment, ext
+	return nil
+}
+
+// ConfigRef is a service's reference to a top-level config. The short form
+// is just the config name, placed at `/<name>`; the long form
+// (`{source, target}`) places it at `target`, which counts from `/` when
+// it is written relative (measured: `target: relative/name.conf` is
+// `/relative/name.conf`). `uid`, `gid` and `mode` are read and listed as
+// ignored — docker compose warns that it ignores them too.
+type ConfigRef struct {
+	Source string
+	Target string
+}
+
+// ConfigRefs accepts the short (name) and long (`{source, target}`) entry forms.
+type ConfigRefs []ConfigRef
+
+func (c *ConfigRefs) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind != yaml.SequenceNode {
+		return fmt.Errorf("configs must be a list, got %s — write each config as `- name`", kindName(value.Kind))
+	}
+	out := make(ConfigRefs, 0, len(value.Content))
+	for i, item := range value.Content {
+		item = unalias(item)
+		if item.Kind == yaml.ScalarNode {
+			if err := refuseNonString("configs", i, len(value.Content), item); err != nil {
+				return err
+			}
+			out = append(out, ConfigRef{Source: item.Value, Target: "/" + item.Value})
+			continue
+		}
+		if err := bareKeysIn(fmt.Sprintf("configs entry %d of %d", i+1, len(value.Content)), item, "source", "target"); err != nil {
+			return err
+		}
+		var lf struct {
+			Source string `yaml:"source"`
+			Target string `yaml:"target"`
+		}
+		if err := item.Decode(&lf); err != nil {
+			return err
+		}
+		if lf.Source == "" {
+			return fmt.Errorf("configs entry %d of %d has no source — write the config's name, as in `source: app_conf`", i+1, len(value.Content))
+		}
+		if lf.Target == "" {
+			lf.Target = "/" + lf.Source
+		} else if !strings.HasPrefix(lf.Target, "/") {
+			lf.Target = "/" + lf.Target
+		}
+		out = append(out, ConfigRef{Source: lf.Source, Target: lf.Target})
+	}
+	*c = out
 	return nil
 }
 
@@ -2227,15 +2561,14 @@ func refuseNonStringKeys(what string, n *yaml.Node) error {
 	return nil
 }
 
-// refuseLabelsShape checks `labels`, which opossum reads nothing of and
-// lists among the ignored fields, the way docker compose (v5.5.0) checks its
-// shape before anything runs: one value where a mapping or a list belongs
+// refuseLabelsShape checks the shape of `labels` before Labels reads it,
+// the way docker compose (v5.5.0) checks it before anything runs: one value where a mapping or a list belongs
 // (`labels: x`, `labels: 1`, a bare `labels:`) is `must be a mapping`; a
 // list item that is not a string (`[42]`, `[{a: b}]`, `- ` alone) is
 // `unexpected type int` (`map[string]interface {}`, `<nil>`); a mapping
 // value that is a list or a mapping is `must be a boolean,
-// null, number or string`. Before this, each was read past and the
-// service listed "labels" as ignored.
+// null, number or string`. The service's decode calls this too, since a
+// bare `labels:` (null) never reaches a field's UnmarshalYAML.
 func refuseLabelsShape(n *yaml.Node) error {
 	switch n.Kind {
 	case yaml.ScalarNode:
@@ -2271,6 +2604,204 @@ func refuseLabelsShape(n *yaml.Node) error {
 				return err
 			}
 		}
+	}
+	return nil
+}
+
+// Ulimit is one resource limit: a bare number is soft and hard at once
+// (docker compose keeps it as the number; the runtime takes `name=soft`),
+// the mapping form sets the two apart (`name=soft:hard`).
+type Ulimit struct {
+	Soft int64
+	Hard int64
+}
+
+// Ulimits is a service's `ulimits`, a mapping of limit name to a number or
+// a `{soft, hard}` mapping, as docker compose (v5.5.0) reads it: anything
+// else is `must be a mapping`, and a value that is not a whole number is
+// refused (docker compose: `failed to cast to expected type: strconv.Atoi`;
+// the runtime: `must be a non-negative integer or 'unlimited'`).
+type Ulimits map[string]Ulimit
+
+func (u *Ulimits) UnmarshalYAML(value *yaml.Node) error {
+	value = unalias(value)
+	if value.Kind != yaml.MappingNode {
+		if value.Kind == yaml.ScalarNode && value.Tag == "!!null" {
+			return fmt.Errorf("ulimits must be a mapping — the key has nothing under it; write the limits, as in `{nofile: 65536}`, or remove the key")
+		}
+		return fmt.Errorf("ulimits must be a mapping, got %s — write it as `{nofile: 65536}` or `{nofile: {soft: 1024, hard: 2048}}`", kindName(value.Kind))
+	}
+	out := Ulimits{}
+	pairs, err := mergedPairs(value)
+	if err != nil {
+		return fmt.Errorf("ulimits: %w", err)
+	}
+	for i := 0; i+1 < len(pairs); i += 2 {
+		k := unalias(pairs[i])
+		v := unalias(pairs[i+1])
+		name := k.Value
+		count := func(what string, n *yaml.Node) (int64, error) {
+			n = unalias(n)
+			if n.Kind != yaml.ScalarNode || n.Tag == "!!null" {
+				return 0, fmt.Errorf("ulimits %s must be a whole number, got %s", what, kindName(n.Kind))
+			}
+			c, err := strconv.ParseInt(n.Value, 10, 64)
+			if err != nil || c < 0 {
+				return 0, fmt.Errorf("ulimits %s must be a non-negative whole number, as in 65536 (got %q)", what, n.Value)
+			}
+			return c, nil
+		}
+		switch v.Kind {
+		case yaml.ScalarNode:
+			c, err := count(name, v)
+			if err != nil {
+				return err
+			}
+			out[name] = Ulimit{Soft: c, Hard: c}
+		case yaml.MappingNode:
+			var lim Ulimit
+			seen := map[string]bool{}
+			for j := 0; j+1 < len(v.Content); j += 2 {
+				key := unalias(v.Content[j]).Value
+				switch key {
+				case "soft", "hard":
+					c, err := count(name+"."+key, v.Content[j+1])
+					if err != nil {
+						return err
+					}
+					if key == "soft" {
+						lim.Soft = c
+					} else {
+						lim.Hard = c
+					}
+					seen[key] = true
+				default:
+					return fmt.Errorf("ulimits %s has a key it does not take: %s — write `{soft: <n>, hard: <n>}`", name, key)
+				}
+			}
+			if !seen["soft"] || !seen["hard"] {
+				return fmt.Errorf("ulimits %s must set both soft and hard, as in `{soft: 1024, hard: 2048}` — or write one number for both", name)
+			}
+			out[name] = lim
+		default:
+			return fmt.Errorf("ulimits %s must be a whole number or `{soft: <n>, hard: <n>}`, got %s", name, kindName(v.Kind))
+		}
+	}
+	*u = out
+	return nil
+}
+
+// mergedPairs is a mapping's key/value pairs with its `<<:` merge keys
+// resolved by YAML's rule, the one docker compose's reader applies: a key
+// written in the mapping itself wins wherever it stands, a merge source
+// fills in only the names still missing, an earlier source in a list wins
+// over a later one, and a source that is not a mapping is refused (yaml.v3:
+// `map merge requires map or sequence of maps as the value`).
+func mergedPairs(m *yaml.Node) ([]*yaml.Node, error) {
+	var out []*yaml.Node
+	seen := map[string]bool{}
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Tag == "!!merge" {
+			continue
+		}
+		out = append(out, m.Content[i], m.Content[i+1])
+		seen[unalias(m.Content[i]).Value] = true
+	}
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Tag != "!!merge" {
+			continue
+		}
+		merged := unalias(m.Content[i+1])
+		sources := []*yaml.Node{merged}
+		if merged.Kind == yaml.SequenceNode {
+			sources = merged.Content
+		}
+		for _, src := range sources {
+			src = unalias(src)
+			if src.Kind != yaml.MappingNode {
+				return nil, fmt.Errorf("`<<:` merge requires a mapping or a list of mappings as the value, got %s", kindName(src.Kind))
+			}
+			sub, err := mergedPairs(src)
+			if err != nil {
+				return nil, err
+			}
+			for j := 0; j+1 < len(sub); j += 2 {
+				name := unalias(sub[j]).Value
+				if seen[name] {
+					continue
+				}
+				seen[name] = true
+				out = append(out, sub[j], sub[j+1])
+			}
+		}
+	}
+	return out, nil
+}
+
+// Args renders the limits for the runtime, in name order: `name=soft` when
+// the two match, `name=soft:hard` otherwise.
+func (u Ulimits) Args() []string {
+	names := make([]string, 0, len(u))
+	for n := range u {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		l := u[n]
+		if l.Soft == l.Hard {
+			out = append(out, fmt.Sprintf("%s=%d", n, l.Soft))
+		} else {
+			out = append(out, fmt.Sprintf("%s=%d:%d", n, l.Soft, l.Hard))
+		}
+	}
+	return out
+}
+
+// Labels is a service's or a declaration's `labels`, as `key=value` pairs in
+// the order the runtime gets them: the mapping form sorted by key (as docker
+// compose renders it), the list form as written, a bare `key` as `key=`
+// (docker compose reads it as the empty value). The shape is checked by
+// refuseLabelsShape before this decodes; a scalar value that is not a
+// string (`tier: 1`, `on: true`) is taken as its text, as there.
+type Labels []string
+
+func (l *Labels) UnmarshalYAML(value *yaml.Node) error {
+	if err := refuseLabelsShape(value); err != nil {
+		return err
+	}
+	switch value.Kind {
+	case yaml.SequenceNode:
+		out := make(Labels, 0, len(value.Content))
+		for _, item := range value.Content {
+			item = unalias(item)
+			s := item.Value
+			if !strings.Contains(s, "=") {
+				s += "="
+			}
+			out = append(out, s)
+		}
+		*l = out
+	case yaml.MappingNode:
+		var m map[string]yaml.Node
+		if err := value.Decode(&m); err != nil {
+			return err
+		}
+		keys := make([]string, 0, len(m))
+		for k := range m {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		out := make(Labels, 0, len(keys))
+		for _, k := range keys {
+			v := unalias(ptr(m[k]))
+			val := v.Value
+			if v.Tag == "!!null" {
+				val = ""
+			}
+			out = append(out, k+"="+val)
+		}
+		*l = out
 	}
 	return nil
 }

@@ -540,6 +540,241 @@ services:
 	}
 }
 
+func TestPortCLI(t *testing.T) {
+	// The shim's inspect publishes 80 -> 0.0.0.0:8080/tcp.
+	readLog := fakeShim(t)
+	compose := writeCompose(t, `
+name: demo
+services:
+  web:
+    image: web:latest
+`)
+	t.Run("prints host:port and nothing else on stdout", func(t *testing.T) {
+		stdout, _, err := runSplit(t, "-f", compose, "port", "web", "80")
+		if err != nil {
+			t.Fatalf("port: %v", err)
+		}
+		if stdout != "0.0.0.0:8080\n" {
+			t.Errorf("stdout = %q, want %q", stdout, "0.0.0.0:8080\n")
+		}
+	})
+	// The service and the port come from the arguments, not from anywhere the
+	// shim's one published port (web, 80) would agree with: a different port is
+	// refused naming what is there, a different service is refused by name.
+	t.Run("the container port asked for is the one looked up", func(t *testing.T) {
+		_, err := run(t, "-f", compose, "port", "web", "443")
+		if err == nil || err.Error() != "no port 443/tcp for container web.demo.opossum: 80/tcp" {
+			t.Errorf("want the 443 miss listing 80/tcp, got: %v", err)
+		}
+	})
+	t.Run("the service asked for is the one looked up", func(t *testing.T) {
+		_, err := run(t, "-f", compose, "port", "nope", "80")
+		if err == nil || !strings.Contains(err.Error(), `unknown service "nope"`) {
+			t.Errorf("want the unknown-service refusal, got: %v", err)
+		}
+	})
+	t.Run("--protocol picks the protocol", func(t *testing.T) {
+		out, err := run(t, "-f", compose, "port", "--protocol", "udp", "web", "80")
+		if err == nil || !strings.Contains(err.Error(), "no port 80/udp for container web.demo.opossum: 80/tcp") {
+			t.Errorf("want the udp miss listing the tcp port, got err=%v out=%q", err, out)
+		}
+	})
+	for _, tc := range []struct{ name, arg, want string }{
+		{"a container port that is not a number", "abc", `container port must be a number from 1 to 65535, got "abc"`},
+		{"a container port one past the range", "65536", `container port must be a number from 1 to 65535, got "65536"`},
+		{"a container port of zero", "0", `container port must be a number from 1 to 65535, got "0"`},
+	} {
+		t.Run(tc.name+" is refused", func(t *testing.T) {
+			_, err := run(t, "-f", compose, "port", "web", tc.arg)
+			if err == nil || err.Error() != tc.want {
+				t.Errorf("want %q, got: %v", tc.want, err)
+			}
+		})
+	}
+	t.Run("a protocol other than tcp or udp is refused", func(t *testing.T) {
+		_, err := run(t, "-f", compose, "port", "--protocol", "icmp", "web", "80")
+		if err == nil || err.Error() != `--protocol must be tcp or udp, got "icmp"` {
+			t.Errorf("want the protocol refusal, got: %v", err)
+		}
+	})
+	t.Run("exactly two arguments are required", func(t *testing.T) {
+		for _, args := range [][]string{{"web"}, {"web", "80", "extra"}} {
+			if _, err := run(t, append([]string{"-f", compose, "port"}, args...)...); err == nil {
+				t.Errorf("port %v must be refused", args)
+			}
+		}
+	})
+	t.Run("a stopped runtime is reported and not started", func(t *testing.T) {
+		t.Setenv("SYSTEM_STOPPED", "1")
+		t.Setenv("APISERVER_DOWN", "1")
+		_, err := run(t, "-f", compose, "port", "web", "80")
+		if err == nil || !strings.Contains(err.Error(), "OPSM-405") {
+			t.Errorf("want the runtime-stopped signal, got: %v", err)
+		}
+		if joined := strings.Join(readLog(), "\n"); strings.Contains(joined, "system start") {
+			t.Errorf("a read must not start the runtime, the runtime saw:\n%s", joined)
+		}
+	})
+}
+
+func TestVolumesCLI(t *testing.T) {
+	readLog := fakeShim(t)
+	compose := writeCompose(t, `
+name: demo
+services:
+  web:
+    image: web:latest
+    volumes:
+      - d1:/d1
+      - ext:/ext
+      - shared:/shared
+      - later:/later
+  db:
+    image: db:latest
+    volumes:
+      - d2:/d2
+      - shared:/shared
+volumes:
+  d1:
+  d2:
+  shared:
+  later:
+  unused:
+  ext:
+    external: true
+`)
+	// The runtime's table after both services started, out of name order, with
+	// the external volume, another project's, and a volume bearing the
+	// project's prefix that no service mounts, beside the project's own — and
+	// without web's `later`, which the runtime has not made yet.
+	t.Setenv("VOLUME_LS", "NAME         TYPE   DRIVER  OPTIONS\ndemo_d2      named  local\ndemo_unused  named  local\ndemo_shared  named  local\ndemo_d1      named  local\next          named  local\nother_d1     named  local")
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"the volumes the services mount that exist, in name order, the shared one once", []string{"volumes"},
+			"DRIVER  VOLUME NAME\nlocal   demo_d1\nlocal   demo_d2\nlocal   demo_shared\n"},
+		{"one service's volumes", []string{"volumes", "db"}, "DRIVER  VOLUME NAME\nlocal   demo_d2\nlocal   demo_shared\n"},
+		{"-q prints names only", []string{"volumes", "-q"}, "demo_d1\ndemo_d2\ndemo_shared\n"},
+		{"--format json prints an array", []string{"volumes", "--format", "json"},
+			`[{"Name":"demo_d1","Driver":"local"},{"Name":"demo_d2","Driver":"local"},{"Name":"demo_shared","Driver":"local"}]` + "\n"},
+		{"a mounted volume the runtime has not made yet is not listed", []string{"volumes", "web"},
+			"DRIVER  VOLUME NAME\nlocal   demo_d1\nlocal   demo_shared\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdout, _, err := runSplit(t, append([]string{"-f", compose}, tc.args...)...)
+			if err != nil {
+				t.Fatalf("%v: %v", tc.args, err)
+			}
+			if stdout != tc.want {
+				t.Errorf("%v printed %q, want %q", tc.args, stdout, tc.want)
+			}
+		})
+	}
+	t.Run("a service the project does not define is refused", func(t *testing.T) {
+		_, err := run(t, "-f", compose, "volumes", "nope")
+		if err == nil || !strings.Contains(err.Error(), `unknown service "nope"`) {
+			t.Errorf("want the unknown-service refusal, got: %v", err)
+		}
+	})
+	t.Run("a format other than table or json is refused", func(t *testing.T) {
+		_, err := run(t, "-f", compose, "volumes", "--format", "yaml")
+		if err == nil || err.Error() != `--format must be table or json, got "yaml"` {
+			t.Errorf("want the format refusal, got: %v", err)
+		}
+	})
+	t.Run("a stopped runtime is reported and not started", func(t *testing.T) {
+		t.Setenv("SYSTEM_STOPPED", "1")
+		t.Setenv("APISERVER_DOWN", "1")
+		stdout, _, err := runSplit(t, "-f", compose, "volumes")
+		if err == nil || !strings.Contains(err.Error(), "OPSM-405") {
+			t.Errorf("want the runtime-stopped signal, got: %v", err)
+		}
+		if stdout != "" {
+			t.Errorf("an unreachable runtime is not an empty project, got %q", stdout)
+		}
+		if joined := strings.Join(readLog(), "\n"); strings.Contains(joined, "system start") {
+			t.Errorf("a read must not start the runtime, the runtime saw:\n%s", joined)
+		}
+	})
+}
+
+func TestLsCLI(t *testing.T) {
+	readLog := fakeShim(t)
+	// Two projects, one with a stopped container beside a running one, plus a
+	// container that is not opossum's. No compose file is given: ls looks at
+	// the machine, not at a project.
+	// Same shape as the orchestrator's fixture: names and states out of order
+	// (shop before old, stopped before running), a state that is neither
+	// running nor stopped, a container named without a project (only its
+	// label places it) sitting between shop's two, blog's containers apart
+	// from each other, shop's last container repeating a state seen two rows
+	// earlier, and one container that is not opossum's.
+	t.Setenv("CONTAINER_LS", `[`+
+		`{"configuration":{"id":"db.shop.opossum","labels":{"opossum.project":"shop"}},"status":{"state":"stopped"}},`+
+		`{"configuration":{"id":"api","labels":{"opossum.project":"blog"}},"status":{"state":"running"}},`+
+		`{"configuration":{"id":"web.shop.opossum","labels":{"opossum.project":"shop"}},"status":{"state":"running"}},`+
+		`{"configuration":{"id":"a.old.opossum","labels":{"opossum.project":"old"}},"status":{"state":"stopping"}},`+
+		`{"configuration":{"id":"web.blog.opossum","labels":{"opossum.project":"blog"}},"status":{"state":"running"}},`+
+		`{"configuration":{"id":"buildkit","labels":{"com.apple.container.plugin":"builder"}},"status":{"state":"running"}},`+
+		`{"configuration":{"id":"worker.shop.opossum","labels":{"opossum.project":"shop"}},"status":{"state":"stopped"}}`+
+		`]`)
+	t.Chdir(t.TempDir())
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"the default view counts running containers and hides a project with none", []string{"ls"},
+			"NAME  STATUS\nblog  running(2)\nshop  running(1)\n"},
+		{"--all counts every state", []string{"ls", "--all"},
+			"NAME  STATUS\nblog  running(2)\nold   stopping(1)\nshop  running(1), stopped(2)\n"},
+		{"-a is --all", []string{"ls", "-a"},
+			"NAME  STATUS\nblog  running(2)\nold   stopping(1)\nshop  running(1), stopped(2)\n"},
+		{"-q prints names only", []string{"ls", "-q", "-a"}, "blog\nold\nshop\n"},
+		{"-q wins over --format json", []string{"ls", "-q", "--format", "json"}, "blog\nshop\n"},
+		{"--format json prints an array", []string{"ls", "--format", "json"},
+			`[{"Name":"blog","Status":"running(2)"},{"Name":"shop","Status":"running(1)"}]` + "\n"},
+		{"--verbose is accepted", []string{"--verbose", "ls", "-q"}, "blog\nshop\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdout, _, err := runSplit(t, tc.args...)
+			if err != nil {
+				t.Fatalf("%v: %v", tc.args, err)
+			}
+			if stdout != tc.want {
+				t.Errorf("%v printed %q, want %q", tc.args, stdout, tc.want)
+			}
+		})
+	}
+	t.Run("a format other than table or json is refused", func(t *testing.T) {
+		_, err := run(t, "ls", "--format", "yaml")
+		if err == nil || err.Error() != `--format must be table or json, got "yaml"` {
+			t.Errorf("want the format refusal, got: %v", err)
+		}
+	})
+	t.Run("an argument is refused", func(t *testing.T) {
+		if _, err := run(t, "ls", "shop"); err == nil {
+			t.Errorf("ls takes no argument; a project name must be refused")
+		}
+	})
+	t.Run("a stopped runtime is reported and not started", func(t *testing.T) {
+		t.Setenv("SYSTEM_STOPPED", "1")
+		t.Setenv("APISERVER_DOWN", "1")
+		stdout, _, err := runSplit(t, "ls")
+		if err == nil || !strings.Contains(err.Error(), "OPSM-405") {
+			t.Errorf("want the runtime-stopped signal, got: %v", err)
+		}
+		if stdout != "" {
+			t.Errorf("an unreachable runtime is not an empty machine, got %q", stdout)
+		}
+		if joined := strings.Join(readLog(), "\n"); strings.Contains(joined, "system start") {
+			t.Errorf("a read must not start the runtime, the runtime saw:\n%s", joined)
+		}
+	})
+}
+
 // columnsOf splits a rendered table line on the padding a tabwriter leaves
 // between cells. Two spaces or more: a single space is inside a value.
 func columnsOf(line string) []string {
@@ -1907,6 +2142,46 @@ func TestConfigProfileFilteredCLI(t *testing.T) {
 	}
 	if !strings.Contains(full, "debug:") {
 		t.Errorf("--profile debug should render the gated service in full config, got:\n%s", full)
+	}
+}
+
+// `*` activates every profile — on the `config --services` path as on `up`
+// (docker compose, measured: `--profile '*'` and `COMPOSE_PROFILES=*` list
+// every gated service, `backend,*` too; a partial pattern and an empty name
+// activate nothing). The fixture is the oracle's: one service gated behind
+// two profiles, one behind one, one open.
+func TestConfigServicesUnderProfileStarCLI(t *testing.T) {
+	fakeShim(t)
+	compose := writeCompose(t, "name: demo\nservices:\n  web:\n    image: nginx\n  db:\n    image: postgres\n    profiles: [backend]\n  tool:\n    image: alpine\n    profiles: [tools, debug]\n")
+	services := func(t *testing.T, args ...string) string {
+		t.Helper()
+		out, err := run(t, append([]string{"-f", compose, "config"}, append(args, "--services")...)...)
+		if err != nil {
+			t.Fatalf("config --services %v: %v", args, err)
+		}
+		return strings.Join(strings.Fields(out), " ")
+	}
+	t.Setenv("COMPOSE_PROFILES", "")
+	for _, tc := range []struct {
+		name string
+		args []string
+		env  string
+		want string
+	}{
+		{"nothing", nil, "", "web"},
+		{"--profile tools", []string{"--profile", "tools"}, "", "tool web"},
+		{"--profile *", []string{"--profile", "*"}, "", "db tool web"},
+		{"COMPOSE_PROFILES=*", nil, "*", "db tool web"},
+		{"COMPOSE_PROFILES=backend,*", nil, "backend,*", "db tool web"},
+		{"--profile '' (empty name)", []string{"--profile", ""}, "", "web"},
+		{"--profile to* (a name, not a pattern)", []string{"--profile", "to*"}, "", "web"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("COMPOSE_PROFILES", tc.env)
+			if got := services(t, tc.args...); got != tc.want {
+				t.Errorf("config --services = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -3929,7 +4204,7 @@ func TestDestroyKeepsAnOverlayItDidNotGenerate(t *testing.T) {
 	t.Setenv("INSPECT_PROJECT", "hand")
 	dir := destroyProject(t, "name: hand\nservices:\n  web:\n    image: web\n")
 	// Replace the generated overlay with one a person wrote.
-	handwritten := "# My own Apple-container tweaks. I wrote this by hand.\nservices:\n  web:\n    memory: 512m\n"
+	handwritten := "# My own Apple-container tweaks. I wrote this by hand.\nservices:\n  web:\n    mem_limit: 512m\n"
 	if err := os.WriteFile(filepath.Join(dir, "compose.opossum.yaml"), []byte(handwritten), 0o644); err != nil {
 		t.Fatal(err)
 	}

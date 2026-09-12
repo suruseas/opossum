@@ -5,6 +5,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -195,6 +196,15 @@ func configHash(o runtime.RunOptions) string {
 	write(o.Entrypoint...)
 	// Only contribute when set, so existing services keep their hash and aren't
 	// recreated on upgrade — but toggling any of these does recreate.
+	if o.MacAddress != "" {
+		write("mac", o.MacAddress)
+	}
+	if o.ShmSize != "" {
+		write("shm", o.ShmSize)
+	}
+	if len(o.Ulimits) > 0 {
+		writeSorted("ulimits", o.Ulimits)
+	}
 	if o.SSH {
 		write("ssh")
 	}
@@ -220,7 +230,10 @@ func configHash(o runtime.RunOptions) string {
 }
 
 // EnableProfiles marks compose profiles active (from --profile flags and the
-// COMPOSE_PROFILES env var), so services gated behind them start.
+// COMPOSE_PROFILES env var), so services gated behind them start. `*` is
+// the one name that is not a name: it means every profile (docker compose,
+// measured — `--profile '*'` and `COMPOSE_PROFILES=*` enable every gated
+// service, and a partial glob like `to*` does not).
 func (o *Orchestrator) EnableProfiles(profiles []string) {
 	if o.profiles == nil {
 		o.profiles = map[string]bool{}
@@ -232,13 +245,25 @@ func (o *Orchestrator) EnableProfiles(profiles []string) {
 	}
 }
 
+// allProfiles is what `--profile '*'` (or `COMPOSE_PROFILES=*`) activates:
+// every profile at once. It is only special on the activation side — a
+// service that declares `profiles: ["*"]` has an ordinary profile of that
+// name, and stays gated until something activates it (docker compose,
+// measured).
+const allProfiles = "*"
+
 // enabled reports whether a service is active under the current profiles: a
 // service with no profiles is always enabled; otherwise one of its profiles must
-// be active, or it must be named explicitly (docker compose: naming a profiled
-// service enables it). named holds the services requested on the command line.
+// be active (or `*` is), or it must be named explicitly (docker compose: naming
+// a profiled service enables it). named holds the services requested on the
+// command line.
 func (o *Orchestrator) enabled(name string, named map[string]bool) bool {
 	svc := o.Project.Services[name]
 	if len(svc.Profiles) == 0 || named[name] {
+		return true
+	}
+	// `*` enables every gated service, whatever its profiles are named.
+	if o.profiles[allProfiles] {
 		return true
 	}
 	for _, p := range svc.Profiles {
@@ -373,9 +398,11 @@ func (o *Orchestrator) networkName() string {
 // resolvedNetwork is the runtime network a service joins, plus how opossum
 // manages it (whether it's host-only, and whether opossum creates/deletes it).
 type resolvedNetwork struct {
-	name     string // the actual `container` network name (namespaced unless external)
-	internal bool   // created with --internal (host-only): no internet egress
-	external bool   // pre-existing; opossum never creates or deletes it
+	name     string                 // the actual `container` network name (namespaced unless external)
+	internal bool                   // created with --internal (host-only): no internet egress
+	external bool                   // pre-existing; opossum never creates or deletes it
+	labels   []string               // the declaration's labels, given to `network create --label`
+	subnets  runtime.NetworkSubnets // the declaration's `ipam` subnets, given to `network create --subnet` / `--subnet-v6`
 }
 
 // resolveNetwork maps one declared network key to its runtime network. External
@@ -390,7 +417,34 @@ func (o *Orchestrator) resolveNetwork(key string) resolvedNetwork {
 		}
 		return resolvedNetwork{name: real, external: true}
 	}
-	return resolvedNetwork{name: o.Project.Name + "-" + key, internal: decl.Internal}
+	return resolvedNetwork{name: o.Project.Name + "-" + key, internal: decl.Internal, labels: decl.Labels,
+		subnets: runtime.NetworkSubnets{V4: decl.IPAM.Subnet, V6: decl.IPAM.SubnetV6}}
+}
+
+// ensureNetwork creates a project network as declared, or, when it already
+// exists, checks that its subnets are the declared ones. docker compose
+// recreates a network whose `ipam` subnet changed (measured on v5.5.0);
+// here the network is kept — the containers on it may be running — and a
+// mismatch the inspect can show is refused with what to do. A declaration
+// with no subnet accepts any network, and so does an inspect that names no
+// subnet (`container` 1.4.1 always names one). The refusal is returned as
+// it is, not wrapped as a failure to create: the network is there.
+func (o *Orchestrator) ensureNetwork(rn resolvedNetwork) (created bool, err error) {
+	created, err = o.rt.EnsureNetworkLabeled(rn.name, rn.internal, rn.labels, rn.subnets)
+	if err != nil || created || (rn.subnets.V4 == "" && rn.subnets.V6 == "") {
+		return created, err
+	}
+	have, ok := o.rt.InspectNetworkSubnets(rn.name)
+	if !ok {
+		return false, nil
+	}
+	for _, want := range []struct{ family, declared, has string }{{"IPv4", rn.subnets.V4, have.V4}, {"IPv6", rn.subnets.V6, have.V6}} {
+		if want.declared != "" && want.declared != want.has {
+			return false, &subnetChangedError{fmt.Errorf("[%s] network %q exists with %s subnet %s, and the compose file now declares %s — the network is kept while the project is up; run `opossum down` (which removes it) and `up` again to recreate it with the new subnet, or remove `ipam` to keep the existing one",
+				codeNetworkSubnetChanged, rn.name, want.family, want.has, want.declared)}
+		}
+	}
+	return false, nil
 }
 
 // networksFor resolves which networks a service joins. A service with no
@@ -520,6 +574,17 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 	// owns the answer from here, and a caller reading it after a failed Up must not
 	// get the previous call's stack. The caller decides what to supervise from it.
 	o.started = nil
+	// One command at a time per project (see projectLock): a second `up`
+	// under way would see this one's containers as its own and, on a failure,
+	// roll them back. A dry run changes nothing and writes nothing under the
+	// state dir, so it takes no lock — and is not refused by one either.
+	if !o.up.dryRun {
+		lock, err := lockProject(o.Project.Name)
+		if err != nil {
+			return err
+		}
+		defer lock.release()
+	}
 	if !o.rt.Available() {
 		return ErrRuntimeAbsent()
 	}
@@ -671,7 +736,11 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 	var createdNets []string
 	for _, rn := range o.managedNetworks(order) {
 		o.logf("Creating network %s\n", rn.name)
-		created, nerr := o.rt.EnsureNetwork(rn.name, rn.internal)
+		created, nerr := o.ensureNetwork(rn)
+		var changed *subnetChangedError
+		if errors.As(nerr, &changed) {
+			return nerr // the network is there; the advice about a stale one would contradict it
+		}
 		if nerr != nil {
 			return fmt.Errorf("couldn't create network %q for the project: %w\n"+
 				"  check the runtime is healthy (`opossum doctor`); if a stale network with that name exists, remove it with `container network delete %s`", rn.name, nerr, rn.name)
@@ -835,6 +904,11 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 			return err
 		}
 		vols := append(o.resolveVolumes(name, svc.Volumes), o.secretMounts(svc)...)
+		cfgMounts, err := o.configMounts(name, svc, !o.up.dryRun)
+		if err != nil {
+			return err
+		}
+		vols = append(vols, cfgMounts...)
 		mcpMount, err := o.mcpConfigMount(name, svc, !o.up.dryRun)
 		if err != nil {
 			return err
@@ -850,13 +924,14 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 			Networks:   svcNets,
 			DNSDomain:  dnsDomain,
 			DNSSearch:  dnsSearch,
+			MacAddress: svc.MacAddress,
 			Env:        env,
 			Ports:      svc.Ports,
 			Volumes:    vols,
 			Tmpfs:      svc.Tmpfs,
 			Command:    svc.Command,
 			Entrypoint: svc.Entrypoint,
-			Labels:     []string{projectLabel + "=" + o.Project.Name},
+			Labels:     append(append([]string(nil), svc.Labels...), projectLabel+"="+o.Project.Name),
 			Memory:     mem,
 			CPUs:       cpu,
 			Detach:     detach,
@@ -865,6 +940,8 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 			WorkingDir: svc.WorkingDir,
 			Init:       svc.Init,
 			ReadOnly:   svc.ReadOnly,
+			ShmSize:    string(svc.ShmSize),
+			Ulimits:    svc.Ulimits.Args(),
 			CapAdd:     svc.CapAdd,
 			CapDrop:    svc.CapDrop,
 		}
@@ -1609,6 +1686,13 @@ func (o *Orchestrator) waitHealthy(name string, hc *compose.Healthcheck) error {
 // project network, and — when removeVolumes is set — removes the project's named
 // volumes.
 func (o *Orchestrator) Down(removeVolumes bool, rmi string, removeOrphans bool) error {
+	// Same lock as Up: a `down` under an `up` would remove what the `up` is
+	// starting, and the `up` would report it started.
+	lock, err := lockProject(o.Project.Name)
+	if err != nil {
+		return err
+	}
+	defer lock.release()
 	// Before anything is torn down: a supervisor watching this project would see
 	// containers stopping and try to bring them back, fighting the teardown it
 	// can't know about.
@@ -1735,6 +1819,87 @@ func (o *Orchestrator) secretMounts(svc *compose.Service) []string {
 		out = append(out, o.resolvePath(sec.File)+":/run/secrets/"+ref.Target+":ro")
 	}
 	return out
+}
+
+// configMounts renders a service's config references as read-only bind
+// mounts at their targets, as docker compose places configs: a `file:`
+// config is the host file itself; a `content:` or `environment:` config is
+// written to a file under the project's state directory first (the text as
+// written in the compose file — interpolated with the rest of it — or the
+// variable's value the load read from the project's environment), then
+// mounted the same way. Refs are
+// validated against the project's configs at load time. With write false
+// (a dry run) nothing is written and the path the file would have is used.
+func (o *Orchestrator) configMounts(service string, svc *compose.Service, write bool) ([]string, error) {
+	var out []string
+	for _, ref := range svc.Configs {
+		cfg := o.Project.Configs[ref.Source]
+		var src string
+		switch {
+		case cfg.File != "":
+			src = o.resolvePath(cfg.File)
+		default:
+			var body []byte
+			if cfg.Content != nil {
+				body = []byte(*cfg.Content)
+			} else {
+				if !cfg.EnvSet {
+					return nil, fmt.Errorf("service %q: environment variable %q required by config %q is not set — set it in the shell or in .env, or declare the config with a file: or content:", service, cfg.EnvVar, ref.Source)
+				}
+				body = []byte(cfg.EnvValue)
+			}
+			dir, err := projectStateDir(o.Project.Name)
+			if err != nil {
+				return nil, err
+			}
+			src = filepath.Join(dir, "configs", service, ref.Source)
+			if write {
+				if err := writeConfigFile(src, body); err != nil {
+					return nil, fmt.Errorf("service %q: writing config %q: %w", service, ref.Source, err)
+				}
+			}
+		}
+		out = append(out, src+":"+ref.Target+":ro")
+	}
+	return out, nil
+}
+
+// writeConfigFile puts body at path as a read-only (0444) file. The file
+// opossum wrote last time is read-only too, so it cannot be opened for
+// writing: the new content goes to a temporary file in the same directory
+// and is renamed over it, which also means a second reference to the same
+// config in one `up`, or the next `up`, finds the file whole rather than
+// half-written. The temporary name is random, not `<name>.tmp`: config
+// names share this directory, and `x.tmp` is a name docker compose takes.
+func writeConfigFile(path string, body []byte) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(dir, ".opossum-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	if _, err := f.Write(body); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Chmod(0o444); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // isNamedVolume reports whether a volume mount's source is a named volume (not a
@@ -2640,6 +2805,233 @@ func (o *Orchestrator) Ps() error {
 	return nil
 }
 
+// Port prints, on one line, the host side of a service's published container
+// port — `0.0.0.0:65345` — the way `docker compose port` does, so a script can
+// read the host port opossum settled on: `ports: - "3000"` is mapped to 3000
+// on the host when that is free and moved to a free port when it is not (see
+// remapAutoHostPorts), and until now the only place to read the outcome was
+// the `ps` table.
+//
+// A service that is not running says so, as docker compose does; a port that
+// is not published lists the ones that are, in the container's order, so the
+// reader sees whether they asked for the wrong port or the wrong protocol.
+func (o *Orchestrator) Port(service string, containerPort int, proto string) error {
+	// The same probe as Ps: a stopped runtime makes the inspect fail, which
+	// would read as "service is not running" — the wrong advice.
+	if !o.rt.SystemRunning() {
+		return ErrRuntimeStopped()
+	}
+	if _, ok := o.Project.Services[service]; !ok {
+		return o.unknownServiceErr(service)
+	}
+	cname := o.containerName(service)
+	// An absent container reports no state at all, so one check covers "never
+	// created", "removed by down" and "stopped" alike.
+	info := o.rt.Inspect(cname)
+	if info.State != "running" {
+		return fmt.Errorf("service %q is not running", service)
+	}
+	for _, p := range info.Ports {
+		if p.ContainerPort == containerPort && p.Proto == proto {
+			fmt.Fprintf(o.out, "%s:%d\n", p.HostAddress, p.HostPort)
+			return nil
+		}
+	}
+	published := make([]string, 0, len(info.Ports))
+	for _, p := range info.Ports {
+		published = append(published, fmt.Sprintf("%d/%s", p.ContainerPort, p.Proto))
+	}
+	list := strings.Join(published, ", ")
+	if list == "" {
+		list = "(none published)"
+	}
+	return fmt.Errorf("no port %d/%s for container %s: %s", containerPort, proto, cname, list)
+}
+
+// LsOptions selects what `opossum ls` shows and how.
+type LsOptions struct {
+	All    bool   // include projects with no running container
+	Quiet  bool   // names only, one per line
+	Format string // "table" (default) or "json"
+}
+
+// ProjectStatus is one row of `opossum ls`: a project found on this machine by
+// the `opossum.project` label its containers carry, and a count of its
+// containers by state — `running(2)`, or `running(1), stopped(1)` — the shape
+// `docker compose ls` prints.
+type ProjectStatus struct {
+	Name   string `json:"Name"`
+	Status string `json:"Status"`
+}
+
+// ListProjects folds every container the runtime lists into the projects that
+// made them, by the `opossum.project` label; containers without it (the
+// builder, anything made by hand) are not opossum's and are left out. Without
+// All only running containers count and a project with none is not listed, as
+// `docker compose ls` hides a project whose containers have all exited; with
+// All every container counts and the states are listed side by side.
+func ListProjects(rt *runtime.Runtime, all bool) ([]ProjectStatus, error) {
+	// The same probe as Ps: with the runtime stopped the listing is empty, and
+	// an empty answer would read as "nothing is running" — the wrong advice.
+	if !rt.SystemRunning() {
+		return nil, ErrRuntimeStopped()
+	}
+	// Names and states are gathered in the order the listing shows them and
+	// sorted afterwards, rather than read out of the maps: a map's order is
+	// arbitrary, and an arbitrary order is sorted often enough by chance that
+	// a missing sort would not be seen to fail.
+	counts := map[string]map[string]int{}
+	var names []string
+	states := map[string][]string{}
+	for _, c := range rt.List() {
+		project := c.Labels[projectLabel]
+		if project == "" {
+			continue
+		}
+		if !all && c.State != "running" {
+			continue
+		}
+		if counts[project] == nil {
+			counts[project] = map[string]int{}
+			names = append(names, project)
+		}
+		if counts[project][c.State] == 0 {
+			states[project] = append(states[project], c.State)
+		}
+		counts[project][c.State]++
+	}
+	sort.Strings(names)
+	out := make([]ProjectStatus, 0, len(names))
+	for _, n := range names {
+		sort.Strings(states[n])
+		parts := make([]string, 0, len(states[n]))
+		for _, st := range states[n] {
+			parts = append(parts, fmt.Sprintf("%s(%d)", st, counts[n][st]))
+		}
+		out = append(out, ProjectStatus{Name: n, Status: strings.Join(parts, ", ")})
+	}
+	return out, nil
+}
+
+// Ls prints the projects on this machine (see ListProjects) as a NAME / STATUS
+// table, names only under Quiet, or a JSON array under Format "json" — the
+// forms `docker compose ls` has, less its CONFIG FILES column, which opossum
+// cannot fill: it does not record which compose file made a project.
+func Ls(rt *runtime.Runtime, w io.Writer, opts LsOptions) error {
+	projects, err := ListProjects(rt, opts.All)
+	if err != nil {
+		return err
+	}
+	switch {
+	case opts.Quiet:
+		for _, p := range projects {
+			fmt.Fprintln(w, p.Name)
+		}
+	case opts.Format == "json":
+		b, err := json.Marshal(projects)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(w, string(b))
+	default:
+		tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(tw, "NAME\tSTATUS")
+		for _, p := range projects {
+			fmt.Fprintf(tw, "%s\t%s\n", p.Name, p.Status)
+		}
+		return tw.Flush()
+	}
+	return nil
+}
+
+// VolumesOptions selects how `opossum volumes` shows the project's volumes.
+type VolumesOptions struct {
+	Quiet  bool   // names only, one per line
+	Format string // "table" (default) or "json"
+}
+
+// VolumeStatus is one row of `opossum volumes`: a volume of this project that
+// exists on the runtime, under the name the runtime knows it by
+// (`<project>_<volume>`), and its driver.
+type VolumeStatus struct {
+	Name   string `json:"Name"`
+	Driver string `json:"Driver"`
+}
+
+// ProjectVolumes lists the volumes the named services (every service when
+// none is named) mount that exist on the runtime, in name order — what
+// `docker compose volumes` shows. A volume is opossum's when a service mounts
+// it as a named or anonymous volume: it is then created under the project's
+// name on first use, and that is the name looked for in `container volume ls`.
+// Declared but unmounted volumes are never created, so they do not appear;
+// external volumes are the user's, not the project's, and are left out as
+// docker compose leaves them out; a bind mount is a directory, not a volume.
+func (o *Orchestrator) ProjectVolumes(services []string) ([]VolumeStatus, error) {
+	// The same probe as Ps: a stopped runtime lists nothing, and nothing would
+	// read as "no volumes yet" — the wrong advice.
+	if !o.rt.SystemRunning() {
+		return nil, ErrRuntimeStopped()
+	}
+	targets, err := o.resolveServices(services)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	var names []string
+	for _, name := range targets {
+		for _, m := range o.serviceMounts(name, o.Project.Services[name].Volumes) {
+			if m.Volume != "" && !seen[m.Volume] {
+				seen[m.Volume] = true
+				names = append(names, m.Volume)
+			}
+		}
+	}
+	sort.Strings(names)
+	driver := map[string]string{}
+	exists := map[string]bool{}
+	for _, row := range o.rt.ListVolumeRows() {
+		exists[row.Name] = true
+		driver[row.Name] = row.Driver
+	}
+	out := make([]VolumeStatus, 0, len(names))
+	for _, n := range names {
+		if exists[n] {
+			out = append(out, VolumeStatus{Name: n, Driver: driver[n]})
+		}
+	}
+	return out, nil
+}
+
+// Volumes prints the project's volumes (see ProjectVolumes) as a DRIVER /
+// VOLUME NAME table, names only under Quiet, or a JSON array under Format
+// "json" — the columns `docker compose volumes` prints.
+func (o *Orchestrator) Volumes(services []string, opts VolumesOptions) error {
+	vols, err := o.ProjectVolumes(services)
+	if err != nil {
+		return err
+	}
+	switch {
+	case opts.Quiet:
+		for _, v := range vols {
+			fmt.Fprintln(o.out, v.Name)
+		}
+	case opts.Format == "json":
+		b, err := json.Marshal(vols)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(o.out, string(b))
+	default:
+		tw := tabwriter.NewWriter(o.out, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(tw, "DRIVER\tVOLUME NAME")
+		for _, v := range vols {
+			fmt.Fprintf(tw, "%s\t%s\n", dash(v.Driver), v.Name)
+		}
+		return tw.Flush()
+	}
+	return nil
+}
+
 // formatPorts renders published ports docker-ps style: "0.0.0.0:8080->80/tcp".
 //
 // The example is asymmetric on purpose. It said 8080->8080 until a sweep pointed
@@ -2936,7 +3328,11 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 			if rn.external {
 				continue
 			}
-			if _, err := o.rt.EnsureNetwork(rn.name, rn.internal); err != nil {
+			if _, err := o.ensureNetwork(rn); err != nil {
+				var changed *subnetChangedError
+				if errors.As(err, &changed) {
+					return err
+				}
 				return fmt.Errorf("couldn't create network %q for the run: %w\n"+
 					"  check the runtime is healthy (`opossum doctor`); if a stale network with that name exists, remove it with `container network delete %s`", rn.name, err, rn.name)
 			}
@@ -2987,6 +3383,11 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 	mem, cpu, _ := svc.Resources() // validated at load
 	svcNets, dnsDomain, dnsSearch := o.serviceNetworks(svc)
 	vols := append(o.resolveVolumes(service, svc.Volumes), o.secretMounts(svc)...)
+	cfgMounts, err := o.configMounts(service, svc, true)
+	if err != nil {
+		return err
+	}
+	vols = append(vols, cfgMounts...)
 	mcpMount, err := o.mcpConfigMount(service, svc, true)
 	if err != nil {
 		return err
@@ -3002,12 +3403,13 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 		Networks:   svcNets,
 		DNSDomain:  dnsDomain,
 		DNSSearch:  dnsSearch,
+		MacAddress: svc.MacAddress,
 		Env:        env,
 		Volumes:    vols,
 		Tmpfs:      svc.Tmpfs,
 		Command:    cmd,
 		Entrypoint: svc.Entrypoint,
-		Labels:     []string{projectLabel + "=" + o.Project.Name},
+		Labels:     append(append([]string(nil), svc.Labels...), projectLabel+"="+o.Project.Name),
 		Memory:     mem,
 		CPUs:       cpu,
 		Detach:     false, // foreground / attached
@@ -3022,6 +3424,8 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 		WorkingDir: svc.WorkingDir,
 		Init:       svc.Init,
 		ReadOnly:   svc.ReadOnly,
+		ShmSize:    string(svc.ShmSize),
+		Ulimits:    svc.Ulimits.Args(),
 		CapAdd:     svc.CapAdd,
 		CapDrop:    svc.CapDrop,
 		// No published ports for a one-off (matches docker-compose run).
@@ -3175,7 +3579,6 @@ func (o *Orchestrator) buildOptions(tag string, b *compose.Build, redo string) r
 		ctx = "."
 	}
 	resolved := o.resolvePath(ctx)
-	o.warnUnreadableContext(resolved)
 	return runtime.BuildOptions{
 		Tag:        tag,
 		Context:    resolved,
@@ -3191,22 +3594,10 @@ func (o *Orchestrator) buildOptions(tag string, b *compose.Build, redo string) r
 	}
 }
 
-// warnUnreadableContext hints when the build context is somewhere Apple's
-// container builder can't read: a directory under /private/tmp (not mounted into
-// the builder VM) or a symlinked context directory (rejected as "not a
-// directory"). Auto-resolving symlinks would be unsafe — `/tmp/x` (which the
-// builder reads) resolves to `/private/tmp/x` (which it can't) — so opossum only
-// warns and leaves the path unchanged (#83).
-func (o *Orchestrator) warnUnreadableContext(ctx string) {
-	switch {
-	case ctx == "/private/tmp" || strings.HasPrefix(ctx, "/private/tmp/"):
-		o.warnf(codeBuildTmpContext, "build context %q is under /private/tmp, which the container builder can't read — run from a real path under your home directory (or /tmp)\n", ctx)
-	default:
-		if fi, err := os.Lstat(ctx); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-			o.warnf(codeBuildSymlink, "build context %q is a symlink; the container builder may reject it — use its real path\n", ctx)
-		}
-	}
-}
+// subnetChangedError is the OPSM-207 refusal, its own type so the callers
+// that wrap a failure to create a network can let it through unwrapped
+// (`errors.As` matches the type itself; nothing unwraps it further).
+type subnetChangedError struct{ error }
 
 // volumeMount is a service's resolved volume mount. Arg is the runtime `-v`
 // value. When the mount is backed by a project-owned volume (named or

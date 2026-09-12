@@ -19,9 +19,60 @@ type configOutput struct {
 }
 
 type configNetwork struct {
-	Internal bool   `yaml:"internal,omitempty"`
-	External bool   `yaml:"external,omitempty"`
-	Name     string `yaml:"name,omitempty"`
+	Internal bool              `yaml:"internal,omitempty"`
+	External bool              `yaml:"external,omitempty"`
+	Name     string            `yaml:"name,omitempty"`
+	Labels   map[string]string `yaml:"labels,omitempty"`
+	IPAM     *configIPAM       `yaml:"ipam,omitempty"`
+}
+
+// configIPAM renders the subnets opossum read, in docker compose's shape
+// (`ipam: {config: [{subnet: …}]}`), one entry per subnet.
+type configIPAM struct {
+	Config []map[string]string `yaml:"config"`
+}
+
+func ipamConfig(i IPAM) *configIPAM {
+	var entries []map[string]string
+	for _, sub := range []string{i.Subnet, i.SubnetV6} {
+		if sub != "" {
+			entries = append(entries, map[string]string{"subnet": sub})
+		}
+	}
+	if entries == nil {
+		return nil
+	}
+	return &configIPAM{Config: entries}
+}
+
+// ulimitMap renders the limits as docker compose shows them: a number when
+// soft and hard match, `{soft, hard}` otherwise.
+func ulimitMap(u Ulimits) map[string]any {
+	if len(u) == 0 {
+		return nil
+	}
+	m := make(map[string]any, len(u))
+	for n, l := range u {
+		if l.Soft == l.Hard {
+			m[n] = l.Soft
+		} else {
+			m[n] = map[string]int64{"soft": l.Soft, "hard": l.Hard}
+		}
+	}
+	return m
+}
+
+// labelMap renders `key=value` labels as the mapping docker compose shows.
+func labelMap(labels []string) map[string]string {
+	if len(labels) == 0 {
+		return nil
+	}
+	m := make(map[string]string, len(labels))
+	for _, l := range labels {
+		k, v, _ := strings.Cut(l, "=")
+		m[k] = v
+	}
+	return m
 }
 
 type configService struct {
@@ -41,10 +92,14 @@ type configService struct {
 	User        string               `yaml:"user,omitempty"`
 	WorkingDir  string               `yaml:"working_dir,omitempty"`
 	Init        bool                 `yaml:"init,omitempty"`
+	ShmSize     string               `yaml:"shm_size,omitempty"`
+	Ulimits     map[string]any       `yaml:"ulimits,omitempty"`
 	ReadOnly    bool                 `yaml:"read_only,omitempty"`
 	CapAdd      []string             `yaml:"cap_add,omitempty"`
 	CapDrop     []string             `yaml:"cap_drop,omitempty"`
 	NetworkMode string               `yaml:"network_mode,omitempty"`
+	MacAddress  string               `yaml:"mac_address,omitempty"`
+	Labels      map[string]string    `yaml:"labels,omitempty"`
 	Networks    []string             `yaml:"networks,omitempty"`
 	DependsOn   map[string]configDep `yaml:"depends_on,omitempty"`
 	Healthcheck *configHealthcheck   `yaml:"healthcheck,omitempty"`
@@ -103,10 +158,14 @@ func RenderConfig(p *Project) (string, error) {
 			User:        svc.User,
 			WorkingDir:  svc.WorkingDir,
 			Init:        svc.Init,
+			ShmSize:     string(svc.ShmSize),
+			Ulimits:     ulimitMap(svc.Ulimits),
 			ReadOnly:    svc.ReadOnly,
 			CapAdd:      svc.CapAdd,
 			CapDrop:     svc.CapDrop,
 			NetworkMode: svc.NetworkMode,
+			MacAddress:  svc.MacAddress,
+			Labels:      labelMap(svc.Labels),
 			Networks:    svc.Networks,
 		}
 		if svc.Build != nil {
@@ -139,7 +198,7 @@ func RenderConfig(p *Project) (string, error) {
 	if len(p.Networks) > 0 {
 		out.Networks = map[string]configNetwork{}
 		for name, decl := range p.Networks {
-			out.Networks[name] = configNetwork{Internal: decl.Internal, External: decl.External, Name: decl.Name}
+			out.Networks[name] = configNetwork{Internal: decl.Internal, External: decl.External, Name: decl.Name, Labels: labelMap(decl.Labels), IPAM: ipamConfig(decl.IPAM)}
 		}
 	}
 
