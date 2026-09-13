@@ -6,6 +6,12 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `ps`, `images`, and `stats --no-stream` now support `--format json`, joining
+  the service name onto each row so a caller no longer has to re-derive it
+  from `container ls`'s `opossum.project` label.
+
 ## [0.27.1] - 2026-09-13
 
 ### Changed
