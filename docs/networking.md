@@ -85,7 +85,8 @@ domain. opossum namespaces each container by project: it names them
 `<service>.<project>.<domain>` and puts `<project>.<domain>` in the DNS search
 list, so a peer still resolves a bare service name, but to *its own* project's
 copy (in project `demo`, `db` → `db.demo.opossum`). Each project also gets its
-own network (`<project>-net`) and its own named volumes (`<project>_<volume>`).
+own network (`<project>-net`) and its own named volumes (`<project>_<volume>`,
+unless a declaration gives the volume a `name:` of its own).
 So two projects can share service names and run concurrently, fully isolated:
 
 ```sh

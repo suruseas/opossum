@@ -5,8 +5,10 @@
 //
 // It logs each invocation's arguments (space-joined) to $FAKE_LOG and returns
 // output shaped like the real CLI. Behaviour is steered entirely through the
-// environment (FAKE_LOG, STATE_DIR, DELETE_STICKY, INSPECT_STATE, INSPECT_STOPPED,
-// INSPECT_ABSENT, NET_EXISTS, NETWORK_ABSENT, RUN_FAIL, HEALTH_*, VOLUME_*, LS_*,
+// environment (FAKE_LOG, STATE_DIR, DELETE_STICKY, STOP_FAIL, INSPECT_STATE, INSPECT_STOPPED, INSPECT_FAIL,
+// INSPECT_ABSENT, NET_EXISTS, NET_CREATE_{HANG,FAIL}, NETWORK_ABSENT, BUILD_{HANG,FAIL}, RUN_FAIL,
+// RUN_HANG, RUN_DIE_SIGNAL, RUN_EXISTS[_WORDING|_HASH], RUN_EXISTS_ANY, HEALTH_*,
+// VOLUME_*, LS_*,
 // IMAGE_ABSENT),
 // so tests need no t.Setenv and stay
 // isolated: the orchestrator passes these per-Runtime via RunOptions-style Env.
@@ -18,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -61,6 +64,37 @@ func run(args []string) int {
 				fmt.Println("status running")
 			}
 		}
+	case "stop":
+		// The real CLI's exit code answers only whether the name exists: 0 for a
+		// running, a stopped and an exited container alike, 1 (`notFound`) when
+		// there is no such container — measured on 1.4.1. So a stop that "worked"
+		// is only visible through the state a later inspect reports, which is what
+		// the marker below is for; the `run` case clears it when the name is made
+		// again. $STOP_FAIL names containers whose stop returns 0 and yet leaves
+		// them running — a defensive knob: no real form of it was found on 1.4.1
+		// (eight shapes tried), so an eval built on it says nothing about the
+		// runtime, only about a caller that trusted the exit code.
+		if dir := os.Getenv("STATE_DIR"); dir != "" && len(args) > 0 {
+			name := args[len(args)-1]
+			if _, err := os.Stat(gonePath(dir, name)); err == nil {
+				fmt.Fprintf(os.Stderr, "Error: internalError: \"failed to stop container\" (cause: \"notFound: \"container with ID %s not found\"\")\n", name)
+				return 1
+			}
+			for _, m := range strings.Fields(os.Getenv("STOP_FAIL")) {
+				if name == m {
+					return 0
+				}
+			}
+			_ = os.WriteFile(stoppedPath(dir, name), []byte("1"), 0o644)
+		}
+
+	case "start":
+		// Starting a stopped container in place: it is running again (the marker
+		// the `stop` case left is cleared), as the real CLI reports it.
+		if dir := os.Getenv("STATE_DIR"); dir != "" && len(args) > 0 {
+			_ = os.Remove(stoppedPath(dir, args[len(args)-1]))
+		}
+
 	case "delete", "rm":
 		// Remember it as gone, so a later `inspect` can answer "not there". Gated on
 		// $STATE_DIR, which the orchestrator tests' fakeShim helper always sets — so
@@ -72,6 +106,12 @@ func run(args []string) int {
 		// knob and meaning as the shim in cmd/opossum/testdata.
 		if dir := os.Getenv("STATE_DIR"); dir != "" && len(args) > 0 {
 			name := args[len(args)-1]
+			// Deleting what is not there is the one failure the real CLI reports
+			// (rc 1, `notFound`) — measured on 1.4.1.
+			if _, err := os.Stat(gonePath(dir, name)); err == nil {
+				fmt.Fprintf(os.Stderr, "Error: internalError: \"failed to delete container\" (cause: \"notFound: \"container with ID %s not found\"\")\n", name)
+				return 1
+			}
 			sticky := false
 			for _, m := range strings.Fields(os.Getenv("DELETE_STICKY")) {
 				if name == m {
@@ -80,10 +120,20 @@ func run(args []string) int {
 			}
 			if !sticky {
 				_ = os.WriteFile(gonePath(dir, name), []byte("1"), 0o644)
+				_ = os.Remove(stoppedPath(dir, name))
 			}
 		}
 
 	case "inspect":
+		// $INSPECT_FAIL names containers the runtime cannot answer about at all
+		// — the CLI fails for a reason that is not "not found" (the apiserver is
+		// down). Different from absent: a caller must not read it as "gone".
+		for _, m := range strings.Fields(os.Getenv("INSPECT_FAIL")) {
+			if arg(1) == m {
+				fmt.Fprintln(os.Stderr, "Error: apiserver is not running")
+				return 1
+			}
+		}
 		// Gone until something creates it again (see the `run` case).
 		if dir := os.Getenv("STATE_DIR"); dir != "" {
 			if _, err := os.Stat(gonePath(dir, arg(1))); err == nil {
@@ -117,6 +167,13 @@ func run(args []string) int {
 		state := os.Getenv("INSPECT_STATE")
 		for _, m := range strings.Fields(os.Getenv("INSPECT_STOPPED")) {
 			if arg(1) == m {
+				state = "stopped"
+			}
+		}
+		// A `stop` that took (see the `stop` case) shows here as the real CLI
+		// shows it: the container is still there, its state is "stopped".
+		if dir := os.Getenv("STATE_DIR"); dir != "" {
+			if _, err := os.Stat(stoppedPath(dir, arg(1))); err == nil {
 				state = "stopped"
 			}
 		}
@@ -163,15 +220,81 @@ func run(args []string) int {
 				fmt.Fprintf(os.Stderr, "network %s already exists\n", arg(2))
 				return 1
 			}
+			// $NET_CREATE_HANG holds the create until this process is killed — a
+			// Ctrl-C landing while the runtime is still making the network.
+			if os.Getenv("NET_CREATE_HANG") != "" {
+				time.Sleep(30 * time.Second)
+			}
+			// $NET_CREATE_FAIL refuses it the way a sick runtime would.
+			if os.Getenv("NET_CREATE_FAIL") != "" {
+				fmt.Fprintln(os.Stderr, "Error: internalError: \"failed to create network\"")
+				return 1
+			}
 			fmt.Println(arg(2)) // real CLI echoes the network name on success
 		}
 
+	case "build":
+		// $BUILD_HANG holds the build until this process is killed (a Ctrl-C
+		// mid-build); $BUILD_FAIL fails it the way the builder does.
+		if os.Getenv("BUILD_HANG") != "" {
+			time.Sleep(30 * time.Second)
+		}
+		if os.Getenv("BUILD_FAIL") != "" {
+			fmt.Fprintln(os.Stderr, "Error: failed to build: process \"/bin/sh -c false\" did not complete successfully: exit code: 1")
+			return 1
+		}
+
 	case "run":
-		// Creating it again means it is no longer gone (see the `delete` case).
+		// A run of $RUN_EXISTS is refused the way container 1.4.1 refuses a name
+		// that is taken (the same sentence whether the holder runs or is stopped),
+		// and records nothing — it comes first so that nothing below (the hash, the
+		// ports, the gone marker) is written for a container this run never made;
+		// what an inspect then reports is whatever an earlier run, or a test, put
+		// in $STATE_DIR.
+		if taken := os.Getenv("RUN_EXISTS"); taken != "" {
+			for i, a := range args {
+				if i > 0 && args[i-1] == "--name" && a == taken {
+					// The holder of the name is there to be inspected (a delete just
+					// before this run marked the name gone; whoever took it since has
+					// un-gone it), with whatever hash and ports were recorded earlier.
+					if dir := os.Getenv("STATE_DIR"); dir != "" {
+						_ = os.Remove(gonePath(dir, taken))
+						// What the holder was made with, if the test says: a hash of its
+						// own, or "none" for a container made by hand (no opossum labels).
+						// Unset, the holder inspects with whatever the earlier run recorded —
+						// another opossum starting the same compose file.
+						switch h := os.Getenv("RUN_EXISTS_HASH"); h {
+						case "":
+						case "none":
+							_ = os.Remove(filepath.Join(dir, taken+".hash"))
+						default:
+							_ = os.WriteFile(filepath.Join(dir, taken+".hash"), []byte(h), 0o644)
+						}
+					}
+					// Two spellings on 1.4.1: the holder fully there, or (with
+					// RUN_EXISTS_WORDING=race) still being created.
+					if os.Getenv("RUN_EXISTS_WORDING") == "race" {
+						fmt.Fprintf(os.Stderr, "Error: container already exists: %s\n", taken)
+					} else {
+						fmt.Fprintf(os.Stderr, "Error: container with id %s already exists\n", taken)
+					}
+					return 1
+				}
+			}
+		}
+		// $RUN_EXISTS_ANY refuses every run with the sentence naming that one
+		// container — what a caller sees when the refusal is about some other name.
+		if taken := os.Getenv("RUN_EXISTS_ANY"); taken != "" {
+			fmt.Fprintf(os.Stderr, "Error: container with id %s already exists\n", taken)
+			return 1
+		}
+		// Creating it again means it is no longer gone (see the `delete` case),
+		// and no longer stopped (see the `stop` case).
 		if dir := os.Getenv("STATE_DIR"); dir != "" {
 			for k, a := range args {
 				if k > 0 && args[k-1] == "--name" {
 					_ = os.Remove(gonePath(dir, a))
+					_ = os.Remove(stoppedPath(dir, a))
 				}
 			}
 		}
@@ -224,7 +347,7 @@ func run(args []string) int {
 		}
 		// $SEED_FAIL makes the seeding container fail the way an image with no shell
 		// does: the runtime cannot start the process, so nothing is copied. The seed
-		// run has no --name, so RUN_FAIL below cannot express this.
+		// run could be failed by RUN_FAIL on its name too; this knob exists to reproduce the real runtime's nested wording below.
 		if os.Getenv("SEED_FAIL") != "" {
 			for _, a := range args {
 				if strings.Contains(a, "/__opossum_seed__") {
@@ -314,6 +437,40 @@ func run(args []string) int {
 				if i > 0 && args[i-1] == "--name" && a == fail {
 					return 1
 				}
+			}
+		}
+		// A foreground run of $RUN_DIE_SIGNAL dies of a signal on its own — what a
+		// kill from outside, not a Ctrl-C, looks like: the same "signal: killed"
+		// error, with nothing cancelled.
+		if die := os.Getenv("RUN_DIE_SIGNAL"); die != "" {
+			detached := false
+			for i, a := range args {
+				if a == "-d" {
+					detached = true
+				}
+				if i > 0 && args[i-1] == "--name" && a == die && !detached {
+					_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
+				}
+			}
+		}
+		// A foreground run (no -d) of $RUN_HANG stays attached the way the real
+		// runtime does until the container exits — here, until the orchestrator's
+		// cancelled context kills this process. That is what a Ctrl-C during
+		// `up --foreground` looks like from the orchestrator's side: the run
+		// returns "signal: killed", not an exit status of the container's own.
+		if hang := os.Getenv("RUN_HANG"); hang != "" {
+			detached := false
+			named := false
+			for i, a := range args {
+				if a == "-d" {
+					detached = true
+				}
+				if i > 0 && args[i-1] == "--name" && a == hang {
+					named = true
+				}
+			}
+			if named && !detached {
+				time.Sleep(30 * time.Second)
 			}
 		}
 
@@ -490,6 +647,12 @@ func madeVolumes() []string {
 
 func gonePath(dir, name string) string {
 	return filepath.Join(dir, "gone-"+strings.NewReplacer("/", "_", ":", "_", ".", "_").Replace(name))
+}
+
+// stoppedPath is the marker a `stop` leaves so that inspect reports the
+// container stopped (and still there) until something runs it again.
+func stoppedPath(dir, name string) string {
+	return filepath.Join(dir, "stopped-"+strings.NewReplacer("/", "_", ":", "_", ".", "_").Replace(name))
 }
 
 // publishedPorts renders the ports a previous `run` recorded for this container,

@@ -116,7 +116,7 @@ func TestLoadFilesDedupsVolumes(t *testing.T) {
 	dir := t.TempDir()
 	base := filepath.Join(dir, "base.yml")
 	over := filepath.Join(dir, "over.yml")
-	mustWriteFile(t, base, "services:\n  web:\n    image: w\n    volumes: [\"data:/data\"]\n")
+	mustWriteFile(t, base, "volumes:\n  data: {}\n  logs: {}\nservices:\n  web:\n    image: w\n    volumes: [\"data:/data\"]\n")
 	mustWriteFile(t, over, "services:\n  web:\n    image: w\n    volumes: [\"data:/data\", \"logs:/logs\"]\n")
 
 	p, err := LoadFiles([]string{base, over}, nil)
@@ -138,7 +138,7 @@ func TestLoadFilesVolumesMergeByTarget(t *testing.T) {
 	base := filepath.Join(dir, "base.yml")
 	over := filepath.Join(dir, "over.yml")
 	mustWriteFile(t, base, "services:\n  db:\n    image: postgres\n    volumes: [\"./data:/var/lib/postgresql/data\", \"./cfg:/etc/cfg\"]\n")
-	mustWriteFile(t, over, "services:\n  db:\n    image: postgres\n    volumes: [\"dbdata:/var/lib/postgresql/data\"]\n")
+	mustWriteFile(t, over, "volumes:\n  dbdata: {}\nservices:\n  db:\n    image: postgres\n    volumes: [\"dbdata:/var/lib/postgresql/data\"]\n")
 
 	p, err := LoadFiles([]string{base, over}, nil)
 	if err != nil {
@@ -161,7 +161,7 @@ func TestLoadFilesVolumesMergeByTargetForms(t *testing.T) {
 	over := filepath.Join(dir, "over.yml")
 	// Long form in the base, short form (with a mode) in the override.
 	mustWriteFile(t, base, "services:\n  web:\n    image: w\n    volumes:\n      - type: bind\n        source: ./a\n        target: /data\n")
-	mustWriteFile(t, over, "services:\n  web:\n    image: w\n    volumes: [\"vol:/data:ro\"]\n")
+	mustWriteFile(t, over, "volumes:\n  vol: {}\nservices:\n  web:\n    image: w\n    volumes: [\"vol:/data:ro\"]\n")
 
 	p, err := LoadFiles([]string{base, over}, nil)
 	if err != nil {
@@ -178,7 +178,7 @@ func TestLoadFilesVolumesDistinctTargetsKept(t *testing.T) {
 	dir := t.TempDir()
 	base := filepath.Join(dir, "base.yml")
 	over := filepath.Join(dir, "over.yml")
-	mustWriteFile(t, base, "services:\n  web:\n    image: w\n    volumes: [\"a:/one\"]\n")
+	mustWriteFile(t, base, "volumes:\n  a: {}\n  b: {}\nservices:\n  web:\n    image: w\n    volumes: [\"a:/one\"]\n")
 	mustWriteFile(t, over, "services:\n  web:\n    image: w\n    volumes: [\"b:/two\", \"/anon\"]\n")
 
 	p, err := LoadFiles([]string{base, over}, nil)

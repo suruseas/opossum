@@ -537,10 +537,10 @@ func TestImageNameRecognition(t *testing.T) {
 	}
 }
 
-// A named volume a service mounts without declaring it top-level is still in use.
-// Claiming that name would hand a database another service's data — and trip the
-// exclusive-attach failure (OPSM-102) on the real runtime.
-func TestPlanOverlayAvoidsUndeclaredButUsedVolume(t *testing.T) {
+// A named volume another service already mounts is in use. Claiming that name
+// would hand a database another service's data — and trip the exclusive-attach
+// failure (OPSM-102) on the real runtime.
+func TestPlanOverlayAvoidsAVolumeAnotherServiceMounts(t *testing.T) {
 	body, _ := planFor(t, `
 name: demo
 services:
@@ -552,6 +552,8 @@ services:
     image: busybox
     volumes:
       - db-data:/archive
+volumes:
+  db-data: {}
 `)
 	if strings.Contains(body, "- db-data:/var/lib/postgresql/data") {
 		t.Errorf("the overlay must not claim a volume another service already mounts, got:\n%s", body)

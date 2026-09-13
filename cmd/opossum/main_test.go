@@ -1072,7 +1072,7 @@ func TestMissingComposeFileErrors(t *testing.T) {
 
 func TestDownVolumesCLI(t *testing.T) {
 	readLog := fakeShim(t)
-	compose := writeCompose(t, "name: demo\nservices:\n  db:\n    image: pg\n    volumes: [\"pgdata:/data\"]\n")
+	compose := writeCompose(t, "name: demo\nservices:\n  db:\n    image: pg\n    volumes: [\"pgdata:/data\"]\nvolumes:\n  pgdata: {}\n")
 	if _, err := run(t, "-f", compose, "down", "-v"); err != nil {
 		t.Fatalf("down -v: %v", err)
 	}
@@ -4767,10 +4767,13 @@ func TestDestroyListsVolumesItCannotRemove(t *testing.T) {
 	// is nobody's orphan. Giving the external volume a prefixed real name is the
 	// point: without it the prefix filter alone would exclude it and the external
 	// check would never be exercised.
-	t.Setenv("VOLUME_LS", "NAME\nrenamed_data\nrenamed_old\nrenamed_shared")
+	// `kept-by-name` is declared with a `name:` of its own and mounted by nothing:
+	// no prefix, so only the declaration says it is this project's — stranded too.
+	t.Setenv("VOLUME_LS", "NAME\nrenamed_data\nrenamed_old\nrenamed_shared\nkept-by-name")
 	dir := destroyProject(t, "name: renamed\nservices:\n"+
 		"  web:\n    image: web\n    volumes:\n      - data:/d\n      - shared:/s\n"+
-		"volumes:\n  data: {}\n  shared:\n    external: true\n    name: renamed_shared\n")
+		"volumes:\n  data: {}\n  shared:\n    external: true\n    name: renamed_shared\n"+
+		"  gone:\n    name: kept-by-name\n")
 	t.Chdir(dir)
 
 	out, err := run(t, "destroy", "--dry-run")
@@ -4788,6 +4791,9 @@ func TestDestroyListsVolumesItCannotRemove(t *testing.T) {
 	// The ones it does remove must not appear in the stranded list, and an external
 	// volume is never stranded.
 	stranded := out[strings.Index(out, "NOT removed"):]
+	if !strings.Contains(stranded, "    - kept-by-name\n") {
+		t.Errorf("a declared `name:` volume no service mounts is stranded too, and listed as such, got:\n%s", out)
+	}
 	// Anchored to a whole list entry: "shared" is a suffix of "renamed_shared", and a
 	// substring test would report a pass or a failure for the wrong reason.
 	for _, notStranded := range []string{"renamed_data", "renamed_shared"} {

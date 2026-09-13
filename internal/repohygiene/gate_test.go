@@ -27,11 +27,12 @@ import (
 // assignment further down is a name the runner still fills in — and readGate
 // fails on anything else. `$0` and the positional parameters are refused outright:
 // they are not names, and what they hold differs between here and a runner. `PATH`
-// is supplied, and points at the stand-in `git`, which models two calls —
-// `diff --name-only [--diff-filter=A] BASE...HEAD` — and shouts at every other,
-// with one exception: a revision range it does not recognise gets an empty diff
-// rather than a shout, because that is what git answers for `A...A` or for the two
-// the other way round. Every case is run twice, once with a dozen runner names
+// is supplied, and points at the stand-in `git`, which models three calls —
+// `diff --name-only [--diff-filter=A] BASE...HEAD` and `log --format=%B BASE..HEAD`
+// — and shouts at every other, with one exception: a revision range it does not
+// recognise gets an empty answer rather than a shout, because that is what git
+// answers for `A...A` or for the two the other way round (a single revision is
+// not a range, and is shouted at). Every case is run twice, once with a dozen runner names
 // set, and the two have to agree. The workflow is parsed as YAML: its top level
 // may hold only `name`, `on` and `jobs`; `on` must carry an unnarrowed
 // `pull_request`; the `ci` job may hold only `runs-on`, `env` and `steps`, its
@@ -125,11 +126,18 @@ func TestTheChangelogGateAsksForANoteAboutEverythingThatShips(t *testing.T) {
 	for i := 0; i < 30; i++ {
 		many = append(many, "docs/page"+string(rune('a'+i%26))+".md")
 	}
+	// The hint about a token in the wrong place is printed only when the token
+	// is there — a message that always appears teaches nothing — and it never
+	// turns the verdict.
+	const hint = "reads only the PR body"
+	const tokenInAnOlderCommit = "fix: the follow-up\n\ndocs: tidy the page\n\nNothing to announce. [skip changelog] (#915)\n\n"
 	for _, c := range []struct {
 		name           string
 		changed, added []string
 		body           string
+		messages       string // the commit messages of BASE..HEAD, as `git log --format=%B` prints them
 		wantPass       bool
+		wantHint       bool
 	}{
 		{name: "a fragment is added", changed: []string{ship, "changelog.d/999-x.fixed.md"},
 			added: []string{"changelog.d/999-x.fixed.md"}, wantPass: true},
@@ -149,13 +157,35 @@ func TestTheChangelogGateAsksForANoteAboutEverythingThatShips(t *testing.T) {
 		// whether a release note is owed.
 		{name: "one shipped file among thirty that ship nothing", changed: append([]string{ship}, many...)},
 		{name: "…and the shipped one last", changed: append(append([]string{}, many...), ship)},
+		// The token in a commit message and not in the body: still refused, and
+		// told where the token has to go. In the body as well: the body wins.
+		// The messages are shaped as `git log --format=%B` prints them — every
+		// message followed by a blank line, newest first — and the token sits in
+		// the body of the older commit with text after it: a gate that read only
+		// the newest commit, only a subject line, or only a line that ends with
+		// the token would miss it, and the author who adds the token in a fix-up
+		// and then pushes one more commit is exactly who the hint is for.
+		{name: "the token is only in a commit message", changed: []string{ship},
+			messages: tokenInAnOlderCommit, wantHint: true},
+		{name: "the token is in a commit message and in the body", changed: []string{ship},
+			messages: tokenInAnOlderCommit, body: "[skip changelog]", wantPass: true},
+		// A refusal with no token anywhere carries no hint: the message would be
+		// noise, and a bracket expression matches these letters one at a time.
+		{name: "commit messages without the token get no hint", changed: []string{ship},
+			messages: "fix: the follow-up\n\ndocs: tidy the page\n\nThe page said more than it showed.\n\n"},
 	} {
-		out, code := runGate(t, g, c.changed, c.added, c.body)
+		out, code := runGateWithCommits(t, g, c.changed, c.added, c.body, c.messages)
 		if c.wantPass && code != 0 {
 			t.Errorf("%s: the gate should pass:\n%s", c.name, out)
 		}
 		if !c.wantPass && code == 0 {
 			t.Errorf("%s: the release note is still owed, but the gate passed:\n%s", c.name, out)
+		}
+		if c.wantHint && !strings.Contains(out, hint) {
+			t.Errorf("%s: the token is in a commit message and the refusal does not say where it has to go:\n%s", c.name, out)
+		}
+		if !c.wantHint && strings.Contains(out, hint) {
+			t.Errorf("%s: no token in any commit message, but the refusal talks about one:\n%s", c.name, out)
 		}
 	}
 }
@@ -230,7 +260,7 @@ func TestTheChangelogGateCanStillFailTheBuild(t *testing.T) {
 // the whole thing rested on a few lines nobody looked at.
 func TestTheStandInGitAnswersOnlyWhatItModels(t *testing.T) {
 	dir := t.TempDir()
-	writeAll(t, dir, map[string]string{"git": fakeGit(dir), "changed": "a.go\n", "added": "b.go\n"})
+	writeAll(t, dir, map[string]string{"git": fakeGit(dir), "changed": "a.go\n", "added": "b.go\n", "messages": "m [skip changelog]\n"})
 	if err := os.Chmod(filepath.Join(dir, "git"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -250,6 +280,17 @@ func TestTheStandInGitAnswersOnlyWhatItModels(t *testing.T) {
 		code int
 	}{
 		{name: "the call it models", args: []string{"diff", "--name-only", "BASE_SHA...HEAD_SHA"}, want: "a.go\n"},
+		{name: "the commit messages", args: []string{"log", "--format=%B", "BASE_SHA..HEAD_SHA"}, want: "m [skip changelog]\n"},
+		{name: "…the other way round", args: []string{"log", "--format=%B", "HEAD_SHA..BASE_SHA"}, want: ""},
+		{name: "…as a three-dot range", args: []string{"log", "--format=%B", "BASE_SHA...HEAD_SHA"}, code: 3},
+		// Each guard has a case only it catches: a format that is not %B with the
+		// argument count right, an extra option with the format right, and a
+		// single revision — which real git answers with the whole history, so
+		// silence here would read as "no token" where a run would say "token".
+		{name: "…with a different format", args: []string{"log", "--oneline", "BASE_SHA..HEAD_SHA"}, code: 3},
+		{name: "…with an option after the range", args: []string{"log", "--format=%B", "BASE_SHA..HEAD_SHA", "--no-merges"}, code: 3},
+		{name: "…for a single revision", args: []string{"log", "--format=%B", "HEAD_SHA"}, code: 3},
+		{name: "…without the format", args: []string{"log", "BASE_SHA..HEAD_SHA"}, code: 3},
 		{name: "…and the added-only form", args: []string{"diff", "--name-only", "--diff-filter=A", "BASE_SHA...HEAD_SHA"}, want: "b.go\n"},
 		// git's A...B is merge-base(A,B)..B, so the order carries the meaning: the
 		// same revision twice, or the two the other way round, is an empty diff.
@@ -489,8 +530,15 @@ func allowed(t *testing.T, what string, m map[string]any, keys ...string) {
 // large change, an added fragment — would otherwise never be asked twice.
 func runGate(t *testing.T, g gate, changed, added []string, body string) (string, int) {
 	t.Helper()
-	bare, bareCode := runGateWith(t, g, changed, added, body, nil)
-	filled, filledCode := runGateWith(t, g, changed, added, body, runnerNames)
+	return runGateWithCommits(t, g, changed, added, body, "")
+}
+
+// runGateWithCommits is runGate with the commit messages of BASE..HEAD, which
+// the gate reads only to word its refusal.
+func runGateWithCommits(t *testing.T, g gate, changed, added []string, body, messages string) (string, int) {
+	t.Helper()
+	bare, bareCode := runGateWith(t, g, changed, added, body, messages, nil)
+	filled, filledCode := runGateWith(t, g, changed, added, body, messages, runnerNames)
 	if bare != filled || bareCode != filledCode {
 		t.Errorf("the gate answers differently when the runner's variables are set:\n"+
 			"  with nothing: exit %d %q\n  on a runner:  exit %d %q\n"+
@@ -500,13 +548,14 @@ func runGate(t *testing.T, g gate, changed, added []string, body string) (string
 	return bare, bareCode
 }
 
-func runGateWith(t *testing.T, g gate, changed, added []string, body string, extra []string) (string, int) {
+func runGateWith(t *testing.T, g gate, changed, added []string, body, messages string, extra []string) (string, int) {
 	t.Helper()
 	dir := t.TempDir()
 	writeAll(t, dir, map[string]string{
-		"git":     fakeGit(dir),
-		"changed": strings.Join(changed, "\n") + "\n",
-		"added":   strings.Join(added, "\n") + "\n",
+		"git":      fakeGit(dir),
+		"changed":  strings.Join(changed, "\n") + "\n",
+		"added":    strings.Join(added, "\n") + "\n",
+		"messages": messages,
 	})
 	if err := os.Chmod(filepath.Join(dir, "git"), 0o755); err != nil {
 		t.Fatal(err)
@@ -555,7 +604,7 @@ var runnerNames = []string{
 }
 
 // fakeGit answers `diff --name-only [--diff-filter=A] BASE_SHA...HEAD_SHA` and
-// shouts at everything else.
+// `log --format=%B BASE_SHA..HEAD_SHA`, and shouts at everything else.
 //
 // Shouting is the point. A stand-in that quietly returns nothing for a call it
 // does not model turns "the script asked something new" into "the script found no
@@ -567,7 +616,23 @@ var runnerNames = []string{
 func fakeGit(dir string) string {
 	return `#!/bin/sh
 say() { echo "fake git: $*" >&2; exit 3; }
-[ "$1" = diff ] || say "only 'diff' is modelled, got: $*"
+# The second call modelled: the commit messages of BASE..HEAD, one form only.
+# Two dots, not three — the gate wants this branch's commits, and the order
+# carries the meaning here as it does for diff, so the reverse is empty.
+if [ "$1" = log ]; then
+  shift
+  [ "$1" = --format=%B ] || say "only 'log --format=%B A..B' is modelled (a different format prints something a grep would read differently), got: $*"
+  [ $# = 2 ] || say "only 'log --format=%B A..B' is modelled (an extra option narrows or widens the commits), got: $*"
+  case "$2" in
+    *...*) say "a three-dot range for log means something else: $2" ;;
+    *..*) ;;
+    *) say "a single revision is the whole history, not this branch: $2" ;;
+  esac
+  [ "$2" = BASE_SHA..HEAD_SHA ] || exit 0
+  cat "` + filepath.Join(dir, "messages") + `"
+  exit 0
+fi
+[ "$1" = diff ] || say "only 'diff' and 'log' are modelled, got: $*"
 shift
 filter=no
 names=no

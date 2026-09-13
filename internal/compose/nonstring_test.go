@@ -75,7 +75,7 @@ func TestANonStringNetworkKeyOrEnvFileScalarIsRefused(t *testing.T) {
 
 // Quoted, the same text is a string and loads.
 func TestQuotedItemsLoadAsWritten(t *testing.T) {
-	p, err := Load(writeTemp(t, "services:\n  web:\n    image: alpine\n    volumes: [\"42:/n\"]\n    networks: [\"123\"]\n    environment: [\"42\"]\n    secrets: [\"42\"]\nnetworks:\n  \"123\": {}\nsecrets:\n  \"42\":\n    file: ./s.txt\n"))
+	p, err := Load(writeTemp(t, "services:\n  web:\n    image: alpine\n    volumes: [\"42:/n\"]\n    networks: [\"123\"]\n    environment: [\"42\"]\n    secrets: [\"42\"]\nnetworks:\n  \"123\": {}\nsecrets:\n  \"42\":\n    file: ./s.txt\nvolumes:\n  \"42\": {}\n"))
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}

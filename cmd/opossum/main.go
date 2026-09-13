@@ -803,15 +803,16 @@ func printDestroyPlan(out io.Writer, project string, p orchestrator.DestroyPlan,
 		}
 	}
 	if len(p.StrandedVolumes) > 0 {
-		fmt.Fprintln(out, "  named for this project but not claimed by any service — NOT removed:")
+		fmt.Fprintln(out, "  named for this project, or declared in the compose file with a `name:` (not `external`), but not claimed by any service — NOT removed:")
 		for _, item := range p.StrandedVolumes {
 			fmt.Fprintf(out, "    - %s\n", item)
 		}
 		fmt.Fprintln(out, "    One of these may be left over from a service you renamed or deleted, in")
 		fmt.Fprintln(out, "    which case it is yours to remove. It may equally belong to another project")
-		fmt.Fprintf(out, "    whose name starts with %q, or be an `external: true` volume — opossum\n", project+"_")
-		fmt.Fprintln(out, "    cannot tell from the name, which is why it leaves them alone. Check what")
-		fmt.Fprintln(out, "    uses one (`container volume inspect <name>`) before removing it.")
+		fmt.Fprintf(out, "    whose name starts with %q or that declares the same `name:`, or be an\n", project+"_")
+		fmt.Fprintln(out, "    `external: true` volume — opossum cannot tell from the name, which is why")
+		fmt.Fprintln(out, "    it leaves them alone. Check what uses one (`container volume inspect <name>`)")
+		fmt.Fprintln(out, "    before removing it.")
 	}
 	if p.KeptOverlay != "" {
 		fmt.Fprintln(out, "  kept, not removed:")
@@ -949,7 +950,7 @@ func volumesCmd() *cobra.Command {
 		Short: "List the volumes the project's services mount that exist on the runtime, with their drivers",
 		Long: `List the volumes this project's services mount (or the named services'
 volumes) that exist on the runtime, under the names the runtime knows them by
-(<project>_<volume>), as a DRIVER / VOLUME NAME table — the way docker compose
+(<project>_<volume>, or the name: a declaration gives), as a DRIVER / VOLUME NAME table — the way docker compose
 volumes does. A volume appears once a service that mounts it has been started;
 external volumes are the user's, not the project's, and are not listed, and
 neither is a volume the file no longer mounts.`,
@@ -1076,6 +1077,22 @@ func runCmd() *cobra.Command {
 			}
 			o.EnableProfiles(profiles)
 			o.EnableProfiles(strings.Split(os.Getenv("COMPOSE_PROFILES"), ","))
+			// Same shape as `up`: the first Ctrl-C cancels the run so the one-off's
+			// container is stopped and the interruption reported (without this the
+			// process just died of the signal and the container kept running); a
+			// second one forces an immediate exit.
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			sig := make(chan os.Signal, 2)
+			signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+			defer signal.Stop(sig)
+			go func() {
+				<-sig
+				cancel()
+				<-sig
+				os.Exit(130)
+			}()
+			o.OnSignal(ctx)
 			opts := orchestrator.RunOneOffOptions{Rm: rm, NoDeps: noDeps, TTY: stdinIsTerminal() && !noTTY, SSH: ssh}
 			if audit {
 				if auditFormat != "json" && auditFormat != "text" {

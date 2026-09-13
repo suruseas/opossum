@@ -44,7 +44,7 @@ release:
 # suruseas/opossum/opossum` keeps working. Casks, not formulas: goreleaser
 # deprecated `brews` (its formulas wrapped pre-compiled binaries, which is
 # what casks are for). A cask carries no license stanza — the license stays
-# declared in this repository. The post-install hook clears the quarantine
+# declared in this repository. The post-install step clears the quarantine
 # bit the browser-less download never sets but a cautious Gatekeeper may
 # still check; the binary is unsigned, and this is the documented shape for
 # that. Pushing to the separate tap repo needs a token with write access to
@@ -62,9 +62,35 @@ homebrew_casks:
     description: "A Docker Compose-like orchestrator for Apple's container runtime"
     dependencies:
       - formula: container
-    hooks:
-      post:
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/opossum"]
-          end
+    # The quarantine step goes through custom_block rather than
+    # hooks.post.install: that option can only emit `postflight`, which
+    # Homebrew has deprecated in favour of `postflight_steps`, so every `brew`
+    # command that touched the cask printed a warning — and a deprecation in
+    # Homebrew becomes a hard error a few versions on, which would stop the
+    # quarantine step altogether. GoReleaser cannot emit the new stanza yet;
+    # the option for it is https://github.com/goreleaser/goreleaser/pull/6873.
+    # Once that lands and a release uses a GoReleaser that has it, move the
+    # step back under `hooks.post.install_steps` and delete this custom_block.
+    #
+    # GoReleaser always emits custom_block first, before `version`, so
+    # `brew style --cask` on the generated cask reports nine
+    # `Cask/StanzaOrder` offenses (every stanza after it), all style-only:
+    # `brew install` and `brew upgrade` never run them, and the generated file
+    # says DO NOT EDIT — do not try to fix them in the tap. They are accepted
+    # on purpose, and they are the sign this workaround is still in place:
+    # moving the step back under hooks restores the order, and the day that
+    # count returns to zero is the day the workaround is gone.
+    #
+    # `{{staged_path}}` is a Homebrew install-steps token that Homebrew
+    # substitutes at install time; it is quoted so that GoReleaser's own
+    # template pass over the generated cask leaves it in place. Check the
+    # rendered cask after a change here: `make snapshot`, then
+    # dist/homebrew/Casks/opossum.rb must contain `{{staged_path}}` literally
+    # and pass `brew style --cask` — a token that got expanded would make the
+    # step run `xattr` on `/opossum`, which fails the install.
+    custom_block: |
+      postflight_steps do
+        on_macos do
+          run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ "{{staged_path}}" }}/opossum"]
+        end
+      end

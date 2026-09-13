@@ -73,8 +73,9 @@ type DestroyPlan struct {
 	// project, which is most of them.
 	MistargetedName string
 
-	// StrandedVolumes are volumes labelled for this project that no current service
-	// claims — left by a service that was renamed or removed from the compose file.
+	// StrandedVolumes are volumes of this project that no current service claims —
+	// named with its prefix, or declared in the file with a `name:` of their own —
+	// left by a service that was renamed or removed from the compose file.
 	// They are listed, not removed: working out which of them is genuinely an
 	// orphan needs care, and a teardown that says "everything is gone" while these
 	// sit on disk is the more urgent problem.
@@ -249,30 +250,40 @@ func (o *Orchestrator) snapshotDirs() []string {
 	return found
 }
 
-// strandedVolumes finds volumes named for this project that the compose file no
+// strandedVolumes finds volumes of this project that the compose file no
 // longer accounts for: `<project>_<name>` left behind by a service that was
-// renamed or deleted. destroy can't remove them safely — a volume declared
-// `external: true` can carry the same prefix, and there is no label to tell them
-// apart — but it can stop pretending they aren't there. Before this, a teardown
-// reported that everything opossum made was gone while these stayed on the disk,
-// invisible.
+// renamed or deleted, and a volume the file still declares with a `name:` of
+// its own but no service mounts any more — that one carries no prefix, so only
+// its declaration says whose it is. destroy can't remove them safely — a volume
+// declared `external: true` can carry the same prefix, and there is no label to
+// tell them apart — but it can stop pretending they aren't there. Before this,
+// a teardown reported that everything opossum made was gone while these stayed
+// on the disk, invisible. A `name:` volume whose declaration is gone as well is
+// indistinguishable from anyone else's and is not looked for.
 func (o *Orchestrator) strandedVolumes(planned []string) []string {
 	inPlan := map[string]bool{}
 	for _, v := range planned {
 		inPlan[v] = true
 	}
 	// External volumes are someone else's whatever they are called, so a name this
-	// project declares as external is never stranded.
-	external := map[string]bool{}
+	// project declares as external is never stranded. A project volume's own
+	// `name:` is the project's, prefix or not.
+	external, declared := map[string]bool{}, map[string]bool{}
 	for key, decl := range o.Project.Volumes {
-		if decl.External {
+		switch {
+		case decl.External:
 			external[o.externalRealName(key)] = true
+		case decl.Name != "":
+			declared[decl.Name] = true
 		}
 	}
 	prefix := o.Project.Name + "_"
 	var out []string
 	for _, name := range o.rt.ListVolumes() {
-		if !strings.HasPrefix(name, prefix) || inPlan[name] || external[name] {
+		if inPlan[name] || external[name] {
+			continue
+		}
+		if !strings.HasPrefix(name, prefix) && !declared[name] {
 			continue
 		}
 		out = append(out, name)

@@ -30,7 +30,9 @@ build instead of drifting.
 Changes nobody upgrading would notice — tests, refactoring, docs — need no
 fragment. CI only asks for one when shipped code under `cmd/` or `internal/`
 changed; if such a change genuinely has nothing to announce, put
-`[skip changelog]` in the pull request body.
+`[skip changelog]` in the pull request body — the body, not a commit message.
+The check reads the body as it was when the run started, so after adding the
+token to an already-open pull request, push again rather than re-running the job.
 
 See [`changelog.d/README.md`](changelog.d/README.md) for the format in detail.
 

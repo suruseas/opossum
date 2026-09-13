@@ -1022,6 +1022,26 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 			}
 		}
 
+		// Every named volume a service mounts must be declared top-level, as
+		// docker compose requires (`service "db" refers to undefined volume
+		// dbdata`). Read past, a misspelling on either side made `up` create
+		// and mount an empty volume under the misspelt name while the declared
+		// one went unused — a database initialised fresh over data that was
+		// meant to be there. A host path is a bind mount and a bare target is
+		// an anonymous volume; neither is declared.
+		for _, m := range svc.Volumes {
+			kind, src := ClassifyMount(m)
+			if kind == MountBind && homeOfAnotherUser(src) {
+				return nil, fmt.Errorf("service %q: the mount source %q starts with `~` but not `~/` — `~` here means your own home only; write `~/%s` for a path under it, or an absolute path", name, src, strings.TrimPrefix(src, "~"))
+			}
+			if kind != MountNamed {
+				continue
+			}
+			if _, ok := f.Volumes[src]; !ok {
+				return nil, fmt.Errorf("service %q refers to undefined volume %q — declare it under top-level volumes:, or write a host path (`./%s`) for a bind mount", name, src, src)
+			}
+		}
+
 		// Every referenced secret must be a defined, file-based top-level secret.
 		for _, ref := range svc.Secrets {
 			sec, ok := f.Secrets[ref.Source]
@@ -1045,6 +1065,62 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 		return nil, err
 	}
 	return p, nil
+}
+
+// IsHostPath reports whether a volume mount's source is a host path — the
+// forms mounted as a bind rather than a named volume. The rule is docker
+// compose's: a source that starts with `/`, `.` or `~` is a path (so `.hidden`
+// and `~` are paths, not volume names), everything else names a volume. The
+// orchestrator classifies the same string with this one function, so what
+// loads as a bind is what runs as one. A `~` followed by anything but `/` is
+// a path here too, but one the loader refuses (see homeOfAnotherUser): docker
+// reads `~bob/h` as `$HOME/bob/h`, which nobody means.
+func IsHostPath(s string) bool {
+	return strings.HasPrefix(s, "/") || strings.HasPrefix(s, "~") || relativeHostPath(s)
+}
+
+// homeOfAnotherUser reports a `~name…` source: `~` followed by something
+// other than `/`. docker compose resolves it to `$HOME/name…` — not that
+// user's home, not a directory called `~name` — a reading nobody intends, so
+// it is refused with the two spellings that mean what they say.
+func homeOfAnotherUser(s string) bool {
+	return strings.HasPrefix(s, "~") && s != "~" && !strings.HasPrefix(s, "~/")
+}
+
+// mountSource is the source half of a `source:target[:mode]` mount, or "" for
+// an anonymous volume written as its target alone.
+func mountSource(m string) string {
+	if i := strings.Index(m, ":"); i > 0 {
+		return m[:i]
+	}
+	return ""
+}
+
+// MountKind is what a service's volume entry (already in the loader's
+// `source:target[:mode]` or bare-target spelling) refers to.
+type MountKind int
+
+const (
+	MountAnonymous MountKind = iota // a bare target: a volume named for the service and path
+	MountBind                       // a host path at a container path
+	MountNamed                      // a named volume, declared under top-level volumes:
+)
+
+// ClassifyMount says what a volume entry refers to, and for a bind or a named
+// volume, its source. The loader requires a declaration for exactly the
+// entries this calls named, and the orchestrator mounts an entry as what this
+// calls it — one judgement on both sides, so a source that loads as a bind
+// runs as one and one that needs a declaration is the one mounted by name
+// (created under it, or, declared external, looked up under its real name).
+func ClassifyMount(entry string) (MountKind, string) {
+	src := mountSource(entry)
+	switch {
+	case src == "":
+		return MountAnonymous, ""
+	case IsHostPath(src):
+		return MountBind, src
+	}
+	return MountNamed, src
 }
 
 // validateDeps ensures every depends_on target exists, uses a known condition,
@@ -1530,10 +1606,11 @@ func extendedServiceFromFile(where, name, path, target string, lookup varLookup,
 // file absolute against dir, so that a project whose first file lives
 // elsewhere resolves them where docker compose does. What is rebased is
 // what docker compose rebases when it extends across files: `build` (as a
-// path or its `context`), a bind mount's source in the short form (only
-// one written as `.`, `..`, `./…` or `../…`, the host paths the runtime
-// side reads as such — a bare name is a named volume) and the long form,
-// `env_file` in every form, and `develop.watch` paths.
+// path or its `context`), a bind mount's source in the short form (one
+// that starts with `.` — `.`, `..`, `./…`, `../…`, `.hidden` — the
+// file-relative host paths; a bare name is a named volume, `/…` and `~…`
+// are not relative to the file) and the long form, `env_file` in every
+// form, and `develop.watch` paths.
 func rebasePaths(svc map[string]any, dir string) {
 	abs := func(p string) string {
 		if p == "" || filepath.IsAbs(p) || strings.HasPrefix(p, "~") || strings.Contains(p, "://") || strings.HasPrefix(p, "git@") {
@@ -1558,7 +1635,11 @@ func rebasePaths(svc map[string]any, dir string) {
 				}
 			case map[string]any:
 				typ, _ := m["type"].(string)
-				if src, ok := m["source"].(string); ok && (typ == "bind" || typ == "") && relativeHostPath(src) {
+				// In the long form the type decides: a `type: bind` source that is a
+				// bare name (`ldata`) is the directory beside that file, so it is
+				// rebased like `./ldata` — otherwise the short spelling it becomes
+				// (`./ldata`) would point beside the main file instead.
+				if src, ok := m["source"].(string); ok && (typ == "bind" && (relativeHostPath(src) || !IsHostPath(src)) || typ == "" && relativeHostPath(src)) {
 					m["source"] = abs(src)
 				}
 			}
@@ -1593,10 +1674,12 @@ func rebasePaths(svc map[string]any, dir string) {
 }
 
 // relativeHostPath reports whether a volume source is written as a path
-// relative to a file — the forms the runtime side reads as a host path
-// rather than a named volume (`.`, `..`, `./…`, `../…`).
+// relative to a file: anything that starts with `.` — `.`, `..`, `./…`,
+// `../…`, and a hidden name such as `.hidden` or `.hidden/sub` — as docker
+// compose reads it. These are the sources an included or extended file's
+// directory has to be joined onto.
 func relativeHostPath(s string) bool {
-	return s == "." || s == ".." || strings.HasPrefix(s, "./") || strings.HasPrefix(s, "../")
+	return strings.HasPrefix(s, ".")
 }
 
 // resolveSameFileExtends is resolveExtendsInTree for a single file: the

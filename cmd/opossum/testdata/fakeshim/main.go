@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 func main() {
@@ -51,6 +52,22 @@ func main() {
 	gonePath := func(kind, name string) string {
 		safe := strings.NewReplacer("/", "_", ":", "_", ".", "_").Replace(name)
 		return filepath.Join(stateDir, "gone-"+kind+"-"+safe)
+	}
+	// A stop is remembered even without $STATE_DIR (beside the log, which every
+	// test sets): stopping is not deleting, so it does not need the opt-in that
+	// keeps every object alive forever — and a `stop` the shim forgot would make
+	// the caller's "did it stop?" check read every stop as one that failed.
+	stopDir := stateDir
+	if stopDir == "" && os.Getenv("FAKE_LOG") != "" {
+		stopDir = filepath.Dir(os.Getenv("FAKE_LOG"))
+	}
+	// With neither set there is nowhere to remember a stop; "" makes every
+	// marker path relative to nothing, so the helpers below do nothing then.
+	stoppedPath := func(name string) string {
+		if stopDir == "" {
+			return ""
+		}
+		return filepath.Join(stopDir, "stopped-"+strings.NewReplacer("/", "_", ":", "_", ".", "_").Replace(name))
 	}
 	// $DELETE_STICKY names objects whose delete succeeds and yet leaves them there.
 	// That is not hypothetical: `container image delete --force` exits 0 for a ref it
@@ -94,10 +111,37 @@ func main() {
 	}
 	switch arg(0) {
 	case "run":
+		// Running a name again means it is no longer stopped (the `stop` case).
+		for i, a := range args {
+			if i > 0 && args[i-1] == "--name" {
+				if p := stoppedPath(a); p != "" {
+					_ = os.Remove(p)
+				}
+			}
+		}
 		// A one-off's body: what the container would have written to its
 		// stdout, so a test can see which of the CLI's streams it reaches.
 		if says := os.Getenv("FAKE_RUN_SAYS"); says != "" {
 			fmt.Println(says)
+		}
+		// A foreground run (no -d) of $RUN_HANG stays attached until this process
+		// is killed — the window in which a Ctrl-C lands on an `up --foreground`
+		// or a `run`. Long enough for a test to send the signal, short enough
+		// that a wiring that never cancels shows up as a slow, wrong answer
+		// rather than a hang.
+		if hang := os.Getenv("RUN_HANG"); hang != "" {
+			detached, named := false, false
+			for i, a := range args {
+				if a == "-d" {
+					detached = true
+				}
+				if i > 0 && args[i-1] == "--name" && a == hang {
+					named = true
+				}
+			}
+			if named && !detached {
+				time.Sleep(20 * time.Second)
+			}
 		}
 	case "system":
 		if arg(1) == "dns" && arg(2) == "list" {
@@ -214,8 +258,33 @@ func main() {
 				fmt.Println(line)
 			}
 		}
+	case "stop":
+		// The real CLI's exit code answers only whether the name exists (0 for a
+		// running, a stopped and an exited container alike; measured on 1.4.1), so
+		// a stop that took is visible only through the state a later inspect
+		// reports — the marker below, cleared when the name is run again. Same
+		// model as the orchestrator's shim.
+		if isGone("container", lastArg()) {
+			fmt.Fprintf(os.Stderr, "Error: internalError: \"failed to stop container\" (cause: \"notFound: \"container with ID %s not found\"\")\n", lastArg())
+			os.Exit(1)
+		}
+		if p := stoppedPath(lastArg()); p != "" {
+			_ = os.WriteFile(p, []byte("1"), 0o644)
+		}
 	case "delete", "rm":
+		if isGone("container", lastArg()) {
+			fmt.Fprintf(os.Stderr, "Error: internalError: \"failed to delete container\" (cause: \"notFound: \"container with ID %s not found\"\")\n", lastArg())
+			os.Exit(1)
+		}
 		markGone("container", lastArg())
+		if p := stoppedPath(lastArg()); p != "" {
+			_ = os.Remove(p)
+		}
+	case "start":
+		// Running again in place: the stop marker is cleared.
+		if p := stoppedPath(lastArg()); p != "" {
+			_ = os.Remove(p)
+		}
 
 	case "inspect":
 		// $INSPECT_STATE overrides the reported state, so a test can stage a
@@ -252,6 +321,13 @@ func main() {
 		state := os.Getenv("INSPECT_STATE")
 		for _, m := range strings.Fields(os.Getenv("INSPECT_STOPPED")) {
 			if arg(1) == m {
+				state = "stopped"
+			}
+		}
+		// A `stop` that took (the `stop` case) shows as the real CLI shows it: the
+		// container is still there, its state is "stopped".
+		if p := stoppedPath(arg(1)); p != "" {
+			if _, err := os.Stat(p); err == nil {
 				state = "stopped"
 			}
 		}

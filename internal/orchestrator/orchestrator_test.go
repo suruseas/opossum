@@ -1464,10 +1464,10 @@ func TestUpSeedsFreshVolumesFromImage(t *testing.T) {
 		t.Fatalf("Up: %v", err)
 	}
 	lines := log()
-	if indexOf(lines, "run --rm --user 0 -v demo_data:/__opossum_seed__ web:latest") < 0 {
+	if indexOf(lines, "run --rm --user 0 -v demo_data:/__opossum_seed__ --name seed-demo_data.opossum web:latest") < 0 {
 		t.Errorf("named volume should be seeded from the image, got %v", lines)
 	}
-	if indexOf(lines, "run --rm --user 0 -v demo_web_app_node_modules_") < 0 || indexOf(lines, ":/__opossum_seed__ web:latest") < 0 {
+	if indexOf(lines, "run --rm --user 0 -v demo_web_app_node_modules_") < 0 || indexOf(lines, ":/__opossum_seed__ --name seed-demo_web_app_node_modules_") < 0 {
 		t.Errorf("anonymous volume should be seeded from the image, got %v", lines)
 	}
 	// The bind mount's host path is never seeded.
@@ -3559,6 +3559,25 @@ func TestUpFindsTheSymlinkedSocketWhereverItSits(t *testing.T) {
 		{"written relative to the compose file", func(link string) (map[string]*compose.Service, string) {
 			return map[string]*compose.Service{
 				"ci": {Image: "ci:1", Volumes: []string{"./" + filepath.Base(link) + ":/var/run/docker.sock"}},
+			}, link
+		}},
+		// A hidden directory beside the compose file is a host path too (a
+		// source starting with `.`), so the check reaches a link kept there —
+		// before, `.hidden/docker.sock` named a volume and was never looked at.
+		{"written under a hidden directory beside the compose file", func(link string) (map[string]*compose.Service, string) {
+			hidden := filepath.Join(filepath.Dir(link), ".hidden")
+			if err := os.Mkdir(hidden, 0o755); err != nil {
+				panic(err)
+			}
+			target, err := os.Readlink(link)
+			if err != nil {
+				panic(err)
+			}
+			if err := os.Symlink(target, filepath.Join(hidden, "docker.sock")); err != nil {
+				panic(err)
+			}
+			return map[string]*compose.Service{
+				"ci": {Image: "ci:1", Volumes: []string{".hidden/docker.sock:/var/run/docker.sock"}},
 			}, link
 		}},
 	} {

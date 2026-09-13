@@ -311,7 +311,16 @@ list; codes are add-only and never change meaning.
   with a storage-device (VZError) error`** → a named volume is held by another
   running container (often from a *different* project), so this service can't
   attach it. The message names the holder; `container stop <name>` frees it, or give
-  this service its own volume / a bind mount. Emitted both as a pre-flight warning
+  this service its own volume / a bind mount. When the holder is the volume's own
+  seeding container (`seed-<project>_<volume>.opossum` — a `run`, or an `up` beside
+  a `run`, is still filling it from the image; two `up`s of one project meet the
+  project lock first, `OPSM-208`), both exits say instead to wait for that fill:
+  stopping it would leave the volume half-filled, and the next start would take it
+  as already there. A fill that is itself stuck: if the `up` or `run` doing it is
+  still in a terminal, Ctrl-C there takes it back (container stopped and removed,
+  volume deleted); if that process is already gone, do the same by hand — stop the
+  seed container, delete the volume — and the next start fills it afresh. Emitted
+  both as a pre-flight warning
   (holder already running at `up`) and as the decoded failure if the run hits the
   raw `VZErrorDomain Code=2 "The storage device attachment is invalid"`.
 - **`[OPSM-104]` … `needs the host directory <path> for a bind mount, and it could

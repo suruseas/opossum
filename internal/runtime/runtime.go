@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -788,12 +789,22 @@ func (r *Runtime) PrepareVolume(volume, image string) error {
 // anything.
 const seedMountPoint = "/__opossum_seed__"
 
+// SeedContainerName is the name of the throwaway container that fills (or
+// prepares) a new volume. It has a name so that it can be found afterwards:
+// `--rm` removes it when its run ends, but a run that is killed from outside —
+// a Ctrl-C during `up` — leaves it running with the volume attached, and the
+// only way to take it back is by name.
+func SeedContainerName(volume string) string { return "seed-" + volume + ".opossum" }
+
 // runOnNewVolume runs one script against a volume opossum is creating, in a
 // throwaway container. The container failing to run at all is what comes back as
 // an error: the volume then exists but was never prepared, and only the caller can
 // say what that means for the service about to mount it.
 func (r *Runtime) runOnNewVolume(volume, image, script string) error {
-	out, err := r.capture("run", "--rm", "--user", "0", "-v", volume+":"+seedMountPoint, image, "sh", "-c", script)
+	// A seed container of this name that an earlier run left behind — killed in
+	// a way the take-back never saw — would refuse this one's name; clear it.
+	r.Delete(SeedContainerName(volume))
+	out, err := r.capture("run", "--rm", "--user", "0", "-v", volume+":"+seedMountPoint, "--name", SeedContainerName(volume), image, "sh", "-c", script)
 	if err != nil {
 		return fmt.Errorf("%w: %s", err, lastNonEmptyLine(out))
 	}
@@ -1225,6 +1236,25 @@ type RunError struct {
 func (e *RunError) Error() string { return e.Err.Error() }
 func (e *RunError) Unwrap() error { return e.Err }
 
+// RunRefusedNameTaken reports whether a failed `run --name <name>` was refused
+// because a container of that name already exists. container 1.4.1 words it
+// two ways: `Error: container with id <name> already exists` when the holder
+// is fully there (running or stopped alike — so the caller has to ask `inspect`
+// what is there), and `Error: container already exists: <name>` when the
+// holder is still being created — the spelling a race between two starts
+// actually produces (measured; a check that knew only the first never fired
+// in that window). The whole sentence is matched, name included: `already
+// exists` alone is also how a network-name clash is worded, and a refusal
+// about some other container is not this one's.
+func RunRefusedNameTaken(err error, name string) bool {
+	var re *RunError
+	if !errors.As(err, &re) {
+		return false
+	}
+	return strings.Contains(re.Stderr, "container with id "+name+" already exists") ||
+		strings.Contains(re.Stderr, "container already exists: "+name)
+}
+
 // streamCaptureStderr is stream but also copies the child's stderr into capture
 // (live to the user's stderr AND the buffer), so a caller can inspect the failure
 // output without changing what the user sees.
@@ -1439,7 +1469,11 @@ func (r *Runtime) Pull(ref string) error {
 	return r.stream("image", "pull", ref)
 }
 
-// Stop stops a running container, ignoring errors for already-stopped ones.
+// Stop stops a running container. Its outcome is not reported: the CLI's exit
+// code answers only whether the name exists (0 for a running, a stopped and an
+// exited container alike; 1 when there is no such container — measured on
+// container 1.4.1), so a caller that needs to know whether the container is
+// down asks Inspect afterwards.
 func (r *Runtime) Stop(name string) {
 	r.capture("stop", name)
 }
@@ -1463,7 +1497,10 @@ func (r *Runtime) Start(name string) error {
 	return nil
 }
 
-// Delete force-removes a container, ignoring "not found".
+// Delete force-removes a container. Every error is ignored — on container
+// 1.4.1 the only one the CLI reports is "not found" (measured), which is the
+// outcome wanted — so a caller that needs to know the container is gone asks
+// Inspect afterwards.
 func (r *Runtime) Delete(name string) {
 	r.capture("delete", "--force", name)
 }
@@ -1582,18 +1619,29 @@ type ContainerInfo struct {
 	IP     string // interface address, IPv4 preferred (IPv6 fallback)
 	Ports  []PortMapping
 	Labels map[string]string
+	// Unknown is set when the runtime could not be asked — the CLI failed for a
+	// reason other than "not found", or its answer could not be read. Exists is
+	// false then too, but "gone" and "could not ask" are different facts: a
+	// caller checking that a container is stopped must not read the second as
+	// the first.
+	Unknown bool
 }
 
 // Inspect parses a container's inspect JSON once, extracting the fields opossum
-// reports. A missing container yields ContainerInfo{Exists: false}.
+// reports. A missing container yields ContainerInfo{Exists: false}; a CLI that
+// failed for any other reason, or an answer that could not be read, yields
+// Unknown as well.
 func (r *Runtime) Inspect(name string) ContainerInfo {
 	out, err := r.capture("inspect", name)
 	if err != nil {
-		return ContainerInfo{}
+		if strings.Contains(strings.ToLower(out), "not found") {
+			return ContainerInfo{}
+		}
+		return ContainerInfo{Unknown: true}
 	}
 	var results []inspectResult
 	if err := json.Unmarshal([]byte(out), &results); err != nil || len(results) == 0 {
-		return ContainerInfo{}
+		return ContainerInfo{Unknown: true}
 	}
 	res := results[0]
 	info := ContainerInfo{Exists: true, State: res.Status.State, Labels: res.Configuration.Labels}

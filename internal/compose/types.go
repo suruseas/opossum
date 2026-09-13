@@ -1397,7 +1397,27 @@ func (v *Volumes) UnmarshalYAML(value *yaml.Node) error {
 		// No source is an anonymous volume (short form is just the target path).
 		s := lf.Target
 		if lf.Source != nil && *lf.Source != "" {
-			s = *lf.Source + ":" + lf.Target
+			src := *lf.Source
+			// In the long form the type decides, not the spelling of the source
+			// (docker compose reads `type: bind, source: data` as the directory
+			// `data` beside the file). The short spelling this becomes decides by
+			// the spelling alone, so a bind whose source does not look like a path
+			// is written as one (`./data`) — the same directory, and `config`
+			// prints it back as what it is. The other way round has no such
+			// spelling: a `type: volume` whose source starts with `/`, `.` or `~`
+			// would read back as a bind — a different mount, silently. docker
+			// compose does create that volume (`<project>_.hidden`), so this is a
+			// form opossum cannot carry yet; it is refused with the two ways to
+			// say the same thing rather than run as something else.
+			switch {
+			case lf.Type == "bind" && !IsHostPath(src):
+				src = "./" + src
+			case lf.Type == "volume" && strings.HasPrefix(src, "."):
+				return fmt.Errorf("volumes entry %d of %d: type: volume with source %q — a volume whose name starts with `.` is not supported here (docker compose would create it as `<project>_%s` once declared); give the volume a name that does not, or declare it under volumes: with a `name:`", i+1, len(value.Content), src, src)
+			case lf.Type == "volume" && IsHostPath(src):
+				return fmt.Errorf("volumes entry %d of %d: type: volume with source %q — a volume name cannot start with `/` or `~` (docker compose refuses it as well); write type: bind for a host path, or a name for a volume", i+1, len(value.Content), src)
+			}
+			s = src + ":" + lf.Target
 		}
 		if lf.ReadOnly {
 			s += ":ro"

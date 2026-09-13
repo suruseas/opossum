@@ -631,3 +631,20 @@ func TestAnIncludedFilesExtendsIsFoundFromItsProjectDirectory(t *testing.T) {
 		})
 	}
 }
+
+// A long-form `type: bind` with a bare source in an included file is the
+// directory beside that file, as docker compose reads it — not beside the file
+// that included it. The bare name has no `./` to say which file it is relative
+// to, so the rebase has to treat it as it treats `./idata`.
+func TestAnIncludedLongFormBareBindIsRelativeToItsOwnFile(t *testing.T) {
+	dir := t.TempDir()
+	writeIn(t, dir, "sub/inc.yml", "services:\n  inc:\n    image: alpine\n    volumes:\n      - {type: bind, source: idata, target: /id}\n")
+	writeIn(t, dir, "compose.yml", "include:\n  - sub/inc.yml\nservices:\n  web:\n    image: alpine\n")
+	p, err := Load(filepath.Join(dir, "compose.yml"))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got, want := strings.Join(p.Services["inc"].Volumes, ","), filepath.Join(dir, "sub", "idata")+":/id"; got != want {
+		t.Errorf("volumes = %q, want the bare long-form bind beside the included file: %q", got, want)
+	}
+}

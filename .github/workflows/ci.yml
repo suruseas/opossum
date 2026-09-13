@@ -264,6 +264,17 @@ jobs:
           echo "Add changelog.d/<number>-<slug>.<type>.md (see changelog.d/README.md),"
           echo "then run 'make changelog'. If the change truly needs no release note,"
           echo "put [skip changelog] in the PR body."
+          # The opt-out written into a commit message instead of the body is a
+          # mistake that has been made three times, and the refusal above reads
+          # as "I did put it there". Name it — and say that editing the body is
+          # not enough: no trigger above fires on an edit, and a re-run replays
+          # the event as it was (GitHub's documented behaviour; nothing in this
+          # repository can test it). The verdict does not change.
+          if git log --format=%B "$BASE..$HEAD" | grep -qF '[skip changelog]'; then
+            echo
+            echo "Note: [skip changelog] is in a commit message, but this gate reads only the PR body."
+            echo "Put it in the PR description and push again — editing the body alone does not re-run this check."
+          fi
           exit 1
 
       # ---- the published record stays published ---------------------------

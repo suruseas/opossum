@@ -56,6 +56,44 @@ caches, `node_modules` — in a **named volume** (in-VM storage), not a bind mou
 opossum namespaces named volumes per project, so this is a drop-in change. Bind
 mounts are best kept for source you edit from the host.
 
+### Starting several containers at once — no faster than one after another
+
+`opossum up` starts services one at a time, in dependency order, even when
+they don't depend on each other. docker compose starts independent services
+concurrently, so it is fair to ask whether opossum is leaving time on the
+table. Measured on `container` 1.4.1 (`alpine:3.20 sleep 120`, network created
+beforehand so only the `run` step is timed), it is not:
+
+| `container run -d …` | Wall time | Per container |
+|----------------------|-----------|---------------|
+| 1 | 0.70 s | 0.70 s |
+| 2 launched at once | 1.35 s | 0.68 s |
+| 4 launched at once | 2.9 s | 0.72 s |
+| 8 launched at once | 5.7 s | 0.72 s |
+| 4 one after another | 2.9 s | 0.73 s |
+
+Every launch succeeded (no `pending operation` refusal, which `container` does
+return for some overlapping network operations), and it made no difference
+whether the containers were attached to a named network or to the default one.
+But the wall time grows with the count either way: the runtime accepts
+concurrent `run`s and then boots the VMs one at a time. Launching in parallel
+would buy nothing, so opossum keeps the simple sequential loop.
+
+The per-container figure is the same ~0.7 s VM boot as the single-container
+start in the table above (0.84 s there includes the container running and
+exiting), so this is the architecture difference again, not a scheduling one.
+For a project of three such services with no dependencies between them,
+`opossum up` took 3.8 s and `docker compose up -d` 0.26 s (0.19 s for one). Docker is close to
+"max of the three" not because it runs them concurrently but because each of
+its starts is 0.2 s inside an already-running VM. The 3.8 s splits into two
+parts worth telling apart: 2.7 s is three VM boots plus the network, which
+nothing in opossum can shorten, and 1.1 s is the post-start crash check
+(`OPOSSUM_CRASH_GRACE`, default one second) — paid on purpose so that `up`
+does not report success over a service that dies right after starting, and
+the one part you can switch off. Re-measure this on a new `container`
+release: if the 8-at-once figure ever drops toward the single one, parallel
+start becomes worth building.
+
 ### How to read this
 
 - **Docker starts a single container faster** (~0.15 s vs ~0.8 s): its Linux VM is
@@ -84,6 +122,14 @@ many short-lived containers and per-container start latency dominates.
 # Single-container start (run several, take the median)
 for i in $(seq 7); do /usr/bin/time -p docker    run --rm alpine:3.20 true; done   # Docker
 for i in $(seq 7); do /usr/bin/time -p container run --rm alpine:3.20 true; done    # Apple container
+
+# Concurrent starts: does the runtime boot VMs in parallel? (all EXIT 0 on 1.4.1,
+# wall time grows linearly with N — compare with the same loop without `&`)
+container network create par
+t0=$(date +%s.%N)
+for i in 1 2 3 4 5 6 7 8; do (container run -d --name par-$i --network par alpine:3.20 sleep 120) & done; wait
+echo "wall=$(echo "$(date +%s.%N) - $t0" | bc)s"; container ls | grep -c 'par-'
+container rm -f par-1 par-2 par-3 par-4 par-5 par-6 par-7 par-8; container network delete par
 
 # Idle host-side daemon memory (RSS, MB)
 ps -Ao rss,comm | grep -iE "com.docker|Docker.app" | awk '{s+=$1} END{print int(s/1024)"MB"}'

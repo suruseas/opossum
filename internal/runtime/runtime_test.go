@@ -7,6 +7,7 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"github.com/suruseas/opossum/internal/suitedir"
 	"os"
@@ -627,6 +628,16 @@ func TestSeedVolumeArgv(t *testing.T) {
 	if !strings.HasPrefix(line, "run --rm --user 0 -v demo_data:") || !strings.Contains(line, "img:1 sh -c") {
 		t.Errorf("SeedVolume argv = %q, want a `run --rm --user 0 -v demo_data:… img:1 sh -c …`", line)
 	}
+	// Named, so an interrupted seed can be stopped and removed by name (--rm does
+	// nothing for a run killed from outside).
+	if !strings.Contains(line, " --name "+SeedContainerName("demo_data")+" ") {
+		t.Errorf("SeedVolume argv = %q, want the throwaway named %q", line, SeedContainerName("demo_data"))
+	}
+	// And a stale one of that name — left by a kill the take-back never saw —
+	// is cleared right before, or it would refuse this run's name.
+	if len(lines) < 2 || lines[len(lines)-2] != "delete --force "+SeedContainerName("demo_data") {
+		t.Errorf("SeedVolume should clear a stale %q right before the run, got %q", SeedContainerName("demo_data"), lines)
+	}
 	// The `--user 0` in that prefix is the load-bearing part: a fresh volume's root
 	// is 0:0/755, so an image with a non-root USER cannot write into it and the copy
 	// moves nothing at all. What that looks like from the outside is covered where
@@ -1147,9 +1158,22 @@ func TestInspect(t *testing.T) {
 		t.Errorf("Ports = %#v", info.Ports)
 	}
 
-	// A missing container is not found (inspect exits non-zero).
-	if info := replayShim(t, "Error: container not found: ghost", 1).Inspect("ghost"); info.Exists {
-		t.Errorf("missing container should be Exists=false, got %#v", info)
+	// A missing container is not found (inspect exits non-zero) — and that is
+	// known, not unknown.
+	if info := replayShim(t, "Error: container not found: ghost", 1).Inspect("ghost"); info.Exists || info.Unknown {
+		t.Errorf("missing container should be Exists=false and known, got %#v", info)
+	}
+	// A CLI that failed for any other reason (the real wording of a stopped
+	// apiserver, see testdata/real-cli-output.md) is neither present nor gone.
+	if info := replayShim(t, "Error: apiserver is not running and not registered with launchd", 1).Inspect("web"); !info.Unknown || info.Exists {
+		t.Errorf("a failed CLI should be Unknown, got %#v", info)
+	}
+	// An answer that cannot be read is unknown too: an empty array, and text
+	// that is not JSON at all.
+	for _, out := range []string{"[]", "not json"} {
+		if info := replayShim(t, out, 0).Inspect("web"); !info.Unknown || info.Exists {
+			t.Errorf("an unreadable answer %q should be Unknown, got %#v", out, info)
+		}
 	}
 }
 
@@ -1601,5 +1625,44 @@ func TestTheNetworkErrorNamesTheNetworkBeforeTheCLIsWords(t *testing.T) {
 	want := "creating network \"demo-net\": exit status 1\nError: no such subnet available"
 	if err.Error() != want {
 		t.Errorf("EnsureNetwork said:\n%q\nwant:\n%q", err.Error(), want)
+	}
+}
+
+// `run --name <name>` on container 1.4.1 when the name is taken: one sentence,
+// the same for a running and a stopped holder (measured, #912), and the word
+// pair `already exists` is shared with the network-name clash. The helper wants
+// the whole sentence with this name in it.
+func TestFidelityRunRefusedNameTaken(t *testing.T) {
+	const real = "Error: container with id web.demo.opossum already exists\n"
+	taken := &RunError{Err: errors.New("exit status 1"), Stderr: real}
+	if !RunRefusedNameTaken(taken, "web.demo.opossum") {
+		t.Error("the real refusal for this name must be recognised")
+	}
+	if RunRefusedNameTaken(taken, "db.demo.opossum") {
+		t.Error("a refusal about another container is not this one's")
+	}
+	if RunRefusedNameTaken(fmt.Errorf("wrapped: %w", taken), "web.demo.opossum") == false {
+		t.Error("the refusal should be found through a wrapping error")
+	}
+	// The spelling the race itself produces (the holder still being created).
+	racing := &RunError{Err: errors.New("exit status 1"), Stderr: "Error: container already exists: web.demo.opossum\n"}
+	if !RunRefusedNameTaken(racing, "web.demo.opossum") {
+		t.Error("the mid-creation spelling of the same refusal must be recognised")
+	}
+	if RunRefusedNameTaken(racing, "db.demo.opossum") {
+		t.Error("the mid-creation spelling about another container is not this one's")
+	}
+	for _, other := range []string{
+		"Error: network demo-net already exists\n", // the network clash shares the words
+		"Error: HTTP request to https://registry-1.docker.io/v2/library/no-such/manifests/latest failed with response: 401 Unauthorized.\n",
+		"Error: container ID bad name is not a valid container ID\n",
+		"",
+	} {
+		if RunRefusedNameTaken(&RunError{Err: errors.New("exit status 1"), Stderr: other}, "web.demo.opossum") {
+			t.Errorf("must not read %q as the name being taken", other)
+		}
+	}
+	if RunRefusedNameTaken(errors.New("exit status 1"), "web.demo.opossum") {
+		t.Error("an error that is not a RunError carries no stderr to read")
 	}
 }

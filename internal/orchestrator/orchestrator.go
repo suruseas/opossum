@@ -742,6 +742,12 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 			return nerr // the network is there; the advice about a stale one would contradict it
 		}
 		if nerr != nil {
+			// A Ctrl-C here kills the `network create` and comes back as its
+			// failure; the runtime is not unhealthy and there is no stale network
+			// to remove. Same verdict as everywhere else in this up.
+			if ierr := o.interrupted(); ierr != nil {
+				return ierr
+			}
 			return fmt.Errorf("couldn't create network %q for the project: %w\n"+
 				"  check the runtime is healthy (`opossum doctor`); if a stale network with that name exists, remove it with `container network delete %s`", rn.name, nerr, rn.name)
 		}
@@ -840,6 +846,13 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 			o.DNSDomain, o.DNSDomain)
 	}
 
+	// One service at a time, in dependency order, even for services that don't
+	// depend on each other. docker compose starts independent services
+	// concurrently; opossum does not because it buys nothing here: the runtime
+	// accepts concurrent `run`s but boots the VMs one at a time, so eight
+	// launched at once take eight times as long as one (measured on 1.4.1, see
+	// docs/benchmarks.md). Re-measure that before reaching for goroutines here —
+	// they would touch rollback, the lock, the supervisor and healthcheck waits.
 	for _, name := range order {
 		// Bail out (into the deferred rollback) if the user interrupted us between
 		// services.
@@ -887,6 +900,11 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 				// dependency is broken on the up side, and `opossum up <dep>` is
 				// the command that retries it.
 				if err := o.rt.Build(o.buildOptions(image, svc.Build, "opossum up")); err != nil {
+					// A Ctrl-C during the build is not a Dockerfile the builder
+					// cannot handle, and the Docker-import fallback is no answer to it.
+					if ierr := o.interrupted(); ierr != nil {
+						return ierr
+					}
 					return buildFailed(name, err)
 				}
 				rebuilt = true
@@ -978,7 +996,9 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 		// looking afterwards would start a container to inspect what opossum had
 		// just prepared itself, on every fresh volume.
 		o.warnForeignPostgresDataVolume(name, svc, image)
-		o.seedVolumes(name, svc, image)
+		if err := o.seedVolumes(name, svc, image); err != nil {
+			return err
+		}
 
 		// Replace any stale container left by a previous run of THIS project (the
 		// pre-flight above already ruled out foreign owners).
@@ -995,6 +1015,20 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 			runOpts.Detach = false
 			o.logf("Running %s to completion (%s)\n", name, image)
 			if err := o.rt.Run(runOpts); err != nil {
+				// A Ctrl-C during the run kills the child, and the run returns a
+				// failure — but the person who pressed it did not see a service
+				// fail, and there is nothing in its logs to check. Say what happened.
+				if ierr := o.interrupted(); ierr != nil {
+					return ierr
+				}
+				// The name was taken between the delete above and this run: not this
+				// up's container (see the same case below). A run-to-completion
+				// dependency has to be run by this up to be known to have completed,
+				// so there is no "up to date" to report here — only the refusal.
+				if runtime.RunRefusedNameTaken(err, cname) {
+					started, createdSvc = disownLast(started, createdSvc, cname, name)
+					return nameTakenError(name, cname, "a run-to-completion dependency has to be run by this `up` to know it completed")
+				}
 				return fmt.Errorf("service %q did not complete successfully: %w\n"+
 					"  it's a run-to-completion dependency (a service_completed_successfully target) that exited non-zero — check its output above, or run it directly with `opossum run %s`", name, err, name)
 			}
@@ -1002,6 +1036,32 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 		}
 		o.logf("Starting %s (%s)\n", name, image)
 		if err := o.rt.Run(runOpts); err != nil {
+			// A foreground run stays attached until the container exits, so a Ctrl-C
+			// lands here as the run's failure ("signal: killed"). The loop's own
+			// interrupted() check runs only between services and never sees it; the
+			// start-failure decoding below would send the person who pressed Ctrl-C
+			// to `opossum logs` for a service that simply stopped. Same verdict as
+			// the loop head: interrupted, rolling back.
+			if ierr := o.interrupted(); ierr != nil {
+				return ierr
+			}
+			// The name was free a moment ago (the delete above), and now the runtime
+			// says it is taken: something else — another opossum this lock could not
+			// see, or a hand-run `container run --name` — created it in between. That
+			// container is not this up's, so it is not this up's to roll back: take
+			// it off the rollback list before deciding anything else. Then, as
+			// docker compose does when it finds the service already there, accept it
+			// if it is the one the compose file describes (running, same config
+			// hash); otherwise refuse, and leave it standing for the person to look
+			// at — recreating it would be the same overreach the lock exists to stop.
+			if runtime.RunRefusedNameTaken(err, cname) {
+				started, createdSvc = disownLast(started, createdSvc, cname, name)
+				if cur := o.rt.Inspect(cname); cur.Exists && cur.State == "running" && cur.Labels[configHashLabel] == hash {
+					o.logf("%s is up to date\n", name)
+					continue
+				}
+				return nameTakenError(name, cname, "it is not the one this compose file describes (different configuration, or not running)")
+			}
 			return o.decodeStartError(name, err)
 		}
 		// The runtime echoes the container's DNS name (e.g. web.demo.opossum),
@@ -1800,11 +1860,20 @@ func (o *Orchestrator) Images() error {
 	return tw.Flush()
 }
 
-// volumeName namespaces a named volume by project, matching docker compose's
-// `<project>_<volume>` convention. This keeps concurrent projects that share a
-// volume name from colliding on a single global volume — the same isolation the
-// `<service>.<project>.<domain>` container naming already gives (see #9/#63).
+// volumeName is the runtime name of a project volume. A declaration with a
+// `name:` keeps that name — docker compose creates the volume under it, not
+// under the project's prefix, which is how a file fixes a volume's name for a
+// backup script or a second project to find (#937). Otherwise the volume is
+// namespaced by project, matching docker compose's `<project>_<volume>`
+// convention, so concurrent projects that share a volume key don't collide on
+// a single global volume — the same isolation the `<service>.<project>.<domain>`
+// container naming already gives (see #9/#63). Every path that names a project
+// volume — the `-v` of `up` and `run`, seeding, `down -v`, `destroy`, `volumes`
+// — goes through here, so what is created is what is removed.
 func (o *Orchestrator) volumeName(src string) string {
+	if n := o.Project.Volumes[src].Name; n != "" {
+		return n
+	}
 	return o.Project.Name + "_" + src
 }
 
@@ -2040,8 +2109,8 @@ func (o *Orchestrator) unknownServiceErr(name string) error {
 }
 
 // serviceRuntimeVolumes returns the runtime-level named volumes a service mounts
-// — the exact names a running container would show — covering project-namespaced,
-// anonymous, and external volumes. Bind mounts (host paths) are excluded: they're
+// — the exact names a running container would show — covering project-namespaced
+// (or declared-name), anonymous, and external volumes. Bind mounts (host paths) are excluded: they're
 // shareable and never cause an attach conflict.
 func (o *Orchestrator) serviceRuntimeVolumes(name string) []string {
 	svc := o.Project.Services[name]
@@ -2269,11 +2338,34 @@ func (o *Orchestrator) decodeVolumeAttachError(name, excludeContainer string, er
 	// fall back to naming just the service's volumes (the holder may have exited
 	// between the failed run and this lookup).
 	var busy []string
+	// A holder that is the volume's own seeding container — another `up` or
+	// `run` filling this very volume from the image — is not one to stop: that
+	// would leave the volume half-filled, and the next start would take it as
+	// already there. The advice for that holder is to wait. The match is the
+	// exact name opossum gives the seed of this volume, not a prefix: a service
+	// called `seed-something`, or the seed of some other volume, is a holder
+	// like any other.
+	var filling []string
 	for _, v := range vols {
 		if hs := holders[v]; len(hs) > 0 {
 			sort.Strings(hs)
+			if seedIsFilling(v, hs) {
+				filling = append(filling, fmt.Sprintf("%q (being filled by %q)", v, hs[0]))
+				continue
+			}
 			busy = append(busy, fmt.Sprintf("%q (held by running container %s)", v, strings.Join(quoteAll(hs), ", ")))
 		}
+	}
+	sort.Strings(filling)
+	verb, those := "is", "that fill"
+	if len(filling) > 1 {
+		verb, those = "are", "those fills"
+	}
+	if len(busy) == 0 && len(filling) > 0 {
+		return fmt.Errorf("[%s] service %q can't start: %s %s still being filled from the image by another `up` or `run`, "+
+			"and Apple `container` attaches a named volume to only one running container at a time. Wait for %s "+
+			"to finish, then retry — do not stop the filler: a volume it leaves half-filled is taken as already there by the next start",
+			codeVolumeAttachBusy, name, strings.Join(filling, ", "), verb, those), true
 	}
 	if len(busy) == 0 {
 		for _, v := range vols {
@@ -2281,11 +2373,32 @@ func (o *Orchestrator) decodeVolumeAttachError(name, excludeContainer string, er
 		}
 	}
 	sort.Strings(busy)
+	// A fill in progress beside some other holder: the stop advice is for the
+	// other holder, and the fill is still not one to stop — say both, so the
+	// person does not stop the wrong container and then meet the seed next.
+	var alsoFilling string
+	if len(filling) > 0 {
+		which := "that one, do not stop it"
+		if len(filling) > 1 {
+			which = "those, do not stop them"
+		}
+		alsoFilling = fmt.Sprintf("; %s %s still being filled from the image — wait for %s", strings.Join(filling, ", "), verb, which)
+	}
 	return fmt.Errorf("[%s] service %q can't start: Apple `container` attaches a named volume to only "+
 		"one running container at a time, and %s is already attached elsewhere — the second attach fails "+
 		"with a storage-device (VZError) error. Stop the container holding it (`container stop <name>`), "+
-		"or give this service its own volume; for shared data use a bind mount (a host path) instead",
-		codeVolumeAttachBusy, name, strings.Join(busy, ", ")), true
+		"or give this service its own volume; for shared data use a bind mount (a host path) instead%s",
+		codeVolumeAttachBusy, name, strings.Join(busy, ", "), alsoFilling), true
+}
+
+// seedIsFilling reports whether the only thing holding volume v is v's own
+// seeding container — another `up` or `run` still filling it from the image.
+// The match is the exact name opossum gives the seed of this volume, not a
+// prefix: a service called `seed-something`, or the seed of some other
+// volume, is a holder like any other. Both exits of OPSM-103 — the
+// pre-flight warning and the decoded start failure — decide with this.
+func seedIsFilling(v string, holders []string) bool {
+	return len(holders) == 1 && holders[0] == runtime.SeedContainerName(v)
 }
 
 // warnBusyNamedVolumes warns, before starting anything, when a service's named
@@ -2338,6 +2451,14 @@ func (o *Orchestrator) warnBusyVolumesFor(services []string, ours map[string]boo
 			}
 			warned[v] = true
 			sort.Strings(foreign)
+			if seedIsFilling(v, foreign) {
+				o.warnf(codeVolumeAttachBusy, "service %q mounts named volume %q, which is still being filled from the image "+
+					"by another `up` or `run` (%s) — Apple container attaches a named volume to only one running container "+
+					"at a time, so this service will fail to start until that fill ends. Wait for it, then retry; "+
+					"do not stop the filler, or the volume is left half-filled and taken as already there by the next start.\n",
+					name, v, quoteAll(foreign)[0])
+				continue
+			}
 			o.warnf(codeVolumeAttachBusy, "service %q mounts named volume %q, which is already attached to "+
 				"running container %s — Apple container attaches a named volume to only one running "+
 				"container at a time, so this service will fail to start until that container stops. "+
@@ -2733,8 +2854,9 @@ func (o *Orchestrator) externalRealName(src string) string {
 	return src
 }
 
-// namedVolumes lists the distinct, project-namespaced named volumes referenced
-// by services (the source of a `name:/path` mount that isn't a host path).
+// namedVolumes lists the distinct named volumes referenced by services (the
+// source of a `name:/path` mount that isn't a host path), under their runtime
+// names — `<project>_<key>`, or the declared `name:`.
 func (o *Orchestrator) namedVolumes() []string {
 	seen := map[string]bool{}
 	var out []string
@@ -2962,7 +3084,8 @@ type VolumeStatus struct {
 // none is named) mount that exist on the runtime, in name order — what
 // `docker compose volumes` shows. A volume is opossum's when a service mounts
 // it as a named or anonymous volume: it is then created under the project's
-// name on first use, and that is the name looked for in `container volume ls`.
+// name (or the `name:` its declaration gives) on first use, and that is the
+// name looked for in `container volume ls`.
 // Declared but unmounted volumes are never created, so they do not appear;
 // external volumes are the user's, not the project's, and are left out as
 // docker compose leaves them out; a bind mount is a directory, not a volume.
@@ -3251,6 +3374,28 @@ func buildFailed(service string, err error) error {
 // startFailed wraps a generic (non-decoded) container-start failure with a pointer
 // to the logs — the raw runtime error rarely says why the container died, but its
 // own logs usually do.
+// disownLast takes the container this iteration just put on the rollback list
+// back off it: the runtime refused to start it because something else holds
+// the name, so it is not this up's to stop or remove. The list's last entry is
+// that container (nothing is appended between the append and the run); the
+// name is checked rather than assumed, so a change to that ordering cannot
+// quietly take someone else's entry off instead.
+func disownLast(started []string, createdSvc map[string]bool, cname, svc string) ([]string, map[string]bool) {
+	if n := len(started); n > 0 && started[n-1] == cname {
+		started = started[:n-1]
+	}
+	delete(createdSvc, svc)
+	return started, createdSvc
+}
+
+// nameTakenError is the refusal for a container name that something else took
+// between this up freeing it and starting it. It says what this up knows — the
+// name is held — and not who holds it, which it cannot tell.
+func nameTakenError(svc, cname, why string) error {
+	return fmt.Errorf("starting service %q: something else now holds the container name %q — it appeared after this `up` made sure the name was free, so this `up` did not create it and will not remove it; %s\n"+
+		"  see it with `container ls -a`; once it is gone, or is the one you want, run `opossum up` again", svc, cname, why)
+}
+
 func startFailed(service string, err error) error {
 	return fmt.Errorf("starting service %q: %w\n"+
 		"  check why with `opossum logs %s`, or verify the image, command, and mounts in the compose file", service, err, service)
@@ -3333,6 +3478,9 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 				if errors.As(err, &changed) {
 					return err
 				}
+				if o.interrupted() != nil {
+					return runInterrupted("the network for " + service + " was not created")
+				}
 				return fmt.Errorf("couldn't create network %q for the run: %w\n"+
 					"  check the runtime is healthy (`opossum doctor`); if a stale network with that name exists, remove it with `container network delete %s`", rn.name, err, rn.name)
 			}
@@ -3347,6 +3495,12 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 		image = o.Project.Name + "-" + service + ":latest"
 		o.logf("Building %s\n", service)
 		if err := o.rt.Build(o.buildOptions(image, svc.Build, "opossum run")); err != nil {
+			// A Ctrl-C mid-build is not a Dockerfile the builder cannot handle.
+			// Nothing has been started yet, so there is nothing to roll back — say
+			// only what was abandoned.
+			if o.interrupted() != nil {
+				return runInterrupted("the build of " + service + " was abandoned")
+			}
 			return buildFailed(service, err)
 		}
 	}
@@ -3366,7 +3520,12 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 	if err := o.ensureBindDirs(service, svc.Volumes, "`opossum run`"); err != nil {
 		return err
 	}
-	o.seedVolumes(service, svc, image)
+	if err := o.seedVolumes(service, svc, image); err != nil {
+		if o.interrupted() != nil {
+			return runInterrupted("the fill of a new volume for " + service + " was taken back")
+		}
+		return err
+	}
 	// Pre-flight the exclusive-attach conflict for the one-off too (as `up` does):
 	// if a running container — including this service's own `up` container — already
 	// holds a volume the one-off needs, it will fail to attach. Exclude only our
@@ -3430,6 +3589,51 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 		CapDrop:    svc.CapDrop,
 		// No published ports for a one-off (matches docker-compose run).
 	})
+	// A Ctrl-C kills the attached `run`, and the container it started keeps
+	// running unless something stops it — measured on container 1.4.1, where
+	// the process died of the signal with nothing said and the one-off stayed
+	// up. Stop it here (and remove it when --rm asked for that), on a live
+	// context: the cancelled one would kill the teardown commands too. Then say
+	// what happened; the run's own error is the kill, not a result.
+	if ierr := o.interrupted(); ierr != nil {
+		o.rt.Ctx = context.Background()
+		o.rt.Stop(cname)
+		// "Stopped" is checked, not assumed — as the rollback of an `up` checks
+		// its removals. `stop`'s exit code says only whether the name exists
+		// (0 for running, stopped and exited alike; measured on container 1.4.1),
+		// so the runtime is asked what became of the container. Gone (the CLI
+		// says "not found") counts as stopped: nothing is left running either
+		// way; a runtime that could not be asked at all does not. On 1.4.1 `stop` is
+		// synchronous (a container ignoring SIGTERM is stopped when it returns,
+		// after a ~5 s grace), so the "still running" branch has no known way
+		// to be reached today; it stands so that a runtime whose stop becomes
+		// asynchronous is reported rather than trusted.
+		if opts.Rm {
+			o.rt.Delete(cname)
+			switch info := o.rt.Inspect(cname); {
+			case info.Unknown:
+				return fmt.Errorf("interrupted — tried to stop and remove %s, but the runtime could not be asked whether it is gone; `container ls -a` shows it, `container delete --force %s` removes it", cname, cname)
+			case info.Exists:
+				return fmt.Errorf("interrupted — tried to stop and remove %s, but it is still there; `container delete --force %s` removes it", cname, cname)
+			}
+			return fmt.Errorf("interrupted — stopped and removed %s", cname)
+		}
+		info := o.rt.Inspect(cname)
+		switch {
+		case info.Unknown:
+			// Not "stopped": nothing answered. Saying so is the whole point of
+			// asking — the stop reached the same runtime, so it may not have either.
+			return fmt.Errorf("interrupted — tried to stop %s, but the runtime could not be asked whether it stopped; `container ls -a` shows it, `container stop %s` stops it", cname, cname)
+		case info.Exists && info.State == "running":
+			return fmt.Errorf("interrupted — tried to stop %s, but it is still running; `container stop %s` stops it (it is kept, as without --rm)", cname, cname)
+		case !info.Exists:
+			// Nothing is running, which is what was wanted — but this run did not
+			// remove it (no --rm), so saying "kept" would be false, and saying
+			// nothing would report someone else's doing as this run's result.
+			return fmt.Errorf("interrupted — stopped %s; it is no longer there (something else removed it)", cname)
+		}
+		return fmt.Errorf("interrupted — stopped %s (it is kept, as without --rm; `opossum run --rm` removes it)", cname)
+	}
 	if opts.Rm {
 		o.rt.Delete(cname)
 	}
@@ -3613,8 +3817,11 @@ type volumeMount struct {
 
 // classifyVolume resolves one compose volume entry for a service into a mount.
 func (o *Orchestrator) classifyVolume(svcName, entry string) volumeMount {
+	// What the entry refers to is the loader's judgement (compose.ClassifyMount),
+	// so what needed a declaration there is what is mounted by name here.
+	kind, src := compose.ClassifyMount(entry)
 	parts := strings.SplitN(entry, ":", 2)
-	if len(parts) == 1 || parts[0] == "" {
+	if kind == compose.MountAnonymous {
 		// A single path (or an omitted source) is an anonymous volume at that path
 		// (compose semantics), not a bind mount. Give it a deterministic
 		// per-service name so re-up reuses (and `down -v` removes) the same volume.
@@ -3622,10 +3829,10 @@ func (o *Orchestrator) classifyVolume(svcName, entry string) volumeMount {
 		name := o.anonVolumeName(svcName, target)
 		return volumeMount{Arg: name + ":" + target, Volume: name, Target: target}
 	}
-	src, rest := parts[0], parts[1]
+	rest := parts[1]
 	target := strings.SplitN(rest, ":", 2)[0] // container path, minus any :ro/:rw
 	switch {
-	case isHostPath(src):
+	case kind == compose.MountBind:
 		// Bind mount: make the host side absolute relative to the compose dir.
 		return volumeMount{Arg: o.resolvePath(src) + ":" + rest}
 	case o.isExternalVolume(src):
@@ -3634,7 +3841,7 @@ func (o *Orchestrator) classifyVolume(svcName, entry string) volumeMount {
 		return volumeMount{Arg: o.externalRealName(src) + ":" + rest}
 	default:
 		// Named volume: namespaced per project so concurrent projects don't share
-		// one global volume (#63).
+		// one global volume (#63), unless its declaration names it (#937).
 		name := o.volumeName(src)
 		return volumeMount{Arg: name + ":" + rest, Volume: name, Target: target}
 	}
@@ -3767,9 +3974,17 @@ func hasPGDATASubdir(svc *compose.Service) bool {
 // contents at the mount path the FIRST time that volume is created, mirroring
 // Docker (Apple `container` mounts a fresh volume empty). Existing volumes are
 // left untouched, so user data and prior state are preserved.
-func (o *Orchestrator) seedVolumes(svcName string, svc *compose.Service, image string) {
+//
+// It returns an error only for an interruption: a Ctrl-C while the throwaway
+// seeding container runs kills that run from outside, which `--rm` does not
+// survive — the container keeps running with the half-filled volume attached
+// (measured on container 1.4.1). The seed is then taken back here, by name:
+// the container stopped and removed and the volume deleted, so the next `up`
+// starts from nothing rather than from half of the image's content. The
+// caller returns that error, and its rollback removes what it had started.
+func (o *Orchestrator) seedVolumes(svcName string, svc *compose.Service, image string) error {
 	if svc == nil {
-		return
+		return nil
 	}
 	// `volume: {nocopy: true}` is the compose file saying "mount this empty" —
 	// typically because the image's copy is stale or huge and the real content
@@ -3798,6 +4013,10 @@ func (o *Orchestrator) seedVolumes(svcName string, svc *compose.Service, image s
 			// would make `nocopy` the one way to end up with ext4's `lost+found` in a
 			// fresh volume, which is the opposite of what it asks for.
 			if err := o.rt.PrepareVolume(m.Volume, image); err != nil {
+				if ierr := o.interrupted(); ierr != nil {
+					o.takeBackSeed(m.Volume)
+					return ierr
+				}
 				o.warnf(codeVolumeNotSeeded, "couldn't prepare the new volume %q with %s: %v\n"+
 					"         nothing was copied into it (the compose file asked for that), but it also\n"+
 					"         keeps `lost+found`, the directory ext4 puts in every filesystem it makes.\n"+
@@ -3809,6 +4028,10 @@ func (o *Orchestrator) seedVolumes(svcName string, svc *compose.Service, image s
 			continue
 		}
 		if err := o.rt.SeedVolume(m.Volume, image, m.Target); err != nil {
+			if ierr := o.interrupted(); ierr != nil {
+				o.takeBackSeed(m.Volume)
+				return ierr
+			}
 			// The volume mounts empty, which looks exactly like a service that lost its
 			// data — and nothing later can tell the two apart, so this is the only
 			// place to say it. The runtime's own words lead, verbatim: the usual cause
@@ -3823,17 +4046,49 @@ func (o *Orchestrator) seedVolumes(svcName string, svc *compose.Service, image s
 				m.Volume, image, m.Target, err)
 		}
 	}
+	return nil
 }
 
+// runInterrupted is the verdict for a Ctrl-C before a one-off's own container
+// started: it names what was abandoned and says the one-off never ran. It says
+// nothing about dependencies on purpose — those `run` started are left up, as
+// docker compose run leaves them, and a sentence claiming "nothing was
+// started" was false whenever there were any.
+func runInterrupted(what string) error {
+	return fmt.Errorf("interrupted — %s; the one-off did not start", what)
+}
+
+// takeBackSeed removes what an interrupted seeding left behind: the throwaway
+// container, still running because the kill came from outside, and the volume
+// it was filling. On a live context — the cancelled one would kill these too.
+//
+// Deleting a volume can destroy data, so what makes this one safe is spelled
+// out: the caller reaches the seed only for a volume that did not exist when
+// it looked (VolumeExists, just above), so this one was made by the seed run
+// itself. The window between that look and this delete is closed, under
+// `up`, by two things together: the name is namespaced to the project
+// (`<project>_<volume>`), and the project lock keeps a second `up` of the same
+// project out — someone removing that lock takes this guarantee with it. A
+// one-off `run` seeds outside that lock and relies on the namespace and the
+// shortness of the window alone.
+func (o *Orchestrator) takeBackSeed(volume string) {
+	o.rt.Ctx = context.Background()
+	name := runtime.SeedContainerName(volume)
+	o.rt.Stop(name)
+	o.rt.Delete(name)
+	o.rt.DeleteVolume(volume)
+}
+
+// isHostPath is the loader's reading of a mount source (compose.IsHostPath):
+// one function on both sides, so a source that loads as a bind runs as one.
 func isHostPath(s string) bool {
-	return strings.HasPrefix(s, "/") ||
-		strings.HasPrefix(s, "./") ||
-		strings.HasPrefix(s, "../") ||
-		strings.HasPrefix(s, "~/") ||
-		s == "." || s == ".."
+	return compose.IsHostPath(s)
 }
 
 func (o *Orchestrator) resolvePath(p string) string {
+	if p == "~" {
+		p = "~/"
+	}
 	if rest, ok := strings.CutPrefix(p, "~/"); ok {
 		// The runtime doesn't expand ~, so resolve it to the home dir here.
 		if home, err := os.UserHomeDir(); err == nil {

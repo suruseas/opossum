@@ -71,10 +71,14 @@ build can starve.
   **subdirectory** (`environment: { PGDATA: /var/lib/postgresql/data/pgdata }`).
   MySQL/MariaDB tolerate the mount point either way. Only bind-mount host
   paths are resolved to absolute paths. Named volumes are namespaced per project
-  (`<project>_<volume>`), so concurrent projects don't share one — except a
-  volume declared `external: true` in the top-level `volumes:` block, which is
-  used by its real name (its declared `name:`, or the key) and never removed by
-  `down -v` — the user manages it. `external` takes the bool form; the volume
+  (`<project>_<volume>`), so concurrent projects don't share one. A volume
+  declared with a `name:` in the top-level `volumes:` block is created under
+  that name instead, as on docker compose — the way a file fixes a name for a
+  backup script or a second project to find — and `down -v` removes it under
+  that name, whether opossum created it or it was already there (to keep a
+  volume out of the project's hands, declare it `external: true`). A volume declared `external: true` there is used by its real name
+  (its declared `name:`, or the key) and never removed by `down -v` — the user
+  manages it. `external` takes the bool form; the volume
   must already exist (opossum doesn't create it). Other top-level volume settings
   (`driver`, `labels`, …) are not applied.
 - **A named volume can't be shared by two running containers.** `container`

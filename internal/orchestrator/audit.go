@@ -135,6 +135,12 @@ func (o *Orchestrator) RunAudited(service string, command []string, opts RunOneO
 	opts.Audit = true
 	opts.NoDeps = true
 	runErr := o.RunOneOff(service, command, opts)
+	// A Ctrl-C is not a result to audit: RunOneOff has stopped the container
+	// and says so, and a report of "exit -1" would bury that under a verdict
+	// about the command. Hand the interruption up as it is.
+	if ierr := o.interrupted(); ierr != nil {
+		return nil, runErr
+	}
 	report.ExitCode = exitCode(runErr)
 
 	// Files diff.

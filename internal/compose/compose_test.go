@@ -324,6 +324,9 @@ services:
         target: /var/lib/data
       - type: volume
         target: /anon
+volumes:
+  shortvol: {}
+  datavol: {}
 `))
 	if err != nil {
 		t.Fatalf("load: %v", err)
@@ -624,6 +627,8 @@ services:
       - type: tmpfs
         target: /tmp
       - ./host:/mnt
+volumes:
+  pgdata: {}
 `))
 	if err != nil {
 		t.Fatalf("load: %v", err)

@@ -16,6 +16,45 @@ type configOutput struct {
 	Name     string                   `yaml:"name,omitempty"`
 	Services map[string]configService `yaml:"services"`
 	Networks map[string]configNetwork `yaml:"networks,omitempty"`
+	// The declarations that change what a run means — a volume's `external`
+	// and `name`, a secret's or config's source — travel with the output, or
+	// the output run back would make an external volume a namespaced, seeded
+	// one of its own and drop every secret and config mount (#939).
+	Volumes map[string]configVolume `yaml:"volumes,omitempty"`
+	Secrets map[string]configSecret `yaml:"secrets,omitempty"`
+	Configs map[string]configConfig `yaml:"configs,omitempty"`
+}
+
+// configVolume carries what `up` acts on: `external`, and the `name:` a
+// declaration gives — the real name of an external volume, or the name a
+// project volume is created under instead of `<project>_<key>` (#937). Both
+// are read by `up`, so the output says exactly what the run does.
+type configVolume struct {
+	External bool   `yaml:"external,omitempty"`
+	Name     string `yaml:"name,omitempty"`
+}
+
+type configSecret struct {
+	File     string `yaml:"file,omitempty"`
+	External bool   `yaml:"external,omitempty"`
+}
+
+// configConfig carries the one form the declaration used: `file`, `content`
+// or `environment` (the variable's name — its value is read when the output
+// is loaded, as it was for the input).
+type configConfig struct {
+	File        string  `yaml:"file,omitempty"`
+	Content     *string `yaml:"content,omitempty"`
+	Environment string  `yaml:"environment,omitempty"`
+	External    bool    `yaml:"external,omitempty"`
+}
+
+// configRef is a service's reference to a secret or config. The short form is
+// written back short (the target it implies is the loader's default again);
+// a target of the person's own is written in the long form.
+type configRef struct {
+	Source string `yaml:"source"`
+	Target string `yaml:"target,omitempty"`
 }
 
 type configNetwork struct {
@@ -101,6 +140,8 @@ type configService struct {
 	MacAddress  string               `yaml:"mac_address,omitempty"`
 	Labels      map[string]string    `yaml:"labels,omitempty"`
 	Networks    []string             `yaml:"networks,omitempty"`
+	Secrets     []any                `yaml:"secrets,omitempty"`
+	Configs     []any                `yaml:"configs,omitempty"`
 	DependsOn   map[string]configDep `yaml:"depends_on,omitempty"`
 	Healthcheck *configHealthcheck   `yaml:"healthcheck,omitempty"`
 }
@@ -167,6 +208,8 @@ func RenderConfig(p *Project) (string, error) {
 			MacAddress:  svc.MacAddress,
 			Labels:      labelMap(svc.Labels),
 			Networks:    svc.Networks,
+			Secrets:     secretRefs(svc.Secrets),
+			Configs:     configRefs(svc.Configs),
 		}
 		if svc.Build != nil {
 			cs.Build = &configBuild{Context: svc.Build.Context, Dockerfile: svc.Build.Dockerfile, Args: ResolveBareNames(svc.Build.Args, os.LookupEnv, false), Target: svc.Build.Target}
@@ -202,12 +245,43 @@ func RenderConfig(p *Project) (string, error) {
 		}
 	}
 
+	if len(p.Volumes) > 0 {
+		out.Volumes = map[string]configVolume{}
+		for name, decl := range p.Volumes {
+			out.Volumes[name] = configVolume{External: decl.External, Name: decl.Name}
+		}
+	}
+	if len(p.Secrets) > 0 {
+		out.Secrets = map[string]configSecret{}
+		for name, decl := range p.Secrets {
+			out.Secrets[name] = configSecret{File: decl.File, External: decl.External}
+		}
+	}
+	if len(p.Configs) > 0 {
+		out.Configs = map[string]configConfig{}
+		for name, decl := range p.Configs {
+			out.Configs[name] = configConfig{File: decl.File, Content: decl.Content, Environment: decl.EnvVar, External: decl.External}
+		}
+	}
+
 	body, err := yaml.Marshal(out)
 	if err != nil {
 		return "", err
 	}
 
 	var b strings.Builder
+	// Every `$` in the values came through interpolation, where `$$` reads as
+	// one `$`; written back bare it would be read as a variable reference the
+	// next time this output is loaded — a healthcheck's `$${PG_USER}`, meant
+	// for the container's shell, expanding to nothing on the host, or a
+	// `$$HOME` turning into this machine's path. So `$` goes out as `$$`, the
+	// way docker compose config prints it, and the output reads back to the
+	// same values (a literal `$$`, written `$$$$`, comes out as `$$$$` again).
+	// The whole output is escaped rather than field by field: nothing
+	// opossum writes here carries a `$` of its own, and a field-by-field list
+	// is one more place for a new field to be missed. The trailing comments
+	// are included — the loader interpolates comments too, and they carry
+	// declaration names the person wrote.
 	b.Write(body)
 	if ignored := ignoredComment(p); ignored != "" {
 		b.WriteString(ignored)
@@ -215,7 +289,7 @@ func RenderConfig(p *Project) (string, error) {
 	if caveat := restartCaveat(p); caveat != "" {
 		b.WriteString(caveat)
 	}
-	return b.String(), nil
+	return strings.ReplaceAll(b.String(), "$", "$$"), nil
 }
 
 // ignoredComment lists, as YAML comments, the fields opossum ignores — both
@@ -276,6 +350,40 @@ func restartCaveat(p *Project) string {
 // print a compose file you could run — so a mount whose seeding was switched off
 // has to say so, or feeding the output back in would turn the copy on again.
 // Rendered in the short spelling, which is what the long form means.
+// secretRefs writes a service's secret references back: the short form for a
+// reference the loader read from a bare name (its target is the name), the
+// long form when a target was given.
+func secretRefs(refs SecretRefs) []any {
+	if len(refs) == 0 {
+		return nil
+	}
+	out := make([]any, 0, len(refs))
+	for _, r := range refs {
+		if r.Target == r.Source {
+			out = append(out, r.Source)
+			continue
+		}
+		out = append(out, configRef{Source: r.Source, Target: r.Target})
+	}
+	return out
+}
+
+// configRefs is secretRefs for configs, whose bare-name target is `/<name>`.
+func configRefs(refs ConfigRefs) []any {
+	if len(refs) == 0 {
+		return nil
+	}
+	out := make([]any, 0, len(refs))
+	for _, r := range refs {
+		if r.Target == "/"+r.Source {
+			out = append(out, r.Source)
+			continue
+		}
+		out = append(out, configRef{Source: r.Source, Target: r.Target})
+	}
+	return out
+}
+
 func volumesWithNoCopy(svc *Service) []string {
 	if len(svc.NoCopy) == 0 {
 		return svc.Volumes

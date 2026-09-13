@@ -36,7 +36,7 @@ func TestABooleanWrittenAsTheQuotedWordIsReadAsTheBoolean(t *testing.T) {
 		{"N, the YAML 1.1 word, quoted", svc + "    init: \"N\"\n", func(p *Project) bool { return !p.Services["web"].Init }},
 		{"a boolean through an alias", "x-ro: &ro true\n" + svc + "    read_only: *ro\n", func(p *Project) bool { return p.Services["web"].ReadOnly }},
 		{"a mount's read_only", svc + "    volumes:\n      - {type: bind, source: ./a, target: /x, read_only: \"true\"}\n", func(p *Project) bool { return p.Services["web"].Volumes[0] == "./a:/x:ro" }},
-		{"a mount's nocopy", svc + "    volumes:\n      - {type: volume, source: d, target: /x, volume: {nocopy: \"true\"}}\n", func(p *Project) bool {
+		{"a mount's nocopy", svc + "    volumes:\n      - {type: volume, source: d, target: /x, volume: {nocopy: \"true\"}}\nvolumes:\n  d: {}\n", func(p *Project) bool {
 			return len(p.Services["web"].NoCopy) == 1 && p.Services["web"].NoCopy[0] == "/x"
 		}},
 		{"an env file's required", svc + "    env_file:\n      - {path: ./nope.env, required: \"false\"}\n", func(p *Project) bool { return !p.Services["web"].EnvFile[0].Required }},

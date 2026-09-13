@@ -55,7 +55,7 @@ func TestALongFormMountWithoutItsTypeIsRefused(t *testing.T) {
 		{"a bind mount with an empty source, as before", "{type: bind, source: \"\", target: /x}", "/x"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p, err := Load(writeTemp(t, svc+"      - "+tc.item+"\n"))
+			p, err := Load(writeTemp(t, svc+"      - "+tc.item+"\nvolumes:\n  data: {}\n"))
 			if err != nil {
 				t.Fatalf("load: %v", err)
 			}

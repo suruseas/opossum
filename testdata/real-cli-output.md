@@ -119,6 +119,18 @@ opossum
 ```
 → `DNSDomainExists(domain)`: 行を trim して一致判定。
 
+## `container run --name <既存の名前>`  （exit 1 / 2026-09-13 に 1.4.1 で採取、#912）
+```
+Error: container with id <name> already exists
+```
+→ 既存が running でも stopped でも**同じ文言**（状態は `inspect` で読む）。別の理由の失敗（image 無し＝`HTTP request … 401 Unauthorized`、名前不正＝`container ID … is not a valid container ID`）とは語が重ならない。
+
+**同じ拒否の 2 つ目の綴り**（exit 1 / 2026-09-13、`up --force-recreate` の delete と run の間に別ループが同名を `run -d` し続ける race で採取、6 回中 3 回）：
+```
+Error: container already exists: <name>
+```
+→ 相手の作成が進行中のときはこちらの文になる。判定は両方の綴りを取る（`RunRefusedNameTaken`）。1 つ目の綴りしか知らない判定は、この窓では毎回すり抜ける。
+
 ## `container network create <name>`  （新規, exit 0）
 ```
 <name>
@@ -175,6 +187,27 @@ Error: network not found: <name>
 → `NetworkExists`: 終了コードだけを見る。`destroy` はこれを削除の可否のゲートに
 使うので（存在しない網を計画に並べない）、この契約が崩れると destroy は `down`
 より消し残す。2026-07-30 に macOS 26 上で実測。
+
+## `container stop <name>` / `container delete --force <name>`  （2026-09-13 に 1.4.1 で採取、inu の実測 `~/opossum-dogfood/del934/probe{1..5}.sh`）
+
+`stop` の exit code は「止まったか」を答えない：
+
+| 対象の状態 | `stop` rc | 出力 |
+|---|---|---|
+| 動いている | 0 | `<name>` |
+| 停止済み | 0 | `<name>` |
+| exit 済み | 0 | `<name>` |
+| 存在しない | **1** | `Error: internalError: "failed to stop container" (cause: "notFound: "container with ID <name> not found"")` |
+
+`stop` は同期（inu の実測、2026-09-13 13:0x 頃に Slack で報告、issue には未転記）：SIGTERM を無視する process（`trap "" TERM; sleep 300`）でも rc 0 が返った時点で `inspect` は `stopped`（所要 5.22 s、途中の state は `running` のままで `stopping` は現れない）。
+
+`delete --force` は 8 形（running／stopped／exited／SIGTERM 無視／exec 張り付き／volume 書き込み中／起動中と競合／2 本同時）で全部 rc 0・消えている。存在しないときだけ rc 1：
+
+```
+Error: internalError: "failed to delete container" (cause: "notFound: "container with ID <name> not found"")
+```
+
+→ `Runtime.Stop`／`Delete` は rc を捨てる（届く error は notFound だけ）。「止まった／消えた」は `inspect` の `status.state`／不在で確かめる（#926）。fake の `stop`／`delete`／`inspect` はこの表を写している。
 
 ## `container inspect <name>`  （不在, exit 1）
 ```

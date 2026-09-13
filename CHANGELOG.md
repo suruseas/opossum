@@ -6,6 +6,26 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.27.1] - 2026-09-13
+
+### Changed
+
+- A service that mounts a named volume the file does not declare under top-level `volumes:` is now refused when the file is read, as docker compose refuses it (`service "db" refers to undefined volume "dbdata"`). Before, a misspelling on either side quietly created an empty volume under the misspelt name and mounted it, so a database could initialise fresh where existing data was expected. A path written as `/…`, `./…`, `../…` or `~/…` (or `.`/`..` itself — a bind mount) and a bare target (an anonymous volume) need no declaration; a file that relied on the old behaviour needs a one-line `volumes: {dbdata: {}}`.
+- A volume source that starts with `.` or `~` is now read as a host path, as docker compose reads it: `.hidden:/y` bind-mounts the hidden directory beside the compose file and `~:/y` your home. Before, such a source named a volume — `.hidden/sub` even became a volume "name" containing a slash, which the runtime then rejected as a path that does not exist. A source written `~name…` is refused rather than resolved (docker compose reads it as `$HOME/name…`, which nobody means): write `~/name…` or an absolute path. In the long form the `type:` decides: `type: bind` with a bare `source: data` now bind-mounts the directory `data` beside the compose file (it was refused as an undeclared volume), and `type: volume` with a source starting with `.` is refused, as such a volume name cannot be carried here yet (docker compose creates it as `<project>_.hidden`).
+
+### Fixed
+
+- `up` no longer rolls back a container it did not create: when the runtime refuses a start because a container of that name already exists (created in the moment between `up` freeing the name and starting it, by something the project lock could not see), `up` reports the service up to date if that container is running with this compose file's configuration, and otherwise refuses and leaves it standing for you to inspect. A run-to-completion dependency in that position is always refused, since only running it would tell whether it completed.
+- Pressing Ctrl-C during `up --foreground` (or while a run-to-completion dependency is running) no longer reports the attached service as a start failure with a pointer to `opossum logs`; `up` now says it was interrupted and rolls back, as it already did for a Ctrl-C between services.
+- Pressing Ctrl-C while an `opossum run` one-off is running now stops the one-off container (and removes it under `--rm`) and reports the interruption; before, the process died of the signal with nothing said and the container kept running.
+- A Ctrl-C during `up` while it is creating the project network, building an image, or filling a new volume from the image now reports the interruption instead of a runtime, builder, or seeding failure with advice that does not apply; an interrupted volume fill also takes back what it left behind (the throwaway seeding container, which `--rm` cannot remove when the run is killed from outside, and the half-filled volume), so the next `up` starts from nothing rather than from part of the image's content. The same applies to `opossum run` before its one-off starts (its network, its service's build, and a new volume's fill): the interruption is reported as such, and dependencies it had already started are left up, as before.
+- Interrupting `opossum run` with Ctrl-C now checks that its container really stopped before saying so: `container stop` reports only whether the name exists, so opossum asks the runtime afterwards, and if the container is still running (or, with `--rm`, still there) it says that instead, with the command that finishes the job.
+- `OPSM-103` (a named volume already attached elsewhere) no longer tells you to stop the holder when that holder is the volume's own seeding container, still filling it from the image for another `up` or `run`; it now says to wait for the fill, since stopping it would leave the volume half-filled and the next start would take it as already there.
+- `opossum config` now writes a literal `$` back as `$$`, as docker compose config does. Its output loaded again therefore keeps the same values: a healthcheck's `$${POSTGRES_USER}` stays for the container's shell instead of expanding to nothing on the host, and `$$HOME` no longer turns into your machine's path. Before, values with `$` changed meaning each time the output was fed back in.
+- A project volume declared with a `name:` is now created, mounted, seeded, listed by `volumes` and removed by `down -v` and `destroy` under that name, as docker compose does; before, the name was ignored and `<project>_<key>` was used everywhere, so a volume meant to be found by name — by a backup script, or shared with another project — silently lived somewhere else. `opossum config` writes the `name:` too. As on docker compose, a `name:` volume is the project's: `down -v` and `destroy` remove it — including one that already existed under that name, which earlier versions never touched — so declare a volume `external: true` to keep it out of the project's hands.
+- `opossum config` now writes the top-level `volumes`, `secrets` and `configs` declarations and each service's `secrets`/`configs` references, so its output run back means what the input meant: an `external: true` volume stays external (real name, never seeded or removed) instead of becoming a namespaced, seeded volume of the project, and secret and config mounts are no longer dropped.
+- `destroy` now lists a volume the compose file declares with a `name:` of its own when no service mounts it any more, alongside the `<project>_` leftovers it already reported: such a volume carries no project prefix, so it used to go unmentioned — and a teardown would say everything was gone while it stayed on disk.
+
 ## [0.27.0] - 2026-09-13
 
 ### Added
@@ -1448,7 +1468,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.27.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.27.1...HEAD
+[0.27.1]: https://github.com/suruseas/opossum/compare/v0.27.0...v0.27.1
 [0.27.0]: https://github.com/suruseas/opossum/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/suruseas/opossum/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/suruseas/opossum/compare/v0.24.8...v0.25.0

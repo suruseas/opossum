@@ -419,9 +419,9 @@ func TestAServiceThatExtendsAnotherFileIsReadAsDockerReadsIt(t *testing.T) {
 	}
 
 	t.Run("paths resolve against the named file's directory, from a relative file: path", func(t *testing.T) {
-		write("sub/base3.yml", "services:\n  common:\n    build: ./ctx\n    volumes: [\"./data:/data\", \"named:/n\", {type: bind, source: ./long, target: /long}]\n    env_file: ./sub.env\n    develop: {watch: [{path: ./src, action: sync, target: /app}]}\n")
+		write("sub/base3.yml", "services:\n  common:\n    build: ./ctx\n    volumes: [\"./data:/data\", \"named:/n\", {type: bind, source: ./long, target: /long}, \".hid:/hid\", \"..hid2:/hid2\", {type: bind, source: .lhid, target: /lhid}, {type: bind, source: lbare, target: /lbare}, {type: bind, source: lbare/sub, target: /ls}, {type: volume, source: named, target: /ln}]\n    env_file: ./sub.env\n    develop: {watch: [{path: ./src, action: sync, target: /app}]}\n")
 		write("sub/sub.env", "X=fromsub\n")
-		paths2 := write("paths2.yml", "services:\n  web:\n    extends: {file: sub/base3.yml, service: common}\n    volumes: [\"./logs:/logs\"]\n")
+		paths2 := write("paths2.yml", "volumes:\n  named: {}\nservices:\n  web:\n    extends: {file: sub/base3.yml, service: common}\n    volumes: [\"./logs:/logs\"]\n")
 		p, err := Load(paths2)
 		if err != nil {
 			t.Fatalf("load: %v", err)
@@ -440,6 +440,17 @@ func TestAServiceThatExtendsAnotherFileIsReadAsDockerReadsIt(t *testing.T) {
 		}
 		if !strings.Contains(strings.Join(env, ","), "X=fromsub") {
 			t.Errorf("env_file must be read from the named file's directory; env = %v", env)
+		}
+		// A hidden name is a path too (docker's rule: a source starting with `.`),
+		// so it is joined onto the named file's directory like `./data`.
+		// A long-form `type: bind` with a bare source (with or without a `/` in
+		// it) is the directory beside the named file too, not beside the main
+		// one — and a long-form `type: volume` with a bare source stays the
+		// volume name: only the type says which, so both spellings sit here.
+		for _, want := range []string{"," + filepath.Join(sub, ".hid") + ":/hid", "," + filepath.Join(sub, "..hid2") + ":/hid2", "," + filepath.Join(sub, ".lhid") + ":/lhid", "," + filepath.Join(sub, "lbare") + ":/lbare", "," + filepath.Join(sub, "lbare", "sub") + ":/ls", ",named:/ln"} {
+			if got := strings.Join(web.Volumes, ","); !strings.Contains(got, want) {
+				t.Errorf("volumes = %q, want the hidden-name bind %s under %s", got, want, sub)
+			}
 		}
 		if web.Develop == nil || len(web.Develop.Watch) != 1 || web.Develop.Watch[0].Path != filepath.Join(sub, "src") {
 			t.Errorf("develop.watch path = %+v, want %s", web.Develop, filepath.Join(sub, "src"))
@@ -468,13 +479,18 @@ func TestAServiceThatExtendsAnotherFileIsReadAsDockerReadsIt(t *testing.T) {
 	})
 
 	t.Run("the named file's declarations do not come over", func(t *testing.T) {
-		write("decl.yml", "volumes:\n  named: {}\nnetworks:\n  back: {}\nservices:\n  common:\n    image: alpine:3\n    volumes: [\"named:/n\"]\n    networks: [back]\n")
-		usesDecl := write("usesdecl.yml", "networks:\n  back: {}\nservices:\n  web:\n    extends: {file: decl.yml, service: common}\n")
+		// The using file declares the mounted volume itself (a mount of an
+		// undeclared volume is refused, as docker refuses it); whether the
+		// named file's declarations came over shows on `extra`, which only the
+		// named file declares — a using-side declaration of `named` would hide
+		// a merge that let the using side win.
+		write("decl.yml", "volumes:\n  named: {}\n  extra: {}\nnetworks:\n  back: {}\nservices:\n  common:\n    image: alpine:3\n    volumes: [\"named:/n\"]\n    networks: [back]\n")
+		usesDecl := write("usesdecl.yml", "volumes:\n  named: {}\nnetworks:\n  back: {}\nservices:\n  web:\n    extends: {file: decl.yml, service: common}\n")
 		p, err := Load(usesDecl)
 		if err != nil {
 			t.Fatalf("load: %v", err)
 		}
-		if _, has := p.Volumes["named"]; has {
+		if _, has := p.Volumes["extra"]; has {
 			t.Errorf("the named file's volume declaration came over: %v", p.Volumes)
 		}
 	})
