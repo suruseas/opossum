@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os/exec"
 	"strings"
@@ -78,19 +79,29 @@ func TestExitCode(t *testing.T) {
 	if exitCode(nil) != 0 {
 		t.Error("nil error should be exit 0")
 	}
-	// A real non-zero container exit.
+	// A real non-zero container exit, as the one-off's own run returns it.
 	err := exec.Command("sh", "-c", "exit 7").Run()
-	if got := exitCode(err); got != 7 {
-		t.Errorf("exitCode(exit 7) = %d, want 7", got)
+	if got := exitCode(attachedExit(err)); got != 7 {
+		t.Errorf("exitCode(exit 7 of the run) = %d, want 7", got)
 	}
 	if exitCode(errors.New("setup failed")) != -1 {
 		t.Error("a non-ExitError should be -1 (a setup failure, not a process exit)")
 	}
-	// A non-TTY foreground run now returns a *runtime.RunError wrapping the exec
-	// error; exitCode must still extract the child's code through Unwrap so
-	// `run --audit` reports it (a dropped Unwrap would silently regress to -1).
-	if got := exitCode(&runtime.RunError{Err: err, Stderr: "boom"}); got != 7 {
+	// A runtime command that exited 7 before the run — a build, a network the
+	// run needed — is a setup failure too: its code is not the command's.
+	if got := exitCode(fmt.Errorf("building service %q: %w", "web", err)); got != -1 {
+		t.Errorf("exitCode of a setup step's exit = %d, want -1", got)
+	}
+	// A non-TTY foreground run returns a *runtime.RunError wrapping the exec
+	// error; the run's code has to be found through Unwrap so `run --audit`
+	// reports it (a dropped Unwrap would silently regress to -1).
+	if got := exitCode(attachedExit(&runtime.RunError{Err: err, Stderr: "boom"})); got != 7 {
 		t.Errorf("exitCode through a RunError wrapper = %d, want 7", got)
+	}
+	// A run whose runtime process a signal killed has no code of its own.
+	killed := exec.Command("sh", "-c", "kill -9 $$").Run()
+	if got := exitCode(attachedExit(killed)); got != -1 {
+		t.Errorf("exitCode of a run killed by a signal = %d, want -1", got)
 	}
 }
 

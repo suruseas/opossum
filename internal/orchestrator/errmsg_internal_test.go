@@ -214,7 +214,14 @@ func TestEnsureBindDirsAcceptsASourceThatIsAlreadyAFile(t *testing.T) {
 func scriptShim(t *testing.T, cases string) *rt.Runtime {
 	t.Helper()
 	shim := filepath.Join(t.TempDir(), "c.sh")
-	body := "#!/bin/sh\ncase \"$1\" in\n" + cases + "esac\nexit 0\n"
+	// A command the test does not mention succeeds with no output — except
+	// inspect, which answers as the real CLI does for a container that is not
+	// there (exit 1, `container not found`). Left to succeed silently, it read as
+	// "the runtime could not be asked" (an empty answer is not a container), a
+	// state no real runtime is in while answering everything else.
+	body := "#!/bin/sh\ncase \"$1\" in\n" + cases +
+		"  inspect) echo \"Error: container not found: $2\" >&2; exit 1 ;;\n" +
+		"esac\nexit 0\n"
 	if err := os.WriteFile(shim, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}

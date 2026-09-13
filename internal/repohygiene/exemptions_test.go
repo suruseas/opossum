@@ -38,6 +38,7 @@ func TestTheChangelogGatesExemptionsAreTheOnesWrittenDownHere(t *testing.T) {
 		"cmd/noleftovers":      "the leftover-directory check: a development tool",
 		"cmd/busy":             "the parallel-test guard: a development tool",
 		"internal/suitedir":    "test-suite directory layout: only tests and tools read it",
+		"internal/testpair":    "a helper that runs a test case with two elements in both orders: only _test.go files import it",
 	}
 
 	got := exemptedPackages(t, g.script)

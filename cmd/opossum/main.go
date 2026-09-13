@@ -418,6 +418,12 @@ func runCLI(args []string, out, errOut io.Writer) int {
 	root.SetArgs(args)
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(errOut, "opossum: "+quoted(err.Error()))
+		// `run` and `exec` exit with the container's own code, as docker
+		// compose does; every other failure is opossum's and exits 1.
+		var ce *orchestrator.ContainerExitError
+		if errors.As(err, &ce) {
+			return ce.Code
+		}
 		return 1
 	}
 	return 0
@@ -1110,8 +1116,12 @@ func runCmd() *cobra.Command {
 				} else {
 					report.WriteSummary(out)
 				}
+				if report.ExitCode > 0 {
+					// The code the report shows is the one opossum exits with.
+					return &orchestrator.ContainerExitError{Code: report.ExitCode, Err: errRunFailed}
+				}
 				if report.ExitCode != 0 {
-					return errRunFailed // non-zero container exit -> non-zero opossum exit
+					return errRunFailed // the run ended without a code of its own
 				}
 				return nil
 			}
@@ -1864,8 +1874,10 @@ func startSupervisorFor(stderr io.Writer, o *orchestrator.Orchestrator, disabled
 	// makes no statement about `db`, so replacing a supervisor watching [db web]
 	// with one watching [web] would silently drop a running service's `restart:`
 	// policy — the notice would be accurate and the behaviour still wrong. The
-	// union keeps both true: only services with a live container are carried over,
-	// so this can't go back to announcing services that were never started.
+	// union keeps both true: only services with a container are carried over — or
+	// ones the runtime could not be asked about, which are not written off over an
+	// outage — so this does not go back to announcing services known never to
+	// have started.
 	services = mergeServices(services, o.StillSupervised(orchestrator.Watched(o.Project.Name)))
 	if len(services) == 0 {
 		return

@@ -362,8 +362,9 @@ func generatedOverlay(path string) bool {
 //
 // Removal is best-effort per item, as in Down: a volume still held by a
 // container elsewhere, or a file already gone, must not stop the rest of the
-// teardown. The error is reserved for a failure that leaves the user's own files
-// in doubt, which is why only path removal can produce one.
+// teardown. The error says what is known to be left afterwards — a path that
+// could not be removed, or a runtime object still there when looked at again —
+// and, apart, the containers the runtime could not be asked about at all.
 func (o *Orchestrator) Destroy(p DestroyPlan) error {
 	// The same lock as Up and Down (see projectLock): a destroy under an `up`
 	// would remove what the `up` is starting, and the `up` would report it
@@ -407,21 +408,35 @@ func (o *Orchestrator) Destroy(p DestroyPlan) error {
 	// Look again. Every runtime removal here is best-effort and silent — a volume
 	// still held elsewhere, a network with a stray endpoint — so without this the
 	// command would report a clean teardown on the strength of having asked for one.
-	failed = append(failed, o.survivors(p)...)
+	left, unconfirmed := o.survivors(p)
+	failed = append(failed, left...)
+	var says []string
 	if len(failed) > 0 {
-		return fmt.Errorf("%d thing(s) could not be removed: %s — "+
+		says = append(says, fmt.Sprintf("%d thing(s) could not be removed: %s — "+
 			"run `opossum destroy` again (a container elsewhere may still be holding one), "+
-			"or remove them by hand", len(failed), joinAnd(failed))
+			"or remove them by hand", len(failed), joinAnd(failed)))
+	}
+	// Not "could not be removed": the removal was asked for and nothing answered
+	// whether it took. Said apart, with the command that shows the truth.
+	if len(unconfirmed) > 0 {
+		says = append(says, fmt.Sprintf("the runtime could not be asked whether %d container(s) are gone: %s — "+
+			"`container ls -a` shows them", len(unconfirmed), joinAnd(unconfirmed)))
+	}
+	if len(says) > 0 {
+		return fmt.Errorf("%s", strings.Join(says, "; and "))
 	}
 	return nil
 }
 
 // survivors re-checks what the plan said it would remove and names whatever is
-// still there.
-func (o *Orchestrator) survivors(p DestroyPlan) []string {
-	var left []string
+// still there — and, apart, the containers the runtime could not be asked
+// about, whose removal is neither done nor failed as far as anyone knows.
+func (o *Orchestrator) survivors(p DestroyPlan) (left, unconfirmed []string) {
 	for _, cname := range p.Containers {
-		if o.rt.Inspect(cname).Exists {
+		switch info := o.rt.Inspect(cname); {
+		case info.Unknown:
+			unconfirmed = append(unconfirmed, "container "+cname)
+		case info.Exists:
 			left = append(left, "container "+cname)
 		}
 	}
@@ -443,7 +458,7 @@ func (o *Orchestrator) survivors(p DestroyPlan) []string {
 			left = append(left, "image "+img)
 		}
 	}
-	return left
+	return left, unconfirmed
 }
 
 // joinAnd renders a short list for a sentence.

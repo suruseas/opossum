@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -109,11 +111,40 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Error: failed to connect to apiserver")
 		os.Exit(1)
 	}
+	// $FAKE_EXIT makes a command exit with a code of its own, the way the real
+	// runtime hands back a container's (`container run` and `container exec`
+	// return 3 for a command that exits 3; measured on container 1.4.1). It is
+	// `;`-separated `<part of the argv>=<code>` entries, and the first whose part
+	// the space-joined argv contains decides — so a test can fail the one-off's
+	// own run and leave a dependency's alone, or the other way round.
+	// $FAKE_DIE_SIGNAL is a part of the argv whose command dies of SIGKILL
+	// instead, which has no exit code at all.
+	joined := strings.Join(args, " ")
+	if part := os.Getenv("FAKE_DIE_SIGNAL"); part != "" && strings.Contains(joined, part) {
+		_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
+		time.Sleep(time.Second)
+	}
+	for _, entry := range strings.Split(os.Getenv("FAKE_EXIT"), ";") {
+		part, code, ok := strings.Cut(entry, "=")
+		if !ok || part == "" || !strings.Contains(joined, part) {
+			continue
+		}
+		n, err := strconv.Atoi(code)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "fakeshim: FAKE_EXIT entry %q: %v\n", entry, err)
+			os.Exit(2)
+		}
+		os.Exit(n)
+	}
 	switch arg(0) {
 	case "run":
-		// Running a name again means it is no longer stopped (the `stop` case).
+		// Running a name again means it is there again (the `delete` case) and no
+		// longer stopped (the `stop` case).
 		for i, a := range args {
 			if i > 0 && args[i-1] == "--name" {
+				if stateDir != "" {
+					_ = os.Remove(gonePath("container", a))
+				}
 				if p := stoppedPath(a); p != "" {
 					_ = os.Remove(p)
 				}
@@ -241,6 +272,12 @@ func main() {
 		// `volume ls` is a table whose first column is the name; opossum reads it to
 		// decide whether a volume exists. $VOLUME_LS is that table.
 		if arg(1) == "delete" {
+			// A volume already deleted is not there to delete: the real CLI fails
+			// (1.4.1: `Error: failed to delete one or more volumes: ["<name>"]`).
+			if isGone("volume", arg(2)) {
+				fmt.Fprintf(os.Stderr, "Error: failed to delete one or more volumes: [%q]\n", arg(2))
+				os.Exit(1)
+			}
 			markGone("volume", arg(2))
 		}
 		// $VOLUME_LS_FAIL makes the listing itself fail, which is a different answer

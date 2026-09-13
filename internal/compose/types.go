@@ -1161,6 +1161,58 @@ func ignoredServiceNetworkFields(n yaml.Node) ([]string, error) {
 // never escapes parsing (#79).
 const tmpfsMarker = "\x00tmpfs\x00"
 
+// dotVolumeMarker spells a volume name that starts with `.` inside the parsed
+// form of a mount and as the key of its top-level declaration. The parsed form
+// of a mount is a `source:target[:mode]` string, and there a source starting
+// with `.` is a host path — which a long-form `type: volume, source: .hidden`
+// is not (docker compose and the runtime both create `<project>_.hidden`).
+// Behind the marker the source no longer reads as a path anywhere it is
+// judged by its spelling, so every such place takes it for a volume without
+// being told; VolumeDisplayName takes the marker off wherever the name leaves
+// the program. A compose file that carries a NUL byte in a mount or a
+// volume's name is refused, so the spelling collides with nothing a person
+// wrote. The word between the NULs is there so
+// the spelling stays recognisable however a printer mangles it — escaped,
+// flattened to spaces, or folded into a sanitized name (ShowsLoaderSpelling).
+const dotVolumeMarker = "\x00" + dotVolumeWord + "\x00"
+
+const dotVolumeWord = "opossumdotvolume"
+
+// ShowsLoaderSpelling says whether text carries the loader's spelling of a
+// volume name starting with `.` in any form a printer could have given it.
+// Text a person or the runtime reads must not; tests look.
+func ShowsLoaderSpelling(text string) bool {
+	return strings.Contains(strings.ToLower(text), dotVolumeWord)
+}
+
+// VolumeDisplayName is a volume's name as written in the compose file: the
+// loader's spelling of a name starting with `.` (dotVolumeMarker) without the
+// marker, any other name as it is. The marker leads the source, so a whole
+// `source:target[:mode]` entry comes back as written too. What shows or passes
+// on a volume name has to go through it; the tests that compare a dot name
+// with a plain one are what find a place that does not.
+func VolumeDisplayName(key string) string {
+	return strings.TrimPrefix(key, dotVolumeMarker)
+}
+
+// nulInMount refuses a mount carrying a NUL byte. The loader's own spellings
+// of a mount (dotVolumeMarker, tmpfsMarker, nocopyMarker) are made of them, so
+// a file could otherwise write one of those by hand. docker compose refuses a
+// short mount with one (`invalid spec`) but passes a long one through; no path
+// or volume name the runtime takes can hold one either way.
+func nulInMount(i, n int) error {
+	return fmt.Errorf("volumes entry %d of %d contains a NUL character — remove it; no mount source or target can hold one", i+1, n)
+}
+
+// dotVolumeKey is the loader's spelling of a declared volume name: marked when
+// it starts with `.`, as it is when a service mounts it by `type: volume`.
+func dotVolumeKey(name string) string {
+	if strings.HasPrefix(name, ".") {
+		return dotVolumeMarker + name
+	}
+	return name
+}
+
 // nocopyMarker tags a mount whose `volume: {nocopy: true}` asked for seeding to
 // be skipped. Same trick as tmpfsMarker: the flag belongs to the mount, but the
 // parsed form of a mount is a single string, so it rides along as a prefix and
@@ -1322,6 +1374,9 @@ func (v *Volumes) UnmarshalYAML(value *yaml.Node) error {
 			if err := refuseNonString("volumes", i, len(value.Content), item); err != nil {
 				return err
 			}
+			if strings.Contains(item.Value, "\x00") {
+				return nulInMount(i, len(value.Content))
+			}
 			// `src:target:nocopy` is the short spelling of the same switch, and
 			// docker accepts it. Left in place it would reach the runtime as a mount
 			// mode, which is not what it is.
@@ -1357,6 +1412,9 @@ func (v *Volumes) UnmarshalYAML(value *yaml.Node) error {
 		}
 		if err := item.Decode(&lf); err != nil {
 			return err
+		}
+		if strings.Contains(lf.Target, "\x00") || lf.Source != nil && strings.Contains(*lf.Source, "\x00") {
+			return nulInMount(i, len(value.Content))
 		}
 		if lf.Target == "" {
 			return fmt.Errorf("volumes entry %d of %d has no target — write the path in the container, as in `target: /app`", i+1, len(value.Content))
@@ -1404,16 +1462,19 @@ func (v *Volumes) UnmarshalYAML(value *yaml.Node) error {
 			// the spelling alone, so a bind whose source does not look like a path
 			// is written as one (`./data`) — the same directory, and `config`
 			// prints it back as what it is. The other way round has no such
-			// spelling: a `type: volume` whose source starts with `/`, `.` or `~`
-			// would read back as a bind — a different mount, silently. docker
-			// compose does create that volume (`<project>_.hidden`), so this is a
-			// form opossum cannot carry yet; it is refused with the two ways to
-			// say the same thing rather than run as something else.
+			// spelling: a `type: volume` whose source starts with `.` names the
+			// volume docker compose creates as `<project>_.hidden`, so it is
+			// carried behind dotVolumeMarker, where it reads as a name.
 			switch {
 			case lf.Type == "bind" && !IsHostPath(src):
 				src = "./" + src
+			case lf.Type == "volume" && strings.HasPrefix(src, ".") && strings.Contains(src, "/"):
+				// A name, not a path, but not one docker compose lets a volume
+				// have: it refuses the declaration (`volumes additional
+				// properties './x' not allowed`), so no file mounts it.
+				return fmt.Errorf("volumes entry %d of %d: type: volume with source %q — a volume name cannot contain `/` (docker compose refuses it as well); write type: bind for a host path, or a name for a volume", i+1, len(value.Content), src)
 			case lf.Type == "volume" && strings.HasPrefix(src, "."):
-				return fmt.Errorf("volumes entry %d of %d: type: volume with source %q — a volume whose name starts with `.` is not supported here (docker compose would create it as `<project>_%s` once declared); give the volume a name that does not, or declare it under volumes: with a `name:`", i+1, len(value.Content), src, src)
+				src = dotVolumeKey(src)
 			case lf.Type == "volume" && IsHostPath(src):
 				return fmt.Errorf("volumes entry %d of %d: type: volume with source %q — a volume name cannot start with `/` or `~` (docker compose refuses it as well); write type: bind for a host path, or a name for a volume", i+1, len(value.Content), src)
 			}

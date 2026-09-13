@@ -716,7 +716,7 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 	// Pre-flight: bail out before creating the network (or anything else) if a
 	// target container name is already owned by a different project.
 	for _, name := range order {
-		if err := o.ensureNotForeign(o.containerName(name)); err != nil {
+		if err := o.ensureNotForeign(o.containerName(name), "opossum up"); err != nil {
 			return err
 		}
 	}
@@ -792,24 +792,37 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 		// down. "Removed" is checked, not assumed: Stop and Delete report
 		// nothing, so the runtime is asked whether each is gone.
 		if len(started) > 0 && !o.up.dryRun {
-			var gone, left []string
+			var gone, left, unknown []string
 			for _, name := range order {
 				if !createdSvc[name] {
 					continue
 				}
-				if o.rt.Inspect(o.containerName(name)).Exists {
+				switch info := o.rt.Inspect(o.containerName(name)); {
+				case info.Unknown:
+					// Not asked is not gone: the removal is not reported as done.
+					unknown = append(unknown, name)
+				case info.Exists:
 					left = append(left, name)
-				} else {
+				default:
 					gone = append(gone, name)
 				}
 			}
-			switch {
-			case len(left) == 0:
-				o.logf("Rolled back %s — stopped and removed; nothing this `up` started is left running\n", strings.Join(gone, ", "))
-			case len(gone) == 0:
-				o.logf("Tried to roll back %s, but the container is still there — `opossum down` removes it\n", strings.Join(left, ", "))
-			default:
-				o.logf("Rolled back %s — stopped and removed; %s is still there — `opossum down` removes it\n", strings.Join(gone, ", "), strings.Join(left, ", "))
+			var parts []string
+			if len(gone) > 0 {
+				parts = append(parts, fmt.Sprintf("Rolled back %s — stopped and removed", strings.Join(gone, ", ")))
+			}
+			if len(left) > 0 {
+				parts = append(parts, fmt.Sprintf("tried to roll back %s, but the container is still there — `opossum down` removes it", strings.Join(left, ", ")))
+			}
+			if len(unknown) > 0 {
+				parts = append(parts, fmt.Sprintf("tried to roll back %s, but the runtime could not be asked whether it is gone — `container ls -a` shows it", strings.Join(unknown, ", ")))
+			}
+			if len(parts) > 0 {
+				if len(left) == 0 && len(unknown) == 0 {
+					parts[0] += "; nothing this `up` started is left running"
+				}
+				line := strings.Join(parts, "; ")
+				o.logf("%s\n", strings.ToUpper(line[:1])+line[1:])
 			}
 		}
 		// Ask what is still running rather than reasoning about it. A service left
@@ -833,7 +846,9 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 			if createdSvc[name] {
 				continue
 			}
-			if o.rt.Inspect(o.containerName(name)).Exists {
+			// Unreachable is kept as present: dropping it here would end its
+			// supervision over a passing outage (the same reading StillSupervised makes).
+			if info := o.rt.Inspect(o.containerName(name)); info.Exists || info.Unknown {
 				survivors = append(survivors, name)
 			}
 		}
@@ -1637,14 +1652,69 @@ func (o *Orchestrator) selectServices(order, requested []string) ([]string, erro
 // opossum project. Two projects sharing a DNS domain would name a service the
 // same (e.g. db.opossum); without this guard opossum's stale-cleanup Delete would
 // silently destroy the other project's container. An unlabeled or missing
-// container is treated as safe to (re)use.
-func (o *Orchestrator) ensureNotForeign(cname string) error {
-	if proj, exists := o.rt.InspectLabel(cname, projectLabel); exists && proj != "" && proj != o.Project.Name {
+// container is treated as safe to (re)use — a container whose owner the runtime
+// could not be asked about is not: reusing that name would force-delete it
+// unseen, whoever it belongs to (measured on container 1.4.1: with only that
+// container's inspect failing, `up` deleted another project's container and
+// ran its own in its place, saying nothing).
+func (o *Orchestrator) ensureNotForeign(cname, command string) error {
+	owner, unknown := o.otherOwner(cname)
+	if unknown {
+		return fmt.Errorf("container %q: the runtime gave no readable answer about which project owns it, so it is left alone; "+
+			"`container inspect %s` shows what the runtime says — run `%s` again once it answers, "+
+			"or, if it belongs to another project, give this project its own DNS domain (e.g. --dns-domain %s)", cname, cname, command, o.Project.Name)
+	}
+	if owner != "" {
 		return fmt.Errorf("container %q is already in use by project %q; give this project its own DNS domain so names don't collide "+
 			"(e.g. --dns-domain %s, created once with `sudo container system dns create %s`) — see README (multi-project)",
-			cname, proj, o.Project.Name, o.Project.Name)
+			cname, owner, o.Project.Name, o.Project.Name)
 	}
 	return nil
+}
+
+// otherOwner reads, from one inspect, whether a container name is this
+// project's to stop, delete or reuse: owner is the other project whose label is
+// on it, unknown that the runtime gave no readable answer. Missing and unlabeled
+// containers are neither. One inspect for both answers: a second call could fail
+// after the first answered, or answer after the first failed.
+func (o *Orchestrator) otherOwner(cname string) (owner string, unknown bool) {
+	info := o.rt.Inspect(cname)
+	if info.Unknown {
+		return "", true
+	}
+	if proj := info.Labels[projectLabel]; info.Exists && proj != "" && proj != o.Project.Name {
+		return proj, false
+	}
+	return "", false
+}
+
+// ours says whether the container name is this project's to stop, start, kill
+// or delete. Another project's container is left and said; one the runtime
+// gives no readable answer about is left and added to unanswered, for the
+// command to name when it is done. Missing and unlabeled containers are ours,
+// as `up` reuses them.
+func (o *Orchestrator) ours(cname string, unanswered *[]string) bool {
+	owner, unknown := o.otherOwner(cname)
+	switch {
+	case unknown:
+		*unanswered = append(*unanswered, cname)
+		return false
+	case owner != "":
+		o.logf("Leaving container %s alone: it belongs to project %q (give this project its own DNS domain so names don't collide)\n", cname, owner)
+		return false
+	}
+	return true
+}
+
+// unansweredOwners is the error for the containers a command left because the
+// runtime gave no readable answer about who owns them; nil when there were none.
+func unansweredOwners(unanswered []string, command string) error {
+	if len(unanswered) == 0 {
+		return nil
+	}
+	return fmt.Errorf("the runtime gave no readable answer about which project owns %d container(s), so they were left: %s — "+
+		"`container inspect <name>` shows what the runtime says; run `%s` again once it answers",
+		len(unanswered), strings.Join(unanswered, ", "), command)
 }
 
 // completedTargets is the set of services that some dependent needs to run to
@@ -1768,14 +1838,28 @@ func (o *Orchestrator) Down(removeVolumes bool, rmi string, removeOrphans bool) 
 	if err != nil {
 		return err
 	}
+	// Only this project's containers are stopped and deleted. The names come from
+	// the compose file, and a container of another project can carry the same one
+	// — with `--dns-domain ""` every project names its containers by the bare
+	// service name (measured on container 1.4.1: `down` stopped and deleted a
+	// running container labeled for another project, from a project never brought
+	// up). A name held by another project, or one the runtime gives no readable
+	// answer about, is left and said; unlabeled containers are removed as before,
+	// as `up` reuses them.
+	var unanswered []string
+	mine := func(cname string) bool { return o.ours(cname, &unanswered) }
 	for i := len(order) - 1; i >= 0; i-- {
 		name := order[i]
 		cname := o.containerName(name)
-		o.logf("Stopping %s\n", name)
-		o.rt.Stop(cname)
-		o.rt.Delete(cname)
+		if mine(cname) {
+			o.logf("Stopping %s\n", name)
+			o.rt.Stop(cname)
+			o.rt.Delete(cname)
+		}
 		// Also clear any leftover one-off container from `run` (no --rm).
-		o.rt.Delete(o.containerName(name + "-run"))
+		if run := o.containerName(name + "-run"); mine(run) {
+			o.rt.Delete(run)
+		}
 	}
 	// Containers for services no longer in the compose are removed with
 	// --remove-orphans (docker compose parity).
@@ -1801,7 +1885,7 @@ func (o *Orchestrator) Down(removeVolumes bool, rmi string, removeOrphans bool) 
 	if rmi == "local" || rmi == "all" {
 		o.removeImages(order, rmi == "all")
 	}
-	return nil
+	return unansweredOwners(unanswered, "opossum down")
 }
 
 // removeImages deletes the services' images after teardown. "local" removes only
@@ -1874,7 +1958,7 @@ func (o *Orchestrator) volumeName(src string) string {
 	if n := o.Project.Volumes[src].Name; n != "" {
 		return n
 	}
-	return o.Project.Name + "_" + src
+	return o.Project.Name + "_" + compose.VolumeDisplayName(src)
 }
 
 // secretMounts renders a service's file-based secret references as read-only
@@ -2020,7 +2104,7 @@ func (o *Orchestrator) warnSharedNamedVolumes(order []string) {
 		o.warnf(codeSharedVolume, "services %s share named volume %q, but Apple container attaches a "+
 			"named volume to only one running container at a time — the others fail to start. "+
 			"Use a bind mount (a host path) for shared data, or bake it into the image.\n",
-			strings.Join(quoted, ", "), src)
+			strings.Join(quoted, ", "), compose.VolumeDisplayName(src))
 	}
 }
 
@@ -2534,7 +2618,7 @@ func (o *Orchestrator) pgVersionedLayoutHint(svc *compose.Service, logs string) 
 			continue
 		}
 		found++
-		where = fmt.Sprintf(" (this service mounts %s there)", src)
+		where = fmt.Sprintf(" (this service mounts %s there)", compose.VolumeDisplayName(src))
 	}
 	if found != 1 {
 		where = ""
@@ -2646,7 +2730,7 @@ func (o *Orchestrator) warnDockerSocket(name string, svc *compose.Service) {
 				"answer for the containers here. Apple `container` runs them, and it has no socket "+
 				"to share; if a Docker daemon answers on that path, it is a different one and knows "+
 				"a different set. A tool that wants this socket in order to watch its neighbours will "+
-				"be told about theirs.\n", name, v)
+				"be told about theirs.\n", name, compose.VolumeDisplayName(v))
 			return
 		}
 	}
@@ -2851,7 +2935,7 @@ func (o *Orchestrator) externalRealName(src string) string {
 	if n := o.Project.Volumes[src].Name; n != "" {
 		return n
 	}
-	return src
+	return compose.VolumeDisplayName(src)
 }
 
 // namedVolumes lists the distinct named volumes referenced by services (the
@@ -3291,18 +3375,40 @@ func (o *Orchestrator) createdContainers(services []string) []string {
 // `docker compose cp`, delegating to `container cp`. Each of src/dst is a host
 // path or `<service>:<path>`; a `<service>:` prefix naming a project service is
 // rewritten to that service's running container name.
+//
+// A container that is not this project's — another project's with the same
+// name, or one the runtime gives no readable answer about — is refused, as
+// `exec` refuses it: `cp` reads and writes files inside it.
 func (o *Orchestrator) Copy(src, dst string) error {
+	for _, arg := range []string{src, dst} {
+		if service, _, ok := o.copyService(arg); ok {
+			if err := o.ensureNotForeign(o.containerName(service), "opossum cp"); err != nil {
+				return err
+			}
+		}
+	}
 	return o.rt.Copy(o.resolveCopyArg(src), o.resolveCopyArg(dst))
+}
+
+// copyService reads a `<service>:<path>` argument: the service and the rest
+// from the `:` on, when the prefix before the first `:` names a project
+// service. The check and the rewrite both read it here, so the container
+// that is checked is the one the copy goes to.
+func (o *Orchestrator) copyService(arg string) (service, rest string, ok bool) {
+	if i := strings.IndexByte(arg, ':'); i > 0 {
+		if _, known := o.Project.Services[arg[:i]]; known {
+			return arg[:i], arg[i:], true
+		}
+	}
+	return "", "", false
 }
 
 // resolveCopyArg rewrites a `<service>:<path>` argument to
 // `<container-name>:<path>` when the prefix names a project service; other
 // arguments (host paths, or a prefix that isn't a service) pass through.
 func (o *Orchestrator) resolveCopyArg(arg string) string {
-	if i := strings.IndexByte(arg, ':'); i > 0 {
-		if _, ok := o.Project.Services[arg[:i]]; ok {
-			return o.containerName(arg[:i]) + arg[i:]
-		}
+	if service, rest, ok := o.copyService(arg); ok {
+		return o.containerName(service) + rest
 	}
 	return arg
 }
@@ -3432,6 +3538,13 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 	// nothing takes back. `up` asks in its own pre-flight for the same reason.
 	env, err := svc.ResolvedEnv()
 	if err != nil {
+		return err
+	}
+	// The stale one-off deleted below is found by name, and a container of
+	// another project can carry that name (with `--dns-domain ""`, names are bare
+	// service names): refuse here, before anything starts, as `up` does for its
+	// own containers.
+	if err := o.ensureNotForeign(o.containerName(service+"-run"), "opossum run"); err != nil {
 		return err
 	}
 
@@ -3645,7 +3758,7 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 			return decoded
 		}
 	}
-	return runErr
+	return attachedExit(runErr)
 }
 
 // Exec runs a command in a service's running container, streaming stdio.
@@ -3656,7 +3769,12 @@ func (o *Orchestrator) Exec(service string, command []string, opts runtime.ExecO
 	if len(command) == 0 {
 		return fmt.Errorf("exec requires a command to run")
 	}
-	return o.rt.ExecStream(o.containerName(service), command, opts)
+	// The command would run inside whatever container carries the name, so
+	// another project's — or one nobody can say the owner of — is refused.
+	if err := o.ensureNotForeign(o.containerName(service), "opossum exec"); err != nil {
+		return err
+	}
+	return attachedExit(o.rt.ExecStream(o.containerName(service), command, opts))
 }
 
 // Build builds the images for services that declare `build:` (all, or the named
@@ -3707,7 +3825,11 @@ func (o *Orchestrator) Start(services []string) error {
 	if err != nil {
 		return err
 	}
+	var unanswered []string
 	for _, name := range targets {
+		if !o.ours(o.containerName(name), &unanswered) {
+			continue
+		}
 		o.logf("Starting %s\n", name)
 		// Starting it by hand undoes an earlier stop, so supervision resumes.
 		o.ClearStopped(name)
@@ -3715,7 +3837,7 @@ func (o *Orchestrator) Start(services []string) error {
 			return fmt.Errorf("starting service %q: %w\n  `start` only (re)starts an already-created container — if it doesn't exist yet, run `opossum up %s` first", name, err, name)
 		}
 	}
-	return nil
+	return unansweredOwners(unanswered, "opossum start")
 }
 
 // Kill signals running containers (all, or the named ones) in reverse dependency
@@ -3725,11 +3847,15 @@ func (o *Orchestrator) Kill(services []string, signal string) error {
 	if err != nil {
 		return err
 	}
+	var unanswered []string
 	for i := len(targets) - 1; i >= 0; i-- {
+		if !o.ours(o.containerName(targets[i]), &unanswered) {
+			continue
+		}
 		o.logf("Killing %s\n", targets[i])
 		o.rt.Kill(o.containerName(targets[i]), signal)
 	}
-	return nil
+	return unansweredOwners(unanswered, "opossum kill")
 }
 
 // Stop stops services without removing them (unlike Down). With no names it stops
@@ -3739,14 +3865,18 @@ func (o *Orchestrator) Stop(services []string) error {
 	if err != nil {
 		return err
 	}
+	var unanswered []string
 	for i := len(targets) - 1; i >= 0; i-- {
+		if !o.ours(o.containerName(targets[i]), &unanswered) {
+			continue
+		}
 		o.logf("Stopping %s\n", targets[i])
 		// Record it before stopping: the supervisor polls, and a stop it sees before
 		// the marker exists would be read as a crash and undone.
 		o.MarkStopped(targets[i])
 		o.rt.Stop(o.containerName(targets[i]))
 	}
-	return nil
+	return unansweredOwners(unanswered, "opossum stop")
 }
 
 // Restart stops then starts services in place, keeping their existing config
@@ -3757,20 +3887,29 @@ func (o *Orchestrator) Restart(services []string) error {
 	if err != nil {
 		return err
 	}
-	// Restarting says "bring this back", so an earlier `stop` no longer stands.
+	// Asked once per name, before anything is stopped: an answer that changed
+	// between the stop and the start would leave a container stopped and not
+	// started again.
+	var unanswered, mine []string
 	for _, name := range targets {
+		if o.ours(o.containerName(name), &unanswered) {
+			mine = append(mine, name)
+		}
+	}
+	// Restarting says "bring this back", so an earlier `stop` no longer stands.
+	for _, name := range mine {
 		o.ClearStopped(name)
 	}
-	for i := len(targets) - 1; i >= 0; i-- {
-		o.rt.Stop(o.containerName(targets[i]))
+	for i := len(mine) - 1; i >= 0; i-- {
+		o.rt.Stop(o.containerName(mine[i]))
 	}
-	for _, name := range targets {
+	for _, name := range mine {
 		o.logf("Restarting %s\n", name)
 		if err := o.rt.Start(o.containerName(name)); err != nil {
 			return fmt.Errorf("restarting service %q: %w\n  `restart` needs an already-created container — if it doesn't exist yet, run `opossum up %s` first", name, err, name)
 		}
 	}
-	return nil
+	return unansweredOwners(unanswered, "opossum restart")
 }
 
 // redo is the opossum command that asked for this build — "opossum up",

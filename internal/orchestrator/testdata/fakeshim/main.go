@@ -5,7 +5,7 @@
 //
 // It logs each invocation's arguments (space-joined) to $FAKE_LOG and returns
 // output shaped like the real CLI. Behaviour is steered entirely through the
-// environment (FAKE_LOG, STATE_DIR, DELETE_STICKY, STOP_FAIL, INSPECT_STATE, INSPECT_STOPPED, INSPECT_FAIL,
+// environment (FAKE_LOG, STATE_DIR, DELETE_STICKY, STOP_FAIL, INSPECT_STATE, INSPECT_STOPPED, INSPECT_OWNER, INSPECT_FAIL, INSPECT_FAIL_ONCE_STOP_ASKED, INSPECT_FAIL_ONCE_GONE, INSPECT_FAIL_ONCE_GONE_ALL,
 // INSPECT_ABSENT, NET_EXISTS, NET_CREATE_{HANG,FAIL}, NETWORK_ABSENT, BUILD_{HANG,FAIL}, RUN_FAIL,
 // RUN_HANG, RUN_DIE_SIGNAL, RUN_EXISTS[_WORDING|_HASH], RUN_EXISTS_ANY, HEALTH_*,
 // VOLUME_*, LS_*,
@@ -76,6 +76,7 @@ func run(args []string) int {
 		// runtime, only about a caller that trusted the exit code.
 		if dir := os.Getenv("STATE_DIR"); dir != "" && len(args) > 0 {
 			name := args[len(args)-1]
+			_ = os.WriteFile(stopAskedPath(dir, name), []byte("1"), 0o644)
 			if _, err := os.Stat(gonePath(dir, name)); err == nil {
 				fmt.Fprintf(os.Stderr, "Error: internalError: \"failed to stop container\" (cause: \"notFound: \"container with ID %s not found\"\")\n", name)
 				return 1
@@ -134,6 +135,35 @@ func run(args []string) int {
 				return 1
 			}
 		}
+		// $INSPECT_FAIL_ONCE_GONE is the same failure, but only after the container
+		// was deleted — a runtime that stops answering during a teardown, while
+		// the checks before it (ownership, presence) still got answers.
+		if dir := os.Getenv("STATE_DIR"); dir != "" {
+			// $INSPECT_FAIL_ONCE_STOP_ASKED: the same failure, but only after a `stop`
+			// was issued for the container — a runtime that stops answering while a
+			// run is being interrupted, after the checks before the run got answers.
+			for _, m := range strings.Fields(os.Getenv("INSPECT_FAIL_ONCE_STOP_ASKED")) {
+				if _, err := os.Stat(stopAskedPath(dir, arg(1))); arg(1) == m && err == nil {
+					fmt.Fprintln(os.Stderr, "Error: apiserver is not running")
+					return 1
+				}
+			}
+			for _, m := range strings.Fields(os.Getenv("INSPECT_FAIL_ONCE_GONE")) {
+				if _, err := os.Stat(gonePath(dir, arg(1))); arg(1) == m && err == nil {
+					fmt.Fprintln(os.Stderr, "Error: apiserver is not running")
+					return 1
+				}
+			}
+			// $INSPECT_FAIL_ONCE_GONE_ALL: once the named container has been deleted,
+			// every inspect fails — the runtime dying in the middle of a teardown,
+			// after the removals and before the checks that follow them.
+			for _, m := range strings.Fields(os.Getenv("INSPECT_FAIL_ONCE_GONE_ALL")) {
+				if _, err := os.Stat(gonePath(dir, m)); err == nil {
+					fmt.Fprintln(os.Stderr, "Error: apiserver is not running")
+					return 1
+				}
+			}
+		}
 		// Gone until something creates it again (see the `run` case).
 		if dir := os.Getenv("STATE_DIR"); dir != "" {
 			if _, err := os.Stat(gonePath(dir, arg(1))); err == nil {
@@ -143,8 +173,16 @@ func run(args []string) int {
 		}
 		// Build the labels object from INSPECT_PROJECT and any recorded config-hash.
 		var labels []string
-		if p := os.Getenv("INSPECT_PROJECT"); p != "" {
-			labels = append(labels, `"opossum.project":"`+p+`"`)
+		project := os.Getenv("INSPECT_PROJECT")
+		// $INSPECT_OWNER gives single containers their own project label
+		// (`name=project` pairs), over $INSPECT_PROJECT, which labels every one.
+		for _, pair := range strings.Fields(os.Getenv("INSPECT_OWNER")) {
+			if name, p, ok := strings.Cut(pair, "="); ok && name == arg(1) {
+				project = p
+			}
+		}
+		if project != "" {
+			labels = append(labels, `"opossum.project":"`+project+`"`)
 		}
 		if dir := os.Getenv("STATE_DIR"); dir != "" {
 			if h, err := os.ReadFile(filepath.Join(dir, arg(1)+".hash")); err == nil {
@@ -314,6 +352,7 @@ func run(args []string) int {
 					continue
 				}
 				_ = os.WriteFile(volumePath(dir, name), []byte(name), 0o644)
+				_ = os.Remove(goneVolumePath(dir, name))
 			}
 		}
 		// Record the config-hash (from -l opossum.config-hash=…) keyed by --name,
@@ -532,7 +571,7 @@ func run(args []string) int {
 			// setup — which says nothing about whether opossum created anything.
 			seen := map[string]bool{}
 			for _, v := range append(strings.Fields(os.Getenv("VOLUME_LS")), madeVolumes()...) {
-				if seen[v] {
+				if seen[v] || volumeGone(v) {
 					continue
 				}
 				seen[v] = true
@@ -542,9 +581,26 @@ func run(args []string) int {
 			// `down -v` removes them, and then they are gone: the next `up` finds no
 			// volume and seeds a fresh one. A shim that kept them forever would make
 			// that sequence untestable.
+			//
+			// A deleted volume is remembered as gone — whether a run made it or
+			// $VOLUME_LS listed it — so deleting it again fails, as on the real CLI
+			// (1.4.1: `Error: failed to delete one or more volumes: ["<name>"]`,
+			// exit 1), and `volume ls` no longer lists it. A name never seen at all
+			// is let through, as the other two fakes let it through (a known
+			// leniency: nothing opossum does depends on that answer).
 			if dir := os.Getenv("STATE_DIR"); dir != "" {
+				var absent []string
 				for _, v := range args[2:] {
+					if _, err := os.Stat(goneVolumePath(dir, v)); err == nil {
+						absent = append(absent, `"`+v+`"`)
+						continue
+					}
 					os.Remove(volumePath(dir, v))
+					_ = os.WriteFile(goneVolumePath(dir, v), []byte(v), 0o644)
+				}
+				if len(absent) > 0 {
+					fmt.Fprintf(os.Stderr, "Error: failed to delete one or more volumes: [%s]\n", strings.Join(absent, ", "))
+					return 1
 				}
 			}
 		}
@@ -626,6 +682,21 @@ func volumePath(dir, name string) string {
 	return filepath.Join(dir, "volume-"+strings.NewReplacer("/", "_", ":", "_", ".", "_").Replace(name))
 }
 
+// goneVolumePath marks a volume deleted (see the `volume delete` case); a run
+// that mounts the name again clears it.
+func goneVolumePath(dir, name string) string {
+	return filepath.Join(dir, "gonevolume-"+strings.NewReplacer("/", "_", ":", "_", ".", "_").Replace(name))
+}
+
+func volumeGone(name string) bool {
+	dir := os.Getenv("STATE_DIR")
+	if dir == "" {
+		return false
+	}
+	_, err := os.Stat(goneVolumePath(dir, name))
+	return err == nil
+}
+
 // madeVolumes lists the volumes recorded so far, in the order they were made.
 func madeVolumes() []string {
 	dir := os.Getenv("STATE_DIR")
@@ -647,6 +718,11 @@ func madeVolumes() []string {
 
 func gonePath(dir, name string) string {
 	return filepath.Join(dir, "gone-"+strings.NewReplacer("/", "_", ":", "_", ".", "_").Replace(name))
+}
+
+// stopAskedPath is the marker every `stop` of a name leaves, whatever it did.
+func stopAskedPath(dir, name string) string {
+	return filepath.Join(dir, "stopasked-"+strings.NewReplacer("/", "_", ":", "_", ".", "_").Replace(name))
 }
 
 // stoppedPath is the marker a `stop` leaves so that inspect reports the

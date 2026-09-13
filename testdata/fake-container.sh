@@ -5,7 +5,23 @@
 # (the captured reference these are kept in sync with; the shapes here are a
 # subset of that version's — keys the parsers never read are left out). Overrides:
 #   FAKE_DNS_DOMAIN   domain reported by `system dns list` (default: opossum)
+#   STATE_DIR         remember what `delete`, `stop` and `volume delete` did, so a
+#                     later `inspect`, `stop` or `delete` answers as the real CLI
+#                     does (stopped; not found, exit 1). Unset, every container is
+#                     running and every delete succeeds, as before.
+# The two Go shims under cmd/opossum/testdata and internal/orchestrator/testdata
+# answer the same questions; internal/shimcontract runs one table through all
+# three.
 echo "container $*" >> "${FAKE_LOG:-/dev/null}"
+
+# marker KIND NAME: the file that records NAME as gone/stopped, or empty when
+# nothing is being remembered.
+marker() {
+  [ -n "${STATE_DIR:-}" ] || return 0
+  printf '%s/%s=%s' "$STATE_DIR" "$1" "$(printf '%s' "$2" | tr '/:.' '___')"
+}
+# last argument
+last() { for a in "$@"; do :; done; printf '%s' "$a"; }
 
 case "$1" in
   network)
@@ -59,10 +75,48 @@ case "$1" in
     esac
     ;;
   build)   echo "built image" ;;
-  run)     echo "started container" ;;
+  run)
+    # Running a name makes it there and running again (see stop/delete).
+    prev=
+    for a in "$@"; do
+      if [ "$prev" = --name ]; then
+        m=$(marker gone "$a"); if [ -n "$m" ]; then rm -f "$m"; fi
+        m=$(marker stopped "$a"); if [ -n "$m" ]; then rm -f "$m"; fi
+      fi
+      prev=$a
+    done
+    echo "started container" ;;
   logs)    echo "fake log line for $*" ;;  # real CLI streams container stdout
-  stop)    : ;;
-  delete)  : ;;
+  stop)
+    # The exit code answers only whether the name exists (container 1.4.1): 0
+    # for a running, stopped or exited container, 1 when there is none.
+    n=$(last "$@"); g=$(marker gone "$n")
+    if [ -n "$g" ] && [ -e "$g" ]; then
+      echo "Error: internalError: \"failed to stop container\" (cause: \"notFound: \"container with ID $n not found\"\")" >&2; exit 1
+    fi
+    s=$(marker stopped "$n"); if [ -n "$s" ]; then : > "$s"; fi
+    ;;
+  start)
+    n=$(last "$@"); s=$(marker stopped "$n"); if [ -n "$s" ]; then rm -f "$s"; fi
+    ;;
+  delete|rm)
+    n=$(last "$@"); g=$(marker gone "$n")
+    if [ -n "$g" ] && [ -e "$g" ]; then
+      echo "Error: internalError: \"failed to delete container\" (cause: \"notFound: \"container with ID $n not found\"\")" >&2; exit 1
+    fi
+    if [ -n "$g" ]; then : > "$g"; fi
+    s=$(marker stopped "$n"); if [ -n "$s" ]; then rm -f "$s"; fi
+    ;;
+  volume)
+    if [ "$2" = delete ] || [ "$2" = rm ]; then
+      g=$(marker volgone "$3")
+      if [ -n "$g" ] && [ -e "$g" ]; then
+        echo "Error: failed to delete one or more volumes: [\"$3\"]" >&2; exit 1
+      fi
+      if [ -n "$g" ]; then : > "$g"; fi
+      echo "$3"
+    fi
+    ;;
   exec)    : ;;   # healthcheck probe: succeed (exit 0 = healthy)
   system)
     # `system dns list`: header + one domain per line, matching the real CLI.
@@ -86,14 +140,18 @@ case "$1" in
     for m in ${INSPECT_ABSENT:-}; do
       [ "$2" = "$m" ] && { echo "Error: container not found: $2" >&2; exit 1; }
     done
+    g=$(marker gone "$2")
+    if [ -n "$g" ] && [ -e "$g" ]; then echo "Error: container not found: $2" >&2; exit 1; fi
+    state=running
+    s=$(marker stopped "$2"); if [ -n "$s" ] && [ -e "$s" ]; then state=stopped; fi
     # Mirror the real `container inspect` shape: the interface address lives
     # under status.networks[].ipv4Address, while a published port surfaces a
     # 0.0.0.0 hostAddress that must NOT be mistaken for the container's IP.
     # configuration.networks is here too, holding a different name from the one
     # under status, so that reading the wrong one of the two is a thing this
     # fixture can show rather than a thing it agrees with.
-    cat <<'JSON'
-[{"status":{"state":"running","networks":[{"network":"demo-net","ipv4Address":"192.168.64.10/24","ipv6Address":"fdee:0:0:0::10/64","ipv4Gateway":"192.168.64.1"}]},"configuration":{"networks":[{"network":"demo-net-configured"}],"publishedPorts":[{"containerPort":8080,"hostAddress":"0.0.0.0","hostPort":8080,"proto":"tcp"}]}}]
+    sed "s/\"state\":\"STATE\"/\"state\":\"$state\"/" <<'JSON'
+[{"status":{"state":"STATE","networks":[{"network":"demo-net","ipv4Address":"192.168.64.10/24","ipv6Address":"fdee:0:0:0::10/64","ipv4Gateway":"192.168.64.1"}]},"configuration":{"networks":[{"network":"demo-net-configured"}],"publishedPorts":[{"containerPort":8080,"hostAddress":"0.0.0.0","hostPort":8080,"proto":"tcp"}]}}]
 JSON
     ;;
   stats)

@@ -807,6 +807,24 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 		}
 		return nil, decodeErr(mergedName(loaded), read, blameService(doc, err))
 	}
+	// A declared name starting with `.` takes the spelling a `type: volume`
+	// mount of it has (dotVolumeKey), so the two meet by key.
+	// The names are read before any is rewritten: a key added while ranging
+	// over the map may be visited, and the rewritten one carries NUL bytes.
+	declared := make([]string, 0, len(f.Volumes))
+	for name := range f.Volumes {
+		declared = append(declared, name)
+	}
+	sort.Strings(declared)
+	for _, name := range declared {
+		if strings.Contains(name, "\x00") {
+			return nil, fmt.Errorf("%s: volume name %q contains a NUL character — remove it", mergedName(loaded), name)
+		}
+		if key := dotVolumeKey(name); key != name {
+			f.Volumes[key] = f.Volumes[name]
+			delete(f.Volumes, name)
+		}
+	}
 	if len(f.Services) == 0 {
 		return nil, fmt.Errorf("%s defines no services — add a top-level `services:` block with at least one service", mergedName(loaded))
 	}
@@ -1038,7 +1056,8 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 				continue
 			}
 			if _, ok := f.Volumes[src]; !ok {
-				return nil, fmt.Errorf("service %q refers to undefined volume %q — declare it under top-level volumes:, or write a host path (`./%s`) for a bind mount", name, src, src)
+				shown := VolumeDisplayName(src)
+				return nil, fmt.Errorf("service %q refers to undefined volume %q — declare it under top-level volumes:, or write a host path (`./%s`) for a bind mount", name, shown, shown)
 			}
 		}
 

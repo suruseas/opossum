@@ -173,7 +173,10 @@ func watchShim(t *testing.T) (*runtime.Runtime, func() string) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "log")
 	shim := filepath.Join(dir, "shim.sh")
-	if err := os.WriteFile(shim, []byte("#!/bin/sh\necho \"$*\" >> \""+logPath+"\"\nexit 0\n"), 0o755); err != nil {
+	// inspect answers as the real CLI does for a container that is not there;
+	// every other command succeeds quietly.
+	if err := os.WriteFile(shim, []byte("#!/bin/sh\necho \"$*\" >> \""+logPath+"\"\n"+
+		"[ \"$1\" = inspect ] && { echo \"Error: container not found: $2\" >&2; exit 1; }\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	return &runtime.Runtime{Bin: shim}, func() string {

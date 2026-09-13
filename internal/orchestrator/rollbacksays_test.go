@@ -111,3 +111,116 @@ func TestNoRollbackMessageWhenNothingWasStarted(t *testing.T) {
 		t.Errorf("nothing started, so nothing to roll back, got:\n%s", out.String())
 	}
 }
+
+// A rollback the runtime cannot be asked about is not reported as done: the
+// container may well be there, and "stopped and removed; nothing … is left
+// running" would be the same claim `run`'s interruption used to make before
+// it checked. It is said as what it is, with the command that shows the truth.
+func TestAFailedUpDoesNotCallARollbackDoneWhenTheRuntimeCannotBeAsked(t *testing.T) {
+	parent := readOnlyParent(t)
+	// The runtime answers while cache is started (the ownership check needs an
+	// answer) and stops answering once the rollback has deleted it.
+	t.Setenv("INSPECT_FAIL_ONCE_GONE", "cache.demo.opossum")
+	rt, _ := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"cache": {Image: "alpine:3"},
+		"db": {
+			Image:     "alpine:3",
+			DependsOn: compose.DependsOn{{Name: "cache"}},
+			Volumes:   []string{filepath.Join(parent, "child") + ":/data"},
+		},
+	})
+	var out bytes.Buffer
+	o := orchestrator.New(p, rt, "opossum", &out)
+	if err := o.Up(true); err == nil {
+		t.Fatal("db's bind source cannot be made, so up must fail")
+	}
+	got := out.String()
+	if !strings.Contains(got, "Tried to roll back cache, but the runtime could not be asked whether it is gone — `container ls -a` shows it") {
+		t.Errorf("an unanswered inspect must be reported as such, got:\n%s", got)
+	}
+	if strings.Contains(got, "stopped and removed") || strings.Contains(got, "left running") {
+		t.Errorf("must not claim the rollback is done, got:\n%s", got)
+	}
+}
+
+// What a failed `up` hands to the supervisor (Started) is what is still there
+// among the services it did not create. One the runtime cannot be asked about
+// is kept: dropping it would end its supervision over an outage — the same
+// reading StillSupervised makes.
+func TestStartedKeepsAServiceTheRuntimeCannotBeAskedAbout(t *testing.T) {
+	parent := readOnlyParent(t)
+	rt, _ := fakeShim(t)
+	// web is brought up once and is up to date on the second up; cache is new
+	// and starts, db is new and cannot. Once the rollback has deleted cache,
+	// the runtime stops answering about everything — web included.
+	t.Setenv("INSPECT_FAIL_ONCE_GONE_ALL", "cache.demo.opossum")
+	p := project("demo", map[string]*compose.Service{"web": {Image: "alpine:3"}})
+	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
+	if err := o.Up(true); err != nil {
+		t.Fatalf("first up: %v", err)
+	}
+	p.Services["cache"] = &compose.Service{Image: "alpine:3"}
+	p.Services["db"] = &compose.Service{Image: "alpine:3", DependsOn: compose.DependsOn{{Name: "cache"}}, Volumes: []string{filepath.Join(parent, "child") + ":/data"}}
+	if err := o.Up(true); err == nil {
+		t.Fatal("db's bind source cannot be made, so the second up must fail")
+	}
+	started := strings.Join(o.Started(), ",")
+	if !strings.Contains(started, "web") {
+		t.Errorf("web was up to date and could not be asked about afterwards — it stays supervised; Started = %q", started)
+	}
+	if strings.Contains(started, "cache") {
+		t.Errorf("cache was created by this up and rolled back; it is not handed to the supervisor; Started = %q", started)
+	}
+}
+
+// The rollback report is one line built from three lists — removed, still
+// there, could not be asked — and each combination reads as one true sentence.
+// Three created services with a different fate each, so a fate folded into
+// another list, or the "nothing is left running" clause attached while
+// something is, shows as a different line. Matched whole: the line is the
+// claim.
+func TestTheRollbackReportIsTrueForEveryMixOfOutcomes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  []string
+		want string
+	}{
+		{"removed and could not be asked",
+			[]string{"INSPECT_FAIL_ONCE_GONE=queue.demo.opossum"},
+			"Rolled back cache, mail — stopped and removed; tried to roll back queue, but the runtime could not be asked whether it is gone — `container ls -a` shows it"},
+		{"only still there",
+			[]string{"DELETE_STICKY=cache.demo.opossum queue.demo.opossum mail.demo.opossum"},
+			"Tried to roll back cache, queue, mail, but the container is still there — `opossum down` removes it"},
+		{"removed, still there and could not be asked",
+			[]string{"DELETE_STICKY=mail.demo.opossum", "INSPECT_FAIL_ONCE_GONE=queue.demo.opossum"},
+			"Rolled back cache — stopped and removed; tried to roll back mail, but the container is still there — `opossum down` removes it; tried to roll back queue, but the runtime could not be asked whether it is gone — `container ls -a` shows it"},
+		{"only removed",
+			nil,
+			"Rolled back cache, queue, mail — stopped and removed; nothing this `up` started is left running"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parent := readOnlyParent(t)
+			rt, _ := fakeShim(t)
+			setShimEnv(rt, tc.env...)
+			chain := []string{"cache", "queue", "mail"}
+			services := map[string]*compose.Service{}
+			for i, name := range chain {
+				svc := &compose.Service{Image: "alpine:3"}
+				if i > 0 {
+					svc.DependsOn = compose.DependsOn{{Name: chain[i-1]}}
+				}
+				services[name] = svc
+			}
+			services["db"] = &compose.Service{Image: "alpine:3", DependsOn: compose.DependsOn{{Name: "mail"}},
+				Volumes: []string{filepath.Join(parent, "child") + ":/data"}}
+			var out bytes.Buffer
+			if err := orchestrator.New(project("demo", services), rt, "opossum", &out).Up(true); err == nil {
+				t.Fatal("db's bind source cannot be made, so up must fail")
+			}
+			if got := rollbackLine(out.String()); got != tc.want {
+				t.Errorf("rollback report:\n got %q\nwant %q", got, tc.want)
+			}
+		})
+	}
+}

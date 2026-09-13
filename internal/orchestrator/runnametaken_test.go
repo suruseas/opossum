@@ -153,7 +153,9 @@ func TestUpLeavesAContainerItDidNotCreateAlone(t *testing.T) {
 		if indexOf(lines, "stop db.demo.opossum") < 0 || countLines(lines, "delete --force db.demo.opossum") != 2 {
 			t.Errorf("db was this up's, and is rolled back; got %v", lines)
 		}
-		if !strings.Contains(out, "Rolled back db") || strings.Contains(out, "web is still there") {
+		// Whatever wording the rollback report uses, web — a container this up did
+		// not create — is not in it: neither as rolled back nor as left behind.
+		if report := rollbackLine(out); !strings.HasPrefix(report, "Rolled back db") || strings.Contains(report, "web") {
 			t.Errorf("the rollback report covers db and does not claim web, got:\n%s", out)
 		}
 	})
@@ -200,7 +202,7 @@ func TestUpLeavesAContainerItDidNotCreateAlone(t *testing.T) {
 		if indexOf(lines, "stop "+db) < 0 || countLines(lines, "delete --force "+db) != 2 {
 			t.Errorf("db was this up's, and is rolled back; got %v", lines)
 		}
-		if !strings.Contains(out, "Rolled back db") || strings.Contains(out, "init is still there") {
+		if report := rollbackLine(out); !strings.HasPrefix(report, "Rolled back db") || strings.Contains(report, "init") {
 			t.Errorf("the rollback report covers db and does not claim init, got:\n%s", out)
 		}
 	})
@@ -238,4 +240,16 @@ func TestUpLeavesAContainerItDidNotCreateAlone(t *testing.T) {
 			t.Errorf("an ordinary failed start is rolled back; want 2 deletes, got %d in %v", n, log())
 		}
 	})
+}
+
+// rollbackLine is the one line of `up`'s output that reports the rollback, or
+// "" when there is none — so a check on what it names is not satisfied by the
+// same words elsewhere, nor escaped by a change of wording.
+func rollbackLine(out string) string {
+	for _, l := range strings.Split(out, "\n") {
+		if strings.HasPrefix(l, "Rolled back ") || strings.HasPrefix(l, "Tried to roll back ") {
+			return l
+		}
+	}
+	return ""
 }

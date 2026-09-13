@@ -205,7 +205,7 @@ func TestUpWiresBusyVolumeWarningAndDecode(t *testing.T) {
 		"  system) echo 'status running' ;;\n" +
 		"  volume) echo 'vzint_data' ;;\n" +
 		"  ls) echo '" + holder + "' ;;\n" +
-		"  inspect) exit 1 ;;\n" +
+		"  inspect) echo \"Error: container not found: $2\" >&2; exit 1 ;;\n" +
 		"  run) echo 'Error Domain=VZErrorDomain Code=2 \"The storage device attachment is invalid.\"' >&2; exit 1 ;;\n" +
 		"esac\nexit 0\n"
 	if err := os.WriteFile(shim, []byte(script), 0o755); err != nil {

@@ -1143,6 +1143,7 @@ func TestFromDockerComposeLegacyAlias(t *testing.T) {
 		container := filepath.Join(dir, "container")
 		writeExec(t, container, fmt.Sprintf("#!/bin/sh\necho \"container $*\" >> %s\n"+
 			"[ \"$1 $2\" = \"image inspect\" ] && exit 1\n"+
+			"[ \"$1\" = \"inspect\" ] && { echo \"Error: container not found: $2\" >&2; exit 1; }\n"+
 			"[ \"$1 $2\" = \"image load\" ] && cat >/dev/null\nexit 0\n", logPath))
 		t.Setenv("OPOSSUM_CONTAINER_BIN", container)
 		t.Setenv("OPOSSUM_DOCKER_BIN", docker)

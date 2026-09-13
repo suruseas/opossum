@@ -1463,21 +1463,24 @@ func (o *Orchestrator) suggestSharedVolumeFix(order []string) []serviceAdaptatio
 	for _, vol := range vols {
 		svcs := users[vol]
 		sort.Strings(svcs)
-		host := "./" + compose.SanitizeName(vol)
+		// The volume as the file names it: vol is the loader's key, which for a
+		// name starting with `.` is not what anyone wrote.
+		shown := compose.VolumeDisplayName(vol)
+		host := "./" + compose.SanitizeName(shown)
 		for _, name := range svcs {
 			out = append(out, serviceAdaptation{
 				Adaptation: Adaptation{
 					Service: name,
 					Code:    string(codeSharedVolume),
-					Summary: fmt.Sprintf("service %q shares named volume %q with %d other service(s); a bind mount would let them all run", name, vol, len(svcs)-1),
+					Summary: fmt.Sprintf("service %q shares named volume %q with %d other service(s); a bind mount would let them all run", name, shown, len(svcs)-1),
 				},
 				class: classSuggestion,
 				comment: suggestionBlock(
 					fmt.Sprintf("%s service %q: mount the shared data from a host directory instead of the named volume %q.",
-						suggestionMarker, esc(name), esc(vol)),
+						suggestionMarker, esc(name), esc(shown)),
 					[]string{
 						"Apple container attaches a named volume to one container at a time, so",
-						fmt.Sprintf("%s cannot all run while they share %q — whichever starts", quotedList(svcs), esc(vol)),
+						fmt.Sprintf("%s cannot all run while they share %q — whichever starts", quotedList(svcs), esc(shown)),
 						"first gets it and the rest fail to attach. Diagnostic: " + string(codeSharedVolume) + ".",
 						"A host directory is shareable, so a bind mount lets them all mount it.",
 						"NOT APPLIED, because it changes what the project means: the data moves out",
@@ -1486,7 +1489,7 @@ func (o *Orchestrator) suggestSharedVolumeFix(order []string) []serviceAdaptatio
 						"particular should NOT be moved this way — it needs to be chownable.",
 					},
 					[]string{
-						fmt.Sprintf("uncomment the block for every service sharing %q (all of them,", esc(vol)),
+						fmt.Sprintf("uncomment the block for every service sharing %q (all of them,", esc(shown)),
 						"or none), create the directory, then `opossum up`. `opossum ps`",
 						"should show them all running.",
 					},

@@ -2,9 +2,11 @@ package site
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -461,32 +463,137 @@ func TestBuildRefusesADirectoryItDidNotWrite(t *testing.T) {
 // on disk instead, so a document added to docs/ and forgotten here — published
 // nowhere, linked as a GitHub blob — fails, and so does one dropped from Pages.
 func TestEveryDocumentIsEitherPublishedOrDeliberatelyNot(t *testing.T) {
-	found, err := filepath.Glob(filepath.Join("..", "..", "docs", "*.md"))
+	names := documentsIn(t, filepath.Join("..", "..", "docs"))
+	if len(names) < 5 {
+		t.Fatalf("only %d documents found — the glob is not doing its job", len(names))
+	}
+	for _, problem := range documentListProblems(names, Pages, Unpublished) {
+		t.Error(problem)
+	}
+	// The names read from the directory are the ones the lists compare against:
+	// a page nobody wrote is found missing among them.
+	if got := documentListProblems(names, append(append([]string{}, Pages...), "no-such-page"), Unpublished); len(got) != 1 {
+		t.Errorf("a listed page that is not under docs/ should be the one problem, got %q", got)
+	}
+}
+
+// documentsIn names the documents in dir as the lists spell them.
+func documentsIn(t *testing.T, dir string) []string {
+	t.Helper()
+	found, err := filepath.Glob(filepath.Join(dir, "*.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(found) < 5 {
-		t.Fatalf("only %d documents found — the glob is not doing its job", len(found))
-	}
-	on := map[string]bool{}
+	var names []string
 	for _, p := range found {
-		on[strings.TrimSuffix(filepath.Base(p), ".md")] = true
+		names = append(names, strings.TrimSuffix(filepath.Base(p), ".md"))
+	}
+	return names
+}
+
+// documentListProblems says what is wrong between the documents under docs/
+// and the two lists. A page the site publishes has to be there. A document that
+// is there has to be on one list or the other. A document listed as
+// unpublished may be absent — a checkout that ships only the published pages
+// leaves it out — and "not published" holds all the same.
+func documentListProblems(onDisk, pages, unpublished []string) []string {
+	var problems []string
+	on := map[string]bool{}
+	for _, name := range onDisk {
+		on[name] = true
 	}
 	listed := map[string]bool{}
-	for _, name := range append(append([]string{}, Pages...), Unpublished...) {
+	for i, name := range append(append([]string{}, pages...), unpublished...) {
 		if listed[name] {
-			t.Errorf("%q is listed twice, so it is both published and not", name)
+			problems = append(problems, fmt.Sprintf("%q is listed twice, so it is both published and not", name))
+			continue // its first listing already said whether it is there
 		}
 		listed[name] = true
-		if !on[name] {
-			t.Errorf("%q is listed in the site's pages but docs/%s.md does not exist", name, name)
+		if i < len(pages) && !on[name] {
+			problems = append(problems, fmt.Sprintf("%q is listed in the site's pages but docs/%s.md does not exist", name, name))
 		}
 		delete(on, name)
 	}
+	var unlisted []string
 	for name := range on {
-		t.Errorf("docs/%s.md is neither published nor listed as deliberately unpublished, so it "+
-			"is missing from the site and linked as a repository file", name)
+		unlisted = append(unlisted, name)
 	}
+	sort.Strings(unlisted)
+	for _, name := range unlisted {
+		problems = append(problems, fmt.Sprintf("docs/%s.md is neither published nor listed as deliberately unpublished, so it "+
+			"is missing from the site and linked as a repository file", name))
+	}
+	return problems
+}
+
+// Each rule on its own, in the two shapes docs/ comes in: every document, and
+// only the published pages.
+func TestTheDocumentListRules(t *testing.T) {
+	pages, unpublished := []string{"guide", "faq"}, []string{"procedure"}
+	for _, tc := range []struct {
+		name   string
+		onDisk []string
+		want   []string // a part of each problem, in order; none when empty
+	}{
+		{"every document is there", []string{"guide", "faq", "procedure"}, nil},
+		{"an unpublished document is left out", []string{"guide", "faq"}, nil},
+		{"two problems at once", []string{"faq", "procedure", "notes"}, []string{`"guide" is listed in the site's pages`, "docs/notes.md is neither published nor listed"}},
+		{"a published page is missing", []string{"guide", "procedure"}, []string{`"faq" is listed in the site's pages but docs/faq.md does not exist`}},
+		{"the first published page is missing", []string{"faq", "procedure"}, []string{`"guide" is listed in the site's pages`}},
+		{"a document is on neither list", []string{"guide", "faq", "procedure", "notes"}, []string{"docs/notes.md is neither published nor listed"}},
+		{"a document is on neither list with only the pages there", []string{"guide", "faq", "notes"}, []string{"docs/notes.md is neither published nor listed"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := documentListProblems(tc.onDisk, pages, unpublished)
+			if len(got) != len(tc.want) {
+				t.Fatalf("problems:\n%s\nwant %d containing %q", strings.Join(got, "\n"), len(tc.want), tc.want)
+			}
+			for i, want := range tc.want {
+				if !strings.Contains(got[i], want) {
+					t.Errorf("problem %d = %q, want it to contain %q", i, got[i], want)
+				}
+			}
+		})
+	}
+	// The real lists, read from a directory that holds only the published pages.
+	copyOf := func(t *testing.T, names ...string) string {
+		dir := t.TempDir()
+		for _, name := range names {
+			if err := os.WriteFile(filepath.Join(dir, name+".md"), []byte("# "+name+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return dir
+	}
+	t.Run("docs/ with only the published pages", func(t *testing.T) {
+		if got := documentListProblems(documentsIn(t, copyOf(t, Pages...)), Pages, Unpublished); len(got) != 0 {
+			t.Errorf("problems: %q", got)
+		}
+	})
+	t.Run("docs/ with only the published pages, one missing", func(t *testing.T) {
+		got := documentListProblems(documentsIn(t, copyOf(t, Pages[1:]...)), Pages, Unpublished)
+		if len(got) != 1 || !strings.Contains(got[0], fmt.Sprintf("%q is listed in the site's pages", Pages[0])) {
+			t.Errorf("problems: %q", got)
+		}
+	})
+	t.Run("a name listed as both published and not", func(t *testing.T) {
+		got := documentListProblems([]string{"guide"}, []string{"guide"}, []string{"guide"})
+		if len(got) != 1 || !strings.Contains(got[0], `"guide" is listed twice`) {
+			t.Errorf("problems: %q", got)
+		}
+	})
+	t.Run("a page listed twice", func(t *testing.T) {
+		got := documentListProblems([]string{"guide"}, []string{"guide", "guide"}, nil)
+		if len(got) != 1 || !strings.Contains(got[0], `"guide" is listed twice`) {
+			t.Errorf("problems: %q", got)
+		}
+	})
+	t.Run("a name listed twice and absent", func(t *testing.T) {
+		got := documentListProblems(nil, nil, []string{"procedure", "procedure"})
+		if len(got) != 1 || !strings.Contains(got[0], `"procedure" is listed twice`) {
+			t.Errorf("problems: %q", got)
+		}
+	})
 }
 
 // These are written for the check, not shared with the rewriter, and they are

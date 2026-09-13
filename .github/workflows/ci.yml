@@ -244,7 +244,7 @@ jobs:
           # same way — that no product code imports it. The checking is not only
           # by hand: internal/repohygiene/gate_test.go pins the set of packages the
           # released binary links, so an exemption that becomes a lie fails there.
-          shipped="$(echo "$changed" | grep -E '^(cmd|internal)/' | grep -v '_test\.go$' | grep -v '/testdata/' | grep -v '^cmd/changelog/' | grep -v '^internal/changelog/' | grep -v '^internal/repohygiene/' | grep -v '^internal/claimcite/' | grep -v '^cmd/mutate/' | grep -v '^internal/mutate/' | grep -v '^cmd/noleftovers/' | grep -v '^cmd/busy/' | grep -v '^internal/suitedir/' | grep -v '^internal/site/' || true)"
+          shipped="$(echo "$changed" | grep -E '^(cmd|internal)/' | grep -v '_test\.go$' | grep -v '/testdata/' | grep -v '^cmd/changelog/' | grep -v '^internal/changelog/' | grep -v '^internal/repohygiene/' | grep -v '^internal/claimcite/' | grep -v '^cmd/mutate/' | grep -v '^internal/mutate/' | grep -v '^cmd/noleftovers/' | grep -v '^cmd/busy/' | grep -v '^internal/suitedir/' | grep -v '^internal/testpair/' | grep -v '^internal/site/' || true)"
           if [ -z "$shipped" ]; then
             echo "No shipped code changed — no fragment needed."; exit 0
           fi
@@ -279,37 +279,94 @@ jobs:
 
       # ---- the published record stays published ---------------------------
       #
-      # A merge that resolves a CHANGELOG.md conflict by hand can drop a
-      # released `## [x.y.z]` section, or bring back a changelog.d fragment the
-      # release already folded in — both went unnoticed once and were caught by
-      # eye. Two cheap checks against the base: every released heading it has,
-      # the head keeps; and a fragment this branch adds is not an entry a
-      # released section of the base already carries.
+      # A merge that resolves a CHANGELOG.md conflict by hand can drop or
+      # rewrite a released `## [x.y.z]` section, or bring back a changelog.d
+      # fragment the release already folded in — both went unnoticed once and
+      # were caught by eye. The check reads what merging the PR would produce
+      # (git merge-tree), not the head: a branch cut before a release lacks that
+      # release's section without dropping anything. Against that merge: every
+      # released section the base has is there, heading and text unchanged;
+      # and no fragment it adds is an entry a released section of the base
+      # already carries. Released sections are fixed outside pull requests, so
+      # nothing here makes an exception.
+      #
+      # Every answer comes from git directly, never through a pipe whose status
+      # is dropped (steps run under `bash -e` without pipefail): a revision git
+      # cannot read, or a merge it cannot compute, stops the check — unknown is
+      # not the same as fine.
       - name: released changelog sections stay released
         if: ${{ !cancelled() && github.event_name == 'pull_request' }}
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
-          base_heads="$(git show "$BASE:CHANGELOG.md" | grep -E '^## \[[0-9]' || true)"
-          head_heads="$(git show "$HEAD:CHANGELOG.md" | grep -E '^## \[[0-9]' || true)"
-          lost="$(comm -23 <(echo "$base_heads" | sort) <(echo "$head_heads" | sort))"
-          if [ -n "$lost" ]; then
-            echo "This PR drops released CHANGELOG.md sections the base has:"
-            echo "$lost" | sed 's/^/  /'
-            echo
-            echo "Released sections are the published record and never change. Take"
-            echo "the base's CHANGELOG.md and run 'make changelog' instead of resolving"
-            echo "the conflict by hand."
+          v="$(git version)"
+          if ! [[ "$v" =~ ^git\ version\ ([0-9]+)\.([0-9]+) ]]; then
+            echo "Cannot tell which git this runner has ($v); this check needs git 2.38 or later."
             exit 1
           fi
-          # A fragment added by this branch whose entry the base's released
-          # sections already carry: the release folded it in, and a merge put
-          # the file back. The first line of the entry is enough to tell.
-          released="$(git show "$BASE:CHANGELOG.md" | sed -n '/^## \[[0-9]/,$p')"
-          for f in $(git diff --name-only --diff-filter=A "$BASE...$HEAD" | grep -E '^changelog\.d/[^/]+\.md$' | grep -v '^changelog\.d/README\.md$' || true); do
-            first="$(git show "$HEAD:$f" | grep -m1 '^- ' || true)"
-            if [ -n "$first" ] && echo "$released" | grep -qF -- "$first"; then
+          if [ "${BASH_REMATCH[1]}" -lt 2 ] || { [ "${BASH_REMATCH[1]}" -eq 2 ] && [ "${BASH_REMATCH[2]}" -lt 38 ]; }; then
+            echo "This runner has $v; computing a merge without a work tree (git merge-tree --write-tree) needs 2.38 or later."
+            exit 1
+          fi
+          if [ -z "$BASE" ] || ! git cat-file -e "$BASE:CHANGELOG.md" || ! git cat-file -e "$HEAD^{commit}"; then
+            echo "Cannot read the base's CHANGELOG.md ('$BASE') or the head commit ('$HEAD'), so whether the"
+            echo "released sections survive is unknown — and unknown is not the same as fine. The checkout"
+            echo "needs the full history (fetch-depth: 0)."
+            exit 1
+          fi
+          rc=0
+          merge="$(git merge-tree --write-tree "$BASE" "$HEAD")" || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "This PR does not merge into its base cleanly (git merge-tree exit $rc), so what merging"
+            echo "does to the released sections cannot be judged. Bring the branch up to date first:"
+            echo "$merge" | sed 's/^/  /'
+            exit 1
+          fi
+          tree="${merge%%$'\n'*}"
+          base_log="$(git show "$BASE:CHANGELOG.md")"
+          merged_log=""
+          if git cat-file -e "$tree:CHANGELOG.md" 2>/dev/null; then
+            merged_log="$(git show "$tree:CHANGELOG.md")"
+          fi
+          # section HEADING prints that section of its input: the heading line
+          # and every line up to the next `## ` heading.
+          section() { awk -v h="$1" '$0 == h { on = 1; print; next } on && /^## / { exit } on { print }'; }
+          heads="$(grep -E '^## \[[0-9]' <<<"$base_log" || true)"
+          lost="" changed=""
+          while IFS= read -r h; do
+            [ -n "$h" ] || continue
+            was="$(section "$h" <<<"$base_log")"
+            now="$(section "$h" <<<"$merged_log")"
+            if [ -z "$now" ]; then
+              lost="$lost  $h"$'\n'
+            elif [ "$was" != "$now" ]; then
+              changed="$changed  $h"$'\n'
+            fi
+          done <<<"$heads"
+          if [ -n "$lost$changed" ]; then
+            if [ -n "$lost" ]; then
+              echo "Merging this PR drops released CHANGELOG.md sections the base has:"
+              printf '%s' "$lost"
+            fi
+            if [ -n "$changed" ]; then
+              echo "Merging this PR changes released CHANGELOG.md sections:"
+              printf '%s' "$changed"
+            fi
+            echo
+            echo "Released sections are the published record and never change in a pull request. Take"
+            echo "the base's CHANGELOG.md and run 'make changelog' instead of resolving the conflict by hand."
+            exit 1
+          fi
+          # A fragment the merge adds whose entry the base's released sections
+          # already carry: the release folded it in, and a merge put the file
+          # back. The first line of the entry is enough to tell.
+          released="$(sed -n '/^## \[[0-9]/,$p' <<<"$base_log")"
+          added="$(git diff --name-only --diff-filter=A "$BASE" "$tree")"
+          for f in $(grep -E '^changelog\.d/[^/]+\.md$' <<<"$added" | grep -v '^changelog\.d/README\.md$' || true); do
+            body="$(git show "$tree:$f")"
+            first="$(grep -m1 '^- ' <<<"$body" || true)"
+            if [ -n "$first" ] && grep -qF -- "$first" <<<"$released"; then
               echo "This PR adds $f, but its entry is already in a released CHANGELOG.md section:"
               echo "  $first"
               echo

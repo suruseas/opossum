@@ -49,7 +49,9 @@ var Pages = []string{
 // files. Saying so here rather than leaving them out of Pages is what lets a test
 // insist that every document is one or the other: a new page nobody added to
 // Pages would otherwise be published nowhere and linked as a GitHub blob, and
-// nothing would say so.
+// nothing would say so. A document on this list is allowed to be absent from
+// docs/ — a checkout that ships only the published pages leaves it out, and it
+// is still not published.
 var Unpublished = []string{"real-runtime-review"}
 
 var (

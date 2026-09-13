@@ -123,7 +123,7 @@ type configService struct {
 	Environment []string             `yaml:"environment,omitempty"`
 	Ports       []string             `yaml:"ports,omitempty"`
 	Restart     string               `yaml:"restart,omitempty"`
-	Volumes     []string             `yaml:"volumes,omitempty"`
+	Volumes     []any                `yaml:"volumes,omitempty"`
 	Tmpfs       []string             `yaml:"tmpfs,omitempty"`
 	MemLimit    string               `yaml:"mem_limit,omitempty"`
 	CPUs        string               `yaml:"cpus,omitempty"`
@@ -191,7 +191,7 @@ func RenderConfig(p *Project) (string, error) {
 			Environment: ResolveBareNames(env, os.LookupEnv, true),
 			Ports:       svc.Ports,
 			Restart:     svc.Restart,
-			Volumes:     volumesWithNoCopy(svc),
+			Volumes:     configMounts(svc),
 			Tmpfs:       svc.Tmpfs,
 			MemLimit:    mem,
 			CPUs:        cpu,
@@ -248,7 +248,7 @@ func RenderConfig(p *Project) (string, error) {
 	if len(p.Volumes) > 0 {
 		out.Volumes = map[string]configVolume{}
 		for name, decl := range p.Volumes {
-			out.Volumes[name] = configVolume{External: decl.External, Name: decl.Name}
+			out.Volumes[VolumeDisplayName(name)] = configVolume{External: decl.External, Name: decl.Name}
 		}
 	}
 	if len(p.Secrets) > 0 {
@@ -380,6 +380,35 @@ func configRefs(refs ConfigRefs) []any {
 			continue
 		}
 		out = append(out, configRef{Source: r.Source, Target: r.Target})
+	}
+	return out
+}
+
+// configMounts is a service's mounts as `config` prints them: the short
+// spelling, except for a volume whose name starts with `.` (dotVolumeMarker),
+// which has no short spelling that stays a volume and is printed in the long
+// form it was written in.
+func configMounts(svc *Service) []any {
+	short := volumesWithNoCopy(svc)
+	nocopy := map[string]bool{}
+	for _, t := range svc.NoCopy {
+		nocopy[strings.TrimRight(t, "/")] = true
+	}
+	out := make([]any, 0, len(short))
+	for i, v := range svc.Volumes {
+		if !strings.HasPrefix(v, dotVolumeMarker) {
+			out = append(out, short[i])
+			continue
+		}
+		parts := strings.SplitN(v, ":", 3)
+		m := map[string]any{"type": "volume", "source": VolumeDisplayName(parts[0]), "target": parts[1]}
+		if len(parts) == 3 && parts[2] == "ro" {
+			m["read_only"] = true
+		}
+		if nocopy[strings.TrimRight(parts[1], "/")] {
+			m["volume"] = map[string]any{"nocopy": true}
+		}
+		out = append(out, m)
 	}
 	return out
 }

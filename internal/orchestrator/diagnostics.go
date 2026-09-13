@@ -56,7 +56,7 @@ const (
 	codeRuntimeStopped        diagCode = "OPSM-405" // the `container` system (daemon) is installed but not running
 	codeRuntimeAutoStart      diagCode = "OPSM-406" // the runtime wasn't running; opossum is starting it
 	codeSupervisorStarted     diagCode = "OPSM-408" // a per-project supervisor is watching `restart:` services
-	codeSupervisorAction      diagCode = "OPSM-409" // the supervisor restarted a service, or gave up on one
+	codeSupervisorAction      diagCode = "OPSM-409" // the supervisor restarted a service, gave up on one, or left a container that is another project's
 	codeSupervisorLogTrimmed  diagCode = "OPSM-410" // the supervisor's log hit its size cap and lost its older half
 	codeSupervisorLogUncapped diagCode = "OPSM-411" // the supervisor could not open a size-capped log and is writing without a bound
 	codeImageNoArm64          diagCode = "OPSM-412" // the image has no arm64 build, so the container cannot start here

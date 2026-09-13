@@ -2896,6 +2896,63 @@ func TestUpDoesNotDeletePreexistingNetworkOnFailure(t *testing.T) {
 	}
 }
 
+// A container whose owner the runtime gives no readable answer about is not
+// "nobody's": up refuses, and creates, deletes, runs nothing. Before this, such
+// a container read as unowned and the stale-cleanup force-deleted it and put
+// this project's in its place — another project's included (reproduced on
+// container 1.4.1, with nothing said).
+func TestUpLeavesAContainerWhoseOwnerCannotBeReadAlone(t *testing.T) {
+	// Two services, db starting before web; the container with no answer is
+	// each of them in turn, so neither the first nor the last position alone is
+	// what the pre-flight looks at.
+	noAnswer := func(svc string) string {
+		return `container "` + svc + `.demo.opossum": the runtime gave no readable answer about which project owns it, so it is left alone; ` +
+			"`container inspect " + svc + ".demo.opossum` shows what the runtime says — run `opossum up` again once it answers, " +
+			"or, if it belongs to another project, give this project its own DNS domain (e.g. --dns-domain demo)"
+	}
+	for _, tc := range []struct {
+		name, refused, want string
+		env                 []string
+	}{
+		// The control: an answered owner. The fake labels every container with
+		// INSPECT_PROJECT, so db, looked at first, is the one refused.
+		{"owned by another project, and answered", "db.demo.opossum", `container "db.demo.opossum" is already in use by project "otherproj"`,
+			[]string{"INSPECT_PROJECT=otherproj"}},
+		{"no answer about the service that starts last", "web.demo.opossum", noAnswer("web"), []string{"INSPECT_FAIL=web.demo.opossum"}},
+		{"no answer about the service that starts first", "db.demo.opossum", noAnswer("db"), []string{"INSPECT_FAIL=db.demo.opossum"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt, log := fakeShim(t)
+			setShimEnv(rt, tc.env...)
+			p := project("demo", map[string]*compose.Service{
+				"db":  {Image: "postgres:16"},
+				"web": {Image: "nginx", DependsOn: []compose.Dependency{{Name: "db"}}},
+			})
+			err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("want the refusal %q, got: %v", tc.want, err)
+			}
+			inspects := 0
+			for _, l := range log() {
+				for _, verb := range []string{"delete", "run ", "stop ", "network create", "volume create"} {
+					if strings.HasPrefix(l, verb) {
+						t.Errorf("nothing may be created, removed or started while a container this up cannot vouch for is in the way, got %q", l)
+					}
+				}
+				if l == "inspect "+tc.refused {
+					inspects++
+				}
+			}
+			// The owner is read from one question, for both answers — a second one
+			// could answer differently from the first. The other inspect is the
+			// host-port check's look at every service, which comes before.
+			if inspects != 2 {
+				t.Errorf("want %s inspected once by the host-port check and once for its owner, got %d", tc.refused, inspects)
+			}
+		})
+	}
+}
+
 func TestUpRefusesForeignProjectContainer(t *testing.T) {
 	rt, log := fakeShim(t)
 	setShimEnv(rt, "INSPECT_PROJECT=otherproj") // db.demo.opossum is owned by another project
@@ -4128,20 +4185,22 @@ func TestStartedSurvivesAPostStartCrash(t *testing.T) {
 // its container still there. Neither had a unit test.
 func TestStillSupervised(t *testing.T) {
 	rt, _ := fakeShim(t)
-	setShimEnv(rt, "INSPECT_ABSENT=gone.demo.opossum")
+	// `unasked` is a service the runtime cannot answer about: not gone, so
+	// still supervised — dropping it would end its supervision over an outage.
+	setShimEnv(rt, "INSPECT_ABSENT=gone.demo.opossum", "INSPECT_FAIL=unasked.demo.opossum")
 	p := project("demo", map[string]*compose.Service{
 		"web":     {Image: "web", Restart: "always"},
 		"gone":    {Image: "g", Restart: "always"},
+		"unasked": {Image: "u", Restart: "always"},
 		"plain":   {Image: "p"},
 		"migrate": {Image: "m", Restart: "always"},
 		"app": {Image: "a", Restart: "always",
 			DependsOn: compose.DependsOn{{Name: "migrate", Condition: compose.ConditionCompleted}}},
 	})
 	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
-	got := o.StillSupervised([]string{"web", "gone", "plain", "migrate", "absent-from-compose"})
-	want := []string{"web"}
-	if len(got) != len(want) || (len(got) > 0 && got[0] != want[0]) {
-		t.Errorf("StillSupervised = %v, want %v — gone has no container, plain has no policy, "+
+	got := o.StillSupervised([]string{"web", "gone", "unasked", "plain", "migrate", "absent-from-compose"})
+	if want := "web unasked"; strings.Join(got, " ") != want {
+		t.Errorf("StillSupervised = %v, want %q — gone has no container, unasked could not be asked about (kept), plain has no policy, "+
 			"migrate runs to completion, and absent-from-compose isn't a service", got, want)
 	}
 }

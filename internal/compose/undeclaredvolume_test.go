@@ -90,15 +90,49 @@ func TestAMountOfAnUndeclaredNamedVolumeIsRefused(t *testing.T) {
 			t.Errorf("refusal:\n got %q\nwant %q", got, want)
 		}
 	})
-	// In the long form the type decides: a `type: volume` whose source is
-	// spelled like a path has no short spelling that keeps that meaning here
-	// (docker compose creates the volume), so it is refused with the two ways
-	// to say it rather than run silently as a bind.
-	// Three spellings, one subtest each: a `.` name is one docker compose
-	// creates (`<project>_.hidden`) and this cannot carry yet; a `/` or `~`
-	// name docker compose refuses too. The wording says which.
+	// In the long form the type decides: a `type: volume` whose source starts
+	// with `.` is a volume name (docker compose creates `<project>_.hidden`),
+	// so it needs its declaration like any other — and the refusal names it as
+	// written, not in the loader's spelling of it.
+	t.Run("a long-form volume whose name starts with a dot needs its declaration", func(t *testing.T) {
+		got := refused(t, "services:\n  web:\n    image: alpine\n    volumes:\n      - {type: volume, source: .hidden, target: /y}\n")
+		want := `service "web" refers to undefined volume ".hidden"`
+		if !strings.Contains(got, want) || ShowsLoaderSpelling(got) {
+			t.Errorf("refusal:\n got %q\nwant it to contain %q, and nothing but what was written", got, want)
+		}
+	})
+	// `./x` is a name docker compose does not let a volume have: it refuses the
+	// declaration (`volumes additional properties './x' not allowed`), and so
+	// `../x` and `.x/y`, whose `/` is not the second character. Declared and
+	// not, so the refusal cannot hang on the declaration being missing.
+	for _, src := range []string{"./x", "../x", ".x/y"} {
+		for _, decl := range []string{"", "volumes:\n  " + src + ": {}\n"} {
+			t.Run("a long-form volume named with a slash is refused, declared or not: "+src+" "+strings.TrimSpace(decl), func(t *testing.T) {
+				got := refused(t, "services:\n  web:\n    image: alpine\n    volumes:\n      - {type: volume, source: "+src+", target: /y}\n"+decl)
+				if want := "type: volume with source \"" + src + "\" — a volume name cannot contain `/`"; !strings.Contains(got, want) {
+					t.Errorf("refusal:\n got %q\nwant it to contain %q", got, want)
+				}
+			})
+		}
+	}
+	// A NUL byte in a mount or a volume's name is refused, as docker compose
+	// refuses it: the loader's own spellings of a mount are made of them, so a
+	// file could otherwise write one by hand and have `.hid:/y`, a path, run as
+	// the volume `.hid`. One subtest per place a NUL can be written.
+	for _, tc := range []struct{ name, body, want string }{
+		{"in a short mount", "services:\n  web:\n    image: alpine\n    volumes:\n      - \"\\0opossumdotvolume\\0.hid:/y\"\nvolumes:\n  .hid: {}\n", "volumes entry 1 of 1 contains a NUL character"},
+		{"in a long mount's source", "services:\n  web:\n    image: alpine\n    volumes:\n      - {type: volume, source: \"\\0x\", target: /y}\n", "volumes entry 1 of 1 contains a NUL character"},
+		{"in a long mount's target", "services:\n  web:\n    image: alpine\n    volumes:\n      - {type: bind, source: ./x, target: \"/y\\0\"}\n", "volumes entry 1 of 1 contains a NUL character"},
+		{"in a volume's name", "services:\n  web:\n    image: alpine\nvolumes:\n  \"a\\0b\": {}\n", `compose.yaml: volume name "a\x00b" contains a NUL character`},
+	} {
+		t.Run("a NUL byte is refused "+tc.name, func(t *testing.T) {
+			if got := refused(t, tc.body); !strings.Contains(got, tc.want) {
+				t.Errorf("refusal:\n got %q\nwant it to contain %q", got, tc.want)
+			}
+		})
+	}
+	// A `/` or `~` name docker compose refuses too; the wording says so.
 	for _, tc := range []struct{ src, want string }{
-		{".hidden", "service \"web\": volumes entry 1 of 1: type: volume with source \".hidden\" — a volume whose name starts with `.` is not supported here (docker compose would create it as `<project>_.hidden` once declared); give the volume a name that does not, or declare it under volumes: with a `name:`"},
 		{"/abs", "service \"web\": volumes entry 1 of 1: type: volume with source \"/abs\" — a volume name cannot start with `/` or `~` (docker compose refuses it as well); write type: bind for a host path, or a name for a volume"},
 		{"~h", "service \"web\": volumes entry 1 of 1: type: volume with source \"~h\" — a volume name cannot start with `/` or `~` (docker compose refuses it as well); write type: bind for a host path, or a name for a volume"},
 	} {

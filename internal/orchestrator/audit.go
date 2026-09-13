@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"io"
 	"net/url"
-	"os/exec"
 	"regexp"
 	"sort"
 	"strings"
@@ -85,6 +84,11 @@ func (o *Orchestrator) RunAudited(service string, command []string, opts RunOneO
 	// that road is #660 — the same shape as a dependency that fails to start
 	// for any other reason, which `origin/main` has too.
 	if _, err := svc.ResolvedEnv(); err != nil {
+		return nil, err
+	}
+	// The one-off's name, for the same two reasons: a refusal spent on the run
+	// below would read `exit -1`, and the dependencies would already be up.
+	if err := o.ensureNotForeign(o.containerName(service+"-run"), "opossum run"); err != nil {
 		return nil, err
 	}
 	report := &AuditReport{Service: service, Command: command}
@@ -257,14 +261,16 @@ func envHasKey(env compose.Environment, key string) bool {
 }
 
 // exitCode extracts a numeric exit code from a run error: 0 for success, the
-// process's code for a normal non-zero exit, -1 for anything else (a setup error).
+// container's code for a non-zero exit of the run itself, -1 for anything else
+// (a setup error — a build or a network the run needed — even when a runtime
+// command under it exited with a code of its own).
 func exitCode(err error) int {
 	if err == nil {
 		return 0
 	}
-	var ee *exec.ExitError
-	if errors.As(err, &ee) {
-		return ee.ExitCode()
+	var ce *ContainerExitError
+	if errors.As(err, &ce) {
+		return ce.Code
 	}
 	return -1
 }

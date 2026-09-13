@@ -6,6 +6,22 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-09-14
+
+### Changed
+
+- ``opossum run`` and ``opossum exec`` now exit with the container command's own exit code, as docker compose does: a one-off that exits 3 makes ``opossum run`` exit 3 (it used to exit 1 for every failure), so a script can tell how the command failed. ``run --audit`` exits with the code its report shows, or 1 when the report shows -1. A failure of opossum itself before the command runs — an unknown service, a dependency that does not start or complete — still exits 1, and so does a runtime process killed by a signal. A command that cannot be run (not found, not executable) exits 1 under ``opossum exec``, where docker compose exits 127 or 126, because the runtime reports it as 1. The audit report's exit code for a failure before the one-off runs, such as its build, is now -1; it used to show the failing runtime command's code.
+
+### Fixed
+
+- A long-form mount with `type: volume` and a source starting with `.` (for example `source: .hidden`) is now the declared volume of that name, created as `<project>_.hidden` the way docker compose creates it. It was refused before. The short spelling `.hidden:/data` is still a directory beside the compose file, as docker compose reads it, and `opossum config` prints the volume back in the long form.
+- When the runtime cannot be asked about a container (the CLI fails for a reason other than "not found"), opossum no longer reads that as "gone": a failed `up`'s rollback and `destroy` say the removal could not be confirmed instead of reporting it done, and the restart supervisor keeps watching through the outage instead of counting it towards "nothing left to watch" — it logs the outage, and stops only when the runtime itself is down, saying so — rather than ending with a line claiming none of the containers exist while they are running.
+- `up` no longer force-deletes a container whose owner the runtime could not report. When `container inspect` failed for a reason other than "not found", or gave an answer opossum could not read, on a container `up` was about to reuse, the check for another project's container read that as "no owner", and `up` deleted that container and ran its own in its place — even if it belonged to another project sharing the DNS domain — without saying so. `up` now stops before creating anything, names the container, and says what to check: `the runtime gave no readable answer about which project owns it, so it is left alone`.
+- `down` no longer stops and deletes a container that belongs to another project. It found containers by name only, so when another project's container carried the same name — as happens with `--dns-domain ""`, where every project names its containers after the bare service — `down` removed it without saying so, even from a project that was never brought up. `down` now leaves such a container alone and prints `Leaving container <name> alone: it belongs to project "<other>"`; a container the runtime gives no readable answer about is left too, and `down` names it and exits non-zero once the rest of the stack is down. `run` likewise refuses, before starting anything, when the name of its one-off container is held by another project or cannot be answered for, instead of deleting it.
+- ``opossum start``, ``stop``, ``kill`` and ``restart`` no longer act on another project's container that has the same name as one of this project's services (which happens with ``--dns-domain ""``, where containers are named by the bare service name). They leave it, say so, and act on the rest of the project; a container the runtime cannot say the owner of is left too, and named in the error. ``opossum exec`` and ``opossum cp`` refuse such a container instead of running a command or copying files inside it.
+- When the restart supervisor stops for having nothing to watch, its log says none of the services has had a container of this project's, rather than that none exists: another project's container may still hold the name. It also names the new project when a service's name moves from one other project's container to another's.
+- The restart supervisor no longer restarts another project's container that has taken the name of one of this project's services after ``opossum up`` (which can happen with ``--dns-domain ""``, where containers are named by the bare service name). It leaves the container, says so in the supervisor log, and does not count it as this project's.
+
 ## [0.27.1] - 2026-09-13
 
 ### Changed
@@ -99,8 +115,8 @@ All notable changes to opossum are documented here. The format follows
 - A long-form mount, port, secret or env file entry that leaves out the
   key it cannot do without (`target`, `source`, `path`) is refused naming
   the entry by number and saying what to write, the way other entry
-  refusals do — \`ports entry 2 of 2 has no target — write the container
-  port, as in `target: 80`\` — where it used to say only "port entry is
+  refusals do — `` ports entry 2 of 2 has no target — write the container
+  port, as in `target: 80` `` — where it used to say only "port entry is
   missing a target". The same key written with nothing after it is
   refused as bare.
 - A key opossum does not read under `build`, `healthcheck`, `deploy` or
@@ -1401,8 +1417,8 @@ All notable changes to opossum are documented here. The format follows
   after a teardown `ps` is empty — matching docker compose. Existing stopped
   containers still appear as `stopped`.
 - When a `service_healthy` dependency's container has exited while opossum waits
-  for it, `up` now fails fast with `container is not running … check
-  \`opossum logs <svc>\`` instead of an opaque "healthcheck did not pass".
+  for it, `up` now fails fast with `` container is not running … check `opossum
+  logs <svc>` `` instead of an opaque "healthcheck did not pass".
 - Named volumes are now namespaced by project (`<project>_<volume>`, matching
   docker compose), so concurrent projects that share a volume name no longer
   collide on one global volume — and `down -v` only removes *this* project's
@@ -1448,7 +1464,7 @@ First tagged release. Everything opossum can do so far.
   (`testdata/fake-container.sh`, kept in sync with the real CLI via
   `testdata/real-cli-output.md`) drives fast, unattended tests of the emitted
   command sequences; a documented real-`container` review
-  ([`docs/real-runtime-review.md`](docs/real-runtime-review.md)) confirms
+  (`docs/real-runtime-review.md`) confirms
   behavior on macOS 26.
 
 ### Fixed
@@ -1468,7 +1484,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.27.1...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.28.0...HEAD
+[0.28.0]: https://github.com/suruseas/opossum/compare/v0.27.1...v0.28.0
 [0.27.1]: https://github.com/suruseas/opossum/compare/v0.27.0...v0.27.1
 [0.27.0]: https://github.com/suruseas/opossum/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/suruseas/opossum/compare/v0.25.0...v0.26.0

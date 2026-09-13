@@ -133,7 +133,7 @@ func TestRunOneOffInterruptedStopsItsContainerAndSaysSo(t *testing.T) {
 	// A runtime that cannot be asked is not a gone container: the stop reached
 	// the same runtime, so nothing is known — and "stopped" would be a guess.
 	t.Run("says it could not confirm when the runtime cannot be asked", func(t *testing.T) {
-		_, err := runInterrupted(t, []string{"RUN_HANG=" + cname, "INSPECT_FAIL=" + cname}, orchestrator.RunOneOffOptions{}, true)
+		_, err := runInterrupted(t, []string{"RUN_HANG=" + cname, "INSPECT_FAIL_ONCE_STOP_ASKED=" + cname}, orchestrator.RunOneOffOptions{}, true)
 		if err == nil || !strings.Contains(err.Error(), "tried to stop "+cname+", but the runtime could not be asked whether it stopped") || !strings.Contains(err.Error(), "`container ls -a` shows it, `container stop "+cname+"` stops it") {
 			t.Errorf("an unanswered inspect must be reported as such, with the commands that show and stop it, got: %v", err)
 		}
@@ -142,7 +142,7 @@ func TestRunOneOffInterruptedStopsItsContainerAndSaysSo(t *testing.T) {
 		}
 	})
 	t.Run("with --rm, says it could not confirm when the runtime cannot be asked", func(t *testing.T) {
-		_, err := runInterrupted(t, []string{"RUN_HANG=" + cname, "INSPECT_FAIL=" + cname}, orchestrator.RunOneOffOptions{Rm: true}, true)
+		_, err := runInterrupted(t, []string{"RUN_HANG=" + cname, "INSPECT_FAIL_ONCE_STOP_ASKED=" + cname}, orchestrator.RunOneOffOptions{Rm: true}, true)
 		if err == nil || !strings.Contains(err.Error(), "tried to stop and remove "+cname+", but the runtime could not be asked whether it is gone") || !strings.Contains(err.Error(), "`container ls -a` shows it, `container delete --force "+cname+"` removes it") {
 			t.Errorf("an unanswered inspect must be reported as such, with the commands that show and remove it, got: %v", err)
 		}

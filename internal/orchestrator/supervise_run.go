@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/suruseas/opossum/internal/compose"
@@ -24,7 +25,9 @@ const idlePollsBeforeExit = 20
 // pollInterval is how often the supervisor asks the runtime what is running.
 // Polling is the only option — Apple `container` has no event stream — so this
 // trades responsiveness against a `container ls` every few seconds.
-const pollInterval = 3 * time.Second
+// A variable, not a constant, so a test can drive the loop through many polls
+// in milliseconds; nothing else assigns it.
+var pollInterval = 3 * time.Second
 
 // Supervise watches this project's `restart:` services until ctx is cancelled.
 // It runs in the background process started by `up`; the decisions it makes live
@@ -51,7 +54,7 @@ func (o *Orchestrator) Supervise(ctx context.Context, services []string, logw io
 	}
 	logf("[%s] supervising %v (poll %s)", codeSupervisorStarted, services, pollInterval)
 
-	idle := 0
+	var w watch
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 	for {
@@ -61,35 +64,108 @@ func (o *Orchestrator) Supervise(ctx context.Context, services []string, logw io
 			return nil
 		case <-ticker.C:
 		}
-		if !o.superviseOnce(policies, state, logf) {
-			idle++
-			if idle >= idlePollsBeforeExit {
-				logf("[%s] nothing left to watch (none of %v exists for %d polls) — stopping",
-					codeSupervisorStarted, services, idle)
-				return nil
-			}
-		} else {
-			idle = 0
+		exists, unknown := o.superviseOnce(policies, state, logf)
+		// An outage that lasts is told apart from a container the runtime
+		// cannot answer about: when the unanswered polls reach the bound, the
+		// runtime itself is asked (after decides when). Down, the watch stops —
+		// a resident process with nothing it can reach is what the idle bound
+		// exists to prevent — and says so truthfully; up, the watch goes on.
+		line, stop := w.after(exists, unknown, o.rt.SystemRunning, services)
+		if line != "" {
+			logf("[%s] %s", codeSupervisorStarted, line)
+		}
+		if stop {
+			return nil
 		}
 	}
 }
 
+// watch counts the polls that found nothing, and the polls the runtime could
+// not answer, so that Supervise stops only when the project is known to be
+// gone — not when the runtime happened to be unreachable for a minute.
+type watch struct {
+	idle, unanswered int
+}
+
+// after takes one poll's outcome and says what to log (if anything) and
+// whether to stop. exists is whether any supervised container was found;
+// unknown names the services the runtime could not be asked about. A poll that
+// found a container resets both counts. A poll that found none and could not
+// ask about some counts towards neither "idle" nor a stop: the project may be
+// entirely there. It is said on the first such poll and on every
+// idlePollsBeforeExit-th, naming only the services that went unanswered — and
+// on exactly those polls runtimeUp is asked, once: if the runtime itself is
+// down the watch stops and says that. Only polls that found none of the
+// containers and were answered about all of them add up to "nothing left".
+func (w *watch) after(exists bool, unknown []string, runtimeUp func() bool, services []string) (line string, stop bool) {
+	switch {
+	case exists:
+		w.idle, w.unanswered = 0, 0
+	case len(unknown) > 0:
+		w.unanswered++
+		if w.unanswered%idlePollsBeforeExit == 0 && !runtimeUp() {
+			return fmt.Sprintf("the runtime is not running (%v could not be asked about for %d polls) — stopping; `opossum up` starts watching again", unknown, w.unanswered), true
+		}
+		if w.unanswered == 1 || w.unanswered%idlePollsBeforeExit == 0 {
+			return fmt.Sprintf("the runtime could not be asked about %v (%d poll(s)) — still watching; `container ls -a` shows what is there", unknown, w.unanswered), false
+		}
+	default:
+		w.unanswered = 0
+		w.idle++
+		if w.idle >= idlePollsBeforeExit {
+			// "Not this project's" rather than "does not exist": a name can be
+			// held by another project's container, which the watch leaves alone.
+			return fmt.Sprintf("nothing left to watch (none of %v has had a container of this project's for %d polls) — stopping", services, w.idle), true
+		}
+	}
+	return "", false
+}
+
 // superviseOnce is one poll: look at what's running, and act on what isn't.
-// superviseOnce reports whether any supervised container still exists, so the
-// caller can stop watching a project that is no longer there.
-func (o *Orchestrator) superviseOnce(policies map[string]compose.RestartPolicy, state map[string]serviceState, logf func(string, ...interface{})) bool {
+// It reports whether any supervised container still exists, so the caller can
+// stop watching a project that is no longer there — and which services the
+// runtime could not be asked about, which is not the same thing (sorted).
+func (o *Orchestrator) superviseOnce(policies map[string]compose.RestartPolicy, state map[string]serviceState, logf func(string, ...interface{})) (exists bool, unknown []string) {
 	return o.superviseAt(time.Now(), policies, state, logf)
 }
 
 // superviseAt is superviseOnce with the clock supplied, so a test can drive many
 // polls — backoff, escalation and giving up only appear over several of them.
-func (o *Orchestrator) superviseAt(now time.Time, policies map[string]compose.RestartPolicy, state map[string]serviceState, logf func(string, ...interface{})) bool {
+func (o *Orchestrator) superviseAt(now time.Time, policies map[string]compose.RestartPolicy, state map[string]serviceState, logf func(string, ...interface{})) (exists bool, unknown []string) {
 	anyExists := false
 	for name, policy := range policies {
 		cname := o.containerName(name)
 		info := o.rt.Inspect(cname)
 		st := state[name]
 
+		// The runtime could not be asked: nothing is known about this service,
+		// so nothing is done to it this poll — not "gone", not "crashed" — and its
+		// state (backoff, giving up) is left as it was. The other services are
+		// still looked at.
+		if info.Unknown {
+			unknown = append(unknown, name)
+			continue
+		}
+		// The name is another project's container now: this project's was removed
+		// and another put in its place (with `--dns-domain ""` names are bare
+		// service names). It is not this project's to restart, and it does not
+		// keep this project's watch going. Said when the name is first seen on that
+		// project — again if it moves on to another project, or comes back after
+		// being this project's, unlabeled or gone; not again for an inspect that
+		// went unanswered in between. Read from the same inspect as the state, so
+		// the owner and the state agree.
+		if owner := info.Labels[projectLabel]; info.Exists && owner != "" && owner != o.Project.Name {
+			if st.foreign != owner {
+				logf("[%s] leaving %q alone: its container %s belongs to project %q, not this one", codeSupervisorAction, name, cname, owner)
+			}
+			st.foreign = owner
+			state[name] = st
+			continue
+		}
+		if st.foreign != "" {
+			st.foreign = ""
+			state[name] = st
+		}
 		if info.Exists {
 			anyExists = true
 		}
@@ -144,7 +220,8 @@ func (o *Orchestrator) superviseAt(now time.Time, policies map[string]compose.Re
 		st.stoppedByUs = false
 		state[name] = st
 	}
-	return anyExists
+	sort.Strings(unknown)
+	return anyExists, unknown
 }
 
 // stopMarkerPath records that opossum stopped a service on purpose, so a policy

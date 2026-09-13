@@ -21,10 +21,96 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: stable
+      # The GitHub Release body is this version's CHANGELOG.md section, so the
+      # release page says the same thing the file does and nobody has to
+      # maintain two texts.
+      #
+      # Two passes. The first takes everything between `## [x.y.z]` and
+      # whatever ends that section — the next `## [` heading, or the
+      # link-reference block at the foot of the file for the oldest one.
+      #
+      # The second unwraps it, and is not cosmetic: GitHub renders a release
+      # body the way it renders a comment, where a single newline is a line
+      # break rather than a space. Entries in this file are written wrapped at
+      # about eighty columns, so pasted through as-is they reach the release
+      # page broken at those columns — a narrow ragged column beside a wide
+      # one, differing per release according to how that entry happened to be
+      # typed. Joining each block back into one line lets the page wrap it to
+      # the reader's width. Blank lines, headings and list starts begin a new
+      # block; a fenced code block passes through untouched.
+      #
+      # The file is the source: `changelog: disable: true` in .goreleaser.yaml
+      # already tells GoReleaser not to invent a commit list, and
+      # `--release-notes` skips its generation outright. An empty extraction
+      # fails the step rather than publishing a release with an empty body,
+      # which is what every release up to v0.27.1 shipped with — a tag missing
+      # from CHANGELOG.md is a mistake in the roll, and silence is how an empty
+      # body stayed unnoticed for forty-one of them.
+      - name: the release body is this version's CHANGELOG section
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          awk -v ver="$ver" '
+            BEGIN { inside = 0; n = 0 }
+            index($0, "## [" ver "]") == 1 { inside = 1; next }
+            inside && /^## \[/ { exit }
+            inside && /^\[[^]]+\]: http/ { exit }
+            inside { lines[++n] = $0 }
+            END {
+              first = 1; last = n
+              while (first <= last && lines[first] ~ /^[[:space:]]*$/) first++
+              while (last >= first && lines[last] ~ /^[[:space:]]*$/) last--
+              for (i = first; i <= last; i++) print lines[i]
+            }
+          ' CHANGELOG.md | awk '
+            function flush() { if (buf != "") { print buf; buf = "" } }
+            /^```/ { flush(); print; fence = !fence; next }
+            fence   { print; next }
+            /^[[:space:]]*$/ { flush(); print ""; next }
+            /^(#+ |[-*] |[0-9]+\. )/ { flush(); buf = $0; next }
+            { sub(/^[[:space:]]+/, ""); buf = (buf == "" ? $0 : buf " " $0) }
+            END { flush() }
+          ' > "$RUNNER_TEMP/release-notes.md"
+          # An optional preamble: release-notes.d/<x.y.z>.md, when it
+          # exists, goes above the section. It carries the warning a reader
+          # needs before the list — a version that refuses a compose file
+          # earlier versions read, say. Kept out of CHANGELOG.md on purpose:
+          # the file is the record of what changed, and this is the notice
+          # that someone upgrading past it should stop and read. No file is
+          # the normal case, not an omission.
+          if [ -f "release-notes.d/$ver.md" ]; then
+            { cat "release-notes.d/$ver.md"; echo; } > "$RUNNER_TEMP/preamble.md"
+            cat "$RUNNER_TEMP/preamble.md" "$RUNNER_TEMP/release-notes.md" \
+              > "$RUNNER_TEMP/with-preamble.md"
+            mv "$RUNNER_TEMP/with-preamble.md" "$RUNNER_TEMP/release-notes.md"
+            echo "prepended release-notes.d/$ver.md"
+          fi
+          if [ ! -s "$RUNNER_TEMP/release-notes.md" ]; then
+            echo "CHANGELOG.md has no '## [$ver]' section, so this release would" >&2
+            echo "have gone out with an empty body. Roll the changelog for $ver" >&2
+            echo "and re-run." >&2
+            exit 1
+          fi
+          # Checked as the page will show it: after the extraction, the
+          # unwrapping and the preamble, not as the pieces were written. A
+          # fragment passed this same check when its pull request merged, but
+          # the preamble never went through a pull request, and the three steps
+          # above are one more place for a code span to come apart. Two shapes
+          # break silently on GitHub: a \` outside a code span shows as a bare
+          # backtick, and a <name> outside one is read as an HTML tag and
+          # removed — which in a preamble would remove the very workaround the
+          # warning exists to give. A problem stops the release here, before
+          # anything is published; the message names the line and the fix.
+          # The `|| exit 1` is not redundant with the runner's `bash -e`: it is
+          # what keeps this a check if the step is ever run another way. Without
+          # it, the echo and cat below succeed and the step exits 0 — a
+          # release that looks checked and was not.
+          go run ./cmd/changelog check "$RUNNER_TEMP/release-notes.md" || exit 1
+          echo "--- release notes ($(wc -l < "$RUNNER_TEMP/release-notes.md") lines) ---"
+          cat "$RUNNER_TEMP/release-notes.md"
       - uses: goreleaser/goreleaser-action@v6
         with:
           version: "~> v2"
-          args: release --clean
+          args: release --clean --release-notes=${{ runner.temp }}/release-notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Token with write access to the suruseas/homebrew-opossum tap repo.

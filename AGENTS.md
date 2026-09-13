@@ -98,8 +98,8 @@ is **0 on success, non-zero on any error** (see Exit codes).
 | `volumes [service…]` | the volumes the file's services mount that exist on the runtime, by their runtime names (`<project>_<volume>`), as a DRIVER / VOLUME NAME table; named services narrow it to what they mount. A volume appears once a service mounting it has started; external volumes, and volumes the file no longer mounts, are not listed. `-q`/`--quiet` prints names only; `--format json` prints `[{"Name":…,"Driver":…}]`. Read-only: never starts the runtime |
 | `logs [service…]` | print logs; `--follow` streams (multiplexed, name-prefixed) — no `-f` shorthand, that is the global `--file`; `-n/--tail N` |
 | `stats [service…]` | live CPU/mem/net/IO (streams); `--no-stream` for one snapshot; `--host` shows each service's host-memory footprint (its VM's resident size — a shared-VM tool can't do this per service) |
-| `exec [-it] <service> <cmd…>` | run a command in a running container; `-i`/`--interactive` keeps stdin open, `-t`/`--tty` allocates a TTY |
-| `run [--rm] [--no-deps] [-T] [--audit] <service> [cmd]` | one-off foreground container; starts deps unless `--no-deps`; `-T` disables the TTY (keeps piped stdout clean, e.g. an MCP stdio server); no published ports. `--audit` reports what the run did afterward — workspace file diff (added/changed/deleted + hashes), egress destinations (when routed through a proxy; else marked unobserved), exit code — as a human summary or `--audit-format json`; the container's stdout goes to stderr so the report owns stdout. `--profile <p>` enables profile-gated services; `--ssh` forwards the host SSH agent into the container (private git over SSH with your host keys) |
+| `exec [-it] <service> <cmd…>` | run a command in a running container; `-i`/`--interactive` keeps stdin open, `-t`/`--tty` allocates a TTY; exits with the command's exit code |
+| `run [--rm] [--no-deps] [-T] [--audit] <service> [cmd]` | one-off foreground container; starts deps unless `--no-deps`; `-T` disables the TTY (keeps piped stdout clean, e.g. an MCP stdio server); no published ports; exits with the one-off's exit code (1 when opossum itself fails first). `--audit` reports what the run did afterward — workspace file diff (added/changed/deleted + hashes), egress destinations (when routed through a proxy; else marked unobserved), exit code — as a human summary or `--audit-format json`; the container's stdout goes to stderr so the report owns stdout. `--profile <p>` enables profile-gated services; `--ssh` forwards the host SSH agent into the container (private git over SSH with your host keys) |
 | `build [service…]` | build images for services with a `build:` |
 | `pull [service…]` | pull images for services with an `image:` |
 | `import [service…]` | copy a service's Docker-built image into `container`'s store (skip Apple's builder) |
@@ -440,7 +440,9 @@ list; codes are add-only and never change meaning.
   supervisor acted. It gives up on `on-failure` after a few tries because **Apple
   `container` does not report a container's exit code**, so a crash and a clean exit
   look identical; looping a service that finished on purpose would be worse than
-  stopping. `always` and `unless-stopped` are honoured exactly.
+  stopping. `always` and `unless-stopped` are honoured exactly. `leaving <service> alone`
+  means the container with that service's name now belongs to another project, so
+  the supervisor does not start it.
 - **`[OPSM-202]` … `DNS domain "opossum" not found`** → run `sudo container system
   dns create opossum` once, then `up` again (needed for bare-name discovery).
 - **`[OPSM-203]` … `network <n> is internal (host-only): … no internet egress`** →
@@ -499,7 +501,7 @@ Every `[OPSM-NNN]` opossum can emit (add-only; grouped 1xx storage / 2xx network
 - `OPSM-405` — the `container` system (daemon) is installed but not running (`ps`/`images` fail loudly; the opt-out error for mutating commands).
 - `OPSM-406` — the runtime was stopped; a mutating command auto-started it (notice, not an error; `OPOSSUM_NO_AUTO_START` opts out).
 - `OPSM-408` — a per-project supervisor is watching `restart:` services.
-- `OPSM-409` — the supervisor restarted a service, or gave up on one.
+- `OPSM-409` — the supervisor restarted a service, gave up on one, or left a container that is another project's.
 - `OPSM-410` — the supervisor's log reached its 1MB cap and its older half was dropped. Housekeeping, not a fault: the newest lines are the ones that explain a service being down. Appears as the first line of `supervisor.log`.
 - `OPSM-411` — the supervisor could not open a size-capped log and is writing without a bound. The file can then grow without limit; remove it if it gets large, or restart the project.
 - `OPSM-407` — a service's container exited right after starting, with no health gate to catch it (`up` reports its logs and fails).

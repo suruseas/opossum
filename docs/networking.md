@@ -99,7 +99,11 @@ Bare-name resolution still relies on the one registered domain (see *Setup*);
 keeps names from colliding. As a backstop for the no-DNS-domain case
 (`--dns-domain ""`, where containers take bare names), every container is labeled
 `opossum.project=<name>` and opossum **refuses to start** (rather than silently
-replacing) a container another project already owns.
+replacing) a container another project already owns. `down` leaves such a
+container alone and says so, and `run` refuses a one-off name another project
+holds. A container the runtime gives no readable answer about is treated the
+same way: `up` and `run` refuse, and `down` leaves it, names it, and exits
+non-zero.
 
 ## Reaching a service on the host
 

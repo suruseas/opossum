@@ -311,17 +311,11 @@ OPOSSUM_CONTAINER_BIN="$PWD/testdata/fake-container.sh" \
   go run ./cmd/opossum -f examples/compose.yaml up
 ```
 
-Changes that users would notice are recorded as one file per change under
-[`changelog.d/`](changelog.d/README.md) rather than by editing `CHANGELOG.md`;
-see [CONTRIBUTING.md](CONTRIBUTING.md).
+Changes that users would notice are listed in [`CHANGELOG.md`](CHANGELOG.md).
 
 `OPOSSUM_CONTAINER_BIN` overrides which binary is invoked as the runtime. The
 fake shim's output is kept in sync with the real CLI (see
 [`testdata/real-cli-output.md`](testdata/real-cli-output.md)).
-
-For the reproducible **real-`container` review** procedure (prerequisites,
-steps, and known gotchas), see
-[`docs/real-runtime-review.md`](docs/real-runtime-review.md).
 
 ## How opossum is developed
 

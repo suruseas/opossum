@@ -502,3 +502,54 @@ func TestDestroyPlanDoesNotReportSnapshotsItIsAboutToRemove(t *testing.T) {
 		t.Errorf("%s was not reported, so it should have gone with .opossum/, stat err = %v", doomed, err)
 	}
 }
+
+// A container the runtime cannot be asked about after the teardown is reported
+// as exactly that — not as gone (a clean sweep it cannot vouch for), not as
+// still there (a survivor it did not see).
+func TestDestroyReportsAContainerTheRuntimeCannotBeAskedAbout(t *testing.T) {
+	rt, _ := fakeShim(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	setShimEnv(rt, "INSPECT_PROJECT=demo", "STATE_DIR="+t.TempDir(),
+		"NETWORK_ABSENT=demo-net", "IMAGE_ABSENT=web", "VOLUME_LS=NAME")
+	p := project("demo", map[string]*compose.Service{"web": {Image: "web"}})
+	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
+	plan, err := o.DestroyPlanFor(false, false, false)
+	if err != nil {
+		t.Fatalf("DestroyPlanFor: %v", err)
+	}
+	if len(plan.Containers) == 0 {
+		t.Fatalf("the plan must include the container for the check to mean anything, got %+v", plan)
+	}
+	// The runtime stops answering once the removals have been issued.
+	setShimEnv(rt, "INSPECT_FAIL=web.demo.opossum")
+	err = o.Destroy(plan)
+	// Said as what it is — not counted among what "could not be removed", which
+	// nobody knows.
+	if want := "the runtime could not be asked whether 1 container(s) are gone: container web.demo.opossum — `container ls -a` shows them"; err == nil || err.Error() != want {
+		t.Errorf("an unanswered inspect after the teardown:\n got %v\nwant %q", err, want)
+	}
+}
+
+// Both kinds at once, each with more than one name: a network still there and
+// two containers the runtime could not be asked about. The error carries both
+// sentences whole — a join that kept one and dropped the other, or a list
+// that named only its first entry, shows as a different line.
+func TestDestroySaysBothWhatIsLeftAndWhatCouldNotBeAskedAbout(t *testing.T) {
+	rt, _ := fakeShim(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	setShimEnv(rt, "INSPECT_PROJECT=demo", "STATE_DIR="+t.TempDir(),
+		"IMAGE_ABSENT=web db", "VOLUME_LS=NAME")
+	p := project("demo", map[string]*compose.Service{"web": {Image: "web"}, "db": {Image: "db"}})
+	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
+	plan, err := o.DestroyPlanFor(false, false, false)
+	if err != nil {
+		t.Fatalf("DestroyPlanFor: %v", err)
+	}
+	setShimEnv(rt, "INSPECT_FAIL=web.demo.opossum db.demo.opossum")
+	err = o.Destroy(plan)
+	want := "1 thing(s) could not be removed: network demo-net — run `opossum destroy` again (a container elsewhere may still be holding one), or remove them by hand; " +
+		"and the runtime could not be asked whether 2 container(s) are gone: container db.demo.opossum and container web.demo.opossum — `container ls -a` shows them"
+	if err == nil || err.Error() != want {
+		t.Errorf("destroy error:\n got %v\nwant %q", err, want)
+	}
+}

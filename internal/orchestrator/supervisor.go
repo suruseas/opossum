@@ -271,11 +271,13 @@ func ClearWatched(project string) {
 // still supervised — the stop marker, not the watch list, is what keeps it down —
 // and one that crashed while nobody was watching is exactly what should be picked
 // back up. A container that is simply gone (a `down`, a manual delete) is dropped,
-// which is what stops a stale record from resurrecting a dismantled project.
+// which is what stops a stale record from resurrecting a dismantled project. One
+// the runtime could not be asked about is kept: unreachable is not gone, and
+// dropping it would end its supervision for good over a passing outage.
 func (o *Orchestrator) StillSupervised(names []string) []string {
 	var out []string
 	for _, name := range o.SupervisedServices(names) {
-		if o.rt.Inspect(o.containerName(name)).Exists {
+		if info := o.rt.Inspect(o.containerName(name)); info.Exists || info.Unknown {
 			out = append(out, name)
 		}
 	}

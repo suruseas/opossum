@@ -18,7 +18,7 @@ import (
 func TestRunOneOffStdoutIsBodyOnly(t *testing.T) {
 	shim := filepath.Join(t.TempDir(), "shim")
 	// Echo a distinct marker to stdout for build vs the foreground body run.
-	body := "#!/bin/sh\ncase \"$1\" in\n  build) echo BUILD-OUT ;;\n  run) echo BODY-OUT ;;\nesac\nexit 0\n"
+	body := "#!/bin/sh\ncase \"$1\" in\n  build) echo BUILD-OUT ;;\n  run) echo BODY-OUT ;;\n  inspect) echo \"Error: container not found: $2\" >&2; exit 1 ;;\nesac\nexit 0\n"
 	if err := os.WriteFile(shim, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestRunOneOffStdoutIsBodyOnly(t *testing.T) {
 // dropped field on a one-off isn't silently swallowed (#274).
 func TestRunOneOffNotesIgnoredFields(t *testing.T) {
 	shim := filepath.Join(t.TempDir(), "shim")
-	if err := os.WriteFile(shim, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+	if err := os.WriteFile(shim, []byte("#!/bin/sh\n[ \"$1\" = inspect ] && { echo \"Error: container not found: $2\" >&2; exit 1; }\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	p := project("pj", map[string]*compose.Service{
@@ -75,7 +75,8 @@ func TestRunOneOffNotesIgnoredFields(t *testing.T) {
 // (no double count in a single command).
 func TestRunOneOffDoesNotDoubleCountTopLevel(t *testing.T) {
 	shim := filepath.Join(t.TempDir(), "shim")
-	if err := os.WriteFile(shim, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+	// inspect answers as the real CLI does for a container that is not there.
+	if err := os.WriteFile(shim, []byte("#!/bin/sh\n[ \"$1\" = inspect ] && { echo \"Error: container not found: $2\" >&2; exit 1; }\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	p := project("pj", map[string]*compose.Service{
