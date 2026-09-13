@@ -616,17 +616,23 @@ func downCmd() *cobra.Command {
 }
 
 func imagesCmd() *cobra.Command {
-	return &cobra.Command{
+	var opts orchestrator.ImagesOptions
+	cmd := &cobra.Command{
 		Use:   "images",
 		Short: "List the image each service uses, and whether it's present locally",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if opts.Format != "table" && opts.Format != "json" {
+				return fmt.Errorf("--format must be table or json, got %q", opts.Format)
+			}
 			o, err := loadOrchestrator(cmd.OutOrStdout())
 			if err != nil {
 				return err
 			}
-			return o.Images()
+			return o.Images(opts)
 		},
 	}
+	cmd.Flags().StringVar(&opts.Format, "format", "table", "table or json")
+	return cmd
 }
 
 // destroyCmd is the exit from a trial run. `down` is the daily command; this is
@@ -870,17 +876,23 @@ func confirmDestroy(cmd *cobra.Command, project string) (bool, error) {
 }
 
 func psCmd() *cobra.Command {
-	return &cobra.Command{
+	var opts orchestrator.PsOptions
+	cmd := &cobra.Command{
 		Use:   "ps",
 		Short: "List services with their container, IP, ports, and status",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if opts.Format != "table" && opts.Format != "json" {
+				return fmt.Errorf("--format must be table or json, got %q", opts.Format)
+			}
 			o, err := loadOrchestrator(cmd.OutOrStdout())
 			if err != nil {
 				return err
 			}
-			return o.Ps()
+			return o.Ps(opts)
 		},
 	}
+	cmd.Flags().StringVar(&opts.Format, "format", "table", "table or json")
+	return cmd
 }
 
 func portCmd() *cobra.Command {
@@ -1204,11 +1216,15 @@ func logsCmd() *cobra.Command {
 }
 
 func statsCmd() *cobra.Command {
-	var noStream, host bool
+	var host bool
+	var opts orchestrator.StatsOptions
 	cmd := &cobra.Command{
 		Use:   "stats [service...]",
 		Short: "Show live resource usage (CPU / memory / net / block I/O) for services",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if opts.Format != "table" && opts.Format != "json" {
+				return fmt.Errorf("--format must be table or json, got %q", opts.Format)
+			}
 			o, err := loadOrchestrator(cmd.OutOrStdout())
 			if err != nil {
 				return err
@@ -1219,11 +1235,12 @@ func statsCmd() *cobra.Command {
 				// report per service.
 				return o.StatsHost(args)
 			}
-			return o.Stats(args, noStream)
+			return o.Stats(args, opts)
 		},
 	}
-	cmd.Flags().BoolVar(&noStream, "no-stream", false, "print a single snapshot instead of streaming live")
+	cmd.Flags().BoolVar(&opts.NoStream, "no-stream", false, "print a single snapshot instead of streaming live")
 	cmd.Flags().BoolVar(&host, "host", false, "show each service's host memory footprint (its VM's resident size on the Mac) instead of streaming guest-view stats")
+	cmd.Flags().StringVar(&opts.Format, "format", "table", "table or json (json requires --no-stream)")
 	return cmd
 }
 

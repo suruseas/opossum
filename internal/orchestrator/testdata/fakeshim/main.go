@@ -597,7 +597,11 @@ func run(args []string) int {
 		if jsonForm {
 			var objs []string
 			for _, n := range names {
-				objs = append(objs, fmt.Sprintf(`{"id":"%s","memoryUsageBytes":49283072,"memoryLimitBytes":1073741824}`, n))
+				objs = append(objs, fmt.Sprintf(
+					`{"id":"%s","cpuUsageUsec":1500000,"memoryUsageBytes":49283072,"memoryLimitBytes":1073741824,`+
+						`"networkRxBytes":2048,"networkTxBytes":4096,"blockReadBytes":8192,"blockWriteBytes":16384,"numProcesses":3}`,
+					n,
+				))
 			}
 			fmt.Printf("[%s]\n", strings.Join(objs, ","))
 		}

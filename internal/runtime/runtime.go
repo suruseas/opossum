@@ -1438,13 +1438,21 @@ func (r *Runtime) Stats(names []string, noStream bool) error {
 }
 
 // ContainerStat is one container's guest-view resource snapshot, as reported by
-// `container stats --no-stream --format json`. Only the fields opossum uses are
-// decoded; the guest sees its own memory usage against its RAM limit (not the
-// host memory the container's VM actually occupies — see host footprint).
+// `container stats --no-stream --format json`. The guest sees its own memory
+// usage against its RAM limit (not the host memory the container's VM actually
+// occupies — see host footprint). CPUUsageUsec is cumulative since the
+// container started, not a rate — a caller wanting CPU% samples twice and
+// divides the delta by the wall-clock time between samples.
 type ContainerStat struct {
 	ID               string `json:"id"`
+	CPUUsageUsec     int64  `json:"cpuUsageUsec"`
 	MemoryUsageBytes int64  `json:"memoryUsageBytes"`
 	MemoryLimitBytes int64  `json:"memoryLimitBytes"`
+	NetworkRxBytes   int64  `json:"networkRxBytes"`
+	NetworkTxBytes   int64  `json:"networkTxBytes"`
+	BlockReadBytes   int64  `json:"blockReadBytes"`
+	BlockWriteBytes  int64  `json:"blockWriteBytes"`
+	NumProcesses     int    `json:"numProcesses"`
 }
 
 // StatsSnapshot captures a single (non-streaming) guest-view stats reading for

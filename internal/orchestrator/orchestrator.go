@@ -1830,34 +1830,78 @@ func (o *Orchestrator) serviceImage(name string, svc *compose.Service) (ref stri
 	return svc.Image, false
 }
 
-// Images lists each service's image, whether opossum builds it, and whether it's
-// present locally — the image-side counterpart to Ps.
-func (o *Orchestrator) Images() error {
+// ImagesOptions selects how `opossum images` shows each service's image.
+type ImagesOptions struct {
+	Format string // "table" (default) or "json"
+}
+
+// ImageStatus is one row of `opossum images`: a service's image, whether
+// opossum built it or pulled it, and whether it's present locally.
+type ImageStatus struct {
+	Service string `json:"Service"`
+	Image   string `json:"Image"`
+	Source  string `json:"Source"` // "built" or "pulled"
+	Present bool   `json:"Present"`
+}
+
+// ProjectImageStatuses gathers one ImageStatus per service, in startup order —
+// the data behind both the table and the JSON array Images prints.
+func (o *Orchestrator) ProjectImageStatuses() ([]ImageStatus, error) {
 	// Same reasoning as Ps: a stopped daemon makes every `image inspect` fail, which
 	// would print a confident `PRESENT=no` for images that may well be present. Probe
 	// first so `PRESENT` reflects reality rather than "couldn't ask the runtime".
 	if !o.rt.SystemRunning() {
-		return ErrRuntimeStopped()
+		return nil, ErrRuntimeStopped()
 	}
 	order, err := o.Project.StartupOrder()
 	if err != nil {
-		return err
+		return nil, err
 	}
-	tw := tabwriter.NewWriter(o.out, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "SERVICE\tIMAGE\tSOURCE\tPRESENT")
+	rows := make([]ImageStatus, 0, len(order))
 	for _, name := range order {
 		ref, built := o.serviceImage(name, o.Project.Services[name])
 		source := "pulled"
 		if built {
 			source = "built"
 		}
-		present := "no"
-		if ref != "" && o.rt.ImageExists(ref) {
-			present = "yes"
-		}
-		row(tw, name, dash(ref), source, present)
+		rows = append(rows, ImageStatus{
+			Service: name,
+			Image:   ref,
+			Source:  source,
+			Present: ref != "" && o.rt.ImageExists(ref),
+		})
 	}
-	return tw.Flush()
+	return rows, nil
+}
+
+// Images lists each service's image, whether opossum builds it, and whether
+// it's present locally — the image-side counterpart to Ps — as a table, or a
+// JSON array under Format "json".
+func (o *Orchestrator) Images(opts ImagesOptions) error {
+	rows, err := o.ProjectImageStatuses()
+	if err != nil {
+		return err
+	}
+	switch opts.Format {
+	case "json":
+		b, err := json.Marshal(rows)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(o.out, string(b))
+		return nil
+	default:
+		tw := tabwriter.NewWriter(o.out, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(tw, "SERVICE\tIMAGE\tSOURCE\tPRESENT")
+		for _, r := range rows {
+			present := "no"
+			if r.Present {
+				present = "yes"
+			}
+			row(tw, r.Service, dash(r.Image), r.Source, present)
+		}
+		return tw.Flush()
+	}
 }
 
 // volumeName is the runtime name of a project volume. A declaration with a
@@ -2875,21 +2919,42 @@ func (o *Orchestrator) namedVolumes() []string {
 }
 
 // Ps prints each service, its container name, status, and resolved IP.
-func (o *Orchestrator) Ps() error {
+// PsOptions selects how `opossum ps` shows the project's services.
+type PsOptions struct {
+	Format string // "table" (default) or "json"
+}
+
+// ServiceStatus is one row of `opossum ps`: a service's container, image, IP,
+// published ports (rendered docker-ps style, e.g. "0.0.0.0:8080->80/tcp"), and
+// status — the columns the table prints, as JSON.
+type ServiceStatus struct {
+	Service   string `json:"Service"`
+	Container string `json:"Container"`
+	Image     string `json:"Image"`
+	IP        string `json:"IP"`
+	Ports     string `json:"Ports"`
+	Status    string `json:"Status"`
+}
+
+// ProjectServiceStatuses gathers one ServiceStatus per service that has a
+// container on the runtime, in startup order — the data behind both the table
+// and the JSON array Ps prints. A service that was never created, or was
+// removed by `down`, has no row (matching docker compose), rather than one
+// that reads "absent".
+func (o *Orchestrator) ProjectServiceStatuses() ([]ServiceStatus, error) {
 	// A dead daemon makes every per-service inspect look like "container absent",
 	// which would render as an empty table — a lie ("nothing is running") when the
 	// truth is the runtime is unreachable. Probe the system once up front so an
 	// empty `ps` means genuinely empty, not "couldn't ask". (The CLI-absent case is
 	// caught earlier by the root preflight; here the CLI is present but stopped.)
 	if !o.rt.SystemRunning() {
-		return ErrRuntimeStopped()
+		return nil, ErrRuntimeStopped()
 	}
 	order, err := o.Project.StartupOrder()
 	if err != nil {
-		return err
+		return nil, err
 	}
-	tw := tabwriter.NewWriter(o.out, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "SERVICE\tCONTAINER\tIMAGE\tIP\tPORTS\tSTATUS")
+	rows := make([]ServiceStatus, 0, len(order))
 	for _, name := range order {
 		svc := o.Project.Services[name]
 		cname := o.containerName(name)
@@ -2898,9 +2963,6 @@ func (o *Orchestrator) Ps() error {
 			image = o.Project.Name + "-" + name + ":latest"
 		}
 		info := o.rt.Inspect(cname)
-		// Only list containers that actually exist. A service that was never
-		// created, or was removed by `down`, is skipped — so after a teardown `ps`
-		// is empty (matching docker compose) rather than a wall of dead rows.
 		if !info.Exists {
 			continue
 		}
@@ -2908,15 +2970,47 @@ func (o *Orchestrator) Ps() error {
 		if info.State != "" {
 			status = info.State
 		}
-		row(tw, name, cname, image, dash(info.IP), dash(formatPorts(info.Ports)), status)
+		rows = append(rows, ServiceStatus{
+			Service:   name,
+			Container: cname,
+			Image:     image,
+			IP:        info.IP,
+			Ports:     formatPorts(info.Ports),
+			Status:    status,
+		})
 	}
-	if err := tw.Flush(); err != nil {
+	return rows, nil
+}
+
+// Ps prints the project's services (see ProjectServiceStatuses) as a
+// SERVICE/CONTAINER/IMAGE/IP/PORTS/STATUS table, or a JSON array under Format
+// "json".
+func (o *Orchestrator) Ps(opts PsOptions) error {
+	rows, err := o.ProjectServiceStatuses()
+	if err != nil {
 		return err
+	}
+	switch opts.Format {
+	case "json":
+		b, err := json.Marshal(rows)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(o.out, string(b))
+	default:
+		tw := tabwriter.NewWriter(o.out, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(tw, "SERVICE\tCONTAINER\tIMAGE\tIP\tPORTS\tSTATUS")
+		for _, r := range rows {
+			row(tw, r.Service, r.Container, r.Image, dash(r.IP), dash(r.Ports), r.Status)
+		}
+		if err := tw.Flush(); err != nil {
+			return err
+		}
 	}
 	// A background process the user didn't name should be visible wherever they
 	// look at the project, not only in the line `up` printed once. It goes to
-	// stderr: `ps` is a column table that agents and scripts parse, and a trailing
-	// prose line on stdout would break them.
+	// stderr: `ps` is a column table (or a JSON array) that agents and scripts
+	// parse, and a trailing prose line on stdout would break either form.
 	if pid := SupervisorPID(o.Project.Name); pid != 0 {
 		msg := fmt.Sprintf("restart supervisor: running (pid %d)", pid)
 		if log, err := SupervisorLogFile(o.Project.Name); err == nil {
@@ -3254,7 +3348,33 @@ func (o *Orchestrator) followMultiplexed(targets []string, opts runtime.LogsOpti
 // Stats streams live resource usage (CPU / memory / net / block I/O / pids) for
 // the requested services, or the whole project when none are named. With
 // noStream it prints a single snapshot. Mirrors `docker stats`.
-func (o *Orchestrator) Stats(services []string, noStream bool) error {
+// StatsOptions selects how `opossum stats` shows resource usage.
+type StatsOptions struct {
+	NoStream bool   // print a single snapshot instead of streaming
+	Format   string // "table" (default) or "json" — json requires NoStream
+}
+
+// ServiceStat is one row of `opossum stats --no-stream --format json`: a
+// service's container alongside its guest-view resource snapshot (the same
+// numbers `container stats --format json` reports, with the service name
+// joined on).
+type ServiceStat struct {
+	Service          string `json:"Service"`
+	Container        string `json:"Container"`
+	CPUUsageUsec     int64  `json:"CPUUsageUsec"`
+	MemoryUsageBytes int64  `json:"MemoryUsageBytes"`
+	MemoryLimitBytes int64  `json:"MemoryLimitBytes"`
+	NetworkRxBytes   int64  `json:"NetworkRxBytes"`
+	NetworkTxBytes   int64  `json:"NetworkTxBytes"`
+	BlockReadBytes   int64  `json:"BlockReadBytes"`
+	BlockWriteBytes  int64  `json:"BlockWriteBytes"`
+	NumProcesses     int    `json:"NumProcesses"`
+}
+
+func (o *Orchestrator) Stats(services []string, opts StatsOptions) error {
+	if opts.Format == "json" && !opts.NoStream {
+		return fmt.Errorf("--format json requires --no-stream: a streaming JSON array isn't well-formed line by line")
+	}
 	targets, err := o.resolveServices(services)
 	if err != nil {
 		return err
@@ -3263,7 +3383,38 @@ func (o *Orchestrator) Stats(services []string, noStream bool) error {
 	if len(names) == 0 {
 		return fmt.Errorf("no container found for any of the %d service(s) — if they were never started, `opossum up` creates them", len(targets))
 	}
-	return o.rt.Stats(names, noStream)
+	if opts.Format != "json" {
+		return o.rt.Stats(names, opts.NoStream)
+	}
+	containerToService := make(map[string]string, len(targets))
+	for _, name := range targets {
+		containerToService[o.containerName(name)] = name
+	}
+	stats, err := o.rt.StatsSnapshot(names)
+	if err != nil {
+		return err
+	}
+	rows := make([]ServiceStat, 0, len(stats))
+	for _, s := range stats {
+		rows = append(rows, ServiceStat{
+			Service:          containerToService[s.ID],
+			Container:        s.ID,
+			CPUUsageUsec:     s.CPUUsageUsec,
+			MemoryUsageBytes: s.MemoryUsageBytes,
+			MemoryLimitBytes: s.MemoryLimitBytes,
+			NetworkRxBytes:   s.NetworkRxBytes,
+			NetworkTxBytes:   s.NetworkTxBytes,
+			BlockReadBytes:   s.BlockReadBytes,
+			BlockWriteBytes:  s.BlockWriteBytes,
+			NumProcesses:     s.NumProcesses,
+		})
+	}
+	b, err := json.Marshal(rows)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(o.out, string(b))
+	return nil
 }
 
 // createdContainers narrows a list of services to the container names that
