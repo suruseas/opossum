@@ -55,7 +55,7 @@ func TestStatsAsksOnlyForContainersThatExist(t *testing.T) {
 		"web": {Image: "web:latest"},
 		"db":  {Image: "postgres:16"},
 	})
-	if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Stats(nil, true); err != nil {
+	if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Stats(nil, orchestrator.StatsOptions{NoStream: true}); err != nil {
 		t.Fatalf("Stats: %v", err)
 	}
 	var stats []string
@@ -84,7 +84,7 @@ func TestStatsWithNoContainersSaysSoInsteadOfAskingForEverything(t *testing.T) {
 		"web": {Image: "web:latest"},
 		"db":  {Image: "postgres:16"},
 	})
-	err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Stats(nil, true)
+	err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Stats(nil, orchestrator.StatsOptions{NoStream: true})
 	if err == nil || !strings.Contains(err.Error(), "opossum up") {
 		t.Fatalf("want an error pointing at `opossum up`, got %v", err)
 	}
@@ -162,7 +162,7 @@ exit 0
 		"web": {Image: "web:latest"},
 		"db":  {Image: "postgres:16"},
 	})
-	if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Stats(nil, true); err != nil {
+	if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Stats(nil, orchestrator.StatsOptions{NoStream: true}); err != nil {
 		t.Fatalf("Stats: %v", err)
 	}
 	b, _ := os.ReadFile(logPath)

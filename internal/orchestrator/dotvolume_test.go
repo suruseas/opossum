@@ -267,7 +267,7 @@ func dotTranscript(t *testing.T, body string) (transcript, config string) {
 		name string
 		run  func() error
 	}{
-		{"ps", o.Ps},
+		{"ps", func() error { return o.Ps(orchestrator.PsOptions{}) }},
 		{"volumes", func() error { return o.Volumes(nil, orchestrator.VolumesOptions{}) }},
 		{"volumes json", func() error { return o.Volumes(nil, orchestrator.VolumesOptions{Format: "json"}) }},
 	} {

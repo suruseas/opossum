@@ -6,6 +6,18 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-09-14
+
+### Added
+
+- `ps`, `images` and `stats --no-stream` accept `--format json`, printing an
+  array of objects that each carry the service name beside the columns, so a
+  program no longer has to parse the table or match container names back to
+  services. As in the table, a service with no container has no row in `ps`;
+  a column the table shows as `-` is an empty string. `stats` has no row for a
+  service whose container is stopped or absent, and refuses `--format json`
+  without `--no-stream` or with `--host`.
+
 ## [0.28.0] - 2026-09-14
 
 ### Changed
@@ -1484,7 +1496,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.28.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.29.0...HEAD
+[0.29.0]: https://github.com/suruseas/opossum/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/suruseas/opossum/compare/v0.27.1...v0.28.0
 [0.27.1]: https://github.com/suruseas/opossum/compare/v0.27.0...v0.27.1
 [0.27.0]: https://github.com/suruseas/opossum/compare/v0.26.0...v0.27.0

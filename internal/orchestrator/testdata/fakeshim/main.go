@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -652,8 +653,21 @@ func run(args []string) int {
 		}
 		if jsonForm {
 			var objs []string
+			// container 1.4.1 answers in id order, not in the order it was asked.
+			slices.Sort(names)
 			for _, n := range names {
-				objs = append(objs, fmt.Sprintf(`{"id":"%s","memoryUsageBytes":49283072,"memoryLimitBytes":1073741824}`, n))
+				// container 1.4.1 prints no entry for a stopped container, and
+				// `[]` when every one named is stopped.
+				if stoppedForStats(n) {
+					continue
+				}
+				// Every key 1.4.1 prints, each with its own value, in the
+				// runtime's (alphabetical) key order.
+				objs = append(objs, fmt.Sprintf(
+					`{"blockReadBytes":8192,"blockWriteBytes":16384,"cpuUsageUsec":1500000,"id":"%s",`+
+						`"memoryLimitBytes":1073741824,"memoryUsageBytes":49283072,"networkRxBytes":2048,"networkTxBytes":4096,"numProcesses":3}`,
+					n,
+				))
 			}
 			fmt.Printf("[%s]\n", strings.Join(objs, ","))
 		}
@@ -792,4 +806,22 @@ func onlyRunning(doc string) string {
 		return doc
 	}
 	return string(b)
+}
+
+// stoppedForStats reports whether inspect would call the container stopped,
+// by the same knobs: $INSPECT_STATE for every container, $INSPECT_STOPPED by
+// name, and a `stop` recorded under $STATE_DIR.
+func stoppedForStats(name string) bool {
+	if st := os.Getenv("INSPECT_STATE"); st != "" && st != "running" {
+		return true
+	}
+	if slices.Contains(strings.Fields(os.Getenv("INSPECT_STOPPED")), name) {
+		return true
+	}
+	if dir := os.Getenv("STATE_DIR"); dir != "" {
+		if _, err := os.Stat(stoppedPath(dir, name)); err == nil {
+			return true
+		}
+	}
+	return false
 }

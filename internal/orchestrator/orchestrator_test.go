@@ -1646,7 +1646,7 @@ func TestImagesListsBuiltAndPulled(t *testing.T) {
 	rt, _ := fakeShim(t)
 	setShimEnv(rt, "IMAGE_ABSENT=postgres:16") // the pulled image isn't present locally
 	var out bytes.Buffer
-	if err := orchestrator.New(imageProject(), rt, "opossum", &out).Images(); err != nil {
+	if err := orchestrator.New(imageProject(), rt, "opossum", &out).Images(orchestrator.ImagesOptions{}); err != nil {
 		t.Fatalf("Images: %v", err)
 	}
 	// Column by column. Tying the values to the line is not enough: every cell
@@ -1959,7 +1959,7 @@ func TestStatsInvokesContainerStats(t *testing.T) {
 
 	// No services + --no-stream: one `stats --no-stream` over all project containers.
 	rt, log := fakeShim(t)
-	if err := orchestrator.New(newP(), rt, "opossum", &bytes.Buffer{}).Stats(nil, true); err != nil {
+	if err := orchestrator.New(newP(), rt, "opossum", &bytes.Buffer{}).Stats(nil, orchestrator.StatsOptions{NoStream: true}); err != nil {
 		t.Fatalf("Stats: %v", err)
 	}
 	line := ""
@@ -1974,7 +1974,7 @@ func TestStatsInvokesContainerStats(t *testing.T) {
 
 	// A named service, streaming (default): no --no-stream, only that container.
 	rt2, log2 := fakeShim(t)
-	if err := orchestrator.New(newP(), rt2, "opossum", &bytes.Buffer{}).Stats([]string{"web"}, false); err != nil {
+	if err := orchestrator.New(newP(), rt2, "opossum", &bytes.Buffer{}).Stats([]string{"web"}, orchestrator.StatsOptions{NoStream: false}); err != nil {
 		t.Fatalf("Stats: %v", err)
 	}
 	if !hasLine(log2(), "stats web.demo.opossum") {
@@ -1983,7 +1983,7 @@ func TestStatsInvokesContainerStats(t *testing.T) {
 
 	// Unknown service is rejected.
 	rt3, _ := fakeShim(t)
-	if err := orchestrator.New(newP(), rt3, "opossum", &bytes.Buffer{}).Stats([]string{"nope"}, true); err == nil {
+	if err := orchestrator.New(newP(), rt3, "opossum", &bytes.Buffer{}).Stats([]string{"nope"}, orchestrator.StatsOptions{NoStream: true}); err == nil {
 		t.Fatal("expected an error for an unknown service")
 	}
 }
@@ -2017,7 +2017,7 @@ func TestPsReportsInspectedIP(t *testing.T) {
 	})
 	var out bytes.Buffer
 	o := orchestrator.New(p, rt, "opossum", &out)
-	if err := o.Ps(); err != nil {
+	if err := o.Ps(orchestrator.PsOptions{}); err != nil {
 		t.Fatalf("Ps: %v", err)
 	}
 	got := out.String()
@@ -2080,7 +2080,7 @@ func TestPsHidesMissingContainers(t *testing.T) {
 		"web": {Image: "web:latest"},
 	})
 	var out bytes.Buffer
-	if err := orchestrator.New(p, rt, "opossum", &out).Ps(); err != nil {
+	if err := orchestrator.New(p, rt, "opossum", &out).Ps(orchestrator.PsOptions{}); err != nil {
 		t.Fatalf("Ps: %v", err)
 	}
 	got := out.String()
@@ -2102,7 +2102,7 @@ func TestPsErrorsWhenSystemStopped(t *testing.T) {
 	setShimEnv(rt, "SYSTEM_STOPPED=1")
 	p := project("demo", map[string]*compose.Service{"db": {Image: "postgres:16"}})
 	var out bytes.Buffer
-	err := orchestrator.New(p, rt, "opossum", &out).Ps()
+	err := orchestrator.New(p, rt, "opossum", &out).Ps(orchestrator.PsOptions{})
 	if err == nil {
 		t.Fatalf("Ps must error when the container system is stopped, got nil (output: %q)", out.String())
 	}
@@ -2120,7 +2120,7 @@ func TestImagesErrorsWhenSystemStopped(t *testing.T) {
 	rt, _ := fakeShim(t)
 	setShimEnv(rt, "SYSTEM_STOPPED=1")
 	var out bytes.Buffer
-	err := orchestrator.New(imageProject(), rt, "opossum", &out).Images()
+	err := orchestrator.New(imageProject(), rt, "opossum", &out).Images(orchestrator.ImagesOptions{})
 	if err == nil {
 		t.Fatalf("Images must error when the container system is stopped, got nil (output: %q)", out.String())
 	}
@@ -2139,7 +2139,7 @@ func TestPsShowsStoppedWhenExistsButNotRunning(t *testing.T) {
 	setShimEnv(rt, "INSPECT_STATE=stopped")
 	p := project("demo", map[string]*compose.Service{"db": {Image: "postgres:16"}})
 	var out bytes.Buffer
-	if err := orchestrator.New(p, rt, "opossum", &out).Ps(); err != nil {
+	if err := orchestrator.New(p, rt, "opossum", &out).Ps(orchestrator.PsOptions{}); err != nil {
 		t.Fatalf("Ps: %v", err)
 	}
 	got := out.String()
@@ -2155,7 +2155,7 @@ func TestPsFallsBackToStoppedWhenExistsWithEmptyState(t *testing.T) {
 	rt := fakeShimInspect(t, `[{"status":{"state":""},"configuration":{}}]`, 0)
 	p := project("demo", map[string]*compose.Service{"db": {Image: "postgres:16"}})
 	var out bytes.Buffer
-	if err := orchestrator.New(p, rt, "opossum", &out).Ps(); err != nil {
+	if err := orchestrator.New(p, rt, "opossum", &out).Ps(orchestrator.PsOptions{}); err != nil {
 		t.Fatalf("Ps: %v", err)
 	}
 	got := out.String()

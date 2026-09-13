@@ -21,31 +21,34 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: stable
-      # The GitHub Release body is this version's CHANGELOG.md section, so the
-      # release page says the same thing the file does and nobody has to
-      # maintain two texts.
+      # The GitHub Release body is this version's CHANGELOG.md section, with an
+      # optional warning above it, so the release page says what the file says and
+      # nobody maintains two texts. Three passes, in this order:
       #
-      # Two passes. The first takes everything between `## [x.y.z]` and
-      # whatever ends that section — the next `## [` heading, or the
-      # link-reference block at the foot of the file for the oldest one.
+      # 1. Take everything between `## [x.y.z]` and whatever ends that section —
+      #    the next `## [` heading, or the link-reference block at the foot of the
+      #    file for the oldest one. An empty section stops the step here, before a
+      #    warning can make the body look non-empty: a warning over no changelog
+      #    used to pass, because this check ran after the warning was added.
       #
-      # The second unwraps it, and is not cosmetic: GitHub renders a release
-      # body the way it renders a comment, where a single newline is a line
-      # break rather than a space. Entries in this file are written wrapped at
-      # about eighty columns, so pasted through as-is they reach the release
-      # page broken at those columns — a narrow ragged column beside a wide
-      # one, differing per release according to how that entry happened to be
-      # typed. Joining each block back into one line lets the page wrap it to
-      # the reader's width. Blank lines, headings and list starts begin a new
-      # block; a fenced code block passes through untouched.
+      # 2. Put release-notes.d/<x.y.z>.md above it when that file exists — the
+      #    warning a reader needs before the list. No file is the normal case.
       #
-      # The file is the source: `changelog: disable: true` in .goreleaser.yaml
-      # already tells GoReleaser not to invent a commit list, and
-      # `--release-notes` skips its generation outright. An empty extraction
-      # fails the step rather than publishing a release with an empty body,
-      # which is what every release up to v0.27.1 shipped with — a tag missing
-      # from CHANGELOG.md is a mistake in the roll, and silence is how an empty
-      # body stayed unnoticed for forty-one of them.
+      # 3. Unwrap the whole assembled body, the warning included. Not cosmetic:
+      #    GitHub renders a release body like a comment, where a single newline is
+      #    a line break, so text written wrapped at eighty columns reaches the page
+      #    broken at those columns. Blank lines, headings and list starts begin a
+      #    new block; fenced code passes through. Inside a `> ` quote (a GitHub
+      #    alert) lines join into one `> ` line, a `>` on its own starts a new
+      #    paragraph, and `> [!WARNING]` keeps its line. v0.28.0's warning was put
+      #    above the section after this pass ran, so it went out broken at eighty
+      #    columns inside the box (2026-09-14); unwrapping last covers both.
+      #
+      # GoReleaser is handed the result with --release-notes and publishes it as it
+      # is; the changelog comment in .goreleaser.yaml says why that pipe must stay
+      # enabled, and a later step reads the published body back. An empty section
+      # is a mistake in the roll, and silence is how an empty body stayed unnoticed
+      # for forty-one releases.
       - name: the release body is this version's CHANGELOG section
         run: |
           ver="${GITHUB_REF_NAME#v}"
@@ -61,35 +64,42 @@ jobs:
               while (last >= first && lines[last] ~ /^[[:space:]]*$/) last--
               for (i = first; i <= last; i++) print lines[i]
             }
-          ' CHANGELOG.md | awk '
-            function flush() { if (buf != "") { print buf; buf = "" } }
-            /^```/ { flush(); print; fence = !fence; next }
-            fence   { print; next }
-            /^[[:space:]]*$/ { flush(); print ""; next }
-            /^(#+ |[-*] |[0-9]+\. )/ { flush(); buf = $0; next }
-            { sub(/^[[:space:]]+/, ""); buf = (buf == "" ? $0 : buf " " $0) }
-            END { flush() }
-          ' > "$RUNNER_TEMP/release-notes.md"
-          # An optional preamble: release-notes.d/<x.y.z>.md, when it
-          # exists, goes above the section. It carries the warning a reader
-          # needs before the list — a version that refuses a compose file
-          # earlier versions read, say. Kept out of CHANGELOG.md on purpose:
-          # the file is the record of what changed, and this is the notice
-          # that someone upgrading past it should stop and read. No file is
-          # the normal case, not an omission.
-          if [ -f "release-notes.d/$ver.md" ]; then
-            { cat "release-notes.d/$ver.md"; echo; } > "$RUNNER_TEMP/preamble.md"
-            cat "$RUNNER_TEMP/preamble.md" "$RUNNER_TEMP/release-notes.md" \
-              > "$RUNNER_TEMP/with-preamble.md"
-            mv "$RUNNER_TEMP/with-preamble.md" "$RUNNER_TEMP/release-notes.md"
-            echo "prepended release-notes.d/$ver.md"
-          fi
-          if [ ! -s "$RUNNER_TEMP/release-notes.md" ]; then
+          ' CHANGELOG.md > "$RUNNER_TEMP/section.md"
+          if [ ! -s "$RUNNER_TEMP/section.md" ]; then
             echo "CHANGELOG.md has no '## [$ver]' section, so this release would" >&2
-            echo "have gone out with an empty body. Roll the changelog for $ver" >&2
+            echo "have gone out without its changelog. Roll the changelog for $ver" >&2
             echo "and re-run." >&2
             exit 1
           fi
+          if [ -f "release-notes.d/$ver.md" ]; then
+            { cat "release-notes.d/$ver.md"; echo; cat "$RUNNER_TEMP/section.md"; } \
+              > "$RUNNER_TEMP/assembled.md"
+            echo "prepended release-notes.d/$ver.md"
+          else
+            cp "$RUNNER_TEMP/section.md" "$RUNNER_TEMP/assembled.md"
+          fi
+          awk '
+            function flush() { if (buf != "") { print (q ? "> " : "") buf; buf = "" } }
+            {
+              if ($0 ~ /^>/) {
+                c = $0; sub(/^> ?/, "", c)
+                if (!q) { flush(); q = 1 }
+                if (qfence) { print; if (c ~ /^```/) qfence = 0; next }
+                if (c ~ /^```/) { flush(); print; qfence = 1; next }
+                if (c ~ /^[[:space:]]*$/) { flush(); print ">"; next }
+                if (c ~ /^\[![A-Za-z]+\]/) { flush(); print "> " c; next }
+                if (c ~ /^(#+ |[-*] |[0-9]+\. )/) { flush(); buf = c; next }
+                buf = (buf == "" ? c : buf " " c); next
+              }
+              if (q) { flush(); q = 0; qfence = 0 }
+              if (fence) { print; if ($0 ~ /^```/) fence = 0; next }
+              if ($0 ~ /^```/) { flush(); print; fence = 1; next }
+              if ($0 ~ /^[[:space:]]*$/) { flush(); print ""; next }
+              if ($0 ~ /^(#+ |[-*] |[0-9]+\. )/) { flush(); buf = $0; next }
+              line = $0; sub(/^[[:space:]]+/, "", line); buf = (buf == "" ? line : buf " " line)
+            }
+            END { flush() }
+          ' "$RUNNER_TEMP/assembled.md" > "$RUNNER_TEMP/release-notes.md"
           # Checked as the page will show it: after the extraction, the
           # unwrapping and the preamble, not as the pieces were written. A
           # fragment passed this same check when its pull request merged, but
@@ -115,3 +125,30 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Token with write access to the suruseas/homebrew-opossum tap repo.
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      # Read the release back and compare its body with the notes handed to GoReleaser.
+      # GoReleaser does not say when it ignores --release-notes: v0.28.0 went out with an
+      # empty body while every step here was green, because `changelog: disable: true`
+      # skipped the pipe that reads the flag (2026-09-14). Being green is not evidence
+      # the page says anything. When the body differs, it is set from the notes — so a
+      # reader is not left with an empty page and no warning — and the run still fails,
+      # because a release whose notes had to be patched in afterwards is a pipeline that
+      # needs fixing, not a success.
+      - name: the published release body is the notes that were generated
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          want="$(cat "$RUNNER_TEMP/release-notes.md")"
+          got="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json body --jq .body)"
+          # GitHub may drop a trailing newline or store CRLF; compare what a reader sees.
+          norm() { printf '%s' "$1" | tr -d '\r' | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}'; }
+          if [ "$(norm "$want")" = "$(norm "$got")" ]; then
+            echo "release body matches the generated notes ($(printf '%s\n' "$want" | wc -l | tr -d ' ') lines)"
+            exit 0
+          fi
+          echo "The published release body is not the notes that were generated:" >&2
+          echo "  generated $(printf '%s\n' "$want" | wc -l | tr -d ' ') lines, published $(printf '%s\n' "$got" | wc -l | tr -d ' ') lines." >&2
+          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --notes-file "$RUNNER_TEMP/release-notes.md"
+          echo "The body has been set from the generated notes, so the page is right. Failing" >&2
+          echo "anyway: GoReleaser did not use --release-notes, and the next release would" >&2
+          echo "publish an empty page again. See the changelog comment in .goreleaser.yaml." >&2
+          exit 1

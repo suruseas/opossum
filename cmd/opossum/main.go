@@ -622,17 +622,23 @@ func downCmd() *cobra.Command {
 }
 
 func imagesCmd() *cobra.Command {
-	return &cobra.Command{
+	var opts orchestrator.ImagesOptions
+	cmd := &cobra.Command{
 		Use:   "images",
 		Short: "List the image each service uses, and whether it's present locally",
+		// Args runs before the root's pre-run, so a flag mistake is refused
+		// before the runtime is asked anything.
+		Args: func(cmd *cobra.Command, args []string) error { return tableOrJSON(opts.Format) },
 		RunE: func(cmd *cobra.Command, args []string) error {
 			o, err := loadOrchestrator(cmd.OutOrStdout())
 			if err != nil {
 				return err
 			}
-			return o.Images()
+			return o.Images(opts)
 		},
 	}
+	cmd.Flags().StringVar(&opts.Format, "format", "table", "table or json")
+	return cmd
 }
 
 // destroyCmd is the exit from a trial run. `down` is the daily command; this is
@@ -875,18 +881,32 @@ func confirmDestroy(cmd *cobra.Command, project string) (bool, error) {
 	return strings.EqualFold(answer, "y") || strings.EqualFold(answer, "yes"), nil
 }
 
+// tableOrJSON refuses a --format other than the two a listing prints.
+func tableOrJSON(format string) error {
+	if format != "table" && format != "json" {
+		return fmt.Errorf("--format must be table or json, got %q", format)
+	}
+	return nil
+}
+
 func psCmd() *cobra.Command {
-	return &cobra.Command{
+	var opts orchestrator.PsOptions
+	cmd := &cobra.Command{
 		Use:   "ps",
 		Short: "List services with their container, IP, ports, and status",
+		// Args runs before the root's pre-run, so a flag mistake is refused
+		// before the runtime is asked anything.
+		Args: func(cmd *cobra.Command, args []string) error { return tableOrJSON(opts.Format) },
 		RunE: func(cmd *cobra.Command, args []string) error {
 			o, err := loadOrchestrator(cmd.OutOrStdout())
 			if err != nil {
 				return err
 			}
-			return o.Ps()
+			return o.Ps(opts)
 		},
 	}
+	cmd.Flags().StringVar(&opts.Format, "format", "table", "table or json")
+	return cmd
 }
 
 func portCmd() *cobra.Command {
@@ -1214,10 +1234,27 @@ func logsCmd() *cobra.Command {
 }
 
 func statsCmd() *cobra.Command {
-	var noStream, host bool
+	var host bool
+	var opts orchestrator.StatsOptions
 	cmd := &cobra.Command{
 		Use:   "stats [service...]",
 		Short: "Show live resource usage (CPU / memory / net / block I/O) for services",
+		// Args runs before the root's pre-run, which starts a stopped runtime
+		// for stats: a flag mistake is refused without starting it.
+		Args: func(cmd *cobra.Command, args []string) error {
+			if err := tableOrJSON(opts.Format); err != nil {
+				return err
+			}
+			if host && opts.Format == "json" {
+				// The host view is a table only; printing it where a program
+				// asked for JSON would hand that program something it cannot read.
+				return fmt.Errorf("--format json is not available with --host")
+			}
+			if opts.Format == "json" && !opts.NoStream {
+				return fmt.Errorf("--format json requires --no-stream: a streaming JSON array isn't well-formed line by line")
+			}
+			return nil
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			o, err := loadOrchestrator(cmd.OutOrStdout())
 			if err != nil {
@@ -1229,11 +1266,12 @@ func statsCmd() *cobra.Command {
 				// report per service.
 				return o.StatsHost(args)
 			}
-			return o.Stats(args, noStream)
+			return o.Stats(args, opts)
 		},
 	}
-	cmd.Flags().BoolVar(&noStream, "no-stream", false, "print a single snapshot instead of streaming live")
+	cmd.Flags().BoolVar(&opts.NoStream, "no-stream", false, "print a single snapshot instead of streaming live")
 	cmd.Flags().BoolVar(&host, "host", false, "show each service's host memory footprint (its VM's resident size on the Mac) instead of streaming guest-view stats")
+	cmd.Flags().StringVar(&opts.Format, "format", "table", "table or json (json requires --no-stream)")
 	return cmd
 }
 

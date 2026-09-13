@@ -29,10 +29,17 @@ archives:
 checksum:
   name_template: checksums.txt
 
-# CHANGELOG.md is assembled from changelog.d/ fragments, so don't let GoReleaser generate release notes
-# from commits.
-changelog:
-  disable: true
+# Release notes are never generated from commits: release.yml hands GoReleaser the
+# version's CHANGELOG.md section with --release-notes, and GoReleaser uses that file
+# and stops (it generates a commit list only when no notes are given).
+#
+# The changelog pipe must stay enabled for that to work. `--release-notes` is read
+# inside this pipe, and `disable: true` skips the whole pipe — so with it set, the
+# flag was ignored without a word and v0.28.0 was published with an empty body
+# (2026-09-14). Read in goreleaser v2.18.1: changelog.Pipe.Skip returns
+# Config.Changelog.Disable; Run loads ReleaseNotesFile and returns before any
+# commit-based generation. release.yml checks the published body afterwards, so a
+# change here that brings the silence back fails that run instead of passing it.
 
 release:
   github:
