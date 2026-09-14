@@ -91,6 +91,31 @@ func (o *Orchestrator) RunAudited(service string, command []string, opts RunOneO
 	if err := o.ensureNotForeign(o.containerName(service+"-run"), "opossum run"); err != nil {
 		return nil, err
 	}
+	// The names of the networks the one-off joins, for the same two reasons.
+	// A dependency's network is checked by the `up` that starts it, which is
+	// after the snapshot, as a dependency's unreadable env_file is (#660).
+	if err := o.checkNetworkNames(o.runNetworks(svc)); err != nil {
+		return nil, err
+	}
+	// The one-off's container name, for the same two reasons.
+	if err := o.checkContainerName(service, o.containerName(service+"-run")); err != nil {
+		return nil, err
+	}
+	// The names of the volumes the one-off mounts, for the same two reasons.
+	if err := o.checkVolumeNames([]string{service}); err != nil {
+		return nil, err
+	}
+	// A missing external volume the one-off or any of its dependencies mounts,
+	// for the same two reasons.
+	if err := o.checkExternalVolumes(o.withDependencies(service)); err != nil {
+		return nil, err
+	}
+	// A dependency behind a profile that is not active, for the same two
+	// reasons — and a third: the `up` below names the dependencies, so it
+	// would start one instead of refusing it (#1005).
+	if err := o.checkRunDependenciesEnabled(service, svc, opts); err != nil {
+		return nil, err
+	}
 	report := &AuditReport{Service: service, Command: command}
 
 	// Files: snapshot the workspace before the run so we can diff after.

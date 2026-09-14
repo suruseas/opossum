@@ -6,6 +6,204 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-09-15
+
+### Changed
+
+- A tmpfs mount (`tmpfs:` or a `type: tmpfs` volume) is now mounted with
+  docker's default options `nosuid,nodev,noexec`, put before the options the
+  file writes. On container 1.4.1 a file in a tmpfs mount used to run, and a
+  device node in it to open, where docker refuses both; an `exec`, `suid` or
+  `dev` written on the mount (`/tmp:exec`) still wins, as on docker engine
+  29.7.2. A container with a tmpfs mount is made again on the first `up` after
+  this change, since what it is made with changed; others are left as they are.
+
+### Fixed
+
+- `opossum watch` no longer tells you to "check the container is running" when
+  a sync was skipped because the container belongs to another project or the
+  runtime would not say whose it is, nor that the container "may be gone" when
+  a restart was skipped for the second reason. The warning now says the change
+  was skipped: for another project's container it keeps the advice to give
+  this project its own DNS domain, and when the runtime did not answer it says
+  to save that file again (a sync) or that watch tries the restart again when a
+  file under one of the service's sync+restart rules next changes (a restart).
+- `opossum restart` no longer leaves services stopped when one of them fails to
+  start: it used to stop every service, start them again in order, and give up
+  at the first failure, so the services after it stayed down. `opossum start`
+  gave up the same way and left the later services unstarted. Both now go on
+  to the other services and report each failure, together with any container
+  whose owner the runtime would not say. `opossum start` does not start a
+  service whose dependency failed to start in the same run (as docker compose
+  does when a dependency's container fails to start), and starts named
+  services in dependency order.
+- A volume's name under top-level `volumes:`, and the `source` of a
+  `type: volume` mount, may now only contain letters, digits, `.`, `_` and
+  `-`, as docker compose requires of those names. Any other character used to
+  be passed to the runtime as written (for example ``-v demo_a/b:/y``), and a
+  `type: volume` source with `:` in it was reported cut at the colon. Both are
+  now refused when the file is loaded, with the name shown whole. The `name:`
+  a volume declaration may set is not checked.
+- The shared named volume warning from `opossum up`, and the matching
+  suggestions in the `compose.opossum.yaml` that `opossum up
+  --from-docker-compose` writes, list the volumes by the names written in the
+  compose file, sorted character by character. A volume whose name starts with
+  `.` used to be listed ahead of names it sorts after, such as `-m`.
+- A short volume entry is now read as `SOURCE:TARGET` or `SOURCE:TARGET:MODE`,
+  the way container 1.4.1 splits it (and docker compose, apart from reading a
+  one-letter source as a Windows drive). One with four or more fields is
+  refused as having too many colons, as docker compose refuses it, and one
+  whose third field is a path (for example ``data:app:/y``, which container
+  1.4.1 reads as the volume at `app` with mount options `/y`, then fails to
+  start) is refused with the target it would have used. A long-form mount
+  whose bind source or target contains `:` is refused too, instead of being
+  split apart at the colon.
+- A volume a service mounts whose name goes to the runtime as written, a
+  declaration's `name:` or the key of an external volume without one, is
+  refused when the file is loaded unless it starts with a letter or digit and
+  continues with letters, digits, `_`, `.` or `-`. container 1.4.1 and the
+  docker engine 29.7.2 both refuse to create any other name, and docker compose
+  v5.5.0 checks neither place in `config`, so such a name used to be passed on
+  to the runtime unchanged. A declaration no service mounts is not checked, as
+  docker compose ignores it too.
+- An anonymous volume whose path holds a character other than ASCII letters,
+  digits, `_`, `-`, `/`, `.` and spaces (`/etc/apk+x`, `/data@2`,
+  `/données`, a tab) no longer fails `opossum up` or `opossum run` with
+  `invalid volume name`. The volume is named from the project, the service and
+  the path, and container 1.4.1 creates only volume names of ASCII letters,
+  digits, `_`, `.` and `-`; such a character in the path is now written `_`,
+  as `/`, `.` and spaces already were. A path without one keeps the name it
+  had, so a volume made by an earlier `up` is found again.
+- `opossum up`, `opossum run` and `opossum run --audit` refuse a container
+  whose name would be longer than the 63 characters container 1.4.1 takes,
+  before they create or start anything, and say what to shorten. A service's
+  container is named `<service>.<project>.<domain>` (`opossum` by default) and
+  a one-off's `<service>-run.<project>.<domain>`, so a long directory name used
+  as the project name was enough: `up` used to create the project's network,
+  start the services that come before in startup order, and then fail with
+  `is not a valid container ID`. The advice offers the service name, the
+  project name and a shorter `--dns-domain`, or only the service name when
+  there is no DNS domain and the container is named by the service alone. The
+  name is not shortened, because peers look the service up by it. docker
+  compose v5.5.0 runs such names. For `run`, a dependency's container name is
+  refused when the dependencies are started, before any of them is created
+  (for `run --audit`, after the workspace is snapshotted).
+- A new volume whose name on the runtime is longer than 50 characters is now
+  filled from the image: a named volume (its `name:`, or `<project>_<key>`) as
+  well as an anonymous one (`<project>_<service>_<path>_<hash>`), for both
+  `opossum up` and `opossum run`. opossum fills a new volume with a throwaway
+  container named `seed-<volume>.opossum`, and container 1.4.1 refuses a
+  container name longer than 63 characters (`is not a valid container ID`), so
+  opossum warned `[OPSM-108] couldn't fill the new volume` and the volume
+  mounted empty. Such a seed container is now named with the start of the
+  volume's name and a hash of the whole name, within 63 characters; a volume
+  whose seed name already fits keeps it.
+- A declared network whose key container 1.4.1 does not take in a network name
+  (upper case as in `backEnd`, a character outside a-z, 0-9, `.`, `_` and `-` as
+  in `a+b`, or a trailing `-`, `.` or `_`) no longer fails `up` with
+  `invalid network name`. The key is folded to lower case, with `-` for each
+  refused character and the trailing ones dropped, so `backEnd` runs as
+  `<project>-backend`; a key the runtime already takes keeps its network name.
+- `opossum up` and `opossum run` (with or without `--audit`) refuse two networks
+  that services of the project join and that fold to the same name (`backEnd`
+  and `backend`), since docker compose v5.5.0 gives each its own network. This
+  includes a network whose key folds to `net` (`net` itself, or `NET`) while
+  another service is on the default network: both used to be the one network
+  `<project>-net`, so those services could reach each other where docker compose
+  keeps them apart. Every service of the file counts, including one behind a
+  profile that is not active, since starting it later would put it on the shared
+  network. `opossum down`, `destroy`, `ps` and `config` still read such a file.
+- `opossum up` and `opossum run` (with or without `--audit`) also refuse a
+  network they would create whose name would be longer than the 63 characters
+  container 1.4.1 creates (the default `<project>-net` or a declared
+  `<project>-<key>`; for `run`, the networks of its dependencies too, unless
+  `--no-deps`), and say to shorten the project name or the key. Both refusals
+  come before any container or network is removed, created or started, and,
+  for `run --audit`, before the workspace is snapshotted, except a
+  dependency's network that is too long, which is refused when the
+  dependencies are started, after the snapshot.
+- A network a service joins is refused when the file is loaded, instead of being
+  passed on to the runtime, if it is external and its real name (its `name:`, or
+  its key when it has none) is one container 1.4.1 cannot create, or if its key
+  keeps no character once folded. A declaration no service joins is not checked.
+- `opossum run --audit` no longer starts a dependency it names directly when
+  that dependency is behind a profile that is not active. It refuses the run
+  instead, the way `opossum run` already did
+  (`service "web" depends on "db", whose profile is not active`), before it
+  snapshots the workspace or starts anything. docker compose v5.5.0 refuses
+  such a `run` as well, with or without `--no-deps`; opossum still lets it go
+  ahead with `--no-deps`, without the dependency, as before. A dependency of a
+  dependency behind such a profile was already refused, and still is, by the
+  step that starts the dependencies (after the snapshot, for `run --audit`).
+- `opossum up`, `opossum run` and `opossum run --audit` refuse, before they
+  create or start anything, a service whose name container 1.4.1 cannot name a
+  container with: one starting with `_`, `.` or `-`, holding a character other
+  than ASCII letters, digits, `_`, `.` and `-` (`_web`, `a+b`), or, without a
+  DNS domain, a single character. `up` used to create the network and start
+  the services before it, then fail with `is not a valid container ID`. The
+  refusal says to rename the service, or to use a DNS domain of those
+  characters when the domain is what does not fit.
+- `opossum up` also refuses two services it would start whose names differ
+  only in case (`Com` and `com`): container 1.4.1 fails the second container
+  with `failed to bootstrap container`, naming neither service. A file that
+  never starts both (one behind a profile that is not active) still runs.
+- `opossum up` warns (`[OPSM-209]`) about a service other services may not
+  reach by name although its container runs: on container 1.4.1 a service
+  name with upper case gets no DNS answer (`MyDb`), or another address when
+  spelled like a top-level domain (`Web`), and one with `.` gets none
+  from a musl image such as alpine, and an internet address when one exists
+  (`web.dev`). The service still starts under the same name, so a project
+  brought up before keeps its containers; rename it in lower case if another
+  service reaches it by name. docker compose v5.5.0 looks up `MyDb` and
+  `web.dev`.
+- `opossum up` starts a service with an anonymous volume on a long path
+  (`- /very/deep/…`) whose volume name would pass 255 characters: the path part
+  of the name is cut to fit, keeping the start of the path and a hash of the
+  whole path. container 1.4.1 refuses a longer volume name, so `up` used to
+  warn that it could not fill the volume and then fail starting the service. A
+  name that already fit is unchanged, so an existing volume is still found.
+- `opossum up` and `opossum run` refuse, before they create or start anything,
+  a service mounting a volume whose name is longer than the 255 characters
+  container 1.4.1 creates: a volume's key under the project name, its `name:`,
+  or an external volume's name. The refusal names the service, the volume and
+  what to shorten. `opossum run --audit` refuses the one-off's own volumes
+  before it snapshots the workspace, and its dependencies' when it starts them,
+  after the snapshot. `up` used to create the network before failing to start
+  the service; docker compose v5.5.0 fails creating a volume of such a key or
+  `name:` too.
+- A long-form tmpfs mount's `read_only`, `tmpfs.size` and `tmpfs.mode` now
+  take effect: they are passed as the mount options `ro`, `size=` (in bytes)
+  and `mode=` (in octal), which container 1.4.1 mounts the way docker engine
+  29.7.2 mounts the long form. They used to be dropped — `read_only` without a
+  word, the `tmpfs:` options as ignored fields. A size is read as a whole
+  number of bytes or digits with a k, m, g, t or p unit, and a mode as a whole
+  number (`0755`), as docker compose v5.5.0 reads them, and what it refuses is
+  refused at load; a size or mode written as a YAML float (`1.5`, `1e3`, `08`),
+  a size string in another spelling (`.5m`, `+1m`, `"-1"`) and a whole number
+  out of range (a mode past 4294967295, a size past 9223372036854775807) are
+  refused too, though docker compose reads some of them. A mount's `tmpfs:`
+  that is not a mapping, and on a bind or volume mount a size or mode refused
+  on a tmpfs mount, are refused as docker compose refuses them.
+- A tmpfs mount written with the `defaults` option (`/tmp:defaults,size=1m`)
+  now starts: the option is dropped before the mount reaches the runtime, as
+  docker engine 29.7.2 reads it as nothing wherever it stands. container 1.4.1
+  failed the mount with errno 22, so the service did not start.
+- `opossum up`, `opossum run` and `opossum run --audit` refuse a volume
+  declared `external: true` that does not exist (`[OPSM-210]`), before they
+  create or remove anything, as docker compose v5.5.0 refuses it. On container
+  1.4.1 the service used to start on a new, empty volume of that name. The
+  refusal says to create the volume or drop `external: true`. `up` looks at the
+  services it starts; `run` at the one-off's service and its dependencies all
+  the way down, with `--no-deps` too, as docker compose does. A runtime that
+  gives no volume list is not taken as the volume being missing.
+- `opossum up --remove-orphans` refuses a missing external network
+  (`[OPSM-205]`) before it removes an orphan, and says it before a missing
+  external volume, as docker compose v5.5.0 does; it used to remove the orphans
+  first.
+- A declared volume named `NAME` (`name: NAME`) that does not exist yet is
+  prepared and filled from the image like any other new volume; opossum used to
+  read the header of container 1.4.1's volume list as that volume.
+
 ## [0.29.0] - 2026-09-14
 
 ### Added
@@ -1496,7 +1694,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.29.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.30.0...HEAD
+[0.30.0]: https://github.com/suruseas/opossum/compare/v0.29.0...v0.30.0
 [0.29.0]: https://github.com/suruseas/opossum/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/suruseas/opossum/compare/v0.27.1...v0.28.0
 [0.27.1]: https://github.com/suruseas/opossum/compare/v0.27.0...v0.27.1

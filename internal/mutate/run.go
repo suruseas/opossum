@@ -22,6 +22,9 @@ import (
 // side-effecting piece is a field so the sweep itself can be tested without a
 // checkout to damage.
 type Runner struct {
+	// pattern is the -run pattern every test run of the current sweep uses.
+	pattern string
+
 	// Root is the directory commands run in, and the boundary a mutation may not
 	// write outside of.
 	Root string
@@ -161,6 +164,7 @@ func (r *Runner) Sweep(ms []Mutation) ([]Result, error) {
 			return nil, err
 		}
 	}
+	r.pattern = SweepPattern(ms)
 	if err := r.baseline(ms); err != nil {
 		return nil, err
 	}
@@ -180,6 +184,7 @@ func (r *Runner) Sweep(ms []Mutation) ([]Result, error) {
 		if err != nil {
 			return out, err
 		}
+		res.Narrowed = r.pattern != ""
 		if r.Log != nil {
 			r.Log(fmt.Sprintf("%s: %s", m.Name, describe(res)))
 		}
@@ -226,7 +231,12 @@ func (r *Runner) baseline(ms []Mutation) error {
 	// the two cannot end up instrumented differently when there is nowhere to
 	// write a profile.
 	r.measured = prof != ""
-	out, errOut, err := r.Go(append(withCoverage([]string{"test", "-count=1", "-json"}, prof), pkgs...)...)
+	pattern := r.pattern
+	args := withCoverage([]string{"test", "-count=1", "-json"}, prof)
+	if pattern != "" {
+		args = append(args, "-run", pattern)
+	}
+	out, errOut, err := r.Go(append(args, pkgs...)...)
 	if prof != "" {
 		// Read before the failure checks below: a red baseline stops the sweep, and
 		// then nobody asks about reach anyway, but a profile that was written and
@@ -235,14 +245,28 @@ func (r *Runner) baseline(ms []Mutation) error {
 		r.reach, _ = os.ReadFile(prof)
 	}
 	if failing := Failures(out); len(failing) > 0 {
-		return fmt.Errorf("the suite is already failing before any mutation is applied:\n  %s\n"+
+		what := "the suite is"
+		if pattern != "" {
+			// Narrowed, the tests ran without the rest of their packages, and a
+			// test that leans on one left out fails here and nowhere else.
+			what = "the tests the sweep names, run together without the rest of their packages, are"
+		}
+		return fmt.Errorf("%s already failing before any mutation is applied:\n  %s\n"+
 			"Every mutation would be reported as caught by these, so the sweep would measure "+
 			"nothing while reporting that everything is guarded. Make them pass first.",
-			strings.Join(failing, "\n  "))
+			what, strings.Join(failing, "\n  "))
 	}
 	if err != nil {
 		return fmt.Errorf("the suite could not be run before any mutation was applied, so nothing "+
 			"the sweep reported afterwards would mean anything: %s", oneLine(whyItDied(out, errOut)))
+	}
+	measured := Measured(out)
+	for _, m := range ms {
+		if missing := Unmeasured(m.Run, measured); len(missing) > 0 {
+			return fmt.Errorf("%s: %s did not run to a result before any mutation was applied, in %s, "+
+				"so nothing vouches for them; name the tests as `go test -json` names them",
+				m.Name, strings.Join(missing, ", "), strings.Join(pkgs, " "))
+		}
 	}
 	if r.Log != nil {
 		// Said out loud: the baseline is the longest single run here, and without
@@ -349,6 +373,13 @@ func (r *Runner) prepare(m Mutation) (original, mutated []byte, err error) {
 		return nil, nil, fmt.Errorf("%s: no packages to test — a mutation nothing runs against "+
 			"cannot be caught, and would be reported as survived", m.Name)
 	}
+	for _, name := range m.Run {
+		// Only the empty name: a level of a name can be empty (`t.Run("c/")`
+		// is printed as `TestX/c/`), and `^$` selects that level.
+		if name == "" {
+			return nil, nil, fmt.Errorf("%s: an empty test name — name each test as `go test -json` names it", m.Name)
+		}
+	}
 	if err := r.inRoot(m.File); err != nil {
 		return nil, nil, fmt.Errorf("%s: %w", m.Name, err)
 	}
@@ -398,6 +429,9 @@ func (r *Runner) one(m Mutation) (res Result, err error) {
 	if r.measured {
 		args = append(args, "-cover", coverPkg)
 	}
+	if r.pattern != "" {
+		args = append(args, "-run", r.pattern)
+	}
 	testOut, testErrOut, testErr := r.Go(append(args, m.Packages...)...)
 	transcript := testOut + testErrOut
 	killers := Failures(testOut)
@@ -413,6 +447,15 @@ func (r *Runner) one(m Mutation) (res Result, err error) {
 		// with this defect" — and the mutations worth writing here are the ones
 		// most likely to hang.
 		return Result{Mutation: m, Outcome: Inconclusive, Detail: whyItDied(testOut, testErrOut), TestOutput: transcript}, nil
+	}
+	// Nothing failed, but a test this mutation names did not run to a result:
+	// skipped, missing, or only its parent ran. Green here measured nothing of
+	// what the mutation is about, and reading it as a survivor would report a
+	// gap in tests that never ran.
+	if missing := Unmeasured(m.Run, Measured(testOut)); len(missing) > 0 {
+		return Result{Mutation: m, Outcome: Inconclusive,
+			Detail:     fmt.Sprintf("%s did not run to a result in %s", strings.Join(missing, ", "), strings.Join(m.Packages, " ")),
+			TestOutput: transcript}, nil
 	}
 	// Nothing failed. That reads as "the suite is fine with this defect" — but it
 	// reads the same way when no test runs the line at all, and those are opposite
@@ -695,8 +738,17 @@ func (r *Runner) disarmAndRestore() error {
 }
 
 // restoreLocked writes the original bytes back and reads them again to confirm.
+// When the write is refused, the file is read anyway: if it holds the original
+// bytes exactly, nothing is left to restore and that is not an error.
 func (r *Runner) restoreLocked(path string, original []byte) error {
 	if err := r.Write(path, original); err != nil {
+		// A file that refuses the original bytes may have refused the mutation
+		// too — one that cannot be opened for writing never changed. Read
+		// before saying it is still mutated: that is the warning a reader
+		// stops a commit for, and saying it of an untouched file wears it out.
+		if now, rerr := r.Read(path); rerr == nil && string(now) == string(original) {
+			return nil
+		}
 		return fmt.Errorf("could not restore %s — IT IS STILL MUTATED: %w", path, err)
 	}
 	now, err := r.Read(path)

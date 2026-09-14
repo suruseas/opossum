@@ -95,17 +95,17 @@ is **0 on success, non-zero on any error** (see Exit codes).
 | `ps` | table of service / container / image / IP / ports / status. STATUS is `running` or `stopped`; a service whose container does not exist gets **no row** (there is no `absent` value). It does **not** show healthcheck state; to confirm a service is *healthy*, check its `logs` (a `service_healthy` dependency gates on health automatically during `up`). `--format json` prints `[{"Service":…,"Container":…,"Image":…,"IP":…,"Ports":…,"Status":…}]` in the same order, with `""` where the table shows `-` (`Ports` is the table's string, not a list) |
 | `port <service> <container-port>` | prints the host side of one published port on a single line, `0.0.0.0:65345` — the way to read the host port when `ports: - "3000"` was moved off a busy 3000 (`HOST=$(opossum port web 3000)`); `--protocol tcp\|udp` (tcp by default). A port that is not published exits 1 listing the ones that are (`no port 90/tcp for container …: 80/tcp, 90/udp`); an absent or stopped container exits 1 with `service "web" is not running`. Read-only: never starts the runtime |
 | `ls` | the opossum projects on this machine (every project that has containers, by the label opossum puts on them) as a NAME / STATUS table — `running(2)`, or `running(1), stopped(1)` — with no compose file needed. A project with no running container is shown only with `-a`/`--all`; `-q`/`--quiet` prints names only; `--format json` prints `[{"Name":…,"Status":…}]`. No CONFIG FILES column (opossum does not record the compose file). Read-only: never starts the runtime |
-| `volumes [service…]` | the volumes the file's services mount that exist on the runtime, by their runtime names (`<project>_<volume>`), as a DRIVER / VOLUME NAME table; named services narrow it to what they mount. A volume appears once a service mounting it has started; external volumes, and volumes the file no longer mounts, are not listed. `-q`/`--quiet` prints names only; `--format json` prints `[{"Name":…,"Driver":…}]`. Read-only: never starts the runtime |
+| `volumes [service…]` | the volumes the file's services mount that exist on the runtime, by their runtime names (`<project>_<volume>`, or the `name:` a declaration gives), as a DRIVER / VOLUME NAME table; named services narrow it to what they mount. A volume appears once a service mounting it has started; external volumes, and volumes the file no longer mounts, are not listed. `-q`/`--quiet` prints names only; `--format json` prints `[{"Name":…,"Driver":…}]`. Read-only: never starts the runtime |
 | `logs [service…]` | print logs; `--follow` streams (multiplexed, name-prefixed) — no `-f` shorthand, that is the global `--file`; `-n/--tail N` |
 | `stats [service…]` | live CPU/mem/net/IO (streams); `--no-stream` for one snapshot; `--host` shows each service's host-memory footprint (its VM's resident size — a shared-VM tool can't do this per service); `--format json` (requires `--no-stream`; not with `--host`) prints `[{"Service":…,"Container":…,"CPUUsageUsec":…,"MemoryUsageBytes":…,"MemoryLimitBytes":…,"NetworkRxBytes":…,"NetworkTxBytes":…,"BlockReadBytes":…,"BlockWriteBytes":…,"NumProcesses":…}]` in service order, with no row for a service whose container is stopped or absent (`[]` when none of those that have a container is running; an error when none has a container) |
-| `exec [-it] <service> <cmd…>` | run a command in a running container; `-i`/`--interactive` keeps stdin open, `-t`/`--tty` allocates a TTY; exits with the command's exit code |
+| `exec [-it] <service> <cmd…>` | run a command in a running container; `-i`/`--interactive` keeps stdin open, `-t`/`--tty` allocates a TTY; exits with the command's exit code; refuses a container of the same name that another project owns |
 | `run [--rm] [--no-deps] [-T] [--audit] <service> [cmd]` | one-off foreground container; starts deps unless `--no-deps`; `-T` disables the TTY (keeps piped stdout clean, e.g. an MCP stdio server); no published ports; exits with the one-off's exit code (1 when opossum itself fails first). `--audit` reports what the run did afterward — workspace file diff (added/changed/deleted + hashes), egress destinations (when routed through a proxy; else marked unobserved), exit code — as a human summary or `--audit-format json`; the container's stdout goes to stderr so the report owns stdout. `--profile <p>` enables profile-gated services; `--ssh` forwards the host SSH agent into the container (private git over SSH with your host keys) |
 | `build [service…]` | build images for services with a `build:` |
 | `pull [service…]` | pull images for services with an `image:` |
 | `import [service…]` | copy a service's Docker-built image into `container`'s store (skip Apple's builder) |
-| `cp <src> <dst>` | copy files host↔container; each path is a host path or `service:path` |
-| `start [service…]` / `stop [service…]` / `restart [service…]` | start / stop / stop-then-start existing containers |
-| `kill [service…]` | send a signal (default KILL); `-s/--signal <SIG>` |
+| `cp <src> <dst>` | copy files host↔container; each path is a host path or `service:path`; refuses a container of the same name that another project owns |
+| `start [service…]` / `stop [service…]` / `restart [service…]` | start / stop / stop-then-start existing containers; a container of the same name that another project owns is left, and said so |
+| `kill [service…]` | send a signal (default KILL); `-s/--signal <SIG>`; a container of the same name that another project owns is left, and said so |
 | `watch` | sync host file changes into containers per `develop.watch`; runs until Ctrl-C (start with `up` first) |
 | `images` | each service's image, whether opossum builds it, whether it's present. `--format json` prints `[{"Service":…,"Image":…,"Source":…,"Present":…}]` |
 | `config [--services]` | validate and print the resolved compose (interpolation + env_file applied), listing ignored fields; `--services` prints names only, resolving no `env_file` (interpolation still runs); `--profile <p>` includes profile-gated services |
@@ -312,7 +312,8 @@ list; codes are add-only and never change meaning.
   running container (often from a *different* project), so this service can't
   attach it. The message names the holder; `container stop <name>` frees it, or give
   this service its own volume / a bind mount. When the holder is the volume's own
-  seeding container (`seed-<project>_<volume>.opossum` — a `run`, or an `up` beside
+  seeding container (`seed-<project>_<volume>.opossum`, or past 63 characters the
+  start of that name and a hash of it — a `run`, or an `up` beside
   a `run`, is still filling it from the image; two `up`s of one project meet the
   project lock first, `OPSM-208`), both exits say instead to wait for that fill:
   stopping it would leave the volume half-filled, and the next start would take it
@@ -453,6 +454,12 @@ list; codes are add-only and never change meaning.
   already exist. Create it (`container network create <n>`), or drop `external:
   true` so opossum creates a project network instead. (Common with reverse-proxy
   composes that expect a shared `proxy` network.) `up` fails this up front.
+- **`[OPSM-210]` … `volume <n> is declared external: true but doesn't exist`** →
+  opossum mounts an `external:` volume by name and never creates it; container
+  1.4.1 would create an empty one of that name, so `up` (for the services it
+  starts) and `run` (for the one-off and its dependencies, `--no-deps` too)
+  refuse before creating anything, as docker compose does. Create it (`container volume create <n>`), or drop
+  `external: true` so opossum creates a project volume instead.
 - **`unsupported network_mode "host"`** does NOT occur — such values are ignored, not
   rejected (the file loads); reported as `[OPSM-502]`.
 - **connected but a tool call / outbound request fails** with the runtime days-old →
@@ -492,6 +499,8 @@ Every `[OPSM-NNN]` opossum can emit (add-only; grouped 1xx storage / 2xx network
 - `OPSM-206` — a container-only port's mirrored host port was taken; opossum published on a free port.
 - `OPSM-207` — the project network exists with a subnet other than the one `ipam` now declares (`down` and `up` to recreate it).
 - `OPSM-208` — another `up`/`down`/`destroy` for the project is still running (wait, then retry).
+- `OPSM-209` — a service's name may not be reachable by other services: upper case gets no DNS answer, or another address when spelled like a top-level domain (`Web`), and `.` gets none from a musl image (alpine) and an internet address when one exists (rename it in lower case if a peer reaches it by name).
+- `OPSM-210` — a volume declared `external: true` doesn't exist (pre-flight; create it or drop `external`).
 - `OPSM-401` — a dependency's container exited before becoming healthy (logs embedded).
 - `OPSM-402` — orphan containers left by services no longer in the compose.
 - `OPSM-403` — a `service_healthy` dependency defines no healthcheck (not waited on).
@@ -509,8 +518,8 @@ Every `[OPSM-NNN]` opossum can emit (add-only; grouped 1xx storage / 2xx network
 - `OPSM-501` — unsupported top-level compose field(s), ignored.
 - `OPSM-502` — unsupported service compose field(s), ignored (e.g. `network_mode: host`).
 - `OPSM-601` — a `watch` rebuild action failed.
-- `OPSM-602` — a `watch` restart action failed.
-- `OPSM-603` — a `watch` file sync failed.
+- `OPSM-602` — a `watch` restart action failed, or was skipped because the runtime would not say which project owns the container.
+- `OPSM-603` — a `watch` file sync failed, or was skipped because the container belongs to another project or the runtime would not say whose it is.
 - `OPSM-604` — `watch` couldn't start watching a path.
 - `OPSM-605` — the `watch` file watcher reported an error.
 
@@ -534,4 +543,8 @@ Every `[OPSM-NNN]` opossum can emit (add-only; grouped 1xx storage / 2xx network
   unknown service, a health-gate failure, the `container` CLI being absent
   (`[OPSM-404]`) or its system stopped (`[OPSM-405]`, `ps`/`images`), or `doctor`
   finding an unhealthy check.
-  There are no granular per-cause codes today; read stderr for the message.
+- `run` and `exec` exit with the container command's own exit code, as docker
+  compose does (`run --audit` with the code its report shows, or 1 when that is
+  -1); a failure of opossum itself before the command runs exits 1.
+  Apart from that, there are no granular per-cause codes today; read stderr for
+  the message.

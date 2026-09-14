@@ -25,9 +25,22 @@
 //	    "file": "internal/orchestrator/orchestrator.go",
 //	    "from": "if len(watching) == 0 || look > 0 {",
 //	    "to":   "if true {",
-//	    "packages": ["./internal/orchestrator/"]
+//	    "packages": ["./internal/orchestrator/"],
+//	    "run": ["TestTheSecondLook"]
 //	  }
 //	]
+//
+// `run` is optional: the tests the mutation is about, named exactly as
+// `go test -json` names them (`TestX`, `TestX/sub_case`), so a sweep over one
+// package does not run all of it once per mutation. Every test run of the sweep
+// — the suite before any mutation and each mutation's — runs the tests all the
+// mutations name, together in one binary (whole packages if any mutation names
+// none), so a row can be caught by a test another row names. A name is copied
+// as printed, empty levels and all (`t.Run("c/")` is `TestX/c/`), and matched
+// without its package. A named test that does not run to a result, absent or
+// skipped, stops the sweep before any mutation, or reports that mutation as not
+// measured rather than as survived. With -baseline the names are not used: both
+// trees run their packages whole.
 //
 // Each `from` must appear exactly once in its file and must actually change
 // something; the tree must still build; the failing tests are collected by name;
@@ -234,6 +247,16 @@ func run(args []string, stdout, stderr io.Writer, sigs <-chan os.Signal, exit fu
 	}()
 	defer close(done)
 
+	if *baseline != "" {
+		// Compared, the two trees have to run the same tests: the tree before
+		// the change runs its packages whole (the tests a change adds are not
+		// in it), so this one does too. A narrowed sweep beside a whole one
+		// reads "caught before, survives now" for a mutation nothing weakened.
+		if note := baselineNote(ms); note != "" {
+			fmt.Fprintln(stderr, note)
+		}
+		ms = mutate.Whole(ms)
+	}
 	results, sweepErr := r.Sweep(ms)
 	// An interrupt reaches this as a cancelled context, and what the sweep made
 	// of it is not news. The likeliest place for a ^C to land is the baseline
@@ -270,19 +293,40 @@ func run(args []string, stdout, stderr io.Writer, sigs <-chan os.Signal, exit fu
 		runCleanup()
 	}
 	if n := count(results, mutate.Survived); n > 0 {
-		fmt.Fprintf(stderr, "mutate: %d of %d mutations survived — the defects they introduce are "+
-			"invisible to the suite\n", n, len(results))
+		fmt.Fprintln(stderr, survivorSummary(n, results))
 		return exitSurvivor
 	}
-	// A mutation that would not build, or a run that named nobody, measured
+	// A mutation that would not build, a run that died without naming anyone,
+	// or a run in which a named test did not run to a result, measured
 	// nothing. Reporting that as "all caught" would be the same lie in a quieter
 	// place: the table says so, and the exit status has to agree with the table.
 	if n := count(results, mutate.Broken) + count(results, mutate.Inconclusive); n > 0 {
-		fmt.Fprintf(stderr, "mutate: %d of %d mutations measured nothing (they did not build, or "+
-			"the run named no tests) — that is not the same as being caught\n", n, len(results))
+		fmt.Fprintf(stderr, "mutate: %d of %d mutations measured nothing (they did not build, their run "+
+			"ended without naming a failing test, or a test they name did not run to a result) — "+
+			"that is not the same as being caught\n", n, len(results))
 		return exitFailed
 	}
 	return exitAllCaught
+}
+
+// baselineNote is what -baseline says about the run names it sets aside: a
+// line when any mutation names tests, nothing when none does.
+func baselineNote(ms []mutate.Mutation) string {
+	if !slices.ContainsFunc(ms, func(m mutate.Mutation) bool { return len(m.Run) > 0 }) {
+		return ""
+	}
+	return "mutate: with -baseline, run names are not used — both trees run their packages whole, so the comparison is between the same tests"
+}
+
+// survivorSummary is the closing line for a sweep with survivors. It speaks
+// for the tests the sweep ran when those were only the named ones, and for
+// the suite otherwise — the same decision the table's survivor rows make.
+func survivorSummary(n int, results []mutate.Result) string {
+	reach := "the suite"
+	if mutate.Narrowed(results) {
+		reach = "the tests the sweep ran"
+	}
+	return fmt.Sprintf("mutate: %d of %d mutations survived — the defects they introduce are invisible to %s", n, len(results), reach)
 }
 
 // compareAgainst runs the same sweep against ref's tree, in a worktree of its
@@ -415,7 +459,10 @@ func compareAgainst(ctx context.Context, cwd, ref, sha string, ms []mutate.Mutat
 		before, err = func() ([]mutate.Result, error) {
 			inUse.Lock()
 			defer inUse.Unlock()
-			return rb.Sweep(applicable)
+			// Whole packages in the tree before: a mutation narrowed to the tests
+			// the change adds would select nothing there, and what is asked of
+			// that tree is whether anything caught it.
+			return rb.Sweep(mutate.Whole(applicable))
 		}()
 		if err != nil {
 			// The inner message may say "make them pass first", which nobody

@@ -29,6 +29,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -49,6 +51,21 @@ type Mutation struct {
 	// Packages are the ones to build and test. Narrow is better — a whole-suite
 	// run makes it easy to credit someone else's failing test to your mutation.
 	Packages []string `json:"packages"`
+	// Run, when set, names the tests this mutation is about, exactly as
+	// `go test -json` names them (`TestX`, `TestX/sub_case`). The sweep runs the
+	// tests every mutation names, together, in every run (see SweepPattern) —
+	// so a row may be caught by a test another row named, and splitting rows
+	// into separate sweeps can change their results. A named test that does not
+	// run to a result — absent, or skipped — measures nothing, and is reported
+	// that way. When any mutation names no test, every run is whole. A name is
+	// matched without its package: one that exists only in another package of
+	// the sweep passes the check before any mutation and makes the row not
+	// measured after it, unless another test the sweep runs catches the
+	// mutation. A fuzz corpus entry whose file name has white space cannot be
+	// selected by the name Go prints; one that Go prints with a `\u` escape
+	// (U+0080, on Go 1.26) makes the `-run` pattern invalid, and then no run of
+	// the sweep can start.
+	Run []string `json:"run,omitempty"`
 }
 
 // Apply replaces From with To in src, insisting the pattern appears exactly once
@@ -117,6 +134,88 @@ func Failures(testJSON string) []string {
 	return out
 }
 
+// Whole is the mutations with their run names dropped, so each runs its
+// packages whole.
+func Whole(ms []Mutation) []Mutation {
+	out := make([]Mutation, len(ms))
+	for i, m := range ms {
+		m.Run = nil
+		out[i] = m
+	}
+	return out
+}
+
+// Measured names each test a `go test -json` run finished with a result,
+// passed or failed, once each. A run whose `-run` pattern selected nothing
+// finishes no test and still passes; a test that was selected and skipped
+// measured nothing either. Both read as green, which is what "survived" is read
+// from.
+func Measured(testJSON string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, line := range strings.Split(testJSON, "\n") {
+		var e struct {
+			Action string `json:"Action"`
+			Test   string `json:"Test"`
+		}
+		if json.Unmarshal([]byte(line), &e) != nil || (e.Action != "pass" && e.Action != "fail") || e.Test == "" || seen[e.Test] {
+			continue
+		}
+		seen[e.Test] = true
+		out = append(out, e.Test)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Narrowed reports whether the sweep these results came from ran only the
+// tests its mutations name, rather than their packages whole — as the sweep
+// recorded it on each row, not as the rows' names would suggest.
+func Narrowed(rs []Result) bool {
+	return slices.ContainsFunc(rs, func(r Result) bool { return r.Narrowed })
+}
+
+// SweepPattern is the one `go test -run` pattern every test run of a sweep
+// uses — the suite before any mutation and each mutation's run alike — built
+// from every name the mutations list. One pattern for all of them, so each run
+// executes the same tests in the same binary: a test that leans on another
+// having run first behaves the same way in the baseline that vouched for it
+// and in the run that reads a mutation's fate from it. Each level of each name
+// is matched whole and literally. Empty when any mutation lists no name: that
+// one runs its packages whole, so every run does.
+func SweepPattern(ms []Mutation) string {
+	var alts []string
+	seen := map[string]bool{}
+	for _, m := range ms {
+		if len(m.Run) == 0 {
+			return ""
+		}
+		for _, name := range m.Run {
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			levels := strings.Split(name, "/")
+			for i, l := range levels {
+				levels[i] = "^" + regexp.QuoteMeta(l) + "$"
+			}
+			alts = append(alts, strings.Join(levels, "/"))
+		}
+	}
+	return strings.Join(alts, "|")
+}
+
+// Unmeasured is the names that no test ran to a result under.
+func Unmeasured(names, measured []string) []string {
+	var missing []string
+	for _, n := range names {
+		if !slices.Contains(measured, n) {
+			missing = append(missing, n)
+		}
+	}
+	return missing
+}
+
 // Outcome is what happened to one mutation.
 type Outcome int
 
@@ -130,11 +229,13 @@ const (
 	// evidence either way — recording it as caught is a mistake this reports
 	// explicitly rather than quietly allowing.
 	Broken
-	// Inconclusive means the test run failed without naming a single test: a
-	// binary that panicked, a package-level timeout, a toolchain that could not
-	// start. Calling that "survived" would be the loudest lie this tool could
-	// tell, because the mutations aimed at waits and loops are exactly the ones
-	// that hang.
+	// Inconclusive means the run measured nothing about the mutation. Either it
+	// failed without naming a single test — a binary that panicked, a
+	// package-level timeout, a toolchain that could not start — and calling
+	// that "survived" would be the loudest lie this tool could tell, because
+	// the mutations aimed at waits and loops are exactly the ones that hang. Or
+	// it passed while a test the mutation names did not run to a result, and
+	// green from tests that never ran says nothing about the defect.
 	Inconclusive
 )
 
@@ -185,6 +286,13 @@ type Result struct {
 	// — a probe prints what it saw to stderr — and the outcome alone would
 	// throw those words away.
 	TestOutput string
+
+	// Narrowed is whether the sweep ran only the tests its mutations name,
+	// decided once from every mutation handed to it. Kept on the row because a
+	// sweep that stops early returns only the rows before the stop, and those
+	// cannot tell whether a row after them named nothing and made every run
+	// whole.
+	Narrowed bool
 }
 
 // namesItsKillers says whether a row with this outcome carries the tests that
@@ -202,6 +310,7 @@ func namesItsKillers(o Outcome) bool { return o == Caught }
 // request. A mutation that survived says so in the table rather than being left
 // out, because that row is the reason to run this at all.
 func Report(rs []Result) string {
+	narrowed := Narrowed(rs)
 	if len(rs) == 0 {
 		// No rows, no table. A run that stopped before it measured anything — a
 		// red baseline, a mutation that would not apply — would otherwise print
@@ -222,6 +331,14 @@ func Report(rs []Result) string {
 			killers = cell(strings.Join(r.Killers, ", "))
 		case r.Outcome == Survived:
 			killers = "**none — this defect is invisible to the suite**"
+			if narrowed {
+				// Only the tests the sweep named ran: another test in the same
+				// package may well catch it, so the row says so rather than
+				// speaking for the whole suite. Decided by the sweep, not by the
+				// row: one row that names nothing runs every package whole, and
+				// then a named row's survivor did escape the whole suite.
+				killers = "**none of the tests the sweep named caught it**"
+			}
 			if r.Detail != "" {
 				// A survivor with something to add: the reach could not be measured,
 				// so "invisible to the suite" is the louder of two readings rather
@@ -242,7 +359,7 @@ func Report(rs []Result) string {
 			}
 			killers += ")"
 		case r.Outcome == Inconclusive:
-			killers = "n/a (the run named no tests: " + cell(r.Detail) + ")"
+			killers = "n/a (measured nothing: " + cell(r.Detail) + ")"
 		}
 		b.WriteString(fmt.Sprintf("| %s | %s | %s |\n", cell(r.Mutation.Name), r.Outcome, killers))
 	}

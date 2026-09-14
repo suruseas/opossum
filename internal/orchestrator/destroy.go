@@ -292,16 +292,23 @@ func (o *Orchestrator) strandedVolumes(planned []string) []string {
 	return out
 }
 
-// declaredNetworks names the networks this project declared and therefore owns.
-// External ones are declared but belong to whoever created them.
+// declaredNetworks names the networks this project declared and therefore owns,
+// each once and in name order. External ones are declared but belong to
+// whoever created them. Keys folding to one name (a declaration no service
+// joins is not refused for that), to the default network's, or to nothing
+// name no network of their own.
 func (o *Orchestrator) declaredNetworks() []string {
+	seen := map[string]bool{o.networkName(): true}
 	var out []string
 	for key, decl := range o.Project.Networks {
-		if decl.External {
+		name := o.declaredNetworkName(key)
+		if decl.External || compose.NetworkRuntimeKey(key) == "" || seen[name] {
 			continue
 		}
-		out = append(out, o.Project.Name+"-"+key)
+		seen[name] = true
+		out = append(out, name)
 	}
+	sort.Strings(out)
 	return out
 }
 

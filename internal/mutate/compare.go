@@ -40,10 +40,10 @@ const (
 	// mutated. Its own heading, because "not present" would be the opposite
 	// of the truth — the sentence was there, twice.
 	AmbiguousBefore = "written more than once before this change"
-	// One of the two runs did not measure: a mutation that would not build, or
-	// a run that named nobody. The pair of outcomes is shown as it fell;
-	// counting these into any other category would dress "unmeasured" as an
-	// answer.
+	// One of the two runs did not measure: a mutation that would not build, a
+	// run that died without naming anyone, or a run in which a named test did
+	// not run to a result. The pair of outcomes is shown as it fell; counting
+	// these into any other category would dress "unmeasured" as an answer.
 	NotMeasuredCleanly = "not measured cleanly"
 	// A row one side has and the other does not, other than by NotPresentBefore
 	// — two sweeps that were not the same sweep. Loud, because every quiet

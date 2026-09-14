@@ -33,7 +33,8 @@ func TestStartHasNextStep(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected Start to fail")
 	}
-	if s := err.Error(); !strings.Contains(s, "opossum up web") {
+	// One failure is the failure itself, not a list of one.
+	if s := err.Error(); !strings.HasPrefix(s, `starting service "web": `) || !strings.Contains(s, "opossum up web") {
 		t.Errorf("start failure should point at `opossum up`, got: %s", s)
 	}
 }
@@ -44,7 +45,7 @@ func TestRestartHasNextStep(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected Restart to fail")
 	}
-	if s := err.Error(); !strings.Contains(s, "opossum up web") {
+	if s := err.Error(); !strings.HasPrefix(s, `restarting service "web": `) || !strings.Contains(s, "opossum up web") {
 		t.Errorf("restart failure should point at `opossum up`, got: %s", s)
 	}
 }
@@ -129,5 +130,115 @@ func TestWatchSyncFailureNamesFileAndService(t *testing.T) {
 		if !strings.Contains(s, want) {
 			t.Errorf("the line should read %q…, got: %s", want, s)
 		}
+	}
+}
+
+// A watch action that an owner check declined did not fail: the container is
+// another project's, or the runtime would not say whose it is. The warning says
+// it was skipped, with advice for that case and no advice about a container
+// that may be gone or not running — while a real failure keeps that advice,
+// each action its own.
+func TestWatchSaysAnOwnerRefusalWithoutFailureAdvice(t *testing.T) {
+	foreign := `  inspect) echo '[{"status":{"state":"running"},"configuration":{"id":"app.demo.opossum","labels":{"opossum.project":"otherproj"}}}]' ;;` + "\n"
+	unreadable := "  inspect) echo 'boom' >&2; exit 2 ;;\n"
+	sync := func(dir string) string { return "sync of " + dir + "/components/x.js to app:/app/src/components/x.js" }
+	syncUnanswered := func(dir string) string {
+		return "warning: [OPSM-603] " + sync(dir) + " skipped: the runtime gave no readable answer about which project owns app.demo.opossum, so it was left alone — " +
+			"`container inspect app.demo.opossum` shows what the runtime says; save " + dir + "/components/x.js again once it answers"
+	}
+	for _, tc := range []struct {
+		name, action, cases string
+		// warnings, in order; one ending in "…" is a prefix and a suffix
+		// around the failure's own message, which is the runtime's.
+		want func(dir string) []string
+		log  string // a line the output must also carry
+	}{
+		{"sync to another project's container", "sync", foreign, func(dir string) []string {
+			return []string{"warning: [OPSM-603] " + sync(dir) + ` skipped: container "app.demo.opossum" is already in use by project "otherproj"; ` +
+				"give this project its own DNS domain so names don't collide (e.g. --dns-domain demo, created once with `sudo container system dns create demo`) — see README (multi-project)"}
+		}, ""},
+		{"sync with no readable answer", "sync", unreadable, func(dir string) []string { return []string{syncUnanswered(dir)} }, ""},
+		{"sync and restart with no readable answer", "sync+restart", unreadable, func(dir string) []string {
+			return []string{syncUnanswered(dir),
+				"warning: [OPSM-602] restart app skipped: the runtime gave no readable answer about which project owns app.demo.opossum, so it was left alone — " +
+					"`container inspect app.demo.opossum` shows what the runtime says; watch tries the restart again when a file under a sync+restart rule of app next changes"}
+		}, ""},
+		{"sync and restart with another project's container", "sync+restart", foreign, func(dir string) []string {
+			return []string{"warning: [OPSM-603] " + sync(dir) + ` skipped: container "app.demo.opossum" is already in use by project "otherproj"; ` +
+				"give this project its own DNS domain so names don't collide (e.g. --dns-domain demo, created once with `sudo container system dns create demo`) — see README (multi-project)"}
+		}, `Leaving container app.demo.opossum alone: it belongs to project "otherproj"`},
+		{"a copy that fails keeps its advice", "sync", "  cp) exit 1 ;;\n", func(dir string) []string {
+			return []string{"warning: [OPSM-603] " + sync(dir) + " failed: …— check the container \"app\" is running (`opossum ps`)"}
+		}, ""},
+		{"a restart that fails keeps its advice", "sync+restart", "  start) exit 1 ;;\n", func(string) []string {
+			return []string{"warning: [OPSM-602] restart app failed: …— the container may be gone; run `opossum up app` to recreate it"}
+		}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			var out bytes.Buffer
+			o := New(watchProject(dir, tc.action), scriptShim(t, tc.cases), "opossum", &out)
+			o.applyChanges([]string{dir + "/components/x.js"})
+			// A warning is its "warning: " line and the indented lines under it:
+			// a failure's own message can span lines.
+			var warnings []string
+			for _, l := range strings.Split(out.String(), "\n") {
+				switch {
+				case strings.HasPrefix(l, "warning: "):
+					warnings = append(warnings, l)
+				case strings.HasPrefix(l, "  ") && len(warnings) > 0:
+					warnings[len(warnings)-1] += "\n" + l
+				}
+			}
+			want := tc.want(dir)
+			if len(warnings) != len(want) {
+				t.Fatalf("want %d warning(s), got %d:\n%s", len(want), len(warnings), out.String())
+			}
+			for i, w := range want {
+				if head, tail, around := strings.Cut(w, "…"); around {
+					if !strings.HasPrefix(warnings[i], head) || !strings.HasSuffix(warnings[i], tail) {
+						t.Errorf("warning %d:\n got %s\nwant %s", i, warnings[i], w)
+					}
+				} else if warnings[i] != w {
+					t.Errorf("warning %d:\n got %s\nwant %s", i, warnings[i], w)
+				}
+			}
+			if tc.log != "" && !strings.Contains(out.String(), tc.log) {
+				t.Errorf("want %q in the output, got:\n%s", tc.log, out.String())
+			}
+		})
+	}
+}
+
+// What the skipped restart promises — another try when a file under a
+// sync+restart rule of the service changes — is what watch does: a file under
+// the same service's plain sync rule is synced and restarts nothing, and one
+// under its sync+restart rule tries the restart again.
+func TestWatchTriesASkippedRestartOnlyForASyncRestartFile(t *testing.T) {
+	dir := t.TempDir()
+	p := &compose.Project{Name: "demo", Services: map[string]*compose.Service{
+		"app": {Name: "app", Image: "app", Develop: &compose.Develop{Watch: []compose.WatchRule{
+			{Action: "sync", Path: dir + "/src", Target: "/app/src"},
+			{Action: "sync+restart", Path: dir + "/package.json", Target: "/app/package.json"},
+		}}},
+	}}
+	for _, tc := range []struct {
+		name, changed string
+		restart       bool
+	}{
+		{"a file under the sync rule", dir + "/src/x.js", false},
+		{"the file under the sync+restart rule", dir + "/package.json", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			o := New(p, scriptShim(t, "  inspect) echo 'boom' >&2; exit 2 ;;\n"), "opossum", &out)
+			o.applyChanges([]string{tc.changed})
+			if got := strings.Count(out.String(), "warning: [OPSM-602] restart app skipped:"); got != map[bool]int{false: 0, true: 1}[tc.restart] {
+				t.Errorf("restart warnings = %d, want restart=%v:\n%s", got, tc.restart, out.String())
+			}
+			if got := strings.Count(out.String(), "warning: [OPSM-603] sync of "+tc.changed+" "); got != 1 {
+				t.Errorf("want the file synced (skipped) once, got %d:\n%s", got, out.String())
+			}
+		})
 	}
 }

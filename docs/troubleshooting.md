@@ -78,8 +78,10 @@ build can starve.
   that name, whether opossum created it or it was already there (to keep a
   volume out of the project's hands, declare it `external: true`). A volume declared `external: true` there is used by its real name
   (its declared `name:`, or the key) and never removed by `down -v` — the user
-  manages it. `external` takes the bool form; the volume
-  must already exist (opossum doesn't create it). Other top-level volume settings
+  manages it. `external` takes the bool form or the older `external: {name: …}` map. Create the
+  volume first: `up` and `run` refuse a missing one before they create anything
+  (`[OPSM-210]`), as docker compose refuses it — on container 1.4.1 mounting it
+  would otherwise create an empty volume of that name. Other top-level volume settings
   (`driver`, `labels`, …) are not applied.
 - **A named volume can't be shared by two running containers.** `container`
   attaches a named volume as an exclusive block device, so if two services mount
@@ -88,7 +90,7 @@ build can starve.
   case is an app + nginx sharing a `public`/assets volume.) `up` **warns** when it
   sees this — use a **bind mount** (a host path, which *is* shareable) for the
   shared data, or bake it into the image.
-- **`networks:` — aliases and static IPs (`ipam`) aren't applied**, and an
+- **`networks:` — aliases and static IPs (`ipv4_address`) aren't applied** (a top-level network's `ipam` subnet is), and an
   `internal:` network has no name resolution (peers must use IPs). Multiple networks
   per service and `external:` reuse both work. See [Networking
   model](networking.md) for the full picture.

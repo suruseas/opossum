@@ -8,6 +8,7 @@ import (
 	"math"
 	"net"
 	"reflect"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -588,8 +589,25 @@ var itemKnownKeys = map[string][]string{
 	"env_file":   {"path", "required"},
 	"depends_on": {"condition"},
 	// One level down, where an item's key is a mapping opossum reads part
-	// of: a volume mount's `volume:` options.
+	// of: a volume mount's `volume:` options, and a tmpfs mount's `tmpfs:`
+	// options (read on a `type: tmpfs` mount only; see itemReadsKey).
 	"volumes.volume": {"nocopy"},
+	"volumes.tmpfs":  {"size", "mode"},
+}
+
+// itemReadsKey is whether opossum reads key in a list item whose keys are
+// fields: the keys itemKnownKeys names, and a mount's `tmpfs:` options when
+// the mount is `type: tmpfs` — on a bind or volume mount they do nothing, and
+// are named among the ignored fields as before.
+func itemReadsKey(field, key string, fields map[string]yaml.Node) bool {
+	if slices.Contains(itemKnownKeys[field], key) {
+		return true
+	}
+	if field == "volumes" && key == "tmpfs" {
+		t := fields["type"]
+		return unalias(&t).Value == "tmpfs"
+	}
+	return false
 }
 
 // ignoredItemKeys names the keys opossum does not read in a list's
@@ -597,7 +615,6 @@ var itemKnownKeys = map[string][]string{
 // as a mapping, in each dependency's mapping (`depends_on.<name>.<key>`).
 // A scalar item — the short form — has no keys to name.
 func ignoredItemKeys(field string, n *yaml.Node) ([]string, error) {
-	known := itemKnownKeys[field]
 	n = unalias(n)
 	// Where docker compose's schema names the item's keys: a list's long-form
 	// item (`services.*.ports[]`), or a dependency's mapping.
@@ -620,7 +637,7 @@ func ignoredItemKeys(field string, n *yaml.Node) ([]string, error) {
 			if strings.HasPrefix(key, "x-") {
 				continue
 			}
-			if !slices.Contains(known, key) {
+			if !itemReadsKey(field, key, fields) {
 				// A key docker compose does not take in such an item is
 				// refused as it refuses it (`services.web.ports.0 additional
 				// properties 'foo' not allowed`); one it takes is listed.
@@ -1219,6 +1236,29 @@ func dotVolumeKey(name string) string {
 // Service.UnmarshalYAML lifts it off.
 const nocopyMarker = "\x00nocopy\x00"
 
+// shortMountFields refuses a short-form mount that the runtime reads
+// differently from what it looks like. container 1.4.1 splits it at every `:`
+// into SOURCE:TARGET[:MODE], and so does docker compose v5.5.0 — except that
+// docker reads a one-letter source before `:` as a Windows drive (`C:/x:/y`),
+// which means nothing on a Mac and is not followed here. Four or more fields
+// docker compose refuses as `too many colons`; a third field holding a path is
+// a mode to both — `vol:app:/y` is the volume at `app` with mount options
+// `/y`, which the runtime fails to start with (`mount failed with errno 22`).
+func shortMountFields(entry string, i, n int) error {
+	fields := strings.Split(entry, ":")
+	switch {
+	case len(fields) > 3:
+		return fmt.Errorf("volumes entry %d of %d: %q has too many colons — a short mount is SOURCE:TARGET or SOURCE:TARGET:MODE (docker compose refuses it as well); for a path with `:` in it, use the long form", i+1, n, entry)
+	case len(fields) == 3 && fields[1] == "":
+		return fmt.Errorf("volumes entry %d of %d: %q has nothing between its colons — a short mount is SOURCE:TARGET or SOURCE:TARGET:MODE", i+1, n, entry)
+	case len(fields) == 3 && strings.Contains(fields[2], "/") && !strings.HasPrefix(fields[1], "/"):
+		return fmt.Errorf("volumes entry %d of %d: in %q the third field %q is the mode (such as `ro`), not a path — the target is %q; write SOURCE:TARGET with the target starting with `/`", i+1, n, entry, fields[2], fields[1])
+	case len(fields) == 3 && strings.Contains(fields[2], "/"):
+		return fmt.Errorf("volumes entry %d of %d: in %q the third field %q is the mode (such as `ro`), not a path — the target is %q; remove the third field, or write a mode there", i+1, n, entry, fields[2], fields[1])
+	}
+	return nil
+}
+
 // cutMountOption removes one comma-separated option from a short-form mount's
 // mode field, reporting whether it was there. `deps:/app:ro,nocopy` keeps the
 // `ro` and loses the `nocopy`, because only the first is a mount mode — the
@@ -1377,6 +1417,9 @@ func (v *Volumes) UnmarshalYAML(value *yaml.Node) error {
 			if strings.Contains(item.Value, "\x00") {
 				return nulInMount(i, len(value.Content))
 			}
+			if err := shortMountFields(item.Value, i, len(value.Content)); err != nil {
+				return err
+			}
 			// `src:target:nocopy` is the short spelling of the same switch, and
 			// docker accepts it. Left in place it would reach the runtime as a mount
 			// mode, which is not what it is.
@@ -1409,6 +1452,10 @@ func (v *Volumes) UnmarshalYAML(value *yaml.Node) error {
 			Volume   struct {
 				NoCopy bool `yaml:"nocopy"`
 			} `yaml:"volume"`
+			Tmpfs struct {
+				Size yaml.Node `yaml:"size"`
+				Mode yaml.Node `yaml:"mode"`
+			} `yaml:"tmpfs"`
 		}
 		if err := item.Decode(&lf); err != nil {
 			return err
@@ -1432,10 +1479,52 @@ func (v *Volumes) UnmarshalYAML(value *yaml.Node) error {
 		// <target>`), so tag it with a marker here and let Service.UnmarshalYAML
 		// split it into Service.Tmpfs. Reject any other non-bind/volume type
 		// rather than silently turning it into a host bind (#79).
+		// The mount travels on as one `source:target` string and reaches the
+		// runtime as `-v source:target` (or `--tmpfs target`), which splits at
+		// every `:`. A `:` in a bind's host path or in the target would move the
+		// split: `./da:ta` at `/y` mounted a directory that is not there at `ta`,
+		// and `--tmpfs /y:z` fails to start (errno 22, container 1.4.1). docker
+		// compose refuses a bind or a named volume like this at `up` (`invalid
+		// volume specification`), but starts a tmpfs or an anonymous volume at
+		// `/y:z` — so only those two say docker refuses it too.
+		if lf.Type == "bind" && lf.Source != nil && strings.Contains(*lf.Source, ":") || strings.Contains(lf.Target, ":") {
+			field, val := "target", lf.Target
+			if !strings.Contains(lf.Target, ":") {
+				field, val = "source", *lf.Source
+			}
+			why := "the runtime splits a mount at `:`"
+			if lf.Type == "bind" || lf.Type == "volume" && lf.Source != nil && *lf.Source != "" {
+				why += "; docker compose refuses it as well"
+			}
+			return fmt.Errorf("volumes entry %d of %d: the %s %q contains `:`, which cannot be mounted (%s) — rename the path without `:`", i+1, len(value.Content), field, val, why)
+		}
+		// `tmpfs:` holds options: docker compose refuses one that is not a mapping
+		// (`must be a mapping`), on any mount. The keys are read through aliases
+		// and `<<:`, as the mount's own decode reads them.
+		var keys map[string]yaml.Node
+		if item.Decode(&keys) == nil {
+			if tv, ok := keys["tmpfs"]; ok && unalias(&tv).Kind != yaml.MappingNode {
+				return fmt.Errorf("volumes entry %d of %d: tmpfs must be a mapping of size and mode (docker compose refuses it as well)", i+1, len(value.Content))
+			}
+		}
+		// On a bind or volume mount the options do nothing, but docker compose
+		// still checks them: a size or mode it refuses is refused there too.
+		if lf.Type != "tmpfs" {
+			if _, err := tmpfsOptions(false, &lf.Tmpfs.Size, &lf.Tmpfs.Mode); err != nil {
+				return fmt.Errorf("volumes entry %d of %d: %w", i+1, len(value.Content), err)
+			}
+		}
 		switch lf.Type {
 		case "bind", "volume":
 		case "tmpfs":
-			out = append(out, tmpfsMarker+lf.Target)
+			opts, err := tmpfsOptions(lf.ReadOnly, &lf.Tmpfs.Size, &lf.Tmpfs.Mode)
+			if err != nil {
+				return fmt.Errorf("volumes entry %d of %d: %w", i+1, len(value.Content), err)
+			}
+			if opts != "" {
+				opts = ":" + opts
+			}
+			out = append(out, tmpfsMarker+lf.Target+opts)
 			continue
 		default:
 			// The target, not the type: the type is what is wrong, but it can have
@@ -1473,6 +1562,11 @@ func (v *Volumes) UnmarshalYAML(value *yaml.Node) error {
 				// have: it refuses the declaration (`volumes additional
 				// properties './x' not allowed`), so no file mounts it.
 				return fmt.Errorf("volumes entry %d of %d: type: volume with source %q — a volume name cannot contain `/` (docker compose refuses it as well); write type: bind for a host path, or a name for a volume", i+1, len(value.Content), src)
+			case lf.Type == "volume" && !strings.HasPrefix(src, "/") && !strings.HasPrefix(src, "~") && !validVolumeName(src):
+				// Refused here, whole: joined into the short spelling below, a
+				// `:` in it would split the name, and the error after that
+				// names only the part before the colon.
+				return fmt.Errorf("volumes entry %d of %d: type: volume with source %q — a volume name %s", i+1, len(value.Content), src, volumeNameRule)
 			case lf.Type == "volume" && strings.HasPrefix(src, "."):
 				src = dotVolumeKey(src)
 			case lf.Type == "volume" && IsHostPath(src):
@@ -1490,6 +1584,84 @@ func (v *Volumes) UnmarshalYAML(value *yaml.Node) error {
 	}
 	*v = out
 	return nil
+}
+
+// tmpfsOptions is a long-form tmpfs mount's `read_only`, `tmpfs.size` and
+// `tmpfs.mode` written as the short form's options (`ro,size=1048576,mode=755`),
+// which container 1.4.1 mounts the way the docker engine 29.7.2 mounts the long
+// form (measured: the mount options and the directory's mode match). What is
+// read: a size as a YAML integer of bytes, or a string of digits with an
+// optional decimal part, one optional space and an optional unit — k, m, g, t
+// or p (1024-based) with an optional b or ib, or a bare b — the way docker
+// compose v5.5.0 reads such a string (`1Mi` and `1ib` are refused, a fraction
+// of a byte is dropped); a mode as a YAML integer (`0755` and `0o755` are
+// octal). A size or mode of 0 adds nothing. Anything else is refused. docker
+// compose refuses these too: a negative YAML integer, a string mode, a
+// boolean, no value or an empty string, two spaces before the unit. And these,
+// though docker compose reads them: a size or mode written as a YAML float
+// (`1.5`, `1e3`, `08`), a size string in another spelling (`.5m`, `+1m`, `1.m`)
+// or with a minus sign (`"-1"`, which it passes on and the engine then fails to
+// mount), and a whole number out of range (a mode past 4294967295, a size past
+// 9223372036854775807), which it reads as no option or as another value.
+func tmpfsOptions(readOnly bool, size, mode *yaml.Node) (string, error) {
+	var opts []string
+	if readOnly {
+		opts = append(opts, "ro")
+	}
+	if size.Kind != 0 {
+		bytes, err := tmpfsSize(unalias(size))
+		if err != nil {
+			return "", err
+		}
+		if bytes > 0 {
+			opts = append(opts, "size="+strconv.FormatInt(bytes, 10))
+		}
+	}
+	if mode.Kind != 0 {
+		m := unalias(mode)
+		var v int64
+		if m.Kind != yaml.ScalarNode || m.ShortTag() != "!!int" || m.Decode(&v) != nil || v < 0 || v > math.MaxUint32 {
+			return "", fmt.Errorf("tmpfs.mode %q is not a mode — write it as a whole number, such as 0755", m.Value)
+		}
+		if v > 0 {
+			opts = append(opts, "mode="+strconv.FormatInt(v, 8))
+		}
+	}
+	return strings.Join(opts, ","), nil
+}
+
+// tmpfsSizePattern is a size docker compose v5.5.0 reads from a string.
+var tmpfsSizePattern = regexp.MustCompile(`^(\d+(?:\.\d+)?) ?(?:([kKmMgGtTpP])(?:[iI]?[bB])?|[bB])?$`)
+
+// tmpfsSize is a tmpfs mount's size in bytes.
+func tmpfsSize(n *yaml.Node) (int64, error) {
+	bad := fmt.Errorf("tmpfs.size %q is not a size — write a whole number of bytes, or digits with k, m, g, t or p", n.Value)
+	if n.Kind != yaml.ScalarNode {
+		return 0, bad
+	}
+	switch n.ShortTag() {
+	case "!!int":
+		var v int64
+		if n.Decode(&v) != nil || v < 0 {
+			return 0, bad
+		}
+		return v, nil
+	case "!!str":
+		m := tmpfsSizePattern.FindStringSubmatch(n.Value)
+		if m == nil {
+			return 0, bad
+		}
+		f, err := strconv.ParseFloat(m[1], 64)
+		if err != nil {
+			return 0, bad
+		}
+		exp := 0
+		if m[2] != "" { // a bare `b` is bytes
+			exp = strings.Index("kmgtp", strings.ToLower(m[2])) + 1
+		}
+		return int64(f * math.Pow(1024, float64(exp))), nil
+	}
+	return 0, bad
 }
 
 // VolumeDecl is a top-level `volumes:` entry. opossum auto-creates named volumes

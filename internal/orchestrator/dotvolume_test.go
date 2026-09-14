@@ -22,7 +22,7 @@ import (
 // `config`, and `up` again from the rendered config, and looks in all of it
 // for the word the loader's spelling carries (compose.ShowsLoaderSpelling).
 func TestAVolumeWhoseNameStartsWithADotRunsAsThatVolume(t *testing.T) {
-	const decls = "volumes:\n  .hid: {}\n  ..x: {}\n  \".\": {}\n  \"..\": {}\n  .hext: {external: true}\n  .hnamed: {name: realvol}\n  .pg: {}\n"
+	const decls = "volumes:\n  .hid: {}\n  ..x: {}\n  \".\": {}\n  \"..\": {}\n  .hext: {external: true, name: hext-real}\n  .hnamed: {name: realvol}\n  .pg: {}\n"
 	for _, tc := range []struct {
 		name, image, item string
 		source            string // the volume's name as written
@@ -32,7 +32,9 @@ func TestAVolumeWhoseNameStartsWithADotRunsAsThatVolume(t *testing.T) {
 		{"a declared volume", "alpine", "{type: volume, source: .hid, target: /y}", ".hid", "-v demo_.hid:/y", "volume delete demo_.hid"},
 		{"a declared volume starting with two dots", "alpine", "{type: volume, source: ..x, target: /y}", "..x", "-v demo_..x:/y", "volume delete demo_..x"},
 		{"read-only", "alpine", "{type: volume, source: .hid, target: /y, read_only: true}", ".hid", "-v demo_.hid:/y:ro", "volume delete demo_.hid"},
-		{"a declared external volume", "alpine", "{type: volume, source: .hext, target: /y}", ".hext", "-v .hext:/y", ""},
+		// An external volume's key starting with `.` cannot be its runtime name
+		// (no runtime creates one), so it carries a `name:` of its own.
+		{"a declared external volume", "alpine", "{type: volume, source: .hext, target: /y}", ".hext", "-v hext-real:/y", ""},
 		{"a declared volume with a name", "alpine", "{type: volume, source: .hnamed, target: /y}", ".hnamed", "-v realvol:/y", "volume delete realvol"},
 		// `.` and `..` alone are names too (docker compose passes both as
 		// volumes); as paths they would be the project directory and its parent.
@@ -58,6 +60,8 @@ func TestAVolumeWhoseNameStartsWithADotRunsAsThatVolume(t *testing.T) {
 				t.Fatalf("load: %v", err)
 			}
 			rt, log := fakeShim(t)
+			// The external volumes this file declares exist, as a user who declares one has made it.
+			setShimEnv(rt, "VOLUME_LS=hext-real")
 			var out bytes.Buffer
 			o := orchestrator.New(p, rt, "opossum", &out)
 			if err := o.Up(true); err != nil {
@@ -70,7 +74,7 @@ func TestAVolumeWhoseNameStartsWithADotRunsAsThatVolume(t *testing.T) {
 			if !strings.Contains(strings.Join(runs, "\n"), tc.run) {
 				t.Errorf("should run with %q, got:\n%s", tc.run, strings.Join(runs, "\n"))
 			}
-			if tc.deleted == "" && indexOf(log(), "volume create .hext") >= 0 {
+			if tc.deleted == "" && indexOf(log(), "volume create hext-real") >= 0 {
 				t.Errorf("an external volume is the user's and is not created, got:\n%s", strings.Join(log(), "\n"))
 			}
 			if err := o.Down(true, "", false); err != nil {
@@ -79,7 +83,7 @@ func TestAVolumeWhoseNameStartsWithADotRunsAsThatVolume(t *testing.T) {
 			if tc.deleted != "" && !hasLine(log(), tc.deleted) {
 				t.Errorf("down -v should run %q, got:\n%s", tc.deleted, strings.Join(log(), "\n"))
 			}
-			if tc.deleted == "" && indexOf(log(), "volume delete .hext") >= 0 {
+			if tc.deleted == "" && indexOf(log(), "volume delete hext-real") >= 0 {
 				t.Errorf("down -v never removes an external volume, got:\n%s", strings.Join(log(), "\n"))
 			}
 			rendered, err := compose.RenderConfig(p)
@@ -113,6 +117,8 @@ func TestAVolumeWhoseNameStartsWithADotRunsAsThatVolume(t *testing.T) {
 				t.Fatalf("the rendered config does not load: %v\n%s", err, rendered)
 			}
 			rt2, log2 := fakeShim(t)
+			// The external volumes this file declares exist, as a user who declares one has made it.
+			setShimEnv(rt2, "VOLUME_LS=hext-real")
 			if err := orchestrator.New(again, rt2, "opossum", &bytes.Buffer{}).Up(true); err != nil {
 				t.Fatalf("up from the rendered config: %v", err)
 			}
@@ -199,7 +205,7 @@ func TestADotNamedVolumeBehavesAsAPlainNamedVolume(t *testing.T) {
 		{"a declared volume", ".hid", "zhid", "services:\n  web:\n    image: alpine\n    volumes:\n      - {type: volume, source: NAME, target: /y}\nvolumes:\n  NAME: {}\n"},
 		{"two dots", "..x", "zzx", "services:\n  web:\n    image: alpine\n    volumes:\n      - {type: volume, source: NAME, target: /y}\nvolumes:\n  NAME: {}\n"},
 		{"read-only and nocopy", ".hid", "zhid", "services:\n  web:\n    image: alpine\n    volumes:\n      - {type: volume, source: NAME, target: /y, read_only: true}\n      - {type: volume, source: NAME, target: /z, volume: {nocopy: true}}\nvolumes:\n  NAME: {}\n"},
-		{"external", ".hext", "zhext", "services:\n  web:\n    image: alpine\n    volumes:\n      - {type: volume, source: NAME, target: /y}\nvolumes:\n  NAME: {external: true}\n"},
+		{"external", ".hext", "zhext", "services:\n  web:\n    image: alpine\n    volumes:\n      - {type: volume, source: NAME, target: /y}\nvolumes:\n  NAME: {external: true, name: hext-real}\n"},
 		{"a declaration with a name", ".hnamed", "zhnamed", "services:\n  web:\n    image: alpine\n    volumes:\n      - {type: volume, source: NAME, target: /y}\nvolumes:\n  NAME: {name: realvol}\n"},
 		{"two services share it", ".hid", "zhid", "services:\n  web:\n    image: alpine\n    volumes:\n      - {type: volume, source: NAME, target: /y}\n  side:\n    image: alpine\n    volumes:\n      - {type: volume, source: NAME, target: /z}\nvolumes:\n  NAME: {}\n"},
 		{"a postgres data directory", ".pg", "zpg", "services:\n  db:\n    image: postgres:16\n    volumes:\n      - {type: volume, source: NAME, target: /var/lib/postgresql/data}\nvolumes:\n  NAME: {}\n"},
@@ -256,6 +262,8 @@ func dotTranscript(t *testing.T, body string) (transcript, config string) {
 		t.Fatalf("load: %v", err)
 	}
 	rt, log := fakeShim(t)
+	// The external volume the rows declare exists, as a user who declares one has made it.
+	setShimEnv(rt, "VOLUME_LS=hext-real")
 	var out bytes.Buffer
 	o := orchestrator.New(p, rt, "opossum", &out)
 	var b strings.Builder

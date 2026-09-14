@@ -167,6 +167,29 @@ func TestUpInterruptedBeforeTheStartLoopSaysSoAndTakesBackTheSeed(t *testing.T) 
 		}
 	})
 
+	// The same take-back for a volume whose seed name is shortened (#1002): the
+	// stop and the delete reach the container under the name it ran with, or the
+	// seed keeps running and the volume it holds cannot be deleted.
+	t.Run("seed: an interrupted fill of a volume with a long name is taken back by the shortened name", func(t *testing.T) {
+		key := strings.Repeat("d", 60)
+		vol := "demo_" + key
+		long := runtime.SeedContainerName(vol)
+		if long == "seed-"+vol+".opossum" || len(long) > 63 {
+			t.Fatalf("the fixture needs a shortened seed name, got %q", long)
+		}
+		proj := project("demo", map[string]*compose.Service{"web": {Image: "node:20-alpine", Volumes: []string{key + ":/var/data"}}})
+		_, _, lines := up(t, proj, []string{"RUN_HANG=" + long}, false, has("--name "+long+" "))
+		i := indexOf(lines, "--name "+long+" ")
+		if i < 0 {
+			t.Fatalf("the seed did not run as %q, got %v", long, lines)
+		}
+		after := lines[i:]
+		stop, del, vol2 := indexOf(after, "stop "+long), indexOf(after, "delete --force "+long), indexOf(after, "volume delete "+vol)
+		if stop < 0 || del < 0 || vol2 < 0 || !(stop < del && del < vol2) {
+			t.Errorf("want stop, delete --force (both by %q) and volume delete in that order, got %v", long, after)
+		}
+	})
+
 	// A seed that dies of a signal with nothing cancelled — killed from outside,
 	// not by Ctrl-C — is an ordinary failed fill: the warning, no take-back.
 	t.Run("seed: a fill killed by some other signal is a failed fill, not an interruption", func(t *testing.T) {

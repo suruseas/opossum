@@ -1380,6 +1380,8 @@ func TestExternalVolumeNotNamespacedOrRemoved(t *testing.T) {
 	}
 
 	rt, log := fakeShim(t)
+	// The external volumes this file declares exist, as a user who declares one has made it.
+	setShimEnv(rt, "VOLUME_LS=shared real_vol")
 	o := orchestrator.New(newP(), rt, "opossum", &bytes.Buffer{})
 	if err := o.Up(true); err != nil {
 		t.Fatalf("Up: %v", err)
@@ -1393,6 +1395,8 @@ func TestExternalVolumeNotNamespacedOrRemoved(t *testing.T) {
 
 	// An external volume with a declared `name:` mounts that real name, not the key.
 	rt3, log3 := fakeShim(t)
+	// The external volumes this file declares exist, as a user who declares one has made it.
+	setShimEnv(rt3, "VOLUME_LS=shared real_vol")
 	pn := project("demo", map[string]*compose.Service{
 		"db": {Image: "postgres:16", Volumes: []string{"alias:/ext"}},
 	})
@@ -1406,6 +1410,8 @@ func TestExternalVolumeNotNamespacedOrRemoved(t *testing.T) {
 	}
 
 	rt2, log2 := fakeShim(t)
+	// The external volumes this file declares exist, as a user who declares one has made it.
+	setShimEnv(rt2, "VOLUME_LS=shared real_vol")
 	o2 := orchestrator.New(newP(), rt2, "opossum", &bytes.Buffer{})
 	if err := o2.Down(true, "", false); err != nil {
 		t.Fatalf("Down: %v", err)
@@ -1836,9 +1842,13 @@ func TestUpLooksAtTheRightMounts(t *testing.T) {
 // and must not run anything that touches its contents either.
 func TestUpNeverTouchesAnExternalVolume(t *testing.T) {
 	rt, log := fakeShim(t)
+	// The external volume exists, as a user who declares one has made it, and
+	// holds what a volume made elsewhere holds — the case in which opossum looks
+	// inside a Postgres data directory it does not own. It must not look here.
+	setShimEnv(rt, "VOLUME_LS=shared", "LOOK_ENTRIES=lost+found")
 	var out bytes.Buffer
 	p := project("demo", map[string]*compose.Service{
-		"web": {Image: "web:latest", Volumes: []string{"shared:/var/data"}},
+		"web": {Image: "postgres:16", Volumes: []string{"shared:/var/lib/postgresql/data"}},
 	})
 	p.Volumes = map[string]compose.VolumeDecl{"shared": {External: true}}
 	if err := orchestrator.New(p, rt, "opossum", &out).Up(true); err != nil {

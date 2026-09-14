@@ -6,6 +6,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +15,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -725,29 +728,35 @@ func (r *Runtime) VolumeListed(name string) (exists, known bool) {
 	if err != nil {
 		return false, false
 	}
-	for _, line := range strings.Split(out, "\n") {
-		if f := strings.Fields(line); len(f) > 0 && f[0] == name {
-			return true, true
-		}
-	}
-	return false, true
+	return volumeInList(out, name), true
 }
 
-// ListVolumes returns the names of every volume the runtime knows about, or nil
-// if it can't be asked. Callers use it to find volumes a compose file no longer
-// accounts for; nil therefore has to mean "found none to report", never "there
-// are none", which is why the error is swallowed rather than guessed at.
+// volumeInList reports whether `volume ls` output lists a volume of that name.
+// The first line is the NAME / TYPE / DRIVER / OPTIONS header on container 1.4.1
+// (as ListVolumeRows reads it), so a volume named `NAME` is found only in a row
+// below it, never in the header.
+func volumeInList(out, name string) bool {
+	for i, line := range strings.Split(out, "\n") {
+		f := strings.Fields(line)
+		if len(f) == 0 || (i == 0 && strings.EqualFold(f[0], "name")) {
+			continue
+		}
+		if f[0] == name {
+			return true
+		}
+	}
+	return false
+}
+
+// VolumeExists reports whether a volume is listed, and reads a runtime that
+// gives no list as "listed": seeding asks it, and would rather leave a volume it
+// cannot see alone than fill one that holds data.
 func (r *Runtime) VolumeExists(name string) bool {
 	out, err := r.capture("volume", "ls")
 	if err != nil {
 		return true // can't tell → assume it exists, so we don't re-seed
 	}
-	for _, line := range strings.Split(out, "\n") {
-		if f := strings.Fields(line); len(f) > 0 && f[0] == name {
-			return true
-		}
-	}
-	return false
+	return volumeInList(out, name)
 }
 
 // SeedVolume copies the image's contents at srcPath into volume, by running a
@@ -794,7 +803,50 @@ const seedMountPoint = "/__opossum_seed__"
 // `--rm` removes it when its run ends, but a run that is killed from outside —
 // a Ctrl-C during `up` — leaves it running with the volume attached, and the
 // only way to take it back is by name.
-func SeedContainerName(volume string) string { return "seed-" + volume + ".opossum" }
+//
+// The name is `seed-<volume>.opossum` while that fits the 63 characters
+// container 1.4.1 takes (64 is `is not a valid container ID`). A volume name
+// may be longer than the container's (container 1.4.1 created volumes of 255
+// characters when measured), and the seed of such a volume used to fail and leave it
+// mounting empty. Past the limit the volume's name is cut and a hash of the
+// whole name put after it: the same volume always gets the same name, which is
+// what finding it again relies on, and two volumes that share the kept part
+// still get two names. Nothing looks a seed up by DNS, so the name only has to
+// be one the runtime creates.
+func SeedContainerName(volume string) string {
+	name := "seed-" + volume + ".opossum"
+	if len(name) <= MaxContainerNameLen {
+		return name
+	}
+	sum := sha256.Sum256([]byte(volume))
+	hash := hex.EncodeToString(sum[:])[:seedNameHashLen]
+	keep := MaxContainerNameLen - len("seed-") - len("-") - seedNameHashLen - len(".opossum")
+	return "seed-" + volume[:keep] + "-" + hash + ".opossum"
+}
+
+// ValidContainerName reports whether container 1.4.1 creates a container by
+// name: 2 to 63 characters, starting with a letter or digit, holding only
+// letters, digits, `_`, `.` and `-` (measured; anything else is `is not a valid
+// container ID`).
+func ValidContainerName(name string) bool {
+	return len(name) >= 2 && len(name) <= MaxContainerNameLen && containerNamePattern.MatchString(name)
+}
+
+var containerNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
+
+// MaxContainerNameLen is the longest container name (container ID) container
+// 1.4.1 creates: 64 characters is refused with `is not a valid container ID`.
+// seedNameHashLen is how much of the volume name's hash a shortened seed name
+// keeps.
+const (
+	MaxContainerNameLen = 63
+	seedNameHashLen     = 12
+)
+
+// MaxVolumeNameLen is the longest volume name container 1.4.1 creates: 256
+// characters is refused with `invalid volume name` (measured with `run -v` and
+// `volume create`).
+const MaxVolumeNameLen = 255
 
 // runOnNewVolume runs one script against a volume opossum is creating, in a
 // throwaway container. The container failing to run at all is what comes back as

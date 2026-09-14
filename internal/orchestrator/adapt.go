@@ -1457,7 +1457,7 @@ func (o *Orchestrator) suggestSharedVolumeFix(order []string) []serviceAdaptatio
 			vols = append(vols, v)
 		}
 	}
-	sort.Strings(vols)
+	sortByVolumeName(vols)
 
 	var out []serviceAdaptation
 	for _, vol := range vols {

@@ -97,6 +97,8 @@ func TestDeclaredVolumeNameIsUsedOnEveryPath(t *testing.T) {
 	})
 	testpair.Run(t, "named beside external: the external one is neither seeded nor removed", testpair.Pair[string]{A: "named:/b", B: "ext:/c"}, func(t *testing.T, first, second string) {
 		rt, log := fakeShim(t)
+		// The external volume this pair mounts exists, as a user who declares one has made it.
+		setShimEnv(rt, "VOLUME_LS=real-outside")
 		o := orchestrator.New(loadBody(t, body(first, second)), rt, "opossum", &bytes.Buffer{})
 		if err := o.Up(true); err != nil {
 			t.Fatalf("up: %v", err)

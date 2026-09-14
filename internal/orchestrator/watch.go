@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -150,6 +151,18 @@ func (o *Orchestrator) applyChanges(paths []string) {
 			continue // a rebuild already recreated it
 		}
 		if err := o.Restart([]string{svc}); err != nil {
+			var refusal ownerRefusal
+			if errors.As(err, &refusal) {
+				// Restart names another project's container in its own log line
+				// and returns nil, so a refusal here is always an unanswered
+				// owner. Its own next step names `opossum restart`, which
+				// restarts the whole project; watch restarts only when a file
+				// under a sync+restart rule of this service changes.
+				o.warnf(codeWatchRestart, "restart %s skipped: the runtime gave no readable answer about which project owns %s, so it was left alone — "+
+					"`container inspect %s` shows what the runtime says; watch tries the restart again when a file under a sync+restart rule of %s next changes\n",
+					svc, strings.Join(refusal.unanswered, ", "), strings.Join(refusal.unanswered, " "), svc)
+				continue
+			}
 			o.warnf(codeWatchRestart, "restart %s failed: %v — the container may be gone; run `opossum up %s` to recreate it\n", svc, err, svc)
 		}
 	}
@@ -160,6 +173,20 @@ func (o *Orchestrator) syncFile(t watchTarget, changed, rel string) {
 	dst := t.service + ":" + t.containerTarget(rel)
 	fmt.Fprintf(o.out, "sync %s → %s\n", changed, dst)
 	if err := o.Copy(changed, dst); err != nil {
+		var refusal ownerRefusal
+		if errors.As(err, &refusal) {
+			if len(refusal.unanswered) == 0 {
+				// Another project's container: its reason says how to give this
+				// project names of its own, which takes a new watch; a later
+				// change gets past it only if that container goes away.
+				o.warnf(codeWatchSync, "sync of %s to %s skipped: %v\n", changed, dst, err)
+				return
+			}
+			o.warnf(codeWatchSync, "sync of %s to %s skipped: the runtime gave no readable answer about which project owns %s, so it was left alone — "+
+				"`container inspect %s` shows what the runtime says; save %s again once it answers\n",
+				changed, dst, strings.Join(refusal.unanswered, ", "), strings.Join(refusal.unanswered, " "), changed)
+			return
+		}
 		o.warnf(codeWatchSync, "sync of %s to %s failed: %v — check the container %q is running (`opossum ps`)\n", changed, dst, err, t.service)
 	}
 }

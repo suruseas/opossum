@@ -26,6 +26,8 @@ func TestConfigOutputRunsAsTheInputDid(t *testing.T) {
 	runLines := func(t *testing.T, dir, file string) []string {
 		t.Helper()
 		rt, log := fakeShim(t)
+		// The external volumes this file declares exist, as a user who declares one has made it.
+		setShimEnv(rt, "VOLUME_LS=real-name-outside")
 		p, err := compose.Load(filepath.Join(dir, file))
 		if err != nil {
 			t.Fatalf("load %s: %v", file, err)
@@ -115,6 +117,45 @@ func TestConfigOutputRunsAsTheInputDid(t *testing.T) {
 		}
 		if strings.Contains(joined, "decl_named") {
 			t.Errorf("the declared name must survive the round trip, got:\n%s", joined)
+		}
+	})
+
+	// A long-form tmpfs mount's `read_only`, `tmpfs.size` and `tmpfs.mode` are
+	// written by `config` as the short form's options, and run the same.
+	testpair.Run(t, "long-form tmpfs mounts with options", testpair.Pair[string]{
+		A: "{type: tmpfs, target: /a, read_only: true, tmpfs: {mode: 0700}}",
+		B: "{type: tmpfs, target: /b, tmpfs: {size: 2m}}",
+	}, func(t *testing.T, first, second string) {
+		dir := t.TempDir()
+		body := "name: decl\nservices:\n  web:\n    image: alpine:3.20\n    volumes:\n      - " + first + "\n      - " + second + "\n"
+		if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		original := runLines(t, dir, "compose.yaml")
+		p, err := compose.Load(filepath.Join(dir, "compose.yaml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		rendered, err := compose.RenderConfig(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "rendered.yaml"), []byte(rendered), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(filepath.Join(dir, "compose.yaml")); err != nil {
+			t.Fatal(err)
+		}
+		again := runLines(t, dir, "rendered.yaml")
+		if strings.Join(original, "\n") != strings.Join(again, "\n") {
+			t.Errorf("the rendered config runs differently from the input:\n--- input\n%s\n--- rendered\n%s\n--- config\n%s",
+				strings.Join(original, "\n"), strings.Join(again, "\n"), rendered)
+		}
+		joined := strings.Join(again, "\n")
+		for _, want := range []string{"--tmpfs /a:nosuid,nodev,noexec,ro,mode=700", "--tmpfs /b:nosuid,nodev,noexec,size=2097152"} {
+			if !strings.Contains(joined, want) {
+				t.Errorf("the rendered config's run should carry %q, got:\n%s", want, joined)
+			}
 		}
 	})
 

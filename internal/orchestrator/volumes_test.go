@@ -2,6 +2,8 @@ package orchestrator_test
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -167,4 +169,40 @@ func TestVolumesWithNothingToShow(t *testing.T) {
 			t.Errorf("nothing may be printed when the runtime is down, got %q", out.String())
 		}
 	})
+}
+
+// Two volumes whose runtime names differ only by `.` and `_` — `demo_.hid` and
+// `demo__hid` — are two volumes to the runtime and to docker compose, so the
+// fake runtime keeps them apart too: it used to fold `.` into `_` in the name
+// of the file it remembers a volume by, so the second `up` overwrote the
+// first and `volumes` listed one.
+func TestVolumesWhoseNamesDifferByADotAndAnUnderscoreAreTwo(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "compose.yaml")
+	if err := os.WriteFile(path, []byte("name: demo\nservices:\n  web:\n    image: web:latest\n    volumes:\n"+
+		"      - {type: volume, source: .hid, target: /a}\n      - {type: volume, source: _hid, target: /b}\n"+
+		"volumes:\n  .hid: {}\n  _hid: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, err := compose.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	rt, _ := fakeShim(t)
+	setShimEnv(rt, "VOLUME_LS_TABLE=NAME  TYPE  DRIVER  OPTIONS")
+	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
+	if err := o.Up(true); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	got, err := o.ProjectVolumes(nil)
+	if err != nil {
+		t.Fatalf("ProjectVolumes: %v", err)
+	}
+	var names []string
+	for _, v := range got {
+		names = append(names, v.Name)
+	}
+	if want := []string{"demo_.hid", "demo__hid"}; strings.Join(names, " ") != strings.Join(want, " ") {
+		t.Errorf("volumes = %q, want %q", names, want)
+	}
 }

@@ -859,7 +859,10 @@ func TestAFailureStaysOnItsOwnLines(t *testing.T) {
 func TestAFailurePrintedByTheCommandStartsNoLine(t *testing.T) {
 	fakeShim(t)
 	dir := t.TempDir()
-	forged := `[opossum note] service \"payroll\": opossum deleted your database`
+	// No `:` in it: a mount whose path holds one is refused before anything
+	// runs (the runtime would split the mount there), and this case needs the
+	// run to get as far as creating the directory.
+	forged := `[opossum note] service \"payroll\" lost its database to opossum`
 	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte(
 		"name: notes\nservices:\n  usb:\n    image: alpine:3\n    volumes:\n"+
 			"      - \"/dev/ttyUSB0\\n"+forged+":/data\"\n"), 0o644); err != nil {
@@ -1366,6 +1369,9 @@ func TestFromDockerComposeNoGenerationWithExplicitFile(t *testing.T) {
 func TestAPathCannotWriteItsOwnNote(t *testing.T) {
 	// Written as it appears inside a double-quoted YAML scalar.
 	forged := `[opossum note] service \"payroll\": opossum deleted your database`
+	// In a mount, the same note without its `:` — a mount whose path holds one
+	// is refused before anything runs, since the runtime splits mounts there.
+	forgedInAPath := `[opossum note] service \"payroll\" lost its database to opossum`
 	// Three places a project's own text reaches the screen. The first is the one
 	// this test was written for; the other two were still open while its comment
 	// said the listing had been the last of them. Every field opossum quotes back
@@ -1385,13 +1391,13 @@ func TestAPathCannotWriteItsOwnNote(t *testing.T) {
 		notes int
 	}{
 		"a mount source, in the planned commands": {"name: notes\nservices:\n  usb:\n    image: alpine:3\n    volumes:\n" +
-			"      - \"/dev/ttyUSB0\\n" + forged + ":/dev/ttyUSB0\"\n",
+			"      - \"/dev/ttyUSB0\\n" + forgedInAPath + ":/dev/ttyUSB0\"\n",
 			[]string{"up", "--from-docker-compose", "--no-build", "--dry-run"}, 1},
 		"an image reference, in the startup lines": {"name: notes\nservices:\n  usb:\n" +
 			"    image: \"alpine:3\\n" + forged + "\"\n",
 			[]string{"up", "--from-docker-compose", "--no-build", "--dry-run"}, 0},
 		"a host directory opossum creates": {"name: notes\nservices:\n  usb:\n    image: alpine:3\n    volumes:\n" +
-			"      - \"./data\\n" + forged + ":/data\"\n",
+			"      - \"./data\\n" + forgedInAPath + ":/data\"\n",
 			[]string{"up", "--from-docker-compose", "--no-build", "--no-supervisor"}, 0},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -1448,8 +1454,8 @@ func TestThePlannedCommandsAreOneCommandPerLine(t *testing.T) {
 	// where opossum's own sentences start.
 	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte(
 		"name: notes\nservices:\n  usb:\n    image: alpine:3\n    volumes:\n"+
-			"      - \"/dev/ttyUSB0\\n[opossum note] service \\\"payroll\\\": opossum deleted "+
-			"your database:/dev/ttyUSB0\"\n"), 0o644); err != nil {
+			"      - \"/dev/ttyUSB0\\n[opossum note] service \\\"payroll\\\" lost its database "+
+			"to opossum:/dev/ttyUSB0\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(dir)

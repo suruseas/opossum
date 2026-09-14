@@ -18,7 +18,9 @@ echo "container $*" >> "${FAKE_LOG:-/dev/null}"
 # nothing is being remembered.
 marker() {
   [ -n "${STATE_DIR:-}" ] || return 0
-  printf '%s/%s=%s' "$STATE_DIR" "$1" "$(printf '%s' "$2" | tr '/:.' '___')"
+  # The name in hex: folding `.` and `/` into `_` made `demo_.hid` and
+  # `demo__hid` the same marker, where the runtime keeps them apart.
+  printf '%s/%s=%s' "$STATE_DIR" "$1" "$(printf '%s' "$2" | od -An -tx1 | tr -d ' \n')"
 }
 # last argument
 last() { for a in "$@"; do :; done; printf '%s' "$a"; }
@@ -27,7 +29,21 @@ case "$1" in
   network)
     # Real CLI echoes just the network name on success (exit 0).
     case "$2" in
-      create) echo "$3" ;;
+      # container 1.4.1 refuses a name outside lower-case letters, digits, `.`,
+      # `_` and `-`, starting and ending with a letter or digit, at most 63
+      # characters (testdata/real-cli-output.md). opossum passes the name last,
+      # so the last argument is read as the name; with none (or only a flag)
+      # the real CLI exits 64. The letters are spelled out: `[a-z]` takes upper
+      # case in some locales. printf, not echo: sh's echo expands backslashes.
+      create)
+        name=$(last "$@")
+        case "$name" in
+          create|-*) printf "Error: Missing expected argument '<name>'\n" >&2; exit 64 ;;
+          ''|*[!abcdefghijklmnopqrstuvwxyz0123456789._-]*|[!abcdefghijklmnopqrstuvwxyz0123456789]*|*[!abcdefghijklmnopqrstuvwxyz0123456789])
+            printf 'Error: invalid network name: %s\n' "$name" >&2; exit 1 ;;
+        esac
+        if [ "${#name}" -gt 63 ]; then printf 'Error: invalid network name: %s\n' "$name" >&2; exit 1; fi
+        printf '%s\n' "$name" ;;
       delete) echo "$3" ;;
       list)   printf 'NETWORK  SUBNET\ndefault  192.168.64.0/24\n' ;;
       # `ls` without --format json prints the same table `list` does. The two
@@ -76,6 +92,81 @@ case "$1" in
     ;;
   build)   echo "built image" ;;
   run)
+    # A `--name` container 1.4.1 would not create is refused before anything is
+    # recorded (testdata/real-cli-output.md). The flags are read up to the image
+    # (the first argument that does not start with `-`), skipping the value of
+    # each flag that takes one (every flag but the ones listed, from `container
+    # run --help`), so a `--name` among the command's arguments is left alone;
+    # the last `--name` there counts. No value, or `-` followed by more, is a
+    # missing value (exit 64); a name that is not 2 to 63 characters starting
+    # with a letter or digit and holding only letters, digits, `_`, `.` and `-`
+    # is not a valid container ID (exit 1). This reads the shapes opossum passes;
+    # not read the way the real CLI reads them: `--name=<name>`, `-e=<value>`,
+    # combined short flags, `--`, `-h`/`--help`/`--version`, `--debug`, a value
+    # starting with `-` for another flag (the real CLI calls it missing, exit 64
+    # — `--user -1`, #996), and a flag with no value at the end. The letters are
+    # spelled out: a range can take other letters in some locales.
+    name= given= want= n=0
+    for a in "$@"; do
+      n=$((n+1)); [ "$n" -eq 1 ] && continue  # "run"
+      if [ -n "$want" ]; then
+        if [ "$want" = name ]; then
+          case "$a" in -?*) printf "Error: Missing value for '--name <name>'\n" >&2; exit 64 ;; esac
+          name=$a; given=1
+        fi
+        want=; continue
+      fi
+      case "$a" in
+        -d|--detach|-i|--interactive|-t|--tty|--init|--no-dns|--read-only|--rm|--remove|--rosetta|--ssh|--virtualization) : ;;
+        --name) want=name ;;
+        -*) want=value ;;
+        *) break ;;
+      esac
+    done
+    if [ "$want" = name ]; then printf "Error: Missing value for '--name <name>'\n" >&2; exit 64; fi
+    if [ -n "$given" ]; then
+      case "$name" in
+        ''|?|[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789]*|*[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-]*)
+          printf 'Error: container ID %s is not a valid container ID\n' "$name" >&2; exit 1 ;;
+      esac
+      if [ "${#name}" -gt 63 ]; then printf 'Error: container ID %s is not a valid container ID\n' "$name" >&2; exit 1; fi
+    fi
+    # A `-v <source>:<target>` whose source container 1.4.1 reads as a volume
+    # name and refuses is refused next, before anything is recorded; the first
+    # such `-v` before the image is named (testdata/real-cli-output.md). A source
+    # holding `/` is a path, not a name. A name whose first character is not a
+    # letter or digit, holding anything but letters, digits, `_`, `.` and `-`, or
+    # longer than 255 characters is refused — so an empty source (an anonymous
+    # volume to the runtime) has nothing refused. The
+    # flags are walked as above, with the same forms unread; also unread are
+    # `--volume`, `--mount` and a `-v` value with no `:`.
+    want= n=0
+    for a in "$@"; do
+      n=$((n+1)); [ "$n" -eq 1 ] && continue  # "run"
+      if [ -n "$want" ]; then
+        if [ "$want" = volume ]; then
+          case "$a" in
+            *:*)
+              src=${a%%:*} bad=
+              case "$src" in
+                */*) : ;;
+                [!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789]*|*[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-]*) bad=1 ;;
+                *) if [ "${#src}" -gt 255 ]; then bad=1; fi ;;
+              esac
+              if [ -n "$bad" ]; then
+                printf "Error: invalid volume name '%s': must match ^[A-Za-z0-9][A-Za-z0-9_.-]*\$\n" "$src" >&2; exit 1
+              fi ;;
+          esac
+        fi
+        want=; continue
+      fi
+      case "$a" in
+        -d|--detach|-i|--interactive|-t|--tty|--init|--no-dns|--read-only|--rm|--remove|--rosetta|--ssh|--virtualization) : ;;
+        -v) want=volume ;;
+        -*) want=value ;;
+        *) break ;;
+      esac
+    done
     # Running a name makes it there and running again (see stop/delete).
     prev=
     for a in "$@"; do

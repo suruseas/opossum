@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -1664,5 +1665,74 @@ func TestFidelityRunRefusedNameTaken(t *testing.T) {
 	}
 	if RunRefusedNameTaken(errors.New("exit status 1"), "web.demo.opossum") {
 		t.Error("an error that is not a RunError carries no stderr to read")
+	}
+}
+
+// A seed's name is one container 1.4.1 creates: at most 63 characters, starting
+// with a letter or digit and holding only letters, digits, `_`, `.` and `-`
+// (measured). A name that fits is left as it was, so a seed left running by an
+// older opossum is still found; a longer one is cut and hashed, the same way
+// every time, and two volumes sharing the kept part get two names.
+func TestSeedContainerNameIsOneTheRuntimeCreates(t *testing.T) {
+	v := func(prefix string, n int) string { return prefix + strings.Repeat("v", n-len(prefix)) }
+	valid := regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
+	for _, tc := range []struct {
+		volume string
+		kept   bool // the name is seed-<volume>.opossum as before
+	}{
+		{"demo_data", true},
+		{v("a", 50), true}, // seed-<50>.opossum is 63
+		{v("a", 51), false},
+		{v("a", 52), false},
+		{v("a", 255), false},
+		{v("Demo.data-x_", 64), false},
+	} {
+		t.Run(strconv.Itoa(len(tc.volume)), func(t *testing.T) {
+			got := SeedContainerName(tc.volume)
+			if len(got) > 63 || !valid.MatchString(got) {
+				t.Errorf("SeedContainerName(%q) = %q (%d characters), not a container name the runtime creates", tc.volume, got, len(got))
+			}
+			if want := "seed-" + tc.volume + ".opossum"; (got == want) != tc.kept {
+				t.Errorf("SeedContainerName(%q) = %q; want it kept as %q: %v", tc.volume, got, want, tc.kept)
+			}
+			if !tc.kept && (len(got) != 63 || !strings.HasPrefix(got, "seed-"+tc.volume[:37]+"-") || !strings.HasSuffix(got, ".opossum")) {
+				t.Errorf("SeedContainerName(%q) = %q, want seed-<the first 37 characters>-<hash>.opossum, 63 characters", tc.volume, got)
+			}
+			if again := SeedContainerName(tc.volume); again != got {
+				t.Errorf("SeedContainerName is not the same twice: %q, %q", got, again)
+			}
+		})
+	}
+	a, b := v("shared", 60)+"a", v("shared", 60)+"b"
+	if SeedContainerName(a) == SeedContainerName(b) {
+		t.Errorf("two volumes sharing the kept part got one seed name %q", SeedContainerName(a))
+	}
+	// Differing only in case after the kept part: a volume key may use upper case.
+	e, f := v("shared", 60)+"A", v("shared", 60)+"a"
+	if SeedContainerName(e) == SeedContainerName(f) {
+		t.Errorf("two volumes differing only in case got one seed name %q", SeedContainerName(e))
+	}
+	// The name itself, written out: a seed left behind by one opossum has to be
+	// found by the next, so what the name is made of cannot change quietly
+	// (sha256 of the whole volume name, its first 12 hex digits).
+	long := "demo_" + strings.Repeat("d", 60)
+	if got, want := SeedContainerName(long), "seed-demo_dddddddddddddddddddddddddddddddd-a7ae399d2d2b.opossum"; got != want {
+		t.Errorf("SeedContainerName(%q) = %q, want %q", long, got, want)
+	}
+}
+
+// The seed of a volume with a long name is run and cleared under the shortened
+// name, the same one both times.
+func TestSeedVolumeArgvWithALongVolumeName(t *testing.T) {
+	rt, read := loggingShim(t)
+	vol := "demo_" + strings.Repeat("d", 60)
+	rt.SeedVolume(vol, "img:1", "/src")
+	lines := read()
+	name := SeedContainerName(vol)
+	if len(name) > 63 {
+		t.Fatalf("the seed name %q is %d characters", name, len(name))
+	}
+	if len(lines) < 2 || !strings.Contains(lines[len(lines)-1], " --name "+name+" ") || lines[len(lines)-2] != "delete --force "+name {
+		t.Errorf("want the stale seed cleared and the seed run as %q, got %q", name, lines)
 	}
 }

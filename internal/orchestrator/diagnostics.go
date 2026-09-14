@@ -30,44 +30,46 @@ import "fmt"
 type diagCode string
 
 const (
-	codePGDATADatadir         diagCode = "OPSM-101" // named volume mounted directly at Postgres's data dir
-	codeSharedVolume          diagCode = "OPSM-102" // a named volume shared by two running services
-	codeVolumeAttachBusy      diagCode = "OPSM-103" // a named volume is already attached to another running container
-	codeBindDirCreate         diagCode = "OPSM-104" // couldn't create a bind mount's host source directory
-	codeBindDataDirChown      diagCode = "OPSM-105" // a database data directory is a bind mount (can't be chowned)
-	codeHostPortInUse         diagCode = "OPSM-201" // a published host port is already taken
-	codeDNSDomainAbsent       diagCode = "OPSM-202" // the DNS domain isn't registered (no bare-name discovery)
-	codeInternalEgress        diagCode = "OPSM-203" // an internal network: no internet egress / no name resolution
-	codeDockerSocket          diagCode = "OPSM-204" // a service mounts docker.sock, which does not answer for these containers
-	codeExternalNetAbsent     diagCode = "OPSM-205" // a network declared external: true doesn't exist
-	codeHostDeviceMount       diagCode = "OPSM-106" // a host device or session socket is mounted (a per-container VM has no route to a device node)
-	codeBindFilePlaceholder   diagCode = "OPSM-107" // a bind mount names a file that doesn't exist, so a directory stands in its place
-	codeVolumeNotSeeded       diagCode = "OPSM-108" // a fresh volume could not be filled or cleared using the image (no shell to run it with)
-	codeSymlinkedSocket       diagCode = "OPSM-109" // a bind source is a symlink to a socket, which the runtime refuses to mount
-	codePGVersionedLayout     diagCode = "OPSM-110" // Postgres 18+ wants the mount one level above the old data directory
-	codeDataDirNotThisMount   diagCode = "OPSM-111" // the cluster does not land in a mounted data directory, and the overlay left it alone
-	codeHostPortRemapped      diagCode = "OPSM-206" // a container-only port's mirrored host port was taken, so opossum picked a free one
-	codeNetworkSubnetChanged  diagCode = "OPSM-207" // the project network exists with a subnet other than the one `ipam` now declares
-	codeProjectBusy           diagCode = "OPSM-208" // another opossum command holds the project's lock (an `up` or `down` is under way)
-	codeDepNotRunning         diagCode = "OPSM-401" // a dependency's container exited before becoming healthy
-	codeOrphans               diagCode = "OPSM-402" // containers left by services no longer in the compose
-	codeDepNoHealth           diagCode = "OPSM-403" // a service_healthy dependency defines no healthcheck
-	codeRuntimeAbsent         diagCode = "OPSM-404" // the `container` CLI isn't installed / not on PATH
-	codeRuntimeStopped        diagCode = "OPSM-405" // the `container` system (daemon) is installed but not running
-	codeRuntimeAutoStart      diagCode = "OPSM-406" // the runtime wasn't running; opossum is starting it
-	codeSupervisorStarted     diagCode = "OPSM-408" // a per-project supervisor is watching `restart:` services
-	codeSupervisorAction      diagCode = "OPSM-409" // the supervisor restarted a service, gave up on one, or left a container that is another project's
-	codeSupervisorLogTrimmed  diagCode = "OPSM-410" // the supervisor's log hit its size cap and lost its older half
-	codeSupervisorLogUncapped diagCode = "OPSM-411" // the supervisor could not open a size-capped log and is writing without a bound
-	codeImageNoArm64          diagCode = "OPSM-412" // the image has no arm64 build, so the container cannot start here
-	codeServiceExited         diagCode = "OPSM-407" // a service's container exited right after starting (no health gate)
-	codeIgnoredTopField       diagCode = "OPSM-501" // unsupported top-level compose field(s), ignored
-	codeIgnoredField          diagCode = "OPSM-502" // unsupported service compose field(s), ignored
-	codeWatchRebuild          diagCode = "OPSM-601" // a `watch` rebuild action failed
-	codeWatchRestart          diagCode = "OPSM-602" // a `watch` restart action failed
-	codeWatchSync             diagCode = "OPSM-603" // a `watch` file sync failed
-	codeWatchSetup            diagCode = "OPSM-604" // `watch` couldn't start watching a path
-	codeWatchError            diagCode = "OPSM-605" // the `watch` file watcher reported an error
+	codePGDATADatadir           diagCode = "OPSM-101" // named volume mounted directly at Postgres's data dir
+	codeSharedVolume            diagCode = "OPSM-102" // a named volume shared by two running services
+	codeVolumeAttachBusy        diagCode = "OPSM-103" // a named volume is already attached to another running container
+	codeBindDirCreate           diagCode = "OPSM-104" // couldn't create a bind mount's host source directory
+	codeBindDataDirChown        diagCode = "OPSM-105" // a database data directory is a bind mount (can't be chowned)
+	codeHostPortInUse           diagCode = "OPSM-201" // a published host port is already taken
+	codeDNSDomainAbsent         diagCode = "OPSM-202" // the DNS domain isn't registered (no bare-name discovery)
+	codeInternalEgress          diagCode = "OPSM-203" // an internal network: no internet egress / no name resolution
+	codeDockerSocket            diagCode = "OPSM-204" // a service mounts docker.sock, which does not answer for these containers
+	codeExternalNetAbsent       diagCode = "OPSM-205" // a network declared external: true doesn't exist
+	codeHostDeviceMount         diagCode = "OPSM-106" // a host device or session socket is mounted (a per-container VM has no route to a device node)
+	codeBindFilePlaceholder     diagCode = "OPSM-107" // a bind mount names a file that doesn't exist, so a directory stands in its place
+	codeVolumeNotSeeded         diagCode = "OPSM-108" // a fresh volume could not be filled or cleared using the image (no shell to run it with)
+	codeSymlinkedSocket         diagCode = "OPSM-109" // a bind source is a symlink to a socket, which the runtime refuses to mount
+	codePGVersionedLayout       diagCode = "OPSM-110" // Postgres 18+ wants the mount one level above the old data directory
+	codeDataDirNotThisMount     diagCode = "OPSM-111" // the cluster does not land in a mounted data directory, and the overlay left it alone
+	codeHostPortRemapped        diagCode = "OPSM-206" // a container-only port's mirrored host port was taken, so opossum picked a free one
+	codeNetworkSubnetChanged    diagCode = "OPSM-207" // the project network exists with a subnet other than the one `ipam` now declares
+	codeProjectBusy             diagCode = "OPSM-208" // another opossum command holds the project's lock (an `up` or `down` is under way)
+	codeServiceNameUnresolvable diagCode = "OPSM-209" // a service's name can't be looked up by its peers (upper case or ".")
+	codeExternalVolumeAbsent    diagCode = "OPSM-210" // a volume declared external: true doesn't exist
+	codeDepNotRunning           diagCode = "OPSM-401" // a dependency's container exited before becoming healthy
+	codeOrphans                 diagCode = "OPSM-402" // containers left by services no longer in the compose
+	codeDepNoHealth             diagCode = "OPSM-403" // a service_healthy dependency defines no healthcheck
+	codeRuntimeAbsent           diagCode = "OPSM-404" // the `container` CLI isn't installed / not on PATH
+	codeRuntimeStopped          diagCode = "OPSM-405" // the `container` system (daemon) is installed but not running
+	codeRuntimeAutoStart        diagCode = "OPSM-406" // the runtime wasn't running; opossum is starting it
+	codeSupervisorStarted       diagCode = "OPSM-408" // a per-project supervisor is watching `restart:` services
+	codeSupervisorAction        diagCode = "OPSM-409" // the supervisor restarted a service, gave up on one, or left a container that is another project's
+	codeSupervisorLogTrimmed    diagCode = "OPSM-410" // the supervisor's log hit its size cap and lost its older half
+	codeSupervisorLogUncapped   diagCode = "OPSM-411" // the supervisor could not open a size-capped log and is writing without a bound
+	codeImageNoArm64            diagCode = "OPSM-412" // the image has no arm64 build, so the container cannot start here
+	codeServiceExited           diagCode = "OPSM-407" // a service's container exited right after starting (no health gate)
+	codeIgnoredTopField         diagCode = "OPSM-501" // unsupported top-level compose field(s), ignored
+	codeIgnoredField            diagCode = "OPSM-502" // unsupported service compose field(s), ignored
+	codeWatchRebuild            diagCode = "OPSM-601" // a `watch` rebuild action failed
+	codeWatchRestart            diagCode = "OPSM-602" // a `watch` restart action failed, or was skipped because the runtime would not say which project owns the container
+	codeWatchSync               diagCode = "OPSM-603" // a `watch` file sync failed, or was skipped because the container belongs to another project or the runtime would not say whose it is
+	codeWatchSetup              diagCode = "OPSM-604" // `watch` couldn't start watching a path
+	codeWatchError              diagCode = "OPSM-605" // the `watch` file watcher reported an error
 )
 
 // allDiagCodes lists every code opossum can emit. A test asserts each appears in
@@ -77,7 +79,7 @@ var allDiagCodes = []diagCode{
 	codeBindFilePlaceholder, codeVolumeNotSeeded, codeSymlinkedSocket, codePGVersionedLayout,
 	codeDataDirNotThisMount,
 	codeHostPortInUse, codeDNSDomainAbsent, codeInternalEgress, codeDockerSocket, codeExternalNetAbsent, codeHostPortRemapped,
-	codeNetworkSubnetChanged, codeProjectBusy,
+	codeNetworkSubnetChanged, codeProjectBusy, codeServiceNameUnresolvable, codeExternalVolumeAbsent,
 	codeDepNotRunning, codeOrphans, codeDepNoHealth,
 	codeIgnoredTopField, codeIgnoredField, codeRuntimeAbsent, codeRuntimeStopped, codeRuntimeAutoStart, codeServiceExited, codeSupervisorStarted, codeSupervisorAction, codeImageNoArm64,
 	codeSupervisorLogTrimmed, codeSupervisorLogUncapped,

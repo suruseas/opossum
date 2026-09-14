@@ -6,6 +6,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -53,7 +54,7 @@ func main() {
 	// promise is "nothing left" needs to be asked exactly that.
 	stateDir := os.Getenv("STATE_DIR")
 	gonePath := func(kind, name string) string {
-		safe := strings.NewReplacer("/", "_", ":", "_", ".", "_").Replace(name)
+		safe := hex.EncodeToString([]byte(name))
 		return filepath.Join(stateDir, "gone-"+kind+"-"+safe)
 	}
 	// A stop is remembered even without $STATE_DIR (beside the log, which every
@@ -70,7 +71,7 @@ func main() {
 		if stopDir == "" {
 			return ""
 		}
-		return filepath.Join(stopDir, "stopped-"+strings.NewReplacer("/", "_", ":", "_", ".", "_").Replace(name))
+		return filepath.Join(stopDir, "stopped-"+hex.EncodeToString([]byte(name)))
 	}
 	// stoppedForStats reports whether inspect would call the container
 	// stopped, by the same knobs: $INSPECT_STATE for every container,
@@ -156,6 +157,18 @@ func main() {
 	}
 	switch arg(0) {
 	case "run":
+		// A name the runtime would not create is refused before anything else:
+		// nothing below is recorded for a container that was never made.
+		if msg, code, refused := containerNameRefused(args); refused {
+			fmt.Fprintln(os.Stderr, msg)
+			os.Exit(code)
+		}
+		// A volume the runtime would not create is refused after the name, and
+		// before anything is recorded (the real run makes no volume at all).
+		if msg, refused := volumeNameRefused(args); refused {
+			fmt.Fprintln(os.Stderr, msg)
+			os.Exit(1)
+		}
 		// Running a name again means it is there again (the `delete` case) and no
 		// longer stopped (the `stop` case).
 		for i, a := range args {
@@ -247,7 +260,16 @@ func main() {
 			return
 		}
 		if arg(1) == "create" {
-			fmt.Println(arg(2))
+			name := os.Args[len(os.Args)-1]
+			if name == "create" || strings.HasPrefix(name, "-") {
+				fmt.Fprintln(os.Stderr, "Error: Missing expected argument '<name>'")
+				os.Exit(64)
+			}
+			if !validNetworkName(name) {
+				fmt.Fprintf(os.Stderr, "Error: invalid network name: %s\n", name)
+				os.Exit(1)
+			}
+			fmt.Println(name) // the real CLI echoes the network name on success
 		}
 		// `network inspect` exits non-zero for a network that isn't there, which is
 		// how opossum decides whether one exists. $NETWORK_ABSENT lists the ones to
@@ -495,4 +517,149 @@ func hasFlag(name, value string) bool {
 		}
 	}
 	return false
+}
+
+// validNetworkName is the rule `container network create` 1.4.1 applies to a
+// network's name: lower-case letters, digits, `.`, `_` and `-`, starting and
+// ending with a letter or digit, at most 63 characters. Anything else is refused
+// with `Error: invalid network name: <name>` and exit 1
+// (testdata/real-cli-output.md). A fake that made any name would keep a caller
+// that passes one the runtime refuses green. The real CLI takes flags on either
+// side of the name; opossum passes the name last, and the fakes read the last
+// argument as the name.
+func validNetworkName(name string) bool {
+	if name == "" || len(name) > 63 {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		letterOrDigit := c >= 'a' && c <= 'z' || c >= '0' && c <= '9'
+		if !letterOrDigit && (i == 0 || i == len(name)-1 || c != '.' && c != '_' && c != '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// containerNameRefused answers a `run` whose `--name` container 1.4.1 refuses
+// (testdata/real-cli-output.md). The flags are read up to the image — the first
+// argument that does not start with `-` — skipping the value of each flag that
+// takes one, so a `--name` among the command's own arguments is the process's;
+// the value of the last `--name` before the image is the one taken, as the real
+// CLI takes the later one. A `--name` with no value, or whose value is `-`
+// followed by more, is a missing value (exit 64). A name that is not 2 to 63
+// characters starting with a letter or digit and holding only letters, digits,
+// `_`, `.` and `-` is `Error: container ID <name> is not a valid container ID`
+// (exit 1). refused is false when the run may go ahead.
+//
+// This reads the shapes opossum passes (`--name <name>` among separate flags).
+// Not read the way the real CLI reads them: `--name=<name>`, `-e=<value>`,
+// combined short flags (`-it`), `--`, `-h`/`--help`/`--version`, `--debug` (an
+// unknown option to `run`), a value starting with `-` for another flag (the
+// real CLI calls that flag's value missing, exit 64 — opossum can pass one, as
+// `--user -1` from `user: "-1"`, #996), and a flag with no value at the end.
+func containerNameRefused(args []string) (msg string, code int, refused bool) {
+	const missing = "Error: Missing value for '--name <name>'"
+	name, given := "", false
+	for i := 1; i < len(args); i++ { // args[0] is "run"
+		a := args[i]
+		if !strings.HasPrefix(a, "-") {
+			break // the image
+		}
+		if runFlagsWithoutValue[a] {
+			continue
+		}
+		if i+1 == len(args) {
+			if a == "--name" {
+				return missing, 64, true
+			}
+			break
+		}
+		if a == "--name" {
+			v := args[i+1]
+			if len(v) > 1 && strings.HasPrefix(v, "-") {
+				return missing, 64, true
+			}
+			name, given = v, true
+		}
+		i++ // the flag's value
+	}
+	if given && !validContainerName(name) {
+		return "Error: container ID " + name + " is not a valid container ID", 1, true
+	}
+	return "", 0, false
+}
+
+// runFlagsWithoutValue are the `container run` flags that take no value
+// (`container run --help`, 1.4.1, measured before `--name`); every other flag
+// takes the next argument.
+var runFlagsWithoutValue = map[string]bool{
+	"-d": true, "--detach": true, "-i": true, "--interactive": true, "-t": true, "--tty": true,
+	"--init": true, "--no-dns": true, "--read-only": true, "--rm": true, "--remove": true,
+	"--rosetta": true, "--ssh": true, "--virtualization": true,
+}
+
+// volumeNameRefused answers a `run` with a `-v <source>:<target>` whose source
+// container 1.4.1 reads as a volume name and refuses (testdata/real-cli-output.md):
+// `Error: invalid volume name '<name>': must match ^[A-Za-z0-9][A-Za-z0-9_.-]*$`,
+// exit 1, for the first such `-v` before the image. A source holding `/` is a
+// path, not a name. A name is refused when its first character is not a letter
+// or digit, it holds anything but letters, digits, `_`, `.` and `-`, or it is
+// longer than 255 characters — so an empty source, which the runtime makes an
+// anonymous volume of, has nothing refused.
+//
+// This reads the shapes opossum passes (`-v <absolute path or volume>:<target>`,
+// with the compose mode such as `:ro` after it when there is one), walking the
+// flags the way containerNameRefused does
+// and with the same forms left unread. Also not read: `--volume`, `--mount`, and
+// a `-v` value with no `:`.
+func volumeNameRefused(args []string) (msg string, refused bool) {
+	for i := 1; i < len(args); i++ { // args[0] is "run"
+		a := args[i]
+		if !strings.HasPrefix(a, "-") {
+			break // the image
+		}
+		if runFlagsWithoutValue[a] {
+			continue
+		}
+		if i+1 == len(args) {
+			break
+		}
+		if a == "-v" {
+			src, _, ok := strings.Cut(args[i+1], ":")
+			if ok && !strings.Contains(src, "/") && !validVolumeName(src) {
+				return "Error: invalid volume name '" + src + "': must match ^[A-Za-z0-9][A-Za-z0-9_.-]*$", true
+			}
+		}
+		i++ // the flag's value
+	}
+	return "", false
+}
+
+func validVolumeName(name string) bool {
+	if len(name) > 255 {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		alnum := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
+		if !alnum && (i == 0 || c != '_' && c != '.' && c != '-') {
+			return false
+		}
+	}
+	return true
+}
+
+func validContainerName(name string) bool {
+	if len(name) < 2 || len(name) > 63 {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		alnum := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
+		if !alnum && (i == 0 || c != '_' && c != '.' && c != '-') {
+			return false
+		}
+	}
+	return true
 }

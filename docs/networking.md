@@ -39,9 +39,9 @@ The table below is the same map in detail — each row is one thing you might re
 | Default connectivity | bridge network, outbound via NAT | per-project network, outbound via NAT — nothing to write |
 | Reaching the **host** | `host.docker.internal` / `--add-host` | **no `host.docker.internal`** — use the built-in **`${OPOSSUM_HOST_GATEWAY}`** (the host's LAN IP; the host service must bind `0.0.0.0`) — see [Reaching a service on the host](#reaching-a-service-on-the-host) |
 | Service **discovery** | automatic embedded DNS on the network | built-in DNS, but it needs a **registered domain** — one-time `sudo container system dns create opossum`; peers then resolve each other by bare service name (`db`, `web`) |
-| Container names / **project isolation** | `<project>-<service>-N`, name-scoped | `<service>.<project>.<domain>` on a per-project network (`<project>-net`); projects stay isolated automatically — see [Running multiple projects](#running-multiple-projects-at-once) |
+| Container names / **project isolation** | `<project>-<service>-N`, name-scoped | `<service>.<project>.<domain>` on a per-project network (`<project>-net`); projects stay isolated automatically — see [Running multiple projects](#running-multiple-projects-at-once). The name is at most 63 characters on container 1.4.1 (a one-off's is `<service>-run.<project>.<domain>`): `up` and `run` refuse a longer one before creating anything (for `run --audit`, a dependency's is refused after the workspace snapshot), since peers resolve the service by that name |
 | Restricting **internet egress** | no native control (needs an external firewall) | `internal: true` on a network **removes the route to the internet** (host still reachable); `network_mode: none` = loopback only — see [Constraining egress](agent-sandbox.md) |
-| Multiple networks / **external** | supported, with aliases | multiple networks per service (one `--network` each) and `external: true` (reuse a pre-existing network by name) both work |
+| Multiple networks / **external** | supported, with aliases | multiple networks per service (one `--network` each) and `external: true` (reuse a pre-existing network by name) both work; a declared network is `<project>-<key>` with the key folded to the lower-case name container 1.4.1 takes (`backEnd` → `<project>-backend`), and a network name longer than 63 characters is refused before any container or network is created |
 | Name resolution **on an `internal:` network** | works | **doesn't** — a container's resolver is its network's gateway, and an internal network's gateway serves no DNS (queries are refused, though the gateway itself is reachable), so address peers by **IP** (or reach a host proxy via `${OPOSSUM_HOST_GATEWAY}`) |
 | Per-network **aliases** / static IPs (`ipv4_address`) | applied | **not applied** — `container run` has no flag for either (the `<project>` subdomain is what keeps names unique) |
 | A network's **subnet** (`ipam.config[].subnet`) | applied | applied — `container network create --subnet` / `--subnet-v6`, one of each at most; two projects declaring the same subnet are refused by the runtime, as by docker |
@@ -101,9 +101,10 @@ keeps names from colliding. As a backstop for the no-DNS-domain case
 `opossum.project=<name>` and opossum **refuses to start** (rather than silently
 replacing) a container another project already owns. `down` leaves such a
 container alone and says so, and `run` refuses a one-off name another project
-holds. A container the runtime gives no readable answer about is treated the
-same way: `up` and `run` refuse, and `down` leaves it, names it, and exits
-non-zero.
+holds. `start`, `stop`, `kill` and `restart` leave such a container, say so, and
+act on the rest of the project; `exec` and `cp` refuse it. A container the
+runtime gives no readable answer about is treated the same way: `up` and `run`
+refuse, and `down` leaves it, names it, and exits non-zero.
 
 ## Reaching a service on the host
 

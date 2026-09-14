@@ -119,6 +119,18 @@ opossum
 ```
 → `DNSDomainExists(domain)`: 行を trim して一致判定。
 
+## `container run --name <runtime が作れない名前>`  （exit 1 / 2026-09-14 に 1.4.1 で採取、#1002・#1011）
+```
+Error: container ID <name> is not a valid container ID
+```
+→ 名前が、2 文字以上 63 文字以下で、先頭が英数字、あとは英数字・`_`・`.`・`-` だけ、という形に合わないと断る（`_c1011`・`.c1011`・`c1011+x`・空白・`/`・`:`・`c1011é`、空の名前、1 文字の `a`・`7`、64 文字。`--name -` もこの文言で exit 1）。大文字（`C1011Up`）、2 文字の `ab`・`12`、途中の `_`、末尾の `-`・`.` は作る。`container create --name` も同じ文言と exit。stderr に出る（`run` は進捗行の後）。値の無い `--name`、`-` の後に文字が続く値（`-c1011`・`--`）は `Error: Missing value for '--name <name>'` で exit 64。image より後ろの `--name` はコマンドの引数として渡る（`run --rm alpine echo --name _x` は動く）。`--name` が 2 回あれば後の値。値を取らない flag は `-d`・`-i`・`-t`・`--init`・`--no-dns`・`--read-only`・`--rm`/`--remove`・`--rosetta`・`--ssh`・`--virtualization`（`container run --help`、`--name` の前に置いて実測）。`-h`・`--help`・`--version` も値を取らない（help や版を出して exit 0）。`--debug` は一覧に載っているが、`run` の後ろでは `Unknown option '--debug'`（exit 64）。値を取る flag の値が `-` で始まると、その flag の値の欠落として exit 64（`run -l -x` → `Missing value for '-l <label>'`、`--user -1` も同じ）。空の `--name=` は次の引数を値として取る、`-it` のようなまとめた短い flag も読まれる、`""` は image として読まれ `invalid format for image reference`（2 巡目のレビューアが実測）。fake が読むのは opossum が渡す形（分けた flag と `--name <名前>`）で、`=` の形・まとめた短い flag・`--`・`-h`/`--help`/`--version`・`--debug`・`-` で始まる他の flag の値（opossum は compose の `user: "-1"` から `--user -1` を渡す、#996）・末尾の値の無い flag は写さない。opossum は `--name <名前>` を image の前に 1 回だけ渡し、service と one-off の container 名の長さを作る前に断り（`checkContainerNameLength`）、seed の名前は 63 文字に詰める（`SeedContainerName`）。3 つの fake の `run` はこの文言と exit を返す（`internal/shimcontract`）。
+
+## `container run -v <runtime が作れない volume 名>:<target>`  （exit 1 / 2026-09-14 に 1.4.1 で採取、#1017）
+```
+Error: invalid volume name '<name>': must match ^[A-Za-z0-9][A-Za-z0-9_.-]*$
+```
+→ `-v` の `:` より前が volume 名として読まれ、先頭が英数字でない（`_nk17`・`.nk17`）、英数字・`_`・`.`・`-` 以外を含む（`nk17+a`・空白・`nk17@a`・`nk17é`）、256 文字、のどれでもこの文言で断る。`:ro` を付けても同じ。1 文字の `q`、先頭の数字 `9nk17`、大文字 `NK17Up`、末尾の `.`・`_`・`-`、255 文字は作る。`-v` が複数あると最初に合わない名前を言い、その前の正しい volume も作らない（container も残らない）。`/` を含む source は path として読まれる（絶対 path と `./bind` は bind mount、`nk17/a` は `Error: path 'nk17/a' does not exist`）。空の source（`:/x`）は匿名 volume を作る。不正な `--name` は `-v` の前後どちらにあっても先に断られ（`container ID … is not a valid container ID`）、使用中の名前も先に断られる（`container with id … already exists`）。image の取得も先（無い image は `HTTP request … 401 Unauthorized`）。opossum が渡す source は、絶対 path か volume 名だけ（`-v <source>:<target>` の後ろに compose の mode（`:ro` など）がそのまま付く。相対の bind も絶対 path にしてから渡し、`volume create` は呼ばない）。3 つの fake の `run` は、image より前の `-v` でこの文言と exit を返す（`internal/shimcontract`）。`--volume`・`--mount`・`:` の無い `-v` の値は写さない。
+
 ## `container run --name <既存の名前>`  （exit 1 / 2026-09-13 に 1.4.1 で採取、#912）
 ```
 Error: container with id <name> already exists
@@ -135,6 +147,12 @@ Error: container already exists: <name>
 ```
 <name>
 ```
+
+## `container network create <name>`  （runtime が作れない名前, exit 1 / 2026-09-14 に 1.4.1 で採取）
+```
+Error: invalid network name: <name>
+```
+→ 名前が、英小文字・数字・`.`・`_`・`-` だけでできていて先頭と末尾が英小文字か数字、という形に合わない（大文字 `n1004-X`・`Xn1004`、`n1004-a+b`、先頭の `.`・`_`、末尾の `-`・`.`・`_`）か、63 文字を超える（64 文字で断り、63 文字は作る）。`n1004..x`・`0n1004_z9`・`9` は作る。出力は stderr だけ、成功時は名前だけを stdout。flag は名前の前にも後ろにも書ける（`create rv1004-p --label x=y` は作る）。名前が無い、または `-` で始まる名前は flag として読まれ、`Error: Missing expected argument '<name>'` と usage で exit 64。opossum は宣言の key をこの規則に写像し（`compose.NetworkRuntimeKey`）、長さは作る前に断り、名前を最後に渡す。3 つの fake は最後の引数を名前として読み、この文言と exit を返す（`internal/shimcontract`）。
 
 ## `container network create <name>`  （既存, exit 1）
 ```

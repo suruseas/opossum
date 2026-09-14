@@ -820,6 +820,9 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 		if strings.Contains(name, "\x00") {
 			return nil, fmt.Errorf("%s: volume name %q contains a NUL character — remove it", mergedName(loaded), name)
 		}
+		if !validVolumeName(name) {
+			return nil, fmt.Errorf("%s: volume name %q %s", mergedName(loaded), name, volumeNameRule)
+		}
 		if key := dotVolumeKey(name); key != name {
 			f.Volumes[key] = f.Volumes[name]
 			delete(f.Volumes, name)
@@ -927,8 +930,20 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 				return nil, fmt.Errorf("service %q: network_mode: none and networks: cannot both be set", name)
 			}
 			for _, netName := range svc.Networks {
-				if _, ok := f.Networks[netName]; !ok {
+				decl, ok := f.Networks[netName]
+				if !ok {
 					return nil, fmt.Errorf("service %q references undefined network %q (declare it under top-level networks:)", name, netName)
+				}
+				// An external network reaches the runtime by its real name as
+				// written; the rest become `<project>-<key>` with the key folded
+				// by NetworkRuntimeKey, which can fold a key down to nothing.
+				switch {
+				case decl.External && decl.Name != "" && !ValidRuntimeNetworkName(decl.Name):
+					return nil, fmt.Errorf("service %q: external network %q: name %q %s", name, netName, decl.Name, runtimeNetworkNameRule)
+				case decl.External && decl.Name == "" && !ValidRuntimeNetworkName(netName):
+					return nil, fmt.Errorf("service %q: external network %q is used by that name, which %s; set `name:` to the network's real name", name, netName, runtimeNetworkNameRule)
+				case !decl.External && NetworkRuntimeKey(netName) == "":
+					return nil, fmt.Errorf("service %q: network %q keeps no character a network name can hold once folded to what the container runtime (1.4.1) takes (lower-case a-z, 0-9, and `.`, `_` or `-` before the end) — rename the key", name, netName)
 				}
 			}
 		}
@@ -1055,9 +1070,21 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 			if kind != MountNamed {
 				continue
 			}
-			if _, ok := f.Volumes[src]; !ok {
-				shown := VolumeDisplayName(src)
+			decl, ok := f.Volumes[src]
+			shown := VolumeDisplayName(src)
+			if !ok {
 				return nil, fmt.Errorf("service %q refers to undefined volume %q — declare it under top-level volumes:, or write a host path (`./%s`) for a bind mount", name, shown, shown)
+			}
+			// The names that reach the runtime as written: a `name:` of its own,
+			// or the key of an external volume without one (the rest become
+			// `<project>_<key>`, which starts with the project's name). Checked
+			// for the volumes a service mounts only: docker compose drops a
+			// declaration nothing uses, and so does what opossum runs.
+			if decl.Name != "" && !runtimeVolumeNamePattern.MatchString(decl.Name) {
+				return nil, fmt.Errorf("service %q: volume %q: name %q %s", name, shown, decl.Name, runtimeVolumeNameRule)
+			}
+			if decl.Name == "" && decl.External && !runtimeVolumeNamePattern.MatchString(shown) {
+				return nil, fmt.Errorf("service %q: external volume %q is used by that name, which %s; set `name:` to the volume's real name", name, shown, runtimeVolumeNameRule)
 			}
 		}
 
@@ -1085,6 +1112,120 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 	}
 	return p, nil
 }
+
+// volumeNamePattern is the names docker compose lets a volume have: it refuses
+// a declaration outside it (`volumes additional properties 'a/b' not allowed`,
+// measured on v5.5.0 for every printable ASCII character). Read past, the name
+// went to the runtime as written — `-v demo_a/b:/y`, `-v demo_a,b:/y`.
+var volumeNamePattern = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+
+// volumeNameRule is what a refused volume name is told, after the name.
+const volumeNameRule = "can only contain letters, digits, `.`, `_` and `-` (docker compose refuses it as well)"
+
+// runtimeVolumeNamePattern is the names a volume can be created with: container
+// 1.4.1 refuses anything else (`invalid volume name … must match
+// ^[A-Za-z0-9][A-Za-z0-9_.-]*$`), and the docker engine refuses the same set.
+// docker compose's `config` checks neither a `name:` nor an external key, so a
+// file it loads can still name a volume no runtime can make.
+var runtimeVolumeNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
+
+// runtimeVolumeNameRule is what a name the runtime cannot create is told.
+const runtimeVolumeNameRule = "is not a name a volume can be created with — it has to start with a letter or digit, followed by letters, digits, `_`, `.` or `-` (the container runtime and the docker engine both refuse it)"
+
+// runtimeNetworkNamePattern is the names a network can be created with:
+// container 1.4.1 refuses (`invalid network name`) upper case, characters
+// outside a-z, 0-9, `.`, `_` and `-`, a last character that is not a letter or
+// digit, and more than MaxRuntimeNetworkNameLen characters (measured with
+// `container network create`).
+var runtimeNetworkNamePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`)
+
+// MaxRuntimeNetworkNameLen is the longest network name container 1.4.1 creates.
+const MaxRuntimeNetworkNameLen = 63
+
+// runtimeNetworkNameRule is what a network name the runtime cannot create is told.
+const runtimeNetworkNameRule = "is not a name a network can be created with — the container runtime (1.4.1) takes lower-case letters, digits, `.`, `_` and `-`, starting and ending with a letter or digit, at most 63 characters"
+
+// ValidRuntimeNetworkName reports whether the runtime can create a network by name.
+func ValidRuntimeNetworkName(name string) bool {
+	return len(name) <= MaxRuntimeNetworkNameLen && runtimeNetworkNamePattern.MatchString(name)
+}
+
+var networkKeyOutsideRuntime = regexp.MustCompile(`[^a-z0-9._-]`)
+
+// NetworkRuntimeKey is what a declared network's key contributes to its
+// runtime name, `<project>-<key>`: lower case, each character the runtime
+// refuses written as `-`, and the trailing `-`, `.` and `_` it refuses
+// dropped. docker compose runs a key like `backEnd` or `a+b` as written
+// (its engine takes them), so folding keeps such a file running; a key the
+// runtime already takes is unchanged, and so is its network.
+func NetworkRuntimeKey(key string) string {
+	return strings.TrimRight(networkKeyOutsideRuntime.ReplaceAllString(strings.ToLower(key), "-"), "-._")
+}
+
+// DefaultNetworkKey is the key part of the network a service with no
+// `networks:` joins, `<project>-net`.
+const DefaultNetworkKey = "net"
+
+// CheckNetworkKeys refuses two networks the services join that fold to the
+// same runtime network — `backEnd` and `backend`, or a key folding to the
+// default network's `net` while a service is on that — since docker compose
+// gives each its own network and one shared network would join services the
+// file keeps apart. It is for the commands that create networks to call, not
+// the loader: a key `net` beside the default network ran before this check
+// existed (the two services shared one network), and `down` and `destroy`
+// have to read that file to clean such a project up.
+func (p *Project) CheckNetworkKeys() error {
+	owner := map[string]string{} // folded key -> the key (or "") that took it first
+	take := func(folded, key string) error {
+		first, taken := owner[folded]
+		if !taken {
+			owner[folded] = key
+			return nil
+		}
+		if first == key {
+			return nil
+		}
+		if first == "" {
+			first, key = key, ""
+		}
+		if key != "" && key < first {
+			first, key = key, first
+		}
+		if key == "" {
+			return fmt.Errorf("network %q becomes the runtime network `<project>-%s`, which is the network services without `networks:` join — rename the key", first, folded)
+		}
+		return fmt.Errorf("networks %q and %q both become the runtime network `<project>-%s` (the container runtime (1.4.1) takes network names in lower case, so each character it refuses is written `-` and a trailing `-`, `.` or `_` is dropped) — rename one of them", first, key, folded)
+	}
+	names := make([]string, 0, len(p.Services))
+	for name := range p.Services {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		svc := p.Services[name]
+		if svc.NetworkMode == NetworkModeNone {
+			continue
+		}
+		if len(svc.Networks) == 0 {
+			if err := take(DefaultNetworkKey, ""); err != nil {
+				return err
+			}
+			continue
+		}
+		for _, key := range svc.Networks {
+			if p.Networks[key].External {
+				continue
+			}
+			if err := take(NetworkRuntimeKey(key), key); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// validVolumeName reports whether name is one docker compose lets a volume have.
+func validVolumeName(name string) bool { return volumeNamePattern.MatchString(name) }
 
 // IsHostPath reports whether a volume mount's source is a host path — the
 // forms mounted as a bind rather than a named volume. The rule is docker

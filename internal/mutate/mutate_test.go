@@ -1810,3 +1810,78 @@ func TestANilContextMeansUncancellableRatherThanPanic(t *testing.T) {
 		t.Errorf("`go env GOMOD` printed nothing: %q", out)
 	}
 }
+
+// "IT IS STILL MUTATED" is said of a file that does not hold what it held
+// before the mutation, and only of such a file. A file that refused every write
+// — one that cannot be opened for writing — never changed, and saying it is
+// mutated sends the author to inspect a clean tree. A file that took the
+// mutation, or was truncated by a write that failed partway, and then refused
+// the original bytes back is still the thing the warning is for — and so is
+// one that cannot be read to tell.
+func TestTheStillMutatedWarningIsForAFileThatChanged(t *testing.T) {
+	refused := errors.New("permission denied")
+	for _, tc := range []struct {
+		name       string
+		write      func(f *fakeRunner, p string, b []byte) error
+		unreadable bool // once the restore has been refused
+		left       string
+		loud       bool
+	}{
+		{"every write refused", func(f *fakeRunner, p string, b []byte) error { return refused }, false, "call()", false},
+		{"the mutation lands, the restore is refused", func(f *fakeRunner, p string, b []byte) error {
+			if string(b) == "call()" {
+				return refused
+			}
+			f.set(p, string(b))
+			return nil
+		}, false, "noop()", true},
+		{"the mutation lands still holding the original, the restore is refused", func(f *fakeRunner, p string, b []byte) error {
+			if string(b) == "call()" {
+				return refused
+			}
+			f.set(p, "call()x") // a mutation that adds to what was there
+			return nil
+		}, false, "call()x", true},
+		{"the restore is refused and the file cannot be read", func(f *fakeRunner, p string, b []byte) error {
+			return refused
+		}, true, "call()", true},
+		{"a write that truncated, then the restore is refused", func(f *fakeRunner, p string, b []byte) error {
+			if string(b) == "noop()" {
+				f.set(p, "")
+			}
+			return refused
+		}, false, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFake(t, map[string]string{"x.go": "call()"})
+			f.testOut["noop()"] = passJSON
+			restoring := false
+			f.Runner.Write = func(p string, b []byte) error {
+				if string(b) == "call()" {
+					restoring = true
+				}
+				return tc.write(f, p, b)
+			}
+			read := f.Runner.Read
+			f.Runner.Read = func(p string) ([]byte, error) {
+				if tc.unreadable && restoring {
+					return nil, errors.New("input/output error")
+				}
+				return read(p)
+			}
+			_, err := f.Sweep([]Mutation{mut()})
+			if err == nil {
+				t.Fatal("a refused write must be reported")
+			}
+			if !strings.Contains(err.Error(), "permission denied") {
+				t.Errorf("the error should carry the refusal, got: %v", err)
+			}
+			if got := strings.Contains(err.Error(), "could not restore x.go — IT IS STILL MUTATED"); got != tc.loud {
+				t.Errorf("still-mutated warning = %v, want %v: %v", got, tc.loud, err)
+			}
+			if got := mustGet(t, f, "x.go"); got != tc.left {
+				t.Errorf("x.go holds %q, want %q", got, tc.left)
+			}
+		})
+	}
+}

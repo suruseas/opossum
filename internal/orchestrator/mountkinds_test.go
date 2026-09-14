@@ -72,6 +72,8 @@ func TestAMountRunsAsWhatItLoadedAs(t *testing.T) {
 				t.Fatalf("load: %v", err)
 			}
 			rt, log := fakeShim(t)
+			// The external volumes this file declares exist, as a user who declares one has made it.
+			setShimEnv(rt, "VOLUME_LS=ext")
 			if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true); err != nil {
 				t.Fatalf("up: %v", err)
 			}

@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -75,6 +76,10 @@ type Orchestrator struct {
 	// because it states the intent: one service's note answers for that
 	// service, not for its neighbours.
 	notedDockerSocket map[string]bool
+
+	// warnedUnresolvable names the services OPSM-209 has been said for, so a
+	// `watch` that brings a service up again on every change says it once.
+	warnedUnresolvable map[string]bool
 }
 
 // upOptions holds the `up` recreate/build flags.
@@ -392,12 +397,19 @@ type ourText string
 // networkName is the default per-project network services share when they don't
 // name a network of their own.
 func (o *Orchestrator) networkName() string {
-	return o.Project.Name + "-net"
+	return o.Project.Name + "-" + compose.DefaultNetworkKey
+}
+
+// declaredNetworkName is the runtime network a non-external declared key
+// names: `<project>-<key>`, the key folded to what the runtime takes.
+func (o *Orchestrator) declaredNetworkName(key string) string {
+	return o.Project.Name + "-" + compose.NetworkRuntimeKey(key)
 }
 
 // resolvedNetwork is the runtime network a service joins, plus how opossum
 // manages it (whether it's host-only, and whether opossum creates/deletes it).
 type resolvedNetwork struct {
+	key      string                 // the declared key; empty for the default project network
 	name     string                 // the actual `container` network name (namespaced unless external)
 	internal bool                   // created with --internal (host-only): no internet egress
 	external bool                   // pre-existing; opossum never creates or deletes it
@@ -407,7 +419,7 @@ type resolvedNetwork struct {
 
 // resolveNetwork maps one declared network key to its runtime network. External
 // networks use their real name verbatim; others are namespaced `<project>-<key>`
-// and carry the decl's internal flag.
+// (see declaredNetworkName) and carry the decl's internal flag.
 func (o *Orchestrator) resolveNetwork(key string) resolvedNetwork {
 	decl := o.Project.Networks[key]
 	if decl.External {
@@ -415,9 +427,9 @@ func (o *Orchestrator) resolveNetwork(key string) resolvedNetwork {
 		if real == "" {
 			real = key
 		}
-		return resolvedNetwork{name: real, external: true}
+		return resolvedNetwork{key: key, name: real, external: true}
 	}
-	return resolvedNetwork{name: o.Project.Name + "-" + key, internal: decl.Internal, labels: decl.Labels,
+	return resolvedNetwork{key: key, name: o.declaredNetworkName(key), internal: decl.Internal, labels: decl.Labels,
 		subnets: runtime.NetworkSubnets{V4: decl.IPAM.Subnet, V6: decl.IPAM.SubnetV6}}
 }
 
@@ -514,6 +526,249 @@ func (o *Orchestrator) checkExternalNetworks(services []string) error {
 					codeExternalNetAbsent, rn.name, rn.name)
 			}
 		}
+	}
+	return nil
+}
+
+// checkExternalVolumes refuses, before anything is created or removed, a volume
+// declared `external: true` that one of the given services mounts and the
+// runtime does not have. opossum mounts an external volume by its real name and
+// never creates it, but container 1.4.1 creates a volume `run -v` names when it
+// is missing — so the service used to start on a new, empty volume under that
+// name, where docker compose v5.5.0 refuses (`external volume "<name>" not
+// found`). The callers pass what docker compose v5.5.0 looks at: the services
+// `up` starts, and a one-off's service with its dependencies, all the way down,
+// with --no-deps too. A runtime that gives no volume list is not read as
+// "absent": nothing is refused then.
+func (o *Orchestrator) checkExternalVolumes(services []string) error {
+	for _, svcName := range services {
+		for _, entry := range o.Project.Services[svcName].Volumes {
+			// A bind mount's or an anonymous volume's source is never a declared key.
+			if _, src := compose.ClassifyMount(entry); o.isExternalVolume(src) {
+				name := o.externalRealName(src)
+				if exists, known := o.rt.VolumeListed(name); exists || !known {
+					continue
+				}
+				return fmt.Errorf("[%s] volume %q is declared `external: true` but doesn't exist — "+
+					"create it first (`container volume create %s`), or remove `external: true` so opossum creates it for the project",
+					codeExternalVolumeAbsent, name, name)
+			}
+		}
+	}
+	return nil
+}
+
+// withDependencies is service followed by every service it depends on, all the
+// way down, each once.
+func (o *Orchestrator) withDependencies(service string) []string {
+	var out []string
+	seen := map[string]bool{}
+	var walk func(string)
+	walk = func(name string) {
+		if seen[name] {
+			return
+		}
+		seen[name] = true
+		out = append(out, name)
+		if svc := o.Project.Services[name]; svc != nil {
+			for _, d := range svc.DependsOn.Names() {
+				walk(d)
+			}
+		}
+	}
+	walk(service)
+	return out
+}
+
+// checkNetworkNames is the pre-flight on the names of the networks about to be
+// created: keys that fold to one runtime network anywhere in the project
+// (Project.CheckNetworkKeys), and names too long for the runtime. It asks
+// nothing of the runtime, so every caller can run it before it removes,
+// creates or starts anything.
+func (o *Orchestrator) checkNetworkNames(nets []resolvedNetwork) error {
+	if err := o.Project.CheckNetworkKeys(); err != nil {
+		return err
+	}
+	return checkNetworkNameLengths(nets)
+}
+
+// checkContainerName refuses, before anything is created, a container opossum
+// would create under a name the runtime does not take: longer than 63
+// characters, or not starting with a letter or digit and holding only letters,
+// digits, `_`, `.` and `-` (`is not a valid container ID` on 1.4.1). The name of
+// a service's container holds the service, the project and the DNS domain, and
+// a peer looks the service up by it (`db.<project>.<domain>`), so it is not
+// rewritten: that would break the lookup. docker compose v5.5.0 runs these
+// names; this is a limit of the runtime.
+func (o *Orchestrator) checkContainerName(service, name string) error {
+	if len(name) <= runtime.MaxContainerNameLen {
+		if runtime.ValidContainerName(name) {
+			return nil
+		}
+		// The project's part is always one the runtime takes (SanitizeName), so
+		// the fault is the service's — the whole name without a DNS domain —
+		// or else the DNS domain's.
+		if o.DNSDomain == "" || !containerNamePart.MatchString(service) {
+			return fmt.Errorf("container name %q is not one the container runtime (1.4.1) creates — it has to start with an ASCII letter or digit and hold only ASCII letters, digits, `_`, `.` and `-`, 2 to 63 characters; rename the service %q", name, service)
+		}
+		return fmt.Errorf("container name %q is not one the container runtime (1.4.1) creates — it has to start with an ASCII letter or digit and hold only ASCII letters, digits, `_`, `.` and `-`; use a DNS domain of those characters instead of %q (`--dns-domain`)", name, o.DNSDomain)
+	}
+	// Only what changes the name is offered: without a DNS domain the name is
+	// the service's alone.
+	fix := fmt.Sprintf("shorten the service name %q", service)
+	if o.DNSDomain != "" {
+		fix = fmt.Sprintf("shorten the service name %q or the project name (`-p`, or `name:` in the compose file), or use a shorter DNS domain than %q (`--dns-domain`, created once with `sudo container system dns create <domain>`)", service, o.DNSDomain)
+	}
+	return fmt.Errorf("container name %q is %d characters, and the container runtime (1.4.1) creates at most %d — %s",
+		name, len(name), runtime.MaxContainerNameLen, fix)
+}
+
+// containerNamePart is a service name that can open a container name.
+var containerNamePart = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
+
+// checkVolumeNames refuses, before anything is created, a volume a service
+// mounts whose name in the runtime is longer than runtime.MaxVolumeNameLen:
+// container 1.4.1 refuses it (`invalid volume name`), and `up` used to create
+// the network and warn that it could not fill the volume before failing to
+// start the service. The name is the user's — a volume's key under the project
+// name, its `name:`, an external volume's real name — so it is not cut the way
+// an anonymous volume's path is; docker compose v5.5.0 fails creating a volume
+// of such a key or `name:` too (`file name too long` from the engine). What is
+// offered to shorten follows from where the name came from. A one-off's own
+// volumes are looked at here; its dependencies' by the `up` that starts them.
+func (o *Orchestrator) checkVolumeNames(services []string) error {
+	for _, svcName := range services {
+		for _, entry := range o.Project.Services[svcName].Volumes {
+			kind, src := compose.ClassifyMount(entry)
+			var name, fix string
+			switch {
+			case kind == compose.MountBind:
+				continue
+			case kind == compose.MountAnonymous:
+				name = o.classifyVolume(svcName, entry).Volume
+				fix = fmt.Sprintf("the path part is already cut, so shorten the service name %q or the project name (`-p`, or `name:` in the compose file)", svcName)
+			case o.isExternalVolume(src):
+				name = o.externalRealName(src)
+				fix = fmt.Sprintf("the runtime cannot mount a volume by that name, so use an external volume with a shorter name for %q", compose.VolumeDisplayName(src))
+			case o.Project.Volumes[src].Name != "":
+				name = o.volumeName(src)
+				fix = fmt.Sprintf("shorten the `name:` of the volume %q", compose.VolumeDisplayName(src))
+			default:
+				name = o.volumeName(src)
+				fix = fmt.Sprintf("shorten the volume key %q or the project name (`-p`, or `name:` in the compose file)", compose.VolumeDisplayName(src))
+			}
+			if len(name) > runtime.MaxVolumeNameLen {
+				return fmt.Errorf("service %q mounts the volume %q, %d characters, and the container runtime (1.4.1) creates at most %d — %s",
+					svcName, name, len(name), runtime.MaxVolumeNameLen, fix)
+			}
+		}
+	}
+	return nil
+}
+
+// warnUnresolvableServiceNames warns, before anything is created, about each
+// service a peer may not reach by its bare name although its container is made.
+// Measured on container 1.4.1: a name holding upper case gets no answer from
+// musl or glibc (`MyDb`), or another address when its lower case is a top-level
+// domain (`Web`); a name holding `.` gets no answer from a musl image (alpine
+// does not search the project's domain for it; glibc does) and, when the name
+// exists on the internet, that address instead (`web.dev`). The name is not
+// rewritten — a container made under the old name would be missed by `down` —
+// and nothing is refused: a service no peer looks up runs. Without a DNS domain
+// there is no lookup by name to warn about. Each service is warned about once
+// per command.
+func (o *Orchestrator) warnUnresolvableServiceNames(services []string) {
+	if o.DNSDomain == "" {
+		return
+	}
+	for _, name := range services {
+		if name == strings.ToLower(name) && !strings.Contains(name, ".") {
+			continue
+		}
+		if o.warnedUnresolvable[name] {
+			continue
+		}
+		if o.warnedUnresolvable == nil {
+			o.warnedUnresolvable = map[string]bool{}
+		}
+		o.warnedUnresolvable[name] = true
+		o.warnf(codeServiceNameUnresolvable, "service %q may not be reachable by that name from other services: on container 1.4.1 a name with\n"+
+			"         upper case gets no DNS answer, or another address when spelled like a top-level domain (Web), and a name with \".\"\n"+
+			"         gets none from a musl image (alpine) and an internet address when one exists for it. If another service reaches\n"+
+			"         it by name, rename it in lower case ASCII letters, digits, \"_\" and \"-\".\n", name)
+	}
+}
+
+// checkServiceNamesDifferInCase refuses two services `up` would start whose
+// names differ only in case (`Com` and `com`): container 1.4.1 creates the
+// first container and fails the second with `failed to bootstrap container`,
+// whether or not a DNS domain is part of the names (measured), so `up` would
+// start one and roll back. Only the services this `up` starts count: a file
+// that never starts both (one behind a profile) runs, as it does under docker
+// compose. A one-off is named `<service>-run` and its dependencies are checked
+// by their own `up`.
+func (o *Orchestrator) checkServiceNamesDifferInCase(services []string) error {
+	names := append([]string(nil), services...)
+	sort.Strings(names)
+	seen := map[string]string{}
+	for _, name := range names {
+		key := strings.ToLower(name)
+		if first, ok := seen[key]; ok {
+			return fmt.Errorf("services %q and %q differ only in case, and the container runtime (1.4.1) cannot run both — the second container fails with \"failed to bootstrap container\"; rename one of them", first, name)
+		}
+		seen[key] = name
+	}
+	return nil
+}
+
+// checkRunDependenciesEnabled refuses a one-off whose dependencies it would
+// start (not with --no-deps) when one of them is behind a profile that is not
+// active, rather than starting it anyway: the run target itself is "named",
+// but its dependencies must be enabled on their own, as in `up` (docker compose
+// v5.5.0 refuses such a run too, calling the dependency undefined). The `up`
+// that starts the dependencies names them, so it would not refuse; both kinds
+// of one-off ask here first.
+func (o *Orchestrator) checkRunDependenciesEnabled(service string, svc *compose.Service, opts RunOneOffOptions) error {
+	if opts.NoDeps {
+		return nil
+	}
+	named := map[string]bool{service: true}
+	for _, d := range svc.DependsOn.Names() {
+		if !o.enabled(d, named) {
+			return fmt.Errorf("service %q depends on %q, whose profile is not active — enable it with --profile or COMPOSE_PROFILES, or name it explicitly", service, d)
+		}
+	}
+	return nil
+}
+
+// runNetworks is the networks a one-off of svc joins: none under
+// `network_mode: none`, which gets no network of the project's. Its
+// dependencies' networks are not counted here: the `up` that starts them
+// checks those itself, before it creates anything, with the selection and
+// profile rules only it applies.
+func (o *Orchestrator) runNetworks(svc *compose.Service) []resolvedNetwork {
+	if svc.NetworkMode == compose.NetworkModeNone {
+		return nil
+	}
+	return o.networksFor(svc)
+}
+
+// checkNetworkNameLengths refuses, before anything is created, a network
+// opossum would create under a name longer than the runtime takes. The name
+// holds the project's name, which is settled only after the file is read, so
+// this is the first place its length is known. The name is not shortened: a
+// hashed one would no longer say which project and key it belongs to.
+func checkNetworkNameLengths(nets []resolvedNetwork) error {
+	for _, rn := range nets {
+		if rn.external || len(rn.name) <= compose.MaxRuntimeNetworkNameLen {
+			continue
+		}
+		fix := "shorten the project name (`-p`, or `name:` in the compose file)"
+		if rn.key != "" {
+			fix += fmt.Sprintf(" or the network key %q", rn.key)
+		}
+		return fmt.Errorf("network name %q is %d characters, and the container runtime (1.4.1) creates at most %d — %s",
+			rn.name, len(rn.name), compose.MaxRuntimeNetworkNameLen, fix)
 	}
 	return nil
 }
@@ -658,6 +913,36 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 	o.warnSharedNamedVolumes(order)
 	o.warnBusyNamedVolumes(order)
 
+	// The names of the networks this will create. The check needs no runtime,
+	// so it goes before the orphans are removed, not only before the networks
+	// are made.
+	if err := o.checkNetworkNames(o.managedNetworks(order)); err != nil {
+		return err
+	}
+	if err := o.checkServiceNamesDifferInCase(order); err != nil {
+		return err
+	}
+	for _, name := range order {
+		if err := o.checkContainerName(name, o.containerName(name)); err != nil {
+			return err
+		}
+	}
+	if err := o.checkVolumeNames(order); err != nil {
+		return err
+	}
+	// A network or volume a service declares `external: true` that doesn't exist
+	// — opossum uses them by name and never creates them. Refused before an orphan
+	// is removed, network first, as docker compose v5.5.0 refuses them: a missing
+	// network would otherwise surface only as a raw "network not found" mid-start,
+	// and a missing volume would be created empty by the runtime.
+	if err := o.checkExternalNetworks(order); err != nil {
+		return err
+	}
+	if err := o.checkExternalVolumes(order); err != nil {
+		return err
+	}
+	o.warnUnresolvableServiceNames(order)
+
 	// Containers for services no longer in the compose are removed with
 	// --remove-orphans, otherwise just flagged (docker compose parity).
 	if orphans := o.orphans(); len(orphans) > 0 {
@@ -702,14 +987,6 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 	// Pre-flight: fail before starting anything if a published host port is already
 	// taken, with a clearer message than the runtime's raw bind error.
 	if err := o.checkHostPorts(order); err != nil {
-		return err
-	}
-
-	// Pre-flight: fail before starting anything if a network a service declares
-	// `external: true` doesn't exist — opossum uses external networks by name and
-	// never creates them, so a missing one would otherwise surface only as a raw
-	// "network not found" mid-start (docker compose likewise errors up front).
-	if err := o.checkExternalNetworks(order); err != nil {
 		return err
 	}
 
@@ -961,7 +1238,7 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 			Env:        env,
 			Ports:      svc.Ports,
 			Volumes:    vols,
-			Tmpfs:      svc.Tmpfs,
+			Tmpfs:      tmpfsMounts(svc.Tmpfs),
 			Command:    svc.Command,
 			Entrypoint: svc.Entrypoint,
 			Labels:     append(append([]string(nil), svc.Labels...), projectLabel+"="+o.Project.Name),
@@ -1660,17 +1937,31 @@ func (o *Orchestrator) selectServices(order, requested []string) ([]string, erro
 func (o *Orchestrator) ensureNotForeign(cname, command string) error {
 	owner, unknown := o.otherOwner(cname)
 	if unknown {
-		return fmt.Errorf("container %q: the runtime gave no readable answer about which project owns it, so it is left alone; "+
+		return ownerRefusal{unanswered: []string{cname}, err: fmt.Errorf("container %q: the runtime gave no readable answer about which project owns it, so it is left alone; "+
 			"`container inspect %s` shows what the runtime says — run `%s` again once it answers, "+
-			"or, if it belongs to another project, give this project its own DNS domain (e.g. --dns-domain %s)", cname, cname, command, o.Project.Name)
+			"or, if it belongs to another project, give this project its own DNS domain (e.g. --dns-domain %s)", cname, cname, command, o.Project.Name)}
 	}
 	if owner != "" {
-		return fmt.Errorf("container %q is already in use by project %q; give this project its own DNS domain so names don't collide "+
+		return ownerRefusal{err: fmt.Errorf("container %q is already in use by project %q; give this project its own DNS domain so names don't collide "+
 			"(e.g. --dns-domain %s, created once with `sudo container system dns create %s`) — see README (multi-project)",
-			cname, owner, o.Project.Name, o.Project.Name)
+			cname, owner, o.Project.Name, o.Project.Name)}
 	}
 	return nil
 }
+
+// ownerRefusal is a command declining a container because it is another
+// project's, or because the runtime would not say whose it is. The message
+// carries its own next step; a caller that adds advice about a failed action
+// (a container that may be gone, one that may not be running) checks for this
+// first, since nothing failed and that advice would point the wrong way.
+// unanswered names the containers the runtime would not say anything about;
+// empty when the refusal is another project's container.
+type ownerRefusal struct {
+	err        error
+	unanswered []string
+}
+
+func (r ownerRefusal) Error() string { return r.err.Error() }
 
 // otherOwner reads, from one inspect, whether a container name is this
 // project's to stop, delete or reuse: owner is the other project whose label is
@@ -1712,9 +2003,9 @@ func unansweredOwners(unanswered []string, command string) error {
 	if len(unanswered) == 0 {
 		return nil
 	}
-	return fmt.Errorf("the runtime gave no readable answer about which project owns %d container(s), so they were left: %s — "+
+	return ownerRefusal{unanswered: unanswered, err: fmt.Errorf("the runtime gave no readable answer about which project owns %d container(s), so they were left: %s — "+
 		"`container inspect <name>` shows what the runtime says; run `%s` again once it answers",
-		len(unanswered), strings.Join(unanswered, ", "), command)
+		len(unanswered), strings.Join(unanswered, ", "), command)}
 }
 
 // completedTargets is the set of services that some dependent needs to run to
@@ -1870,11 +2161,8 @@ func (o *Orchestrator) Down(removeVolumes bool, rmi string, removeOrphans bool) 
 	// (skipping external ones, which it never owns). Deletion is best-effort and
 	// silent when a network is already gone or still in use.
 	o.rt.DeleteNetwork(o.networkName())
-	for key, decl := range o.Project.Networks {
-		if decl.External {
-			continue
-		}
-		o.rt.DeleteNetwork(o.Project.Name + "-" + key)
+	for _, net := range o.declaredNetworks() {
+		o.rt.DeleteNetwork(net)
 	}
 	if removeVolumes {
 		for _, v := range o.namedVolumes() {
@@ -2107,6 +2395,18 @@ func isNamedVolume(src string) bool {
 	return src != "" && !isHostPath(src)
 }
 
+// sortByVolumeName orders the loader's volume keys by the names written in the
+// compose file, byte for byte. A key for a name that starts with `.` carries a
+// NUL prefix, so sorting the keys themselves put `.hid` before `-m`. (This is
+// not the order `config` prints its map keys in — YAML's, with `db9` before
+// `db10` — nor, for a volume with `name:` or an external one, the order
+// `volumes` lists runtime names in.)
+func sortByVolumeName(keys []string) {
+	sort.Slice(keys, func(i, j int) bool {
+		return compose.VolumeDisplayName(keys[i]) < compose.VolumeDisplayName(keys[j])
+	})
+}
+
 // warnSharedNamedVolumes warns when two or more services being started mount the
 // same named volume. Apple `container` attaches a named volume as an exclusive
 // block device, so only the first service to start gets it and the others fail to
@@ -2137,7 +2437,7 @@ func (o *Orchestrator) warnSharedNamedVolumes(order []string) {
 			shared = append(shared, src)
 		}
 	}
-	sort.Strings(shared)
+	sortByVolumeName(shared)
 	for _, src := range shared {
 		svcs := append([]string(nil), users[src]...)
 		sort.Strings(svcs)
@@ -2974,7 +3274,10 @@ func (o *Orchestrator) isExternalVolume(src string) bool {
 
 // externalRealName is the real volume name to mount for an external volume: its
 // declared `name:` if set (compose lets an external volume have a real name
-// different from its key), otherwise the compose key (#64).
+// different from its key), otherwise the compose key (#64). The key is shown
+// through VolumeDisplayName for its spelling's sake only: a mounted external
+// volume whose key starts with `.` is refused at load without a `name:`, since
+// no runtime can create a volume by that name.
 func (o *Orchestrator) externalRealName(src string) string {
 	if n := o.Project.Volumes[src].Name; n != "" {
 		return n
@@ -3709,6 +4012,21 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 	if err := o.ensureNotForeign(o.containerName(service+"-run"), "opossum run"); err != nil {
 		return err
 	}
+	// The names of the networks the one-off joins, before the dependencies
+	// start: their `up` checks the names of the networks it creates, but not
+	// one only this service joins.
+	if err := o.checkNetworkNames(o.runNetworks(svc)); err != nil {
+		return err
+	}
+	if err := o.checkContainerName(service, o.containerName(service+"-run")); err != nil {
+		return err
+	}
+	if err := o.checkVolumeNames([]string{service}); err != nil {
+		return err
+	}
+	if err := o.checkExternalVolumes(o.withDependencies(service)); err != nil {
+		return err
+	}
 
 	// Keep the one-off's own stdout clean (e.g. an MCP server's JSON-RPC over
 	// stdio): dependency startup, build, and volume-seeding progress all go to
@@ -3723,17 +4041,11 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 	willStartDeps := !opts.NoDeps && len(svc.DependsOn.Names()) > 0
 	o.reportIgnoredFields([]string{service}, !willStartDeps)
 
+	if err := o.checkRunDependenciesEnabled(service, svc, opts); err != nil {
+		return err
+	}
 	if !opts.NoDeps {
 		if deps := svc.DependsOn.Names(); len(deps) > 0 {
-			// A gated-inactive dependency is an error here too (as in `up`) rather
-			// than being silently force-started. The run target itself is "named",
-			// but its dependencies must be enabled on their own.
-			named := map[string]bool{service: true}
-			for _, d := range deps {
-				if !o.enabled(d, named) {
-					return fmt.Errorf("service %q depends on %q, whose profile is not active — enable it with --profile or COMPOSE_PROFILES, or name it explicitly", service, d)
-				}
-			}
 			if err := o.Up(true, deps...); err != nil {
 				return fmt.Errorf("starting dependencies: %w", err)
 			}
@@ -3840,7 +4152,7 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 		MacAddress: svc.MacAddress,
 		Env:        env,
 		Volumes:    vols,
-		Tmpfs:      svc.Tmpfs,
+		Tmpfs:      tmpfsMounts(svc.Tmpfs),
 		Command:    cmd,
 		Entrypoint: svc.Entrypoint,
 		Labels:     append(append([]string(nil), svc.Labels...), projectLabel+"="+o.Project.Name),
@@ -3987,8 +4299,26 @@ func (o *Orchestrator) Start(services []string) error {
 	if err != nil {
 		return err
 	}
+	targets, err = o.inStartupOrder(targets)
+	if err != nil {
+		return err
+	}
+	// One service that will not start does not stop the others: each failure
+	// is kept and said at the end, beside the containers nobody would say
+	// the owner of — returning at the first one left every later service
+	// unstarted and those containers unmentioned. What it does stop is the
+	// services that depend on it, as docker compose's start does: they would
+	// come up without what they were declared to need. Targets are in startup
+	// order, so a dependency is decided before anything that depends on it.
 	var unanswered []string
+	var failed []error
+	notStarted := map[string]bool{}
 	for _, name := range targets {
+		if dep := o.firstNotStartedDependency(name, notStarted); dep != "" {
+			notStarted[name] = true
+			failed = append(failed, fmt.Errorf("not starting service %q: it depends on %q, which did not start", name, dep))
+			continue
+		}
 		if !o.ours(o.containerName(name), &unanswered) {
 			continue
 		}
@@ -3996,10 +4326,88 @@ func (o *Orchestrator) Start(services []string) error {
 		// Starting it by hand undoes an earlier stop, so supervision resumes.
 		o.ClearStopped(name)
 		if err := o.rt.Start(o.containerName(name)); err != nil {
-			return fmt.Errorf("starting service %q: %w\n  `start` only (re)starts an already-created container — if it doesn't exist yet, run `opossum up %s` first", name, err, name)
+			notStarted[name] = true
+			failed = append(failed, fmt.Errorf("starting service %q: %w\n  `start` only (re)starts an already-created container — if it doesn't exist yet, run `opossum up %s` first", name, err, name))
 		}
 	}
-	return unansweredOwners(unanswered, "opossum start")
+	return withOwners(startFailures("start", failed), unansweredOwners(unanswered, "opossum start"))
+}
+
+// startFailures is the failures of one start or restart. More than one is
+// headed by their count and listed one entry per failure, each entry's further
+// lines (the runtime's own, the next step) indented under it: every failure
+// carries several lines, and without the marks the second reads as more of the
+// first.
+func startFailures(verb string, failed []error) error {
+	if len(failed) < 2 {
+		return errors.Join(failed...)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d services did not %s:", len(failed), verb)
+	for _, f := range failed {
+		lines := strings.Split(f.Error(), "\n")
+		b.WriteString("\n- " + lines[0])
+		for _, l := range lines[1:] {
+			// The runtime's lines come unindented and the next step two in;
+			// under an entry they all sit one level in.
+			b.WriteString("\n    " + strings.TrimLeft(l, " "))
+		}
+	}
+	return errorList{msg: b.String(), errs: failed}
+}
+
+// withOwners puts the containers nobody would say the owner of after the
+// failures, a blank line apart: they are not among the counted failures.
+func withOwners(failures, owners error) error {
+	if failures == nil || owners == nil {
+		return errors.Join(failures, owners)
+	}
+	return errorList{msg: failures.Error() + "\n\n" + owners.Error(), errs: []error{failures, owners}}
+}
+
+// errorList is several errors under a message of its own, still unwrapping to
+// each of them.
+type errorList struct {
+	msg  string
+	errs []error
+}
+
+func (l errorList) Error() string   { return l.msg }
+func (l errorList) Unwrap() []error { return l.errs }
+
+// inStartupOrder puts named services in the order `up` starts them, so that a
+// dependency named after its dependent is still started, or found failing,
+// first.
+func (o *Orchestrator) inStartupOrder(targets []string) ([]string, error) {
+	order, err := o.Project.StartupOrder()
+	if err != nil {
+		return nil, err
+	}
+	named := make(map[string]bool, len(targets))
+	for _, t := range targets {
+		named[t] = true
+	}
+	out := make([]string, 0, len(targets))
+	for _, name := range order {
+		if named[name] {
+			out = append(out, name)
+		}
+	}
+	return out, nil
+}
+
+// firstNotStartedDependency is the first of name's dependencies that failed to
+// start in this run, or was itself held back, or "" when none was. A dependency
+// not among the services asked for, or left because the runtime would not say
+// its owner or because another project owns its name, does not hold back its
+// dependents.
+func (o *Orchestrator) firstNotStartedDependency(name string, notStarted map[string]bool) string {
+	for _, dep := range o.Project.Services[name].DependsOn {
+		if notStarted[dep.Name] {
+			return dep.Name
+		}
+	}
+	return ""
 }
 
 // Kill signals running containers (all, or the named ones) in reverse dependency
@@ -4065,13 +4473,17 @@ func (o *Orchestrator) Restart(services []string) error {
 	for i := len(mine) - 1; i >= 0; i-- {
 		o.rt.Stop(o.containerName(mine[i]))
 	}
+	// Every service stopped above is started again, whatever happened to the
+	// one before it: returning at the first failure left the later ones
+	// stopped by a command that was asked to bring them back.
+	var failed []error
 	for _, name := range mine {
 		o.logf("Restarting %s\n", name)
 		if err := o.rt.Start(o.containerName(name)); err != nil {
-			return fmt.Errorf("restarting service %q: %w\n  `restart` needs an already-created container — if it doesn't exist yet, run `opossum up %s` first", name, err, name)
+			failed = append(failed, fmt.Errorf("restarting service %q: %w\n  `restart` needs an already-created container — if it doesn't exist yet, run `opossum up %s` first", name, err, name))
 		}
 	}
-	return unansweredOwners(unanswered, "opossum restart")
+	return withOwners(startFailures("restart", failed), unansweredOwners(unanswered, "opossum restart"))
 }
 
 // redo is the opossum command that asked for this build — "opossum up",
@@ -4169,15 +4581,74 @@ func (o *Orchestrator) resolveVolumes(svcName string, vols []string) []string {
 
 // anonVolumeName is the project-namespaced name for an anonymous volume, derived
 // from the service and in-container path so it stays stable across re-ups.
+//
+// The path's characters other than letters, digits, `_` and `-` are written
+// `_`: container 1.4.1 creates only volume names matching
+// `^[A-Za-z0-9][A-Za-z0-9_.-]*$`, and a path holding `+`, `@` or `é` used to
+// give a name `up` failed on (`invalid volume name`). A path of letters, digits,
+// `_`, `-`, `/`, `.` and spaces gets the name it always had (those three were
+// already written `_`), so an existing volume is still found.
+//
+// A name longer than runtime.MaxVolumeNameLen keeps the start of the path and
+// loses the rest: container 1.4.1 refuses a longer name, so `up` failed on it
+// (docker names an anonymous volume itself and runs the same file). The hash
+// is of the whole path, so two paths that differ only past the cut still get
+// different names. A name that fits is left as it was.
 func (o *Orchestrator) anonVolumeName(svcName, target string) string {
-	san := strings.NewReplacer("/", "_", ".", "_", " ", "_").Replace(strings.Trim(target, "/"))
+	san := anonVolumePathOutside.ReplaceAllString(strings.Trim(target, "/"), "_")
 	// A hash of the exact path makes the name deterministic (re-up reuses the same
 	// volume) yet collision-proof: paths that sanitize alike (`/a/b` vs `/a.b`)
 	// stay distinct, and the suffix keeps anonymous names from ever coinciding
 	// with a project-namespaced named volume (#123).
 	h := fnv.New32a()
 	h.Write([]byte(target))
-	return fmt.Sprintf("%s_%s_%s_%08x", o.Project.Name, svcName, san, h.Sum32())
+	prefix := o.Project.Name + "_" + svcName + "_"
+	suffix := fmt.Sprintf("_%08x", h.Sum32())
+	if over := len(prefix) + len(san) + len(suffix) - runtime.MaxVolumeNameLen; over > 0 {
+		san = san[:max(len(san)-over, 0)]
+	}
+	return prefix + san + suffix
+}
+
+// anonVolumePathOutside is what anonVolumeName writes `_` for.
+var anonVolumePathOutside = regexp.MustCompile(`[^A-Za-z0-9_-]`)
+
+// tmpfsDefaults are the options docker puts on every tmpfs mount before the
+// ones the file writes.
+const tmpfsDefaults = "nosuid,nodev,noexec"
+
+// tmpfsMounts gives each tmpfs mount docker's default options: `/t` becomes
+// `/t:nosuid,nodev,noexec`, and `/t:exec,mode=700` becomes
+// `/t:nosuid,nodev,noexec,exec,mode=700`. Put first, the defaults give way to an
+// `exec`, `suid` or `dev` the file writes, since the later of two such options
+// wins — in the docker engine and in container 1.4.1 alike. Measured with the
+// options spelled these ways (none, `ro`, `rw`, each of `exec`/`suid`/`dev`,
+// `exec,suid,dev`, `mode=`, `size=`, `noexec,exec` and `exec,noexec`): the mount
+// options, whether a file in the mount runs and whether a device node in it
+// opens were the same on the docker engine 29.7.2 with the options as written
+// and on container 1.4.1 with the defaults put first. The options are split
+// from the target at the first `:`, as an option may hold one (`mpol=bind:0`). Without them a file in a tmpfs mount ran under
+// opossum that docker refuses to run.
+//
+// A `defaults` option is dropped: the docker engine 29.7.2 reads it as nothing
+// wherever it stands (`/t:defaults,exec` mounts as `/t:exec`), where container
+// 1.4.1 fails the mount with errno 22 (`data=defaults`). Only the lower-case
+// word: the engine refuses `DEFAULTS` as an invalid tmpfs option.
+func tmpfsMounts(mounts []string) []string {
+	var out []string
+	for _, m := range mounts {
+		target, opts, _ := strings.Cut(m, ":")
+		kept := []string{tmpfsDefaults}
+		if opts != "" {
+			for _, o := range strings.Split(opts, ",") {
+				if o != "defaults" {
+					kept = append(kept, o)
+				}
+			}
+		}
+		out = append(out, target+":"+strings.Join(kept, ","))
+	}
+	return out
 }
 
 // warnForeignPostgresDataVolume warns, before a Postgres service starts, that its
