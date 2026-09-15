@@ -349,9 +349,11 @@ func doctorCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			rt := runtime.New()
 			rt.Verbose = verbose
-			// A compose file is optional — it only enables the memory estimate.
+			// A compose file is optional — it only enables the memory estimate,
+			// which two mounts at one target do not change: the project is read
+			// without refusing them (the commands that start it refuse them).
 			var proj *compose.Project
-			if o, err := loadOrchestrator(io.Discard); err == nil {
+			if o, err := loadOrchestratorWith(io.Discard); err == nil {
 				proj = o.Project
 			}
 			var healthy bool
@@ -400,8 +402,17 @@ func startCmd() *cobra.Command {
 
 func killCmd() *cobra.Command {
 	var signal string
-	cmd := servicesCmd("kill [service...]", "Send a signal (default KILL) to running services",
-		func(o *orchestrator.Orchestrator, args []string) error { return o.Kill(args, signal) })
+	cmd := &cobra.Command{
+		Use:   "kill [service...]",
+		Short: "Send a signal (default KILL) to running services",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			o, err := loadOrchestratorToTakeDown(cmd.OutOrStdout(), cmd.ErrOrStderr())
+			if err != nil {
+				return err
+			}
+			return o.Kill(args, signal)
+		},
+	}
 	cmd.Flags().StringVarP(&signal, "signal", "s", "", "signal to send (default KILL)")
 	return cmd
 }
@@ -417,6 +428,11 @@ func runCLI(args []string, out, errOut io.Writer) int {
 	root.SetErr(errOut)
 	root.SetArgs(args)
 	if err := root.Execute(); err != nil {
+		// A Ctrl-C that ended the command is said by the shell, not here:
+		// docker compose exits 130 and prints nothing.
+		if errors.Is(err, orchestrator.ErrInterrupted) {
+			return 130
+		}
 		fmt.Fprintln(errOut, "opossum: "+quoted(err.Error()))
 		// `run` and `exec` exit with the container's own code, as docker
 		// compose does; every other failure is opossum's and exits 1.
@@ -497,11 +513,19 @@ func upCmd() *cobra.Command {
 			// `profiles:`-gated services start. Before the overlay is planned,
 			// because the plan looks only at the services this run would start
 			// — and again after a reload, which begins from a fresh orchestrator.
-			enableProfiles := func(o *orchestrator.Orchestrator) {
+			enableProfiles := func(o *orchestrator.Orchestrator) error {
 				o.EnableProfiles(profiles)
 				o.EnableProfiles(strings.Split(os.Getenv("COMPOSE_PROFILES"), ","))
+				// The services the profiles enabled are checked for mounts docker
+				// compose refuses, as the whole project was when it was loaded.
+				if err := o.CheckMounts(); err != nil {
+					return mountRefusal(err)
+				}
+				return nil
 			}
-			enableProfiles(o)
+			if err := enableProfiles(o); err != nil {
+				return err
+			}
 			if fromDocker {
 				reloaded, err := adaptProject(cmd.ErrOrStderr(), o, dryRun, args, profiles)
 				if err != nil {
@@ -509,7 +533,9 @@ func upCmd() *cobra.Command {
 				}
 				if reloaded != nil {
 					o = reloaded
-					enableProfiles(o)
+					if err := enableProfiles(o); err != nil {
+						return err
+					}
 				}
 			}
 			o.SetUpOptions(forceRecreate, build, noBuild, removeOrphans, fromDocker)
@@ -608,7 +634,7 @@ func downCmd() *cobra.Command {
 				}
 				orchestrator.ClearWatched(name)
 			}
-			o, err := loadOrchestrator(cmd.OutOrStdout())
+			o, err := loadOrchestratorToTakeDown(cmd.OutOrStdout(), cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -665,7 +691,7 @@ func destroyCmd() *cobra.Command {
 			"global --file.)",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			o, err := loadOrchestrator(cmd.OutOrStdout())
+			o, err := loadOrchestratorToTakeDown(cmd.OutOrStdout(), cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -1014,6 +1040,9 @@ func configCmd() *cobra.Command {
 			// profile is active (docker compose parity).
 			o.EnableProfiles(profiles)
 			o.EnableProfiles(strings.Split(os.Getenv("COMPOSE_PROFILES"), ","))
+			if err := o.CheckMounts(); err != nil {
+				return mountRefusal(err)
+			}
 			// Reject the same projects `up` would (an enabled service depending on a
 			// gated-inactive one), rather than printing a dangling reference.
 			if err := o.ValidateProfiles(); err != nil {
@@ -1103,6 +1132,9 @@ func runCmd() *cobra.Command {
 			}
 			o.EnableProfiles(profiles)
 			o.EnableProfiles(strings.Split(os.Getenv("COMPOSE_PROFILES"), ","))
+			if err := o.CheckMounts(); err != nil {
+				return mountRefusal(err)
+			}
 			// Same shape as `up`: the first Ctrl-C cancels the run so the one-off's
 			// container is stopped and the interruption reported (without this the
 			// process just died of the signal and the container kept running); a
@@ -1190,7 +1222,7 @@ func stopCmd() *cobra.Command {
 		Use:   "stop [service...]",
 		Short: "Stop services without removing them (all, or the named services)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			o, err := loadOrchestrator(cmd.OutOrStdout())
+			o, err := loadOrchestratorToTakeDown(cmd.OutOrStdout(), cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -1214,7 +1246,7 @@ func restartCmd() *cobra.Command {
 }
 
 func logsCmd() *cobra.Command {
-	var follow bool
+	var follow, noLogPrefix bool
 	var tail int
 	cmd := &cobra.Command{
 		Use:   "logs [service...]",
@@ -1224,11 +1256,12 @@ func logsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return o.Logs(args, runtime.LogsOptions{Follow: follow, Tail: tail})
+			return o.Logs(args, runtime.LogsOptions{Follow: follow, Tail: tail, NoLogPrefix: noLogPrefix})
 		},
 	}
 	// No -f shorthand: the root reserves -f for --file.
-	cmd.Flags().BoolVar(&follow, "follow", false, "follow log output (several services are multiplexed, each line prefixed with its name)")
+	cmd.Flags().BoolVar(&follow, "follow", false, "follow log output (several services are multiplexed)")
+	cmd.Flags().BoolVar(&noLogPrefix, "no-log-prefix", false, "print each line as the container wrote it, without the service prefix (web-1  | )")
 	cmd.Flags().IntVarP(&tail, "tail", "n", 0, "number of lines to show from the end of the logs (0 = all)")
 	return cmd
 }
@@ -1518,6 +1551,23 @@ func reloadWith(stderr io.Writer, o *orchestrator.Orchestrator, body string) (*o
 }
 
 func loadOrchestrator(out io.Writer) (*orchestrator.Orchestrator, error) {
+	o, err := loadOrchestratorWith(out)
+	if err != nil {
+		return nil, err
+	}
+	// What docker compose refuses for every command — two mounts at one
+	// target in a service no profile gates — is refused here, before any
+	// command runs; the commands that activate profiles ask again for the
+	// services those enable.
+	if err := o.CheckMounts(); err != nil {
+		return nil, mountRefusal(err)
+	}
+	return o, nil
+}
+
+// loadOrchestratorWith reads the project the way every command does, and
+// checks nothing about it that a command may want to decide for itself.
+func loadOrchestratorWith(out io.Writer) (*orchestrator.Orchestrator, error) {
 	files := composeFiles
 	if len(files) == 0 {
 		// No -f: discover a standard compose file, plus its override if present
@@ -1559,6 +1609,33 @@ func loadOrchestrator(out io.Writer) (*orchestrator.Orchestrator, error) {
 	rt := runtime.New()
 	rt.Verbose = verbose
 	return orchestrator.New(proj, rt, dnsDomain, out), nil
+}
+
+// loadOrchestratorToTakeDown is loadOrchestrator for the commands that stop
+// or remove what is running (`down`, `destroy`, `stop`, `kill`): the mounts
+// docker compose refuses are named on stderr and the command goes on. docker
+// compose refuses them in these commands too, but it never started such a
+// project; an earlier opossum passed the pair on to the runtime and did, and
+// refusing here would leave that project with no way down but `container
+// delete` by hand.
+func loadOrchestratorToTakeDown(out, stderr io.Writer) (*orchestrator.Orchestrator, error) {
+	o, err := loadOrchestratorWith(out)
+	if err != nil {
+		return nil, err
+	}
+	if err := o.CheckMounts(); err != nil {
+		for _, line := range strings.Split(err.Error(), "\n") {
+			fmt.Fprintf(stderr, "opossum: %s — `up` refuses this compose file; going on, as an earlier opossum may have started it\n", orchestrator.OneLine(line))
+		}
+	}
+	return o, nil
+}
+
+// mountRefusal is CheckMounts' refusal with the way out a reader needs: the
+// compose file is what to change, and a project an earlier opossum started
+// from it still comes down.
+func mountRefusal(err error) error {
+	return fmt.Errorf("%w\n  change the compose file so each container path is mounted once; `opossum down` (with the same -f, -p and --env-file) still takes down what an earlier opossum started from it", err)
 }
 
 // entryLine prints one adaptation as opossum's own line. The summary carries
@@ -1821,6 +1898,9 @@ func superviseCmd() *cobra.Command {
 			}
 			o.EnableProfiles(profiles)
 			o.EnableProfiles(strings.Split(os.Getenv("COMPOSE_PROFILES"), ","))
+			if err := o.CheckMounts(); err != nil {
+				return mountRefusal(err)
+			}
 			// The set is decided by the `up` that started this watcher and handed
 			// over here — what it started plus what was already watched and still
 			// exists. Re-deriving it from the compose file would put services nobody

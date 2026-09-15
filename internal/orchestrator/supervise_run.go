@@ -154,11 +154,21 @@ func (o *Orchestrator) superviseAt(now time.Time, policies map[string]compose.Re
 		// being this project's, unlabeled or gone; not again for an inspect that
 		// went unanswered in between. Read from the same inspect as the state, so
 		// the owner and the state agree.
-		if owner := info.Labels[projectLabel]; info.Exists && owner != "" && owner != o.Project.Name {
-			if st.foreign != owner {
-				logf("[%s] leaving %q alone: its container %s belongs to project %q, not this one", codeSupervisorAction, name, cname, owner)
+		// A container of the name with no project label at all was made outside
+		// opossum, and is left alone the same way.
+		if owner := info.Labels[projectLabel]; info.Exists && owner != o.Project.Name {
+			seen := "project " + owner
+			if owner == "" {
+				seen = "no label"
 			}
-			st.foreign = owner
+			if st.foreign != seen {
+				if owner == "" {
+					logf("[%s] leaving %q alone: its container %s carries no %s label, so it was not made by this project", codeSupervisorAction, name, cname, projectLabel)
+				} else {
+					logf("[%s] leaving %q alone: its container %s belongs to project %q, not this one", codeSupervisorAction, name, cname, owner)
+				}
+			}
+			st.foreign = seen
 			state[name] = st
 			continue
 		}
@@ -241,13 +251,13 @@ func (o *Orchestrator) stopMarkerPath(service string) (string, error) {
 	return filepath.Join(dir, "stopped-"+hex.EncodeToString(sum[:8])), nil
 }
 
-// MarkStopped notes that `opossum stop` (or `down`) took this service down.
+// MarkStopped notes that `opossum stop` or `kill` took this service down.
 // A failed write is reported: silently losing the marker means the supervisor
 // fights the stop the user just asked for, which is worse than a warning.
 func (o *Orchestrator) MarkStopped(service string) {
 	warn := func(err error) {
-		o.warnf(codeSupervisorAction, "couldn't record that %q was stopped (%v) — "+
-			"the supervisor may restart it\n", service, err)
+		o.warnf(codeSupervisorAction, "couldn't record that %q was stopped or killed on purpose (%v) — "+
+			"the supervisor may restart it when it exits\n", service, err)
 	}
 	path, err := o.stopMarkerPath(service)
 	if err != nil {

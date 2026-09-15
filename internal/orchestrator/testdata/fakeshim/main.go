@@ -5,7 +5,7 @@
 //
 // It logs each invocation's arguments (space-joined) to $FAKE_LOG and returns
 // output shaped like the real CLI. Behaviour is steered entirely through the
-// environment (FAKE_LOG, STATE_DIR, DELETE_STICKY, STOP_FAIL, INSPECT_STATE, INSPECT_STOPPED, INSPECT_OWNER, INSPECT_FAIL, INSPECT_FAIL_ONCE_STOP_ASKED, INSPECT_FAIL_ONCE_GONE, INSPECT_FAIL_ONCE_GONE_ALL,
+// environment (FAKE_LOG, STATE_DIR, DELETE_STICKY, STOP_FAIL, INSPECT_STATE, INSPECT_STOPPED, INSPECT_OWNER, INSPECT_FAIL, LOGS_FAIL, STATS_FAIL, INSPECT_FAIL_ONCE_STOP_ASKED, INSPECT_FAIL_ONCE_GONE, INSPECT_FAIL_ONCE_GONE_ALL,
 // INSPECT_ABSENT, NET_EXISTS, NET_CREATE_{HANG,FAIL}, NETWORK_ABSENT, BUILD_{HANG,FAIL}, RUN_FAIL,
 // RUN_HANG, RUN_DIE_SIGNAL, RUN_EXISTS[_WORDING|_HASH], RUN_EXISTS_ANY, HEALTH_*,
 // VOLUME_*, LS_*,
@@ -19,8 +19,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -181,6 +183,27 @@ func run(args []string) int {
 		for _, pair := range strings.Fields(os.Getenv("INSPECT_OWNER")) {
 			if name, p, ok := strings.Cut(pair, "="); ok && name == arg(1) {
 				project = p
+			}
+		}
+		// Otherwise the label an earlier run of the name carried, if one was run.
+		// $INSPECT_PROJECT_FROM_NAME: a container never run here, named
+		// <service>.<project>.<domain>, carries that project's label, as every
+		// container opossum makes does. $INSPECT_UNLABELED names containers that
+		// carry no label at all.
+		recorded := false
+		if dir := os.Getenv("STATE_DIR"); project == "" && dir != "" {
+			if b, err := os.ReadFile(filepath.Join(dir, arg(1)+".project")); err == nil {
+				project, recorded = string(b), true
+			}
+		}
+		if project == "" && !recorded && os.Getenv("INSPECT_PROJECT_FROM_NAME") != "" {
+			if parts := strings.Split(arg(1), "."); len(parts) >= 3 {
+				project = parts[len(parts)-2]
+			}
+		}
+		for _, m := range strings.Fields(os.Getenv("INSPECT_UNLABELED")) {
+			if arg(1) == m {
+				project = ""
 			}
 		}
 		if project != "" {
@@ -393,6 +416,20 @@ func run(args []string) int {
 			}
 			if cname != "" && chash != "" {
 				os.WriteFile(filepath.Join(dir, cname+".hash"), []byte(chash), 0o644)
+			}
+			// Record the project label the run carried (empty for a run without
+			// one), so a later inspect reports what the container was made with.
+			// `-l` is the spelling opossum passes; `--label` is the long one.
+			if cname != "" {
+				var proj string
+				for i, a := range args {
+					if i > 0 && (args[i-1] == "-l" || args[i-1] == "--label") {
+						if v, ok := strings.CutPrefix(a, "opossum.project="); ok {
+							proj = v
+						}
+					}
+				}
+				os.WriteFile(filepath.Join(dir, cname+".project"), []byte(proj), 0o644)
 			}
 			// Record what was actually published, so a later inspect reports the
 			// real mapping. Without this the fake always claims 8080:8080 and no
@@ -634,7 +671,49 @@ func run(args []string) int {
 		if len(args) > 0 {
 			last = args[len(args)-1]
 		}
-		fmt.Printf("log-line %s\n", last)
+		// $LOGS_FAIL names containers whose logs cannot be read: the real CLI
+		// prints an error and exits 1.
+		if slices.Contains(strings.Fields(os.Getenv("LOGS_FAIL")), last) {
+			fmt.Fprintf(os.Stderr, "Error: failed to get logs for container %s\n", last)
+			return 1
+		}
+		// $LOGS_TEXT is what every container's logs hold, written as is
+		// ({name} is the container): several lines, a blank one, a last one
+		// without its newline. The real CLI writes a container's stdout and
+		// stderr lines alike to its own stdout (container 1.4.1, measured).
+		// While the stream is open the real CLI catches SIGINT and SIGTERM and
+		// exits 130 and 143 of its own (container 1.4.1); caught before the
+		// first line, so a signal after it is answered the same way.
+		caught := make(chan os.Signal, 1)
+		signal.Notify(caught, syscall.SIGINT, syscall.SIGTERM)
+		if text, ok := os.LookupEnv("LOGS_TEXT"); ok {
+			fmt.Print(strings.ReplaceAll(text, "{name}", last))
+		} else {
+			fmt.Printf("log-line %s\n", last)
+		}
+		// $LOGS_SLEEP keeps the stream open that many seconds after the lines,
+		// as `container logs -f` stays open, or as a long read of a large log
+		// does without -f (the real CLI without -f ends once the log is read).
+		if n, err := strconv.Atoi(os.Getenv("LOGS_SLEEP")); err == nil {
+			// $LOGS_SELF_INT=<ms> streams that long after the lines, then writes
+			// `self-int` and sends this process the SIGINT a terminal's Ctrl-C
+			// gives the runtime: the stream ends as the real CLI ends it, 130
+			// with -f or without (the contract in internal/shimcontract), before
+			// the caller has been told anything. The line tells a test when.
+			if ms, err := strconv.Atoi(os.Getenv("LOGS_SELF_INT")); err == nil {
+				time.Sleep(time.Duration(ms) * time.Millisecond)
+				fmt.Println("self-int")
+				syscall.Kill(os.Getpid(), syscall.SIGINT)
+			}
+			select {
+			case sig := <-caught:
+				if sig == syscall.SIGINT {
+					return 130
+				}
+				return 143
+			case <-time.After(time.Duration(n) * time.Second):
+			}
+		}
 
 	case "ls":
 		// $CONTAINER_LS is a whole `ls -a --format json` document, for a test that
@@ -656,9 +735,21 @@ func run(args []string) int {
 		for _, n := range strings.Fields(os.Getenv("LS_FOREIGN")) {
 			items = append(items, fmt.Sprintf(`{"status":{"state":"running"},"configuration":{"id":"%s","labels":{"opossum.project":"otherproj"}}}`, n))
 		}
+		// $LS_UNLABELED lists containers with no project label at all (made
+		// outside opossum).
+		for _, n := range strings.Fields(os.Getenv("LS_UNLABELED")) {
+			items = append(items, fmt.Sprintf(`{"status":{"state":"running"},"configuration":{"id":"%s","labels":{}}}`, n))
+		}
 		fmt.Printf("[%s]", strings.Join(items, ","))
 
 	case "stats":
+		// $STATS_FAIL=1 makes every `stats` call fail on stderr with exit 1, in
+		// the words container 1.4.1 uses for a name it does not know (the one
+		// failure of `stats` recorded in testdata/real-cli-output.md).
+		if os.Getenv("STATS_FAIL") == "1" {
+			fmt.Fprintln(os.Stderr, "Error: no such container: "+strings.Join(args[1:], " "))
+			return 1
+		}
 		// `stats --no-stream --format json <names…>` returns a guest-view JSON
 		// array, one entry per named container (echoing the id back so callers can
 		// join it to a service). The streaming form (no --format json) just logs.

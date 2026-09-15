@@ -354,7 +354,8 @@ func TestARefusedRunIsToldToRunAgain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	o := New(p, &rt.Runtime{Bin: shim}, "", &bytes.Buffer{})
+	// No one-off of the name is there yet.
+	o := New(p, &rt.Runtime{Bin: shim, Env: []string{"INSPECT_ABSENT=svc-run"}}, "", &bytes.Buffer{})
 	err = o.RunOneOff("svc", []string{"/bin/true"}, RunOneOffOptions{})
 	if err == nil {
 		t.Fatal("the bind source cannot be made, so the run must refuse — nothing was measured")
@@ -387,7 +388,8 @@ func TestARefusedUpIsToldToUpAgain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	o := New(p, &rt.Runtime{Bin: shim}, "", &bytes.Buffer{})
+	// No container of the name is there yet.
+	o := New(p, &rt.Runtime{Bin: shim, Env: []string{"INSPECT_ABSENT=svc"}}, "", &bytes.Buffer{})
 	err = o.Up(true)
 	if err == nil {
 		t.Fatal("the bind source cannot be made, so the up must refuse — nothing was measured")

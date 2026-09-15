@@ -141,7 +141,12 @@ func TestWatchSyncFailureNamesFileAndService(t *testing.T) {
 func TestWatchSaysAnOwnerRefusalWithoutFailureAdvice(t *testing.T) {
 	foreign := `  inspect) echo '[{"status":{"state":"running"},"configuration":{"id":"app.demo.opossum","labels":{"opossum.project":"otherproj"}}}]' ;;` + "\n"
 	unreadable := "  inspect) echo 'boom' >&2; exit 2 ;;\n"
+	noLabel := `  inspect) echo '[{"status":{"state":"running"},"configuration":{"id":"app.demo.opossum","labels":{}}}]' ;;` + "\n"
 	sync := func(dir string) string { return "sync of " + dir + "/components/x.js to app:/app/src/components/x.js" }
+	syncNoLabel := func(dir string) string {
+		return "warning: [OPSM-603] " + sync(dir) + ` skipped: container "app.demo.opossum" already exists and carries no opossum.project label, so it was not made by this project and is left alone; ` +
+			"remove it (`container delete --force app.demo.opossum`) to free the name, or give this project its own DNS domain (e.g. --dns-domain demo)"
+	}
 	syncUnanswered := func(dir string) string {
 		return "warning: [OPSM-603] " + sync(dir) + " skipped: the runtime gave no readable answer about which project owns app.demo.opossum, so it was left alone — " +
 			"`container inspect app.demo.opossum` shows what the runtime says; save " + dir + "/components/x.js again once it answers"
@@ -167,6 +172,12 @@ func TestWatchSaysAnOwnerRefusalWithoutFailureAdvice(t *testing.T) {
 			return []string{"warning: [OPSM-603] " + sync(dir) + ` skipped: container "app.demo.opossum" is already in use by project "otherproj"; ` +
 				"give this project its own DNS domain so names don't collide (e.g. --dns-domain demo, created once with `sudo container system dns create demo`) — see README (multi-project)"}
 		}, `Leaving container app.demo.opossum alone: it belongs to project "otherproj"`},
+		// A container with no project label is refused the way another project's
+		// is — its own reason, not "no readable answer" (which would say to save
+		// again once the runtime answers, when it has answered).
+		{"sync to a container with no project label", "sync", noLabel, func(dir string) []string { return []string{syncNoLabel(dir)} }, ""},
+		{"sync and restart with a container with no project label", "sync+restart", noLabel, func(dir string) []string { return []string{syncNoLabel(dir)} },
+			"Leaving container app.demo.opossum alone: it carries no opossum.project label"},
 		{"a copy that fails keeps its advice", "sync", "  cp) exit 1 ;;\n", func(dir string) []string {
 			return []string{"warning: [OPSM-603] " + sync(dir) + " failed: …— check the container \"app\" is running (`opossum ps`)"}
 		}, ""},

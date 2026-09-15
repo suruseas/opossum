@@ -269,7 +269,7 @@ func superviseShimStartFails(t *testing.T, state string) (*rt.Runtime, func() st
 	log := filepath.Join(dir, "calls.log")
 	shim := filepath.Join(dir, "c.sh")
 	body := fmt.Sprintf("#!/bin/sh\necho \"$@\" >> %s\ncase \"$1\" in\n"+
-		"  inspect) echo '[{\"status\":{\"state\":\"%s\"},\"configuration\":{\"labels\":{}}}]' ;;\n"+
+		"  inspect) echo '[{\"status\":{\"state\":\"%s\"},\"configuration\":{\"labels\":{\"opossum.project\":\"demo\"}}}]' ;;\n"+
 		"  system) echo 'status running' ;;\n"+
 		"  start) echo 'Error: no such container' >&2; exit 1 ;;\nesac\nexit 0\n", log, state)
 	if err := os.WriteFile(shim, []byte(body), 0o755); err != nil {

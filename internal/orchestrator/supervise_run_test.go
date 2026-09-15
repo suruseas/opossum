@@ -23,7 +23,7 @@ func superviseShim(t *testing.T, state string) (*runtime.Runtime, func() string)
 	log := filepath.Join(dir, "calls.log")
 	shim := filepath.Join(dir, "c.sh")
 	body := fmt.Sprintf("#!/bin/sh\necho \"$@\" >> %s\ncase \"$1\" in\n"+
-		"  inspect) echo '[{\"status\":{\"state\":\"%s\"},\"configuration\":{\"labels\":{}}}]' ;;\n"+
+		"  inspect) echo '[{\"status\":{\"state\":\"%s\"},\"configuration\":{\"labels\":{\"opossum.project\":\"demo\"}}}]' ;;\n"+
 		"  system) echo 'status running' ;;\nesac\nexit 0\n", log, state)
 	if err := os.WriteFile(shim, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
@@ -155,7 +155,7 @@ func countingShim(t *testing.T, state *string) (*runtime.Runtime, func() int) {
 	statef := filepath.Join(dir, "state")
 	shim := filepath.Join(dir, "c.sh")
 	body := fmt.Sprintf("#!/bin/sh\necho \"$@\" >> %s\ncase \"$1\" in\n"+
-		"  inspect) printf '[{\"status\":{\"state\":\"%%s\"},\"configuration\":{\"labels\":{}}}]' \"$(cat %s)\" ;;\n"+
+		"  inspect) printf '[{\"status\":{\"state\":\"%%s\"},\"configuration\":{\"labels\":{\"opossum.project\":\"demo\"}}}]' \"$(cat %s)\" ;;\n"+
 		"  system) echo 'status running' ;;\nesac\nexit 0\n", log, statef)
 	if err := os.WriteFile(shim, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
@@ -256,7 +256,7 @@ func TestSuperviseHonoursAStopThatIsStillSettling(t *testing.T) {
 	log := filepath.Join(dir, "calls.log")
 	shim := filepath.Join(dir, "c.sh")
 	body := fmt.Sprintf("#!/bin/sh\necho \"$@\" >> %s\ncase \"$1\" in\n"+
-		"  inspect) printf '[{\"status\":{\"state\":\"%%s\"},\"configuration\":{\"labels\":{}}}]' \"$(cat %s)\" ;;\n"+
+		"  inspect) printf '[{\"status\":{\"state\":\"%%s\"},\"configuration\":{\"labels\":{\"opossum.project\":\"demo\"}}}]' \"$(cat %s)\" ;;\n"+
 		"esac\nexit 0\n", log, statef)
 	if err := os.WriteFile(shim, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
@@ -283,6 +283,66 @@ func TestSuperviseHonoursAStopThatIsStillSettling(t *testing.T) {
 	b, _ = os.ReadFile(log)
 	if !strings.Contains(string(b), "start web.demo.opossum") {
 		t.Errorf("after the stop is cleared it should be supervised again, calls:\n%s", b)
+	}
+}
+
+// A service `kill` stopped is not brought back by the supervisor, whatever the
+// signal, as docker compose v5.5.0 does not restart a container `kill` stopped
+// under `restart: always` (measured: SIGKILL, and TERM to a container that
+// exits on it, both stay exited; one that exits from inside is restarted). The
+// record is on disk before the signal is sent, and `start` resumes supervision.
+func TestSuperviseLeavesAKilledServiceStopped(t *testing.T) {
+	for _, signal := range []string{"", "TERM", "HUP"} {
+		t.Run("signal "+signal, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			dir := t.TempDir()
+			statef := filepath.Join(dir, "state")
+			log := filepath.Join(dir, "calls.log")
+			shim := filepath.Join(dir, "c.sh")
+			o := New(superviseProject(t, "always"), nil, "opossum", os.Stderr)
+			marker, err := o.stopMarkerPath("web")
+			if err != nil {
+				t.Fatal(err)
+			}
+			// On `kill`, the shim logs whether the record was already on disk.
+			body := fmt.Sprintf("#!/bin/sh\necho \"$@\" >> %s\ncase \"$1\" in\n"+
+				"  kill) if [ -e %s ]; then echo recorded-before-signal >> %s; fi ;;\n"+
+				"  inspect) printf '[{\"status\":{\"state\":\"%%s\"},\"configuration\":{\"labels\":{\"opossum.project\":\"demo\"}}}]' \"$(cat %s)\" ;;\n"+
+				"  system) echo 'status running' ;;\n"+
+				"esac\nexit 0\n", log, marker, log, statef)
+			if err := os.WriteFile(shim, []byte(body), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			os.WriteFile(statef, []byte("running"), 0o644)
+			o.rt = &runtime.Runtime{Bin: shim}
+
+			if err := o.Kill(nil, signal); err != nil {
+				t.Fatalf("kill: %v", err)
+			}
+			b, _ := os.ReadFile(log)
+			if !strings.Contains(string(b), "recorded-before-signal") {
+				t.Fatalf("the stop must be recorded before the signal is sent, calls:\n%s", b)
+			}
+			// The container ends — at once, or later on its own after a signal
+			// it did not end on — and the supervisor polls.
+			os.WriteFile(statef, []byte("stopped"), 0o644)
+			pols := map[string]compose.RestartPolicy{"web": pol(t, "always")}
+			state := map[string]serviceState{}
+			now := time.Now()
+			o.superviseAt(now, pols, state, func(string, ...interface{}) {})
+			o.superviseAt(now.Add(10*pollInterval), pols, state, func(string, ...interface{}) {})
+			b, _ = os.ReadFile(log)
+			if strings.Contains(string(b), "start web.demo.opossum") {
+				t.Errorf("a killed service must not be restarted, calls:\n%s", b)
+			}
+			// `start` says bring it back: supervision resumes.
+			if err := o.Start(nil); err != nil {
+				t.Fatalf("start: %v", err)
+			}
+			if o.wasStoppedByUs("web") {
+				t.Error("start should clear the record of the kill")
+			}
+		})
 	}
 }
 
@@ -327,7 +387,7 @@ func TestSuperviseAbsorbsAStartupRace(t *testing.T) {
 	// The container is stopped (it lost the race). A `start` flips it to running,
 	// the way a real second attempt would once the database is up.
 	body := fmt.Sprintf("#!/bin/sh\necho \"$@\" >> %s\ncase \"$1\" in\n"+
-		"  inspect) printf '[{\"status\":{\"state\":\"%%s\"},\"configuration\":{\"labels\":{}}}]' \"$(cat %s)\" ;;\n"+
+		"  inspect) printf '[{\"status\":{\"state\":\"%%s\"},\"configuration\":{\"labels\":{\"opossum.project\":\"demo\"}}}]' \"$(cat %s)\" ;;\n"+
 		"  start) echo running > %s ;;\nesac\nexit 0\n", log, statef, statef)
 	if err := os.WriteFile(shim, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
@@ -444,7 +504,7 @@ case "$1" in
     n=$(echo "$2" | cut -d. -f1)
     if [ -e "$d/unknown-$n" ]; then echo 'Error: apiserver is not running and not registered with launchd' >&2; exit 1; fi
     st=stopped; [ -e "$d/state-$n" ] && st=$(cat "$d/state-$n")
-    echo "[{\"status\":{\"state\":\"$st\"},\"configuration\":{\"labels\":{}}}]" ;;
+    echo "[{\"status\":{\"state\":\"$st\"},\"configuration\":{\"labels\":{\"opossum.project\":\"demo\"}}}]" ;;
   system)
     echo x >> "$d/system.log"
     if [ -e "$d/runtime-down" ]; then echo '{"status":"unregistered"}'; exit 1; fi

@@ -245,6 +245,7 @@ func TestAnAnonymousVolumeWithNoRoomLeftIsRefused(t *testing.T) {
 	for _, path := range []string{"up", "run"} {
 		t.Run(path, func(t *testing.T) {
 			rt, log := fakeShim(t)
+			setShimEnv(rt, "INSPECT_PROJECT="+long) // names without a DNS domain: the fake cannot read the project from them
 			proj := project(long, map[string]*compose.Service{"web": {Image: "alpine:3.20", NetworkMode: compose.NetworkModeNone, Volumes: compose.Volumes{"/data"}}})
 			o := orchestrator.New(proj, rt, "", &bytes.Buffer{})
 			var err error
@@ -265,6 +266,7 @@ func TestAnAnonymousVolumeWithNoRoomLeftIsRefused(t *testing.T) {
 	}
 	t.Run("one character shorter goes ahead", func(t *testing.T) {
 		rt, log := fakeShim(t)
+		setShimEnv(rt, "INSPECT_PROJECT="+long[1:]) // names without a DNS domain: the fake cannot read the project from them
 		proj := project(long[1:], map[string]*compose.Service{"web": {Image: "alpine:3.20", NetworkMode: compose.NetworkModeNone, Volumes: compose.Volumes{"/data"}}})
 		if err := orchestrator.New(proj, rt, "", &bytes.Buffer{}).Up(true); err != nil || runLine(log()) < 0 {
 			t.Errorf("want it run, got err %v and %v", err, log())

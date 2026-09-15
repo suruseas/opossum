@@ -77,6 +77,7 @@ func TestAContainerNameLongerThanTheRuntimeTakesIsRefusedBeforeCreating(t *testi
 			t.Run(tc.name+"/"+path, func(t *testing.T) {
 				rt, log := fakeShim(t)
 				o := orchestrator.New(tc.project(), rt, tc.domain, &bytes.Buffer{})
+				setShimEnv(rt, "INSPECT_PROJECT="+o.Project.Name) // names without a DNS domain: the fake cannot read the project from them
 				opts := orchestrator.RunOneOffOptions{NoDeps: strings.HasSuffix(path, "--no-deps")}
 				var err error
 				switch {

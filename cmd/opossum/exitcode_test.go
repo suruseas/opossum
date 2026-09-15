@@ -90,6 +90,7 @@ services:
 			cmd.Dir = dir
 			cmd.Env = append(append(os.Environ(),
 				"OPOSSUM_CONTAINER_BIN="+fakeShimBin,
+				"INSPECT_PROJECT_FROM_NAME=1", // the containers opossum made carry their project's label
 				"FAKE_LOG="+logPath,
 				"XDG_STATE_HOME="+t.TempDir(),
 				"OPOSSUM_CRASH_GRACE=0"), tc.env...)

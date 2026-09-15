@@ -751,6 +751,7 @@ README・`docs/compatibility.md`・`docs/troubleshooting.md`・`docs/networking.
 | `system dns create` は再起動をまたいで残る（README「Setup」） | `/etc/resolver/containerization.opossum`（`domain opossum` / `nameserver 127.0.0.1` / `port 2053`）の日付は 6/20、`kern.boottime` は 9/5——再起動後も `system dns ls` に `opossum` が出る | `p9-dns-persist.txt` |
 | `ports: - "3000"`（host 側なし）は runtime が受けない（compat「Published ports」） | `run -p 3000` → `Error: invalid publish value: 3000`・exit 1（コンテナは作られない） | `p10-port.txt` |
 | `logs`/`exec`/`cp` に不在の名前 | いずれも exit 1。`logs`：`failed to get logs for container X (cause: "internalError: "failed to open container logs: notFound: "container with ID X not found""")`／`exec`：`Error: get failed: container X not found`／`cp`（両向き）：`failed to copy from|into container X (cause: "notFound: "container with ID X not found"")` | `p15-absent.txt` |
+| `logs -f` に signal（`internal/shimcontract` の契約の行） | container 1.4.1（2026-09-15）。`container logs -f <name>` を自分の process group に置き、2 秒後に signal を送って wait status を読んだ：SIGINT → `code=130 signal=0`、SIGTERM → `code=143 signal=0`（どちらも捕まえて自分の exit code で終わる）、SIGHUP → `code=0 signal=1`（signal で死ぬ）。`-f` 無しの `logs` は、小さいログではその前に読み終えて exit 0 | perl で fork・setpgrp・waitpid |
 
 **引いていないもの（1.3.1 では unverified のまま）**：macOS 15 での網分離（この Mac は 26）、build の cache 破損／
 resource／disk full の上流文言（表の行 6–8）、ベンチ値・コーパス実測値・Homebrew 手順（実ランタイムの事実ではない）。

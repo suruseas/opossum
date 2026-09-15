@@ -13,11 +13,14 @@ package shimcontract_test
 
 import (
 	"crypto/sha256"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // step is one command and what the real CLI does with it: its exit code, a
@@ -33,6 +36,10 @@ type step struct {
 	rc    int
 	has   string
 	lacks string
+	// signal, when set, is sent to the command once it has written its first
+	// output, and rc is how it then ends: an exit code of its own, or -1 when
+	// the signal ended it.
+	signal syscall.Signal
 }
 
 // A scenario runs its steps in order against one fresh fake with a fresh state
@@ -66,6 +73,39 @@ var contract = []struct {
 		{argv: []string{"inspect", "NAME"}, has: `"state":"running"`},
 		{argv: []string{"delete", "--force", "NAME"}},
 		{argv: []string{"inspect", "NAME"}, rc: 1, has: "container not found: NAME"},
+	}},
+	// The project label is what the run gave the container, as `-l` (the
+	// spelling opossum passes) or `--label`; a run without one leaves none
+	// (1.4.1: `configuration.labels`, testdata/real-cli-output.md).
+	{"a container carries the project label its run gave it, and none without one", nil, []step{
+		{argv: []string{"run", "-d", "--name", "NAME", "-l", "opossum.project=demo", "alpine"}},
+		{argv: []string{"inspect", "NAME"}, has: `"opossum.project":"demo"`},
+		{argv: []string{"delete", "--force", "NAME"}},
+		{argv: []string{"run", "-d", "--name", "NAME", "--label", "opossum.project=long", "alpine"}},
+		{argv: []string{"inspect", "NAME"}, has: `"opossum.project":"long"`},
+		{argv: []string{"delete", "--force", "NAME"}},
+		{argv: []string{"run", "-d", "--name", "NAME", "alpine"}},
+		{argv: []string{"inspect", "NAME"}, has: `"state":"running"`, lacks: `opossum.project`},
+		{argv: []string{"run", "-d", "--name", "second.demo.opossum", "--label", "opossum.project=other", "alpine"}},
+		{argv: []string{"inspect", "second.demo.opossum"}, has: `"opossum.project":"other"`},
+		{argv: []string{"inspect", "NAME"}, lacks: `opossum.project`},
+	}},
+	// The test knobs: a name never run carries the project its spelling names,
+	// one that was run carries what its run gave it, and $INSPECT_UNLABELED
+	// takes the label away.
+	{"a name never run carries the project its spelling names, a run's label wins", []string{"INSPECT_PROJECT_FROM_NAME=1"}, []step{
+		{argv: []string{"inspect", "NAME"}, has: `"opossum.project":"demo"`},
+		{argv: []string{"inspect", "OTHER"}, has: `"opossum.project":"other"`},
+		{argv: []string{"inspect", "bare"}, has: `"state":"running"`, lacks: `opossum.project`},
+		{argv: []string{"run", "-d", "--name", "NAME", "alpine"}},
+		{argv: []string{"inspect", "NAME"}, has: `"state":"running"`, lacks: `opossum.project`},
+		{argv: []string{"inspect", "OTHER"}, has: `"opossum.project":"other"`},
+	}},
+	{"an unlabeled name carries no label, a run's included", []string{"INSPECT_PROJECT_FROM_NAME=1", "INSPECT_UNLABELED=probe.demo.opossum"}, []step{
+		{argv: []string{"inspect", "NAME"}, has: `"state":"running"`, lacks: `opossum.project`},
+		{argv: []string{"inspect", "OTHER"}, has: `"opossum.project":"other"`},
+		{argv: []string{"run", "-d", "--name", "NAME", "-l", "opossum.project=demo", "alpine"}},
+		{argv: []string{"inspect", "NAME"}, has: `"state":"running"`, lacks: `opossum.project`},
 	}},
 	{"a container that is gone: stop and delete fail, and only then", nil, []step{
 		{argv: []string{"run", "-d", "--name", "NAME", "alpine"}},
@@ -311,6 +351,23 @@ var contract = []struct {
 	}},
 	// The same answers where `[a-z]` would take upper case (en_US.UTF-8 for the
 	// shell fake): the rule must not lean on the locale.
+	// `container logs -f` catches SIGINT and SIGTERM and exits 130 and 143 of
+	// its own; SIGHUP ends it (container 1.4.1, measured: the wait status of
+	// `logs -f` in a process group of its own, `code=130 signal=0`,
+	// `code=143 signal=0`, `code=0 signal=1`). opossum reads how the runtime
+	// ended, so a fake that died of the signal would answer another question.
+	// LOGS_SLEEP keeps the fake's stream open, as the real one stays open.
+	{"logs exits 130 on SIGINT and 143 on SIGTERM, and a SIGHUP ends it", []string{"LOGS_SLEEP=30"}, []step{
+		{argv: []string{"run", "-d", "--name", "NAME", "alpine"}},
+		{argv: []string{"logs", "-f", "NAME"}, signal: syscall.SIGINT, rc: 130},
+		{argv: []string{"logs", "-f", "NAME"}, signal: syscall.SIGTERM, rc: 143},
+		{argv: []string{"logs", "-f", "NAME"}, signal: syscall.SIGHUP, rc: -1},
+		// Without -f too, while the log is still being read (container 1.4.1,
+		// a reader that stalls the pipe: `code=130 signal=0`,
+		// `code=143 signal=0`; the real CLI writes out what it has first).
+		{argv: []string{"logs", "NAME"}, signal: syscall.SIGINT, rc: 130},
+		{argv: []string{"logs", "NAME"}, signal: syscall.SIGTERM, rc: 143},
+	}},
 	{"a network name with upper case is refused in a UTF-8 locale too", []string{"LC_ALL=en_US.UTF-8", "LANG=en_US.UTF-8"}, []step{
 		{argv: []string{"network", "create", "demo-Back"}, rc: 1, has: "Error: invalid network name: demo-Back"},
 		{argv: []string{"network", "create", "Bdemo"}, rc: 1, has: "Error: invalid network name: Bdemo"},
@@ -405,7 +462,13 @@ func TestEveryFakeAnswersTheContract(t *testing.T) {
 					// STATE_DIR of the caller's) must not decide the answer.
 					cmd.Env = append([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME"),
 						"STATE_DIR=" + state, "FAKE_LOG=" + filepath.Join(state, "calls.log")}, sc.env...)
-					out, err := cmd.CombinedOutput()
+					var out []byte
+					var err error
+					if st.signal != 0 {
+						out, err = runSignalled(t, cmd, st.signal)
+					} else {
+						out, err = cmd.CombinedOutput()
+					}
 					rc := 0
 					if ee, ok := err.(*exec.ExitError); ok {
 						rc = ee.ExitCode()
@@ -425,6 +488,47 @@ func TestEveryFakeAnswersTheContract(t *testing.T) {
 			})
 		}
 	}
+}
+
+// runSignalled starts cmd, sends it sig once it has written something, and
+// returns all it wrote and how it ended.
+func runSignalled(t *testing.T, cmd *exec.Cmd, sig syscall.Signal) ([]byte, error) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Stdout, cmd.Stderr = w, w
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	first := make([]byte, 1)
+	got := make(chan int, 1)
+	go func() { n, _ := r.Read(first); got <- n }()
+	select {
+	case n := <-got:
+		if n == 0 {
+			cmd.Wait()
+			t.Fatalf("%v ended before writing anything to signal after", cmd.Args)
+		}
+	case <-time.After(10 * time.Second):
+		cmd.Process.Kill()
+		t.Fatalf("%v wrote nothing to signal after", cmd.Args)
+	}
+	if err := cmd.Process.Signal(sig); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err = <-done:
+	case <-time.After(10 * time.Second):
+		cmd.Process.Kill()
+		t.Fatalf("%v did not end on %v", cmd.Args, sig)
+	}
+	rest, _ := io.ReadAll(r)
+	return append(first[:1], rest...), err
 }
 
 func digest(t *testing.T, path string) [32]byte {

@@ -6,6 +6,128 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-09-16
+
+### Added
+
+- The YAML tags `!reset` and `!override` are read as docker compose v5.5.0
+  reads them: a key tagged `!reset` (`ports: !reset []`, a whole service
+  `db: !reset {}`) is taken away, and a key tagged `!override`
+  (`tmpfs: !override [/u]`) keeps the later value whole instead of merging —
+  across `-f` files, over an `include`, in an `extends`, and in a file alone.
+  They used to be left unread or refused: `!reset []` and `!override [...]`
+  merged like plain values, `!reset null` was read as the string `null` (a
+  `tmpfs` path or a `command` of `null`), and `depends_on: {db: !reset
+  null}` was refused. Not read yet: a tag reached through a YAML alias or
+  merge key (`<<: *base`), and, in an `extends` from another file, a
+  `networks:` or `depends_on:` list of the extended service.
+
+### Changed
+
+- A container of a service's name that carries no `opossum.project` label —
+  one made outside opossum, such as with `container run --name db` — is no
+  longer taken for the project's own. `up` and `run` refuse it, naming the
+  container and how to free the name (a host port it holds that a service
+  publishes is still reported first, as before), as docker compose v5.5.0
+  refuses a container of the name without its labels (`Conflict. The
+  container name … is already in use`); `down`, `stop`, `start`, `kill` and
+  `restart` leave it and say so, `exec` and `cp` refuse it, `ps` gives it no
+  row and names it on stderr, `port` reports no container of this project's,
+  and the restart supervisor does not start it (`ps` and `port` treat another
+  project's container of the name the same way). Before, `up` reused such a
+  container, `down` removed it and `ps` listed it as the service. The
+  containers opossum itself makes are not affected: every service container
+  (since v0.1.0) and every one-off `run` makes carries the label.
+- Two mounts at one container path that docker compose v5.5.0 refuses are
+  refused here too, in its words (`services.web.volumes[0]: target /t
+  already mounted as services.web.tmpfs[0]`): two `tmpfs:` entries not alike
+  up to their first `=`, or a `tmpfs:` entry and a `volumes:` entry at its
+  target. They are refused for the services the active profiles leave
+  enabled — not for a `profiles:` service enabled by naming it on the
+  command line, as docker compose does not refuse it — and by the commands
+  that read the project, save `down`, `destroy`, `stop` and `kill`, which
+  name the pair on stderr and go on, so a project an earlier opossum started
+  still comes down (and `doctor`, which reads it for its memory estimate). They used to be passed on, and container 1.4.1 mounts
+  the first of two `tmpfs:` entries and drops the second, or mounts both a
+  `tmpfs:` and a `volumes:` entry with the `volumes:` one on top, silently.
+  Commands that take no `--profile` do not read `COMPOSE_PROFILES`, so a
+  gated service's pair is refused by `up`, `run` and `config` only.
+- `logs` and `stats` read only this project's containers, as `ps` lists only
+  those: a container of a service's name that belongs to another project,
+  carries no `opossum.project` label (made outside opossum), or that the
+  runtime gives no readable answer about is left out and named on stderr,
+  where it used to be read or measured as the service. With every container
+  asked for someone else's, they print nothing and exit zero, as docker
+  compose v5.5.0 does. `ps`, `logs` and `stats` now exit non-zero, naming the
+  containers, when the runtime gave no readable answer about any of them,
+  as `down` does; `ps` and `port` used to read such a container as not there
+  (no row, silently; `port` said "not running"), and `port` now reports no
+  container of this project's.
+- `logs` prefixes every line with its service as docker compose v5.5.1
+  writes it off a terminal (`web-1  | hello`), for one service as for several and whether or
+  not it follows; `--no-log-prefix` prints the lines as the container wrote
+  them. Before, one service's lines were bare, several services without
+  `--follow` were shown under `==> web <==` headers, and `--follow` used
+  the bare service name (`web | hello`) and dropped a carriage return at a
+  line's end. A script reading `opossum logs web` line by line needs
+  `--no-log-prefix` for bare lines (a last line the container left without
+  a newline now ends with one). A Ctrl-C or a SIGTERM now ends
+  `logs` with exit 130 and nothing said, as there, where `--follow` over
+  several services exited 0, and a SIGTERM to one service's `--follow`
+  exited 143 and left the runtime's `container logs -f` running
+  (container 1.4.1).
+
+### Fixed
+
+- Two mounts at one container path are read as docker compose v5.5.0 reads
+  them in more cases. Among `volumes:` the later entry is kept, whatever the
+  types — two long-form tmpfs mounts, or a long-form tmpfs and a bind, used
+  to reach container 1.4.1 as two mounts (of two tmpfs mounts it mounted the
+  first), and a `nocopy` on the earlier entry no longer keeps the later
+  volume from being filled from the image. An entry a later one replaces is
+  not looked up afterwards, as there: an undefined volume there used to
+  refuse `config`, an `external: true` volume that does not exist used to
+  refuse `up` and `run` (`[OPSM-210]`), and a bind there used to have its
+  host directory made; none of that happens now (the entry's own spelling
+  is still checked). Of two service-level `tmpfs:` entries alike up to the
+  first `=` the later is kept (`/t:size=1m`, then `/t:size=2m`), also across
+  `-f` files and `extends`, where both used to be passed on.
+- `up` and `run` refuse a `tmpfs:` entry whose options hold an empty one
+  (`/t:exec,,size=1m`, `/t:exec,`, `/t:defaults,`) before anything is
+  created, naming the service and the entry, after a missing `external`
+  volume (and, for `up`, a missing `external` network). The docker engine
+  29.7.2 refuses the container docker compose v5.5.0 creates for it
+  (`invalid tmpfs option ""`); container 1.4.1 mounted it, so such a file
+  started here and not there. `/t:` alone still mounts with the defaults,
+  and `config` and `up --dry-run` still read such a file, as docker
+  compose v5.5.1 does.
+- A service's `tmpfs:` or `env_file:` written as a string (`tmpfs: /t`) in one
+  `-f` file, in an included file, or in a service another `extends`, now
+  merges with the other file's or service's value as a list, as docker compose
+  v5.5.0 merges them. The later value used to replace the earlier one whenever
+  either was a string, so a tmpfs mount or an env file from the earlier file
+  was silently dropped.
+- A service named twice on the command line (`opossum logs web web`) is
+  handled once, in the position it was first named: `logs`, `stats`
+  (`stats --host web web` used to show the container twice and count it
+  twice in the total), `start`, `stop`, `restart`, `kill`, `build`, `pull`
+  and `import` used to handle it once per mention. docker compose v5.5.0
+  runs `logs`, `up`, `start`, `stop`, `restart`, `kill` and `pull` once for
+  such a name too (its `stats` takes one service at most). And when `logs`
+  or `stats` fails to read this project's containers, the error still names
+  the containers the runtime gave no readable answer about, where it used to
+  name them on stderr only.
+- A service stopped by `opossum kill` stays stopped: the restart supervisor
+  used to bring a `restart: always` (or `unless-stopped`, `on-failure`)
+  service back seconds after it was killed, where it leaves one `stop`
+  stopped. docker compose v5.5.0 does not restart a container `kill`
+  stopped, whatever the signal, and restarts it on exit again once `start`
+  has brought it back; `up`, `start` and `restart` bring supervision back
+  here. And a kill container 1.4.1 fails now exits 1 and names the service
+  when the container is then found running (`-s BOGUS`) or the runtime gives
+  no readable answer about it, as docker compose exits 1 for both, where it
+  used to exit 0; every service is still signalled.
+
 ## [0.30.0] - 2026-09-15
 
 ### Changed
@@ -42,8 +164,7 @@ All notable changes to opossum are documented here. The format follows
   `-`, as docker compose requires of those names. Any other character used to
   be passed to the runtime as written (for example ``-v demo_a/b:/y``), and a
   `type: volume` source with `:` in it was reported cut at the colon. Both are
-  now refused when the file is loaded, with the name shown whole. The `name:`
-  a volume declaration may set is not checked.
+  now refused when the file is loaded, with the name shown whole.
 - The shared named volume warning from `opossum up`, and the matching
   suggestions in the `compose.opossum.yaml` that `opossum up
   --from-docker-compose` writes, list the volumes by the names written in the
@@ -1694,7 +1815,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.30.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.31.0...HEAD
+[0.31.0]: https://github.com/suruseas/opossum/compare/v0.30.0...v0.31.0
 [0.30.0]: https://github.com/suruseas/opossum/compare/v0.29.0...v0.30.0
 [0.29.0]: https://github.com/suruseas/opossum/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/suruseas/opossum/compare/v0.27.1...v0.28.0

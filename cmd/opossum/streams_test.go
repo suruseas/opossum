@@ -27,6 +27,7 @@ func TestARunsStdoutIsTheContainersAndUnderAuditTheReports(t *testing.T) {
 	const says = "hello from the container"
 	env := append(os.Environ(),
 		"OPOSSUM_CONTAINER_BIN="+fakeShimBin,
+		"INSPECT_PROJECT_FROM_NAME=1", // the containers opossum made carry their project's label
 		"FAKE_LOG="+filepath.Join(dir, "invocations.log"),
 		"OPOSSUM_CRASH_GRACE=0",
 		"FAKE_RUN_SAYS="+says)

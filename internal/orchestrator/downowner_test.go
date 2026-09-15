@@ -63,7 +63,54 @@ func TestDownLeavesContainersThatAreNotThisProjects(t *testing.T) {
 			said:   []string{`Leaving container web alone: it belongs to project "otherproj"`},
 		},
 		{name: "this project's own containers all come down", domain: "opossum", env: []string{"INSPECT_PROJECT=demo"}},
-		{name: "unlabeled containers come down, as up reuses them", domain: "opossum"},
+		// A container that is not there carries no label either, and is not
+		// "left": there is nothing to leave, and nothing is said about it.
+		{
+			name:    "a service container that is not there is not said to be left",
+			domain:  "opossum",
+			env:     []string{"INSPECT_ABSENT=web.demo.opossum"},
+			notSaid: []string{"Leaving container web.demo.opossum"},
+		},
+		// A container of the name with no project label was made outside
+		// opossum: `down` leaves it and says so, as it leaves another project's
+		// (docker compose v5.5.0 leaves it too, silently).
+		{
+			name:   "a service container with no project label, first in the teardown",
+			domain: "opossum",
+			env:    []string{"INSPECT_UNLABELED=web.demo.opossum"},
+			left:   []string{"web.demo.opossum"},
+			said:   []string{"Leaving container web.demo.opossum alone: it carries no opossum.project label, so it was not made by this project (remove it with `container delete --force web.demo.opossum` for this project to use the name)"},
+		},
+		{
+			name:   "a service container with no project label, last in the teardown",
+			domain: "opossum",
+			env:    []string{"INSPECT_UNLABELED=db.demo.opossum"},
+			left:   []string{"db.demo.opossum"},
+			said:   []string{"Leaving container db.demo.opossum alone: it carries no opossum.project label"},
+		},
+		{
+			name:   "a run leftover with no project label",
+			domain: "opossum",
+			env:    []string{"INSPECT_UNLABELED=cache-run.demo.opossum"},
+			left:   []string{"cache-run.demo.opossum"},
+			said:   []string{"Leaving container cache-run.demo.opossum alone: it carries no opossum.project label"},
+		},
+		{
+			name:   "bare names: a container called web with no project label",
+			domain: "",
+			env:    []string{"INSPECT_PROJECT=demo", "INSPECT_UNLABELED=web"},
+			left:   []string{"web"},
+			said:   []string{"Leaving container web alone: it carries no opossum.project label"},
+		},
+		{
+			// Each is said the way it is: another project's, and no label.
+			name:    "another project's container and one with no project label, mixed",
+			domain:  "opossum",
+			env:     []string{"INSPECT_OWNER=cache.demo.opossum=otherproj", "INSPECT_UNLABELED=db.demo.opossum"},
+			left:    []string{"cache.demo.opossum", "db.demo.opossum"},
+			said:    []string{`Leaving container cache.demo.opossum alone: it belongs to project "otherproj"`, "Leaving container db.demo.opossum alone: it carries no opossum.project label"},
+			notSaid: []string{"Leaving container cache.demo.opossum alone: it carries no", `Leaving container db.demo.opossum alone: it belongs`},
+		},
 		{
 			name:   "another project's service container, first in the teardown",
 			domain: "opossum",
@@ -259,6 +306,10 @@ func TestRunRefusesAOneOffNameThatIsNotThisProjects(t *testing.T) {
 			"`container inspect web-run.demo.opossum` shows what the runtime says — run `opossum run` again once it answers, " +
 			"or, if it belongs to another project, give this project its own DNS domain (e.g. --dns-domain demo)",
 			[]string{"INSPECT_FAIL=web-run.demo.opossum"}},
+		// A one-off of the name made outside opossum carries no project label.
+		{"no project label", `container "web-run.demo.opossum" already exists and carries no opossum.project label, so it was not made by this project and is left alone; ` +
+			"remove it (`container delete --force web-run.demo.opossum`) to free the name, or give this project its own DNS domain (e.g. --dns-domain demo)",
+			[]string{"INSPECT_UNLABELED=web-run.demo.opossum"}},
 	} {
 		for _, sh := range shapes {
 			t.Run(tc.name+", "+sh.name, func(t *testing.T) {
@@ -304,15 +355,20 @@ func TestRunRefusesAOneOffNameThatIsNotThisProjects(t *testing.T) {
 		}
 	}
 	// The name is the one-off's own: another project holding the service's up
-	// container is not this refusal's business (up refuses that one).
-	rt, log := fakeShim(t)
-	setShimEnv(rt, "INSPECT_OWNER=web.demo.opossum=otherproj")
-	p := project("demo", map[string]*compose.Service{"web": {Image: "web:latest"}})
-	if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).RunOneOff("web", []string{"true"}, orchestrator.RunOneOffOptions{Rm: true, NoDeps: true}); err != nil {
-		t.Fatalf("a one-off whose own name is free should run, got: %v", err)
-	}
-	if !slices.ContainsFunc(log(), func(l string) bool { return strings.HasPrefix(l, "run ") }) {
-		t.Errorf("the one-off should have run, got %v", log())
+	// container, or one with no project label holding it, is not this
+	// refusal's business (up refuses that one).
+	for _, env := range []string{"INSPECT_OWNER=web.demo.opossum=otherproj", "INSPECT_UNLABELED=web.demo.opossum"} {
+		t.Run(env, func(t *testing.T) {
+			rt, log := fakeShim(t)
+			setShimEnv(rt, env)
+			p := project("demo", map[string]*compose.Service{"web": {Image: "web:latest"}})
+			if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).RunOneOff("web", []string{"true"}, orchestrator.RunOneOffOptions{Rm: true, NoDeps: true}); err != nil {
+				t.Fatalf("a one-off whose own name is free should run, got: %v", err)
+			}
+			if !slices.ContainsFunc(log(), func(l string) bool { return strings.HasPrefix(l, "run ") }) {
+				t.Errorf("the one-off should have run, got %v", log())
+			}
+		})
 	}
 }
 

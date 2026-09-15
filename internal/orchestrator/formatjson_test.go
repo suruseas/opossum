@@ -23,7 +23,7 @@ func TestStatsJSONJoinsEachRowToItsOwnService(t *testing.T) {
 	dir := t.TempDir()
 	script := `#!/bin/sh
 case "$1" in
-  inspect) echo '[{"status":{"state":"running","networks":[]},"configuration":{"id":"x","labels":{}}}]' ;;
+  inspect) echo '[{"status":{"state":"running","networks":[]},"configuration":{"id":"x","labels":{"opossum.project":"demo"}}}]' ;;
   stats) echo '[{"id":"db.demo.opossum","cpuUsageUsec":21,"memoryUsageBytes":22,"memoryLimitBytes":23,"networkRxBytes":24,"networkTxBytes":25,"blockReadBytes":26,"blockWriteBytes":27,"numProcesses":28},{"id":"other.demo.opossum","cpuUsageUsec":31,"memoryUsageBytes":32,"memoryLimitBytes":33,"networkRxBytes":34,"networkTxBytes":35,"blockReadBytes":36,"blockWriteBytes":37,"numProcesses":38},{"id":"api.v1.demo.opossum","cpuUsageUsec":11,"memoryUsageBytes":12,"memoryLimitBytes":13,"networkRxBytes":14,"networkTxBytes":15,"blockReadBytes":16,"blockWriteBytes":17,"numProcesses":18}]' ;;
   system) echo 'status running' ;;
 esac
@@ -88,7 +88,7 @@ func TestStatsJSONHasNoRowForAStoppedService(t *testing.T) {
 // What the runtime does not report stays empty in JSON: the table's "-" is
 // for a reader's eye, and a program would read it as an address or a port.
 func TestPsJSONLeavesWhatIsNotThereEmpty(t *testing.T) {
-	rt := fakeShimInspect(t, `[{"status":{"state":"stopped"},"configuration":{}}]`, 0)
+	rt := fakeShimInspect(t, `[{"status":{"state":"stopped"},"configuration":{"labels":{"opossum.project":"demo"}}}]`, 0)
 	p := project("demo", map[string]*compose.Service{"db": {Image: "postgres:16"}})
 	var out bytes.Buffer
 	if err := orchestrator.New(p, rt, "opossum", &out).Ps(orchestrator.PsOptions{Format: "json"}); err != nil {

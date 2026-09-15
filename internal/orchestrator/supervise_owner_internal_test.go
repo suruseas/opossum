@@ -18,7 +18,8 @@ import (
 // other one put in its place. Restarting it would start another project's
 // container that was stopped on purpose — measured on container 1.4.1, the
 // supervisor did. Such a container is left, said once, and not counted as this
-// project's; this project's own and unlabeled ones are handled as before.
+// project's; so is one that carries no project label, made outside opossum.
+// This project's own is handled as before.
 func TestTheSupervisorLeavesAnotherProjectsContainer(t *testing.T) {
 	shim := func(t *testing.T, state, project string) (*runtime.Runtime, func() string) {
 		dir := t.TempDir()
@@ -45,7 +46,7 @@ func TestTheSupervisorLeavesAnotherProjectsContainer(t *testing.T) {
 		said                 string
 	}{
 		{"this project's stopped container is restarted", "stopped", "demo", true, true, ""},
-		{"an unlabeled stopped container is restarted", "stopped", "", true, true, ""},
+		{"an unlabeled stopped container is left", "stopped", "", false, false, `leaving "web" alone: its container web.demo.opossum carries no opossum.project label`},
 		{"another project's stopped container is left", "stopped", "otherproj", false, false, `leaving "web" alone: its container web.demo.opossum belongs to project "otherproj"`},
 		{"another project's running container is not this project's", "running", "otherproj", false, false, `leaving "web" alone: its container web.demo.opossum belongs to project "otherproj"`},
 	} {
@@ -108,8 +109,10 @@ func TestTheSupervisorSaysEachTimeTheNameIsAnotherProjects(t *testing.T) {
 	// Back to this project's, and gone: either way the next time the name is
 	// another project's is a new time.
 	// An unanswered inspect in between says nothing about the owner, so it is
-	// not a new time; an unlabeled container is this project's, so it is.
-	for i, p := range []string{"otherproj", "otherproj", "demo", "otherproj", "gone", "otherproj", "thirdproj", "thirdproj", "unknown", "thirdproj", "", "thirdproj"} {
+	// not a new time. A container with no project label is not this project's
+	// either: it is said once when the name comes to it, and the project after
+	// it is a new time again.
+	for i, p := range []string{"otherproj", "otherproj", "demo", "otherproj", "gone", "otherproj", "thirdproj", "thirdproj", "unknown", "thirdproj", "", "", "thirdproj"} {
 		if err := os.WriteFile(owner, []byte(p), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -121,8 +124,8 @@ func TestTheSupervisorSaysEachTimeTheNameIsAnotherProjects(t *testing.T) {
 			n++
 		}
 	}
-	if n != 5 {
-		t.Errorf("want it said each time the name became another project's — back from this project's, back from gone, on to a different project, back from unlabeled, and not after an unanswered poll — five times over these polls, got %d in %q", n, said)
+	if n != 6 {
+		t.Errorf("want it said each time the name changed hands — back from this project's, back from gone, on to a different project, on to no label once, back from no label, and not after an unanswered poll — six times over these polls, got %d in %q", n, said)
 	}
 	if last := said[len(said)-1]; !strings.Contains(last, `belongs to project "thirdproj"`) {
 		t.Errorf("the last word should name the project the name is on now, got %q", last)

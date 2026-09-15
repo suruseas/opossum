@@ -153,9 +153,9 @@ func (o *Orchestrator) applyChanges(paths []string) {
 		if err := o.Restart([]string{svc}); err != nil {
 			var refusal ownerRefusal
 			if errors.As(err, &refusal) {
-				// Restart names another project's container in its own log line
-				// and returns nil, so a refusal here is always an unanswered
-				// owner. Its own next step names `opossum restart`, which
+				// Restart names another project's container, or one with no
+				// project label, in its own log line and returns nil, so a refusal
+				// here is always an unanswered owner. Its own next step names `opossum restart`, which
 				// restarts the whole project; watch restarts only when a file
 				// under a sync+restart rule of this service changes.
 				o.warnf(codeWatchRestart, "restart %s skipped: the runtime gave no readable answer about which project owns %s, so it was left alone — "+
@@ -176,9 +176,10 @@ func (o *Orchestrator) syncFile(t watchTarget, changed, rel string) {
 		var refusal ownerRefusal
 		if errors.As(err, &refusal) {
 			if len(refusal.unanswered) == 0 {
-				// Another project's container: its reason says how to give this
-				// project names of its own, which takes a new watch; a later
-				// change gets past it only if that container goes away.
+				// Another project's container, or one with no project label: its
+				// reason says how to free the name or give this project names of
+				// its own, which takes a new watch; a later change gets past it
+				// only if that container goes away.
 				o.warnf(codeWatchSync, "sync of %s to %s skipped: %v\n", changed, dst, err)
 				return
 			}

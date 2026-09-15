@@ -199,7 +199,9 @@ func TestANetworkNameLongerThanTheRuntimeTakesIsRefusedBeforeCreating(t *testing
 				if tc.name == "the default network at 63" || tc.name == "an isolated service in a project of 60 characters" {
 					domain = ""
 				}
-				err := invokePath(orchestrator.New(tc.project(), rt, domain, &bytes.Buffer{}), path)
+				proj := tc.project()
+				setShimEnv(rt, "INSPECT_PROJECT="+proj.Name) // names without a DNS domain: the fake cannot read the project from them
+				err := invokePath(orchestrator.New(proj, rt, domain, &bytes.Buffer{}), path)
 				created := indexOf(log(), "network create") >= 0
 				switch {
 				case tc.refusal == "" && (err != nil || runLine(log()) < 0):
@@ -514,7 +516,9 @@ func TestADependencysLongNetworkIsRefusedBeforeAnythingIsCreated(t *testing.T) {
 				if shape.name == "an isolated run's dependency on a long default network" {
 					domain = ""
 				}
-				err := invokePath(orchestrator.New(shape.project(), rt, domain, &bytes.Buffer{}), path)
+				proj := shape.project()
+				setShimEnv(rt, "INSPECT_PROJECT="+proj.Name) // names without a DNS domain: the fake cannot read the project from them
+				err := invokePath(orchestrator.New(proj, rt, domain, &bytes.Buffer{}), path)
 				if !refused {
 					if err != nil || runLine(log()) < 0 {
 						t.Errorf("want the run to go ahead without its dependencies, got err %v and %v", err, log())

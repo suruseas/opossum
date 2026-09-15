@@ -60,7 +60,17 @@ type Service struct {
 	// only — nothing from the files is folded in — so a caller that renders or
 	// starts this service has to ask through ResolvedEnv.
 	envFileErr error
-	Ports      Ports `yaml:"ports"`
+	// mountConflicts holds the mounts docker compose v5.5.0 refuses at one
+	// target once the collapse below has run: a `tmpfs:` entry at a target an
+	// earlier `tmpfs:` entry mounts (the two alike up to their first `=` were
+	// collapsed; `/t:mode=700` and `/t:size=1m` remain), and a `volumes:`
+	// entry at a target a `tmpfs:` entry mounts. Loading records them instead
+	// of failing, as it records envFileErr: docker compose refuses them for
+	// the services its profiles leave enabled, whatever the command, and not
+	// for a service enabled by being named — and loading does not know the
+	// profiles. The orchestrator asks through MountConflicts.
+	mountConflicts []mountConflict
+	Ports          Ports `yaml:"ports"`
 	// Restart is the compose restart policy. opossum honours it with a small
 	// per-project supervisor started by `up`; see internal/orchestrator/supervisor.go.
 	Restart string `yaml:"restart"`
@@ -861,6 +871,23 @@ func (s *Service) UnmarshalYAML(value *yaml.Node) error {
 	}
 	*s = Service(r)
 
+	// Mounts at one target, read the way docker compose v5.5.0 reads them: among
+	// `volumes:` the later entry is kept, whatever the types (a long-form tmpfs
+	// and a bind included, which the collapse after load cannot see once the
+	// tmpfs has moved to Tmpfs); among `tmpfs:` the later of two entries alike
+	// up to the first `=` is kept. This runs on the document the -f files and
+	// an extends were merged into. What docker compose refuses after that — a
+	// target a `tmpfs:` entry still mounts twice, or one a `volumes:` entry
+	// mounts too — is recorded (mountConflicts) for the commands to refuse
+	// once they know which services are enabled.
+	if len(s.Volumes) > 1 {
+		s.Volumes = collapseVolumeEntries(s.Volumes)
+	}
+	if len(s.Tmpfs) > 1 {
+		s.Tmpfs = collapseTmpfsEntries(s.Tmpfs)
+	}
+	s.mountConflicts = mountConflicts(s.Tmpfs, s.Volumes)
+
 	// Move any tmpfs entries (tagged by Volumes.UnmarshalYAML) out of Volumes
 	// into Tmpfs, so the marker never escapes parsing (#79).
 	if len(s.Volumes) > 0 {
@@ -1584,6 +1611,124 @@ func (v *Volumes) UnmarshalYAML(value *yaml.Node) error {
 	}
 	*v = out
 	return nil
+}
+
+// volumeEntryTarget is the target a parsed `volumes:` entry mounts at, with a
+// trailing `/` dropped as docker compose drops it there (`/t/` and `/t` are
+// one target; `/` itself stays `/`): a tmpfs entry's is before its options, a
+// nocopy entry's is the mount's. "" when there is none to read.
+func volumeEntryTarget(m string) string {
+	if rest, ok := strings.CutPrefix(m, tmpfsMarker); ok {
+		t, _, _ := strings.Cut(rest, ":")
+		return targetKey(t)
+	}
+	m, _ = strings.CutPrefix(m, nocopyMarker)
+	parts := strings.Split(m, ":")
+	if len(parts) == 1 {
+		return targetKey(parts[0]) // anonymous volume: the target itself
+	}
+	return targetKey(parts[1])
+}
+
+// targetKey is a target with its trailing `/` dropped, and `/` (or `//`) for
+// the root, which has nothing else to be spelled as; "" only when nothing was
+// written.
+func targetKey(t string) string {
+	if k := strings.TrimRight(t, "/"); k != "" || t == "" {
+		return k
+	}
+	return "/"
+}
+
+// collapseVolumeEntries keeps, for each target, the last `volumes:` entry that
+// mounts there, at the first one's position (collapseMountsByTarget, with the
+// loader's tmpfs and nocopy entries read too).
+func collapseVolumeEntries(vs Volumes) Volumes {
+	pos := map[string]int{}
+	out := make(Volumes, 0, len(vs))
+	for _, v := range vs {
+		t := volumeEntryTarget(v)
+		if t == "" {
+			out = append(out, v)
+			continue
+		}
+		if i, seen := pos[t]; seen {
+			out[i] = v
+			continue
+		}
+		pos[t] = len(out)
+		out = append(out, v)
+	}
+	return out
+}
+
+// collapseTmpfsEntries keeps the later of two service-level `tmpfs:` entries
+// that are alike up to the first `=` (`/t:size=1m` and `/t:size=2m`, or `/t`
+// twice), at the first one's position, as docker compose v5.5.0 collapses them
+// before it compares targets; `/t:mode=700` and `/t:size=2m` are two entries.
+func collapseTmpfsEntries(tmpfs []string) []string {
+	pos := map[string]int{}
+	out := make([]string, 0, len(tmpfs))
+	for _, t := range tmpfs {
+		key, _, _ := strings.Cut(t, "=")
+		if i, seen := pos[key]; seen {
+			out[i] = t
+			continue
+		}
+		pos[key] = len(out)
+		out = append(out, t)
+	}
+	return out
+}
+
+// mountConflict is one mount docker compose v5.5.0 refuses: the entry at
+// list[i] (`tmpfs` or `volumes`) mounts target where `tmpfs:` entry j already
+// does. Indices are positions after the collapse, as docker compose's.
+type mountConflict struct {
+	list   string
+	i, j   int
+	target string
+}
+
+// mountConflicts is the first thing docker compose v5.5.0 refuses among a
+// service's collapsed `tmpfs:` and `volumes:` entries (measured, `config`,
+// which reports one): a `tmpfs:` entry at a target an earlier `tmpfs:` entry
+// mounts, the targets compared as written (`/t` and `/t/` are two), and
+// then a `volumes:` entry (of any type, the loader's tmpfs and nocopy entries
+// included) at a target a `tmpfs:` entry mounts, the volume's target with
+// its trailing `/` dropped (`./a:/t/` beside `tmpfs: [/t]` is refused,
+// `./a:/t` beside `tmpfs: [/t/]` is not) — always reported against the tmpfs
+// side, whatever the order the two were written in. nil when there is none.
+func mountConflicts(tmpfs []string, volumes Volumes) []mountConflict {
+	tmpfsAt := map[string]int{}
+	for i, t := range tmpfs {
+		target, _, _ := strings.Cut(t, ":")
+		if j, seen := tmpfsAt[target]; seen {
+			return []mountConflict{{list: "tmpfs", i: i, j: j, target: target}}
+		}
+		tmpfsAt[target] = i
+	}
+	for i, v := range volumes {
+		key := volumeEntryTarget(v)
+		if j, seen := tmpfsAt[key]; seen && key != "" {
+			return []mountConflict{{list: "volumes", i: i, j: j, target: key}}
+		}
+	}
+	return nil
+}
+
+// MountConflicts is the service's mounts docker compose v5.5.0 refuses, in
+// its words (`services.web.volumes[0]: target /t already mounted as
+// services.web.tmpfs[0]`), for a service of the given name — the first pair,
+// as docker compose reports one; nil when there is none. The runtime does not refuse them: container 1.4.1 mounts the
+// first of two `tmpfs:` entries and drops the second, and mounts both a
+// `tmpfs:` and a `volumes:` entry with the `volumes:` one on top (measured).
+func (s *Service) MountConflicts(name string) []string {
+	var out []string
+	for _, c := range s.mountConflicts {
+		out = append(out, fmt.Sprintf("services.%s.%s[%d]: target %s already mounted as services.%s.tmpfs[%d]", name, c.list, c.i, c.target, name, c.j))
+	}
+	return out
 }
 
 // tmpfsOptions is a long-form tmpfs mount's `read_only`, `tmpfs.size` and

@@ -41,7 +41,21 @@ func TestServiceCommandsLeaveContainersThatAreNotThisProjects(t *testing.T) {
 		wantErr string   // a part of the error; "" for success
 	}{
 		{name: "this project's containers", domain: "opossum", env: []string{"INSPECT_PROJECT=demo"}},
-		{name: "unlabeled containers", domain: "opossum"},
+		{
+			// Made outside opossum: no project label (docker compose v5.5.0 leaves it too).
+			name:   "a container with no project label, first to start",
+			domain: "opossum",
+			env:    []string{"INSPECT_UNLABELED=db.demo.opossum"},
+			left:   []string{"db.demo.opossum"},
+			said:   []string{"Leaving container db.demo.opossum alone: it carries no opossum.project label, so it was not made by this project (remove it with `container delete --force db.demo.opossum` for this project to use the name)"},
+		},
+		{
+			name:   "a container with no project label, last to start",
+			domain: "opossum",
+			env:    []string{"INSPECT_UNLABELED=web.demo.opossum"},
+			left:   []string{"web.demo.opossum"},
+			said:   []string{"Leaving container web.demo.opossum alone: it carries no opossum.project label"},
+		},
 		{
 			name:   "another project's container, first to start",
 			domain: "opossum",
@@ -148,7 +162,7 @@ func TestServiceCommandsLeaveContainersThatAreNotThisProjects(t *testing.T) {
 func TestCopyRefusesAContainerThatIsNotThisProjects(t *testing.T) {
 	copied := map[string]string{
 		"into this project's container":                         "cp ./f web.demo.opossum:/tmp/f",
-		"out of an unlabeled container":                         "cp web.demo.opossum:/tmp/f ./f",
+		"out of a container named for this project":             "cp web.demo.opossum:/tmp/f ./f",
 		"into this project's container, at a path with a colon": "cp ./f web.demo.opossum:/tmp/a:b",
 		"a prefix that is not a service is a host path":         "cp notaservice:/tmp/f ./f",
 	}
@@ -159,7 +173,9 @@ func TestCopyRefusesAContainerThatIsNotThisProjects(t *testing.T) {
 		wantErr  string
 	}{
 		{"into this project's container", "./f", "web:/tmp/f", []string{"INSPECT_PROJECT=demo"}, ""},
-		{"out of an unlabeled container", "web:/tmp/f", "./f", nil, ""},
+		{"out of a container named for this project", "web:/tmp/f", "./f", nil, ""},
+		{"out of a container with no project label", "web:/tmp/f", "./f", []string{"INSPECT_UNLABELED=web.demo.opossum"}, `container "web.demo.opossum" already exists and carries no opossum.project label, so it was not made by this project and is left alone`},
+		{"into a container with no project label", "./f", "web:/tmp/f", []string{"INSPECT_UNLABELED=web.demo.opossum"}, `container "web.demo.opossum" already exists and carries no opossum.project label`},
 		{"into another project's container", "./f", "web:/tmp/f", []string{"INSPECT_OWNER=web.demo.opossum=otherproj"}, `container "web.demo.opossum" is already in use by project "otherproj"`},
 		{"out of another project's container", "web:/tmp/f", "./f", []string{"INSPECT_OWNER=web.demo.opossum=otherproj"}, `container "web.demo.opossum" is already in use by project "otherproj"`},
 		{"out of this project's container into another project's", "db:/tmp/f", "web:/tmp/f", []string{"INSPECT_PROJECT=demo", "INSPECT_OWNER=web.demo.opossum=otherproj"}, `container "web.demo.opossum" is already in use by project "otherproj"`},
@@ -242,7 +258,9 @@ func TestExecRefusesAContainerThatIsNotThisProjects(t *testing.T) {
 		wantErr string
 	}{
 		{"this project's container", "opossum", []string{"INSPECT_PROJECT=demo"}, ""},
-		{"an unlabeled container", "opossum", nil, ""},
+		{"a container named for this project", "opossum", nil, ""},
+		{"a container with no project label", "opossum", []string{"INSPECT_UNLABELED=web.demo.opossum"}, `container "web.demo.opossum" already exists and carries no opossum.project label, so it was not made by this project and is left alone`},
+		{"bare names: a container with no project label", "", []string{"INSPECT_PROJECT=demo", "INSPECT_UNLABELED=web"}, `container "web" already exists and carries no opossum.project label`},
 		{"another project's container", "opossum", []string{"INSPECT_OWNER=web.demo.opossum=otherproj"}, `container "web.demo.opossum" is already in use by project "otherproj"`},
 		{"bare names: another project's container", "", []string{"INSPECT_OWNER=web=otherproj"}, `container "web" is already in use by project "otherproj"`},
 		{"no readable answer", "opossum", []string{"INSPECT_FAIL=web.demo.opossum"}, "the runtime gave no readable answer about which project owns it, so it is left alone; `container inspect web.demo.opossum` shows what the runtime says — run `opossum exec` again once it answers"},

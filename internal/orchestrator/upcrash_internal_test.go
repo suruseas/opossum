@@ -19,8 +19,9 @@ import (
 	rt "github.com/suruseas/opossum/internal/runtime"
 )
 
-const stoppedInspect = `[{"status":{"state":"stopped"},"configuration":{"id":"web"}}]`
-const runningInspect = `[{"status":{"state":"running"},"configuration":{"id":"web"}}]`
+// Both carry this project's label, as the container `up` made does.
+const stoppedInspect = `[{"status":{"state":"stopped"},"configuration":{"id":"web","labels":{"opossum.project":"demo"}}}]`
+const runningInspect = `[{"status":{"state":"running"},"configuration":{"id":"web","labels":{"opossum.project":"demo"}}}]`
 
 func inspectShim(t *testing.T, inspectJSON, logsLine string) *rt.Runtime {
 	return scriptShim(t, ""+

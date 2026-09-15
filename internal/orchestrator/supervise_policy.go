@@ -34,7 +34,7 @@ type serviceState struct {
 	lastAction  time.Time // when we last restarted it
 	stoppedByUs bool      // `opossum stop` asked for this; unless-stopped must honour it
 	gaveUp      bool
-	foreign     string // the other project whose container the name was last seen on, once said; "" when it was not
+	foreign     string // whose container the name was last seen on, once said — "project <name>" for another project's, "no label" for one with no project label; "" when it was not
 }
 
 // backoff limits how fast a crash loop can spin. The first restart is immediate —

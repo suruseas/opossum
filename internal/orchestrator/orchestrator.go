@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -315,6 +316,42 @@ func (o *Orchestrator) ValidateProfiles() error {
 		names = append(names, name)
 	}
 	return o.validateProfileDeps(names, nil)
+}
+
+// CheckMounts refuses the project when a service the active profiles leave
+// enabled mounts two things at one target that docker compose v5.5.0 refuses
+// (see compose.Service.MountConflicts), in its words. docker compose runs
+// this check for every command over the services its profiles enable, and
+// not over a gated service enabled by being named on the command line, so
+// this is asked once a command has activated its profiles, and with nothing
+// named. Services are checked in startup order, a line per service with a
+// pair (its first, as docker compose reports one).
+func (o *Orchestrator) CheckMounts() error {
+	// The order is only the order of the lines: a project whose startup order
+	// cannot be worked out (a dependency cycle, which docker compose does not
+	// look for among services an inactive profile gates) is not refused here
+	// for that — its services are read by name instead, and a pair among them
+	// is named first, as docker compose names it before the cycle; a project
+	// with no pair reports its cycle where it did before.
+	order, err := o.Project.StartupOrder()
+	if err != nil {
+		order = order[:0]
+		for name := range o.Project.Services {
+			order = append(order, name)
+		}
+		slices.Sort(order)
+	}
+	enabled := o.EnabledServices()
+	var lines []string
+	for _, name := range order {
+		if enabled[name] {
+			lines = append(lines, o.Project.Services[name].MountConflicts(name)...)
+		}
+	}
+	if len(lines) == 0 {
+		return nil
+	}
+	return errors.New(strings.Join(lines, "\n"))
 }
 
 // interrupted returns a rollback-triggering error if up's context has been
@@ -666,6 +703,30 @@ func (o *Orchestrator) checkVolumeNames(services []string) error {
 	return nil
 }
 
+// checkTmpfsOptions refuses, before anything is created, a `tmpfs:` entry
+// whose options hold an empty one — two commas together, or a comma at the
+// start or end (`/t:exec,,size=1m`, `/t:,`, `/t:exec,`). docker compose v5.5.0
+// reads such a file (`config` passes it) and the docker engine 29.7.2 refuses
+// the container it creates (`invalid tmpfs option ""`, measured with `docker
+// compose run`), where container 1.4.1 mounts it, so `up` and `run` refuse it
+// here. An entry with no options after its `:` (`/t:`) is not refused, as it
+// is not there. The entries are the service's after the collapse, the ones
+// opossum passes on, so one a later entry alike up to the first `=` replaced
+// is not looked at (docker compose v5.5.1 runs such a file). A one-off's own
+// mounts are looked at here; its dependencies' by the `up` that starts them.
+func (o *Orchestrator) checkTmpfsOptions(services []string) error {
+	for _, svcName := range services {
+		for _, entry := range o.Project.Services[svcName].Tmpfs {
+			_, opts, _ := strings.Cut(entry, ":")
+			if opts != "" && slices.Contains(strings.Split(opts, ","), "") {
+				return fmt.Errorf("service %q mounts the tmpfs %q, whose options hold an empty one, which the docker engine 29.7.2 refuses (`invalid tmpfs option \"\"`) — drop the extra comma",
+					svcName, entry)
+			}
+		}
+	}
+	return nil
+}
+
 // warnUnresolvableServiceNames warns, before anything is created, about each
 // service a peer may not reach by its bare name although its container is made.
 // Measured on container 1.4.1: a name holding upper case gets no answer from
@@ -940,6 +1001,14 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 	}
 	if err := o.checkExternalVolumes(order); err != nil {
 		return err
+	}
+	// After the external networks and volumes, as docker compose v5.5.1
+	// refuses a missing one before the engine refuses the container; and not
+	// under --dry-run, which docker compose passes, as it creates nothing.
+	if !o.up.dryRun {
+		if err := o.checkTmpfsOptions(order); err != nil {
+			return err
+		}
 	}
 	o.warnUnresolvableServiceNames(order)
 
@@ -1928,18 +1997,27 @@ func (o *Orchestrator) selectServices(order, requested []string) ([]string, erro
 // ensureNotForeign refuses to reuse a container name that belongs to a different
 // opossum project. Two projects sharing a DNS domain would name a service the
 // same (e.g. db.opossum); without this guard opossum's stale-cleanup Delete would
-// silently destroy the other project's container. An unlabeled or missing
-// container is treated as safe to (re)use — a container whose owner the runtime
-// could not be asked about is not: reusing that name would force-delete it
-// unseen, whoever it belongs to (measured on container 1.4.1: with only that
-// container's inspect failing, `up` deleted another project's container and
-// ran its own in its place, saying nothing).
+// silently destroy the other project's container. A container of the name that
+// carries no project label at all was made outside opossum (every service
+// container and one-off opossum makes carries one), so it is refused too, as
+// docker compose v5.5.0 refuses a container of the name without its labels
+// (`Conflict. The container name … is already in use`). A missing container is
+// safe to use — a container whose owner the runtime could not be asked about is
+// not: reusing that name would force-delete it unseen, whoever it belongs to
+// (measured on container 1.4.1: with only that container's inspect failing,
+// `up` deleted another project's container and ran its own in its place,
+// saying nothing).
 func (o *Orchestrator) ensureNotForeign(cname, command string) error {
-	owner, unknown := o.otherOwner(cname)
+	owner, unlabeled, unknown := o.otherOwner(cname)
 	if unknown {
 		return ownerRefusal{unanswered: []string{cname}, err: fmt.Errorf("container %q: the runtime gave no readable answer about which project owns it, so it is left alone; "+
 			"`container inspect %s` shows what the runtime says — run `%s` again once it answers, "+
 			"or, if it belongs to another project, give this project its own DNS domain (e.g. --dns-domain %s)", cname, cname, command, o.Project.Name)}
+	}
+	if unlabeled {
+		return ownerRefusal{err: fmt.Errorf("container %q already exists and carries no %s label, so it was not made by this project and is left alone; "+
+			"remove it (`container delete --force %s`) to free the name, or give this project its own DNS domain (e.g. --dns-domain %s)",
+			cname, projectLabel, cname, o.Project.Name)}
 	}
 	if owner != "" {
 		return ownerRefusal{err: fmt.Errorf("container %q is already in use by project %q; give this project its own DNS domain so names don't collide "+
@@ -1965,30 +2043,41 @@ func (r ownerRefusal) Error() string { return r.err.Error() }
 
 // otherOwner reads, from one inspect, whether a container name is this
 // project's to stop, delete or reuse: owner is the other project whose label is
-// on it, unknown that the runtime gave no readable answer. Missing and unlabeled
-// containers are neither. One inspect for both answers: a second call could fail
-// after the first answered, or answer after the first failed.
-func (o *Orchestrator) otherOwner(cname string) (owner string, unknown bool) {
+// on it; unlabeled that it is there with no project label at all, made outside
+// opossum; unknown that the runtime gave no readable answer. A missing
+// container is none of them. One inspect for all three answers: a second call
+// could fail after the first answered, or answer after the first failed.
+func (o *Orchestrator) otherOwner(cname string) (owner string, unlabeled, unknown bool) {
 	info := o.rt.Inspect(cname)
 	if info.Unknown {
-		return "", true
+		return "", false, true
 	}
-	if proj := info.Labels[projectLabel]; info.Exists && proj != "" && proj != o.Project.Name {
-		return proj, false
+	if !info.Exists {
+		return "", false, false
 	}
-	return "", false
+	switch proj := info.Labels[projectLabel]; {
+	case proj == "":
+		return "", true, false
+	case proj != o.Project.Name:
+		return proj, false, false
+	}
+	return "", false, false
 }
 
 // ours says whether the container name is this project's to stop, start, kill
-// or delete. Another project's container is left and said; one the runtime
-// gives no readable answer about is left and added to unanswered, for the
-// command to name when it is done. Missing and unlabeled containers are ours,
-// as `up` reuses them.
+// or delete. Another project's container, and one that carries no project
+// label (made outside opossum), is left and said; one the runtime gives no
+// readable answer about is left and added to unanswered, for the command to
+// name when it is done. A missing container is ours: there is nothing there
+// to take from anyone.
 func (o *Orchestrator) ours(cname string, unanswered *[]string) bool {
-	owner, unknown := o.otherOwner(cname)
+	owner, unlabeled, unknown := o.otherOwner(cname)
 	switch {
 	case unknown:
 		*unanswered = append(*unanswered, cname)
+		return false
+	case unlabeled:
+		o.logf("Leaving container %s alone: it carries no %s label, so it was not made by this project (remove it with `container delete --force %s` for this project to use the name)\n", cname, projectLabel, cname)
 		return false
 	case owner != "":
 		o.logf("Leaving container %s alone: it belongs to project %q (give this project its own DNS domain so names don't collide)\n", cname, owner)
@@ -2134,9 +2223,9 @@ func (o *Orchestrator) Down(removeVolumes bool, rmi string, removeOrphans bool) 
 	// — with `--dns-domain ""` every project names its containers by the bare
 	// service name (measured on container 1.4.1: `down` stopped and deleted a
 	// running container labeled for another project, from a project never brought
-	// up). A name held by another project, or one the runtime gives no readable
-	// answer about, is left and said; unlabeled containers are removed as before,
-	// as `up` reuses them.
+	// up). A name held by another project, one that carries no project label
+	// (made outside opossum, which `up` refuses to reuse), or one the runtime
+	// gives no readable answer about, is left and said.
 	var unanswered []string
 	mine := func(cname string) bool { return o.ours(cname, &unanswered) }
 	for i := len(order) - 1; i >= 0; i-- {
@@ -3322,25 +3411,49 @@ type ServiceStatus struct {
 	Status    string `json:"Status"`
 }
 
-// serviceStatuses gathers one ServiceStatus per service that has a
-// container on the runtime, in startup order — the data behind both the table
-// and the JSON array Ps prints. A service that was never created, or was
-// removed by `down`, has no row (matching docker compose), rather than one
-// that reads "absent".
-func (o *Orchestrator) serviceStatuses() ([]ServiceStatus, error) {
+// notThisProjects says why a container of a service's name is not this
+// project's to list, read or measure: it belongs to another project, it
+// carries no project label at all (made outside opossum), or the runtime gave
+// no readable answer about it — the same three answers `up` and `down` act
+// on. "" for this project's own and for a missing container.
+func (o *Orchestrator) notThisProjects(info runtime.ContainerInfo) string {
+	if info.Unknown {
+		return "could not be asked: the runtime gave no readable answer about which project owns it"
+	}
+	if !info.Exists {
+		return ""
+	}
+	switch proj := info.Labels[projectLabel]; {
+	case proj == "":
+		return "carries no " + projectLabel + " label, so it was not made by this project"
+	case proj != o.Project.Name:
+		return fmt.Sprintf("belongs to project %q", proj)
+	}
+	return ""
+}
+
+// serviceStatuses is the `ps` table: one row per service whose container is
+// there and this project's. A container of the name that is another
+// project's, or carries no project label, gets no row — as docker compose
+// lists only the containers that carry its project's labels — and is named
+// in notes, for `ps` to say. The containers the runtime gave no readable
+// answer about are in unanswered as well, for `ps` to exit non-zero over: an
+// empty table must not read as "nothing is running" when the truth is the
+// runtime would not say.
+func (o *Orchestrator) serviceStatuses() (rows []ServiceStatus, notes, unanswered []string, err error) {
 	// A dead daemon makes every per-service inspect look like "container absent",
 	// which would render as an empty table — a lie ("nothing is running") when the
 	// truth is the runtime is unreachable. Probe the system once up front so an
 	// empty `ps` means genuinely empty, not "couldn't ask". (The CLI-absent case is
 	// caught earlier by the root preflight; here the CLI is present but stopped.)
 	if !o.rt.SystemRunning() {
-		return nil, ErrRuntimeStopped()
+		return nil, nil, nil, ErrRuntimeStopped()
 	}
 	order, err := o.Project.StartupOrder()
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
-	rows := make([]ServiceStatus, 0, len(order))
+	rows = make([]ServiceStatus, 0, len(order))
 	for _, name := range order {
 		svc := o.Project.Services[name]
 		cname := o.containerName(name)
@@ -3349,6 +3462,15 @@ func (o *Orchestrator) serviceStatuses() ([]ServiceStatus, error) {
 			image = o.Project.Name + "-" + name + ":latest"
 		}
 		info := o.rt.Inspect(cname)
+		// Whose it is comes first: a container the runtime gave no readable
+		// answer about is not "not there".
+		if why := o.notThisProjects(info); why != "" {
+			notes = append(notes, fmt.Sprintf("%s: container %s %s — not listed", name, cname, why))
+			if info.Unknown {
+				unanswered = append(unanswered, cname)
+			}
+			continue
+		}
 		if !info.Exists {
 			continue
 		}
@@ -3365,14 +3487,14 @@ func (o *Orchestrator) serviceStatuses() ([]ServiceStatus, error) {
 			Status:    status,
 		})
 	}
-	return rows, nil
+	return rows, notes, unanswered, nil
 }
 
 // Ps prints the project's services (see serviceStatuses) as a
 // SERVICE/CONTAINER/IMAGE/IP/PORTS/STATUS table, or a JSON array under Format
 // "json".
 func (o *Orchestrator) Ps(opts PsOptions) error {
-	rows, err := o.serviceStatuses()
+	rows, notes, unanswered, err := o.serviceStatuses()
 	if err != nil {
 		return err
 	}
@@ -3393,10 +3515,14 @@ func (o *Orchestrator) Ps(opts PsOptions) error {
 			return err
 		}
 	}
-	// A background process the user didn't name should be visible wherever they
-	// look at the project, not only in the line `up` printed once. It goes to
-	// stderr: `ps` is a column table (or a JSON array) that agents and scripts
-	// parse, and a trailing prose line on stdout would break either form.
+	// What is not in the table goes to stderr: `ps` is a column table (or a
+	// JSON array) that agents and scripts parse, and a prose line on stdout
+	// would break either form. First the containers left out and why, then a
+	// background process the user didn't name, which should be visible
+	// wherever they look at the project, not only in the line `up` printed once.
+	for _, n := range notes {
+		fmt.Fprintln(os.Stderr, n)
+	}
 	if pid := SupervisorPID(o.Project.Name); pid != 0 {
 		msg := fmt.Sprintf("restart supervisor: running (pid %d)", pid)
 		if log, err := SupervisorLogFile(o.Project.Name); err == nil {
@@ -3404,7 +3530,7 @@ func (o *Orchestrator) Ps(opts PsOptions) error {
 		}
 		fmt.Fprintln(os.Stderr, msg)
 	}
-	return nil
+	return unansweredOwners(unanswered, "opossum ps")
 }
 
 // Port prints, on one line, the host side of a service's published container
@@ -3430,6 +3556,11 @@ func (o *Orchestrator) Port(service string, containerPort int, proto string) err
 	// An absent container reports no state at all, so one check covers "never
 	// created", "removed by down" and "stopped" alike.
 	info := o.rt.Inspect(cname)
+	// A container of the name that is not this project's has no port of this
+	// project's to read, whatever it publishes.
+	if why := o.notThisProjects(info); why != "" {
+		return fmt.Errorf("service %q has no container of this project's: %s %s", service, cname, why)
+	}
 	if info.State != "running" {
 		return fmt.Errorf("service %q is not running", service)
 	}
@@ -3657,30 +3788,73 @@ func dash(s string) string {
 	return s
 }
 
+// ErrInterrupted is what `logs` returns when a Ctrl-C or a SIGTERM ended it:
+// docker compose v5.5.1 `logs` says nothing then and exits 130 (measured),
+// and the CLI does the same with this.
+var ErrInterrupted = errors.New("interrupted")
+
 // Logs streams container logs. With no service names it shows every service in
 // dependency order; otherwise just the named ones (validated against the
-// project). Following (-f) blocks on a single stream, so it requires exactly one
-// target. When more than one service is shown non-follow, each is prefixed with
-// a header.
+// project), each line prefixed with its service (see logPrefixes) unless
+// opts.NoLogPrefix. Following several services multiplexes them; one service
+// followed, or several not followed, are read one after another. A Ctrl-C
+// ends it with ErrInterrupted.
 func (o *Orchestrator) Logs(services []string, opts runtime.LogsOptions) error {
 	targets, err := o.resolveServices(services)
 	if err != nil {
 		return err
 	}
-	// Following several services multiplexes their streams into one output, each
-	// line prefixed with the service name (docker compose style); Ctrl-C stops all.
+	// Only this project's containers are read: a container of a service's
+	// name that is another project's, carries no project label, or that the
+	// runtime gave no readable answer about is left out and said on stderr
+	// (docker compose shows nothing for it, silently), and the rest are shown.
+	// With every container asked for someone else's, nothing is printed and
+	// the exit is zero, as docker compose's; the ones the runtime gave no
+	// readable answer about make the exit non-zero once the rest are shown,
+	// as `down` exits over the ones it left.
+	targets, _, unanswered := o.ownContainers(targets, "not shown")
+	left := unansweredOwners(unanswered, "opossum logs")
+	prefixes := logPrefixes(targets, opts.NoLogPrefix)
+	base := o.ctx
+	if base == nil {
+		base = context.Background()
+	}
+	// Not SIGHUP: a terminal that closes ends opossum and the runtime it runs
+	// as it always did (129, as docker compose), and `nohup opossum logs
+	// --follow` keeps following, where taking it would undo the nohup.
+	ctx, stop := signal.NotifyContext(base, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	// Following several services multiplexes their streams into one output;
+	// Ctrl-C stops all.
 	if opts.Follow && len(targets) > 1 {
-		return o.followMultiplexed(targets, opts)
-	}
-	for _, name := range targets {
-		if len(targets) > 1 {
-			o.logf("==> %s <==\n", name)
+		err := o.followMultiplexed(ctx, targets, opts, prefixes)
+		if ctx.Err() != nil {
+			return ErrInterrupted
 		}
-		if err := o.rt.Logs(o.containerName(name), opts); err != nil {
-			return fmt.Errorf("logs for service %q: %w\n  confirm the service is up with `opossum ps`", name, err)
+		if err != nil {
+			return withOwners(err, left)
+		}
+		return left
+	}
+	// One service followed, or each service in turn: every line carries the
+	// prefix, as docker compose v5.5.1 writes it whether it follows or not and
+	// for one service too. The lines of one service are kept together, in the
+	// order of targets, where docker compose reads the services at once and
+	// the order of the services can change from one run to the next. A Ctrl-C
+	// ends it there, whatever the stream was doing: what the cancel did to the
+	// stream (a child killed, one not started) is not a failure to read.
+	for i, name := range targets {
+		err := o.rt.PrefixedLogs(ctx, o.containerName(name), opts, o.out, os.Stderr, prefixes[i])
+		if ctx.Err() != nil {
+			return ErrInterrupted
+		}
+		if err != nil {
+			// A failure to read still names the containers the runtime would
+			// not answer about, as `start` names them beside its failures.
+			return withOwners(fmt.Errorf("logs for service %q: %w\n  confirm the service is up with `opossum ps`", name, err), left)
 		}
 	}
-	return nil
+	return left
 }
 
 // syncWriter serializes concurrent writes from several log-follow goroutines onto
@@ -3696,33 +3870,44 @@ func (s *syncWriter) Write(p []byte) (int, error) {
 	return s.w.Write(p)
 }
 
-// followMultiplexed follows every target concurrently, prefixing each line with
-// the (padded) service name and merging into o.out. A single stream ending
-// doesn't stop the others; Ctrl-C (SIGINT/SIGTERM) cancels them all.
-func (o *Orchestrator) followMultiplexed(targets []string, opts runtime.LogsOptions) error {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
+// logPrefixes is the prefix of each target's lines, as docker compose v5.5.1
+// writes it (measured): the container's name as docker compose gives it,
+// `<service>-1`, padded to one more than the longest among the services
+// shown, then ` | ` (`web-1  | `, and `x-1    | ` beside `web-1`). With
+// noPrefix each is empty. The index is always 1: opossum runs one container
+// per service.
+func logPrefixes(targets []string, noPrefix bool) []string {
+	prefixes := make([]string, len(targets))
+	if noPrefix {
+		return prefixes
+	}
 	width := 0
 	for _, name := range targets {
-		if len(name) > width {
-			width = len(name)
-		}
+		width = max(width, len(name)+len("-1"))
 	}
+	for i, name := range targets {
+		prefixes[i] = fmt.Sprintf("%-*s | ", width+1, name+"-1")
+	}
+	return prefixes
+}
+
+// followMultiplexed follows every target concurrently, prefixing each line with
+// its prefix and merging into o.out. A single stream ending doesn't stop the
+// others; the cancel of ctx stops them all.
+func (o *Orchestrator) followMultiplexed(ctx context.Context, targets []string, opts runtime.LogsOptions, prefixes []string) error {
 	out := &syncWriter{w: o.out}
 	var wg sync.WaitGroup
 	errs := make([]error, len(targets))
 	for i, name := range targets {
 		wg.Add(1)
-		prefix := fmt.Sprintf("%-*s | ", width, name)
 		go func(i int, name, prefix string) {
 			defer wg.Done()
 			errs[i] = o.rt.FollowLogs(ctx, o.containerName(name), opts, out, prefix)
-		}(i, name, prefix)
+		}(i, name, prefixes[i])
 	}
 	wg.Wait()
-	// A clean Ctrl-C leaves all errs nil. If every stream genuinely failed, surface
-	// it (non-zero exit); a partial failure still showed its diagnostic per stream.
+	// If every stream genuinely failed, surface it (non-zero exit); a partial
+	// failure still showed its diagnostic per stream.
 	for _, e := range errs {
 		if e == nil {
 			return nil
@@ -3766,16 +3951,30 @@ func (o *Orchestrator) Stats(services []string, opts StatsOptions) error {
 	if err != nil {
 		return err
 	}
-	names := o.createdContainers(targets)
+	// Only this project's containers are measured (see ownContainers): with
+	// every container asked for someone else's there is nothing to measure
+	// and nothing is printed, exit zero, as docker compose's — not the "no
+	// container found" below, which is about this project's own services
+	// and offers `opossum up`, which would refuse a container that is there
+	// and someone else's. The ones the runtime gave no readable answer about
+	// make the exit non-zero once the rest are measured, as `down` exits.
+	own, names, unanswered := o.ownContainers(targets, "not measured")
+	left := unansweredOwners(unanswered, "opossum stats")
+	if len(own) == 0 {
+		return left
+	}
 	if len(names) == 0 {
-		return fmt.Errorf("no container found for any of the %d service(s) — if they were never started, `opossum up` creates them", len(targets))
+		return withOwners(fmt.Errorf("no container found for any of the %d service(s) — if they were never started, `opossum up` creates them", len(own)), left)
 	}
 	if opts.Format != "json" {
-		return o.rt.Stats(names, opts.NoStream)
+		if err := o.rt.Stats(names, opts.NoStream); err != nil {
+			return withOwners(err, left)
+		}
+		return left
 	}
 	stats, err := o.rt.StatsSnapshot(names)
 	if err != nil {
-		return err
+		return withOwners(err, left)
 	}
 	byID := make(map[string]int, len(stats))
 	for i, s := range stats {
@@ -3786,13 +3985,11 @@ func (o *Orchestrator) Stats(services []string, opts StatsOptions) error {
 	// stopped container out altogether, so a service without a reading has no
 	// row, and a reading for a container nobody asked about is not printed.
 	rows := make([]ServiceStat, 0, len(stats))
-	seen := make(map[string]bool, len(targets))
 	for _, name := range targets {
 		i, ok := byID[o.containerName(name)]
-		if !ok || seen[name] {
+		if !ok {
 			continue
 		}
-		seen[name] = true
 		s := stats[i]
 		rows = append(rows, ServiceStat{
 			Service:          name,
@@ -3812,28 +4009,44 @@ func (o *Orchestrator) Stats(services []string, opts StatsOptions) error {
 		return err
 	}
 	fmt.Fprintln(o.out, string(b))
-	return nil
+	return left
 }
 
-// createdContainers narrows a list of services to the container names that
-// exist on the runtime, in the order given. "Exists" is what `inspect` said:
-// a runtime that cannot answer at all (apiserver down) reads as "nothing
-// exists" here, which is why the message a caller prints on an empty answer
-// says "not found" and only offers `opossum up` as the likely cause. `container stats` (1.3.1) refuses
-// the whole call when any name it is handed does not exist — "no such
-// container", exit 1, nothing shown for the ones that do — where 1.2.2 skipped
-// the missing name. A service that was never started has no container, so
-// asking for it would blank the stats of every other service; asking only for
-// the ones that exist shows the same thing on either version. Stopped
-// containers are kept: both versions skip those quietly.
-func (o *Orchestrator) createdContainers(services []string) []string {
-	var names []string
+// ownContainers is the services whose container of the name is this
+// project's to read or measure — or is not there, which a caller reads as
+// "no container" — and, of those, the container names that are there
+// (created), from one inspect per service. Only created ones go to
+// `container stats`: 1.3.1 refuses the whole call when any name it is handed
+// does not exist — "no such container", exit 1, nothing shown for the ones
+// that do — where 1.2.2 skipped the missing name, so asking for a service
+// that was never started would blank the stats of every other service.
+// Stopped containers are kept: both versions skip those quietly. A
+// container that is another project's, carries no project label, or that the
+// runtime gave no readable answer about is left out and named on stderr with
+// what was not done to it (`logs` and `stats` are read as tables or streams,
+// so nothing prose goes to stdout), as `ps` leaves it out of its table.
+// docker compose shows nothing for such a container. The ones the runtime
+// gave no readable answer about are also returned in unanswered, for the
+// caller to exit non-zero over (unansweredOwners) once it has read the rest:
+// "not shown" is not the same as "not there", and a runtime that answers
+// nothing must not read as a project with nothing to show.
+func (o *Orchestrator) ownContainers(services []string, notDone string) (own, created, unanswered []string) {
 	for _, name := range services {
-		if cname := o.containerName(name); o.rt.Inspect(cname).Exists {
-			names = append(names, cname)
+		cname := o.containerName(name)
+		info := o.rt.Inspect(cname)
+		if why := o.notThisProjects(info); why != "" {
+			fmt.Fprintf(os.Stderr, "%s: container %s %s — %s\n", name, cname, why, notDone)
+			if info.Unknown {
+				unanswered = append(unanswered, cname)
+			}
+			continue
+		}
+		own = append(own, name)
+		if info.Exists {
+			created = append(created, cname)
 		}
 	}
-	return names
+	return own, created, unanswered
 }
 
 // Copy copies files between a service's container and the host, like
@@ -3885,12 +4098,20 @@ func (o *Orchestrator) resolveServices(services []string) ([]string, error) {
 	if len(services) == 0 {
 		return o.Project.StartupOrder()
 	}
+	// A service named twice is one service, in the position it was first
+	// named: docker compose v5.5.0 prints `logs web web` once, and a command
+	// that reads, counts or names containers must not read, count or name
+	// one twice.
+	var once []string
 	for _, s := range services {
 		if _, ok := o.Project.Services[s]; !ok {
 			return nil, o.unknownServiceErr(s)
 		}
+		if !slices.Contains(once, s) {
+			once = append(once, s)
+		}
 	}
-	return services, nil
+	return once, nil
 }
 
 // Import brings each build service's Docker-built image into container's store,
@@ -4025,6 +4246,9 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 		return err
 	}
 	if err := o.checkExternalVolumes(o.withDependencies(service)); err != nil {
+		return err
+	}
+	if err := o.checkTmpfsOptions([]string{service}); err != nil {
 		return err
 	}
 
@@ -4339,11 +4563,17 @@ func (o *Orchestrator) Start(services []string) error {
 // carries several lines, and without the marks the second reads as more of the
 // first.
 func startFailures(verb string, failed []error) error {
+	return listedFailures(fmt.Sprintf("%d services did not %s:", len(failed), verb), failed)
+}
+
+// listedFailures is several failures under a heading, one entry each, as
+// startFailures lays them out; one failure alone is itself.
+func listedFailures(heading string, failed []error) error {
 	if len(failed) < 2 {
 		return errors.Join(failed...)
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%d services did not %s:", len(failed), verb)
+	b.WriteString(heading)
 	for _, f := range failed {
 		lines := strings.Split(f.Error(), "\n")
 		b.WriteString("\n- " + lines[0])
@@ -4412,20 +4642,58 @@ func (o *Orchestrator) firstNotStartedDependency(name string, notStarted map[str
 
 // Kill signals running containers (all, or the named ones) in reverse dependency
 // order. An empty signal defaults to KILL.
+//
+// A killed service is recorded as stopped by the user, as `stop` records it, so
+// the restart supervisor does not bring it back: docker compose v5.5.0 does not
+// restart a container `kill` stopped, whatever the signal, and does restart one
+// that exits on its own (measured, `restart: always`). The record is written
+// before the signal, and whether or not the signal ends the container: after a
+// `kill -s HUP` the container keeps running, and docker does not restart it
+// when it later exits either (measured). `up`, `start` and `restart` clear it
+// — where docker compose, for a container still running after the kill, lets
+// only `restart` bring supervision back (measured; see docs/compatibility.md).
+//
+// A kill the runtime refuses leaves no record it did not find: the record this
+// kill wrote is taken back (one written before — by `stop`, or by a kill the
+// container outlived — stays). A container found not running afterwards was
+// not killed, as docker compose kills only running ones, and that is not an
+// error; one found running refused the signal (`kill -s BOGUS`), and one the
+// runtime gives no readable answer about may have: both are errors, as docker
+// compose exits 1 for a refused signal and for a daemon that does not answer.
+// Every service is signalled whatever an earlier one did, and more than one
+// failure is listed one entry each, as `start` lists its failures.
 func (o *Orchestrator) Kill(services []string, signal string) error {
 	targets, err := o.resolveServices(services)
 	if err != nil {
 		return err
 	}
 	var unanswered []string
+	var failed []error
 	for i := len(targets) - 1; i >= 0; i-- {
-		if !o.ours(o.containerName(targets[i]), &unanswered) {
+		name, cname := targets[i], o.containerName(targets[i])
+		if !o.ours(cname, &unanswered) {
 			continue
 		}
-		o.logf("Killing %s\n", targets[i])
-		o.rt.Kill(o.containerName(targets[i]), signal)
+		o.logf("Killing %s\n", name)
+		// Before the signal: a poll landing between the container ending and
+		// the record being written would read the kill as a crash.
+		recorded := o.wasStoppedByUs(name)
+		o.MarkStopped(name)
+		if err := o.rt.Kill(cname, signal); err != nil {
+			if !recorded {
+				o.ClearStopped(name)
+			}
+			switch info := o.rt.Inspect(cname); {
+			case info.Unknown:
+				failed = append(failed, fmt.Errorf("killing service %q: %w\n  the runtime gave no readable answer about the container afterwards, so whether it took the signal is not known", name, err))
+			case info.Exists && info.State == "running":
+				failed = append(failed, fmt.Errorf("killing service %q: %w", name, err))
+			}
+		}
 	}
-	return unansweredOwners(unanswered, "opossum kill")
+	// The heading says only that the kill failed: an entry may be one the
+	// runtime gave no answer about, which may have taken the signal.
+	return withOwners(listedFailures(fmt.Sprintf("the kill failed for %d services:", len(failed)), failed), unansweredOwners(unanswered, "opossum kill"))
 }
 
 // Stop stops services without removing them (unlike Down). With no names it stops

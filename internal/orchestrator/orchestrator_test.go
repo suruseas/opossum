@@ -68,6 +68,7 @@ func fakeShim(t *testing.T) (*runtime.Runtime, func() []string) {
 		"FAKE_LOG=" + logPath,
 		"HEALTH_COUNTER=" + filepath.Join(dir, "health.count"),
 		"STATE_DIR=" + dir, // remembers each run's config-hash for idempotency evals
+		"INSPECT_PROJECT_FROM_NAME=1",
 	}}
 	read := func() []string {
 		b, err := os.ReadFile(logPath)
@@ -308,6 +309,7 @@ func TestUpFailsWhenHostPortInUse(t *testing.T) {
 	defer l.Close()
 	port := l.Addr().(*net.TCPAddr).Port
 	rt, _ := fakeShim(t)
+	setShimEnv(rt, "INSPECT_ABSENT=web.demo.opossum") // not up yet: the port is held by something else
 	p := project("demo", map[string]*compose.Service{
 		"web": {Image: "web:latest", Ports: []string{fmt.Sprintf("127.0.0.1:%d:80", port)}},
 	})
@@ -680,6 +682,7 @@ func TestUpMountsTmpfs(t *testing.T) {
 
 func TestUpWithoutDNSDomainUsesBareNames(t *testing.T) {
 	rt, log := fakeShim(t)
+	setShimEnv(rt, "INSPECT_PROJECT=demo") // this project's containers, with a DNS domain or without one (the fake cannot read the project from a name without)
 	p := project("demo", map[string]*compose.Service{
 		"solo": {Image: "busybox"},
 	})
@@ -2162,7 +2165,7 @@ func TestPsFallsBackToStoppedWhenExistsWithEmptyState(t *testing.T) {
 	// A container that exists but reports no state must fall back to "stopped",
 	// not "absent" — guards the exists-but-empty-state branch (which a shim with a
 	// non-empty INSPECT_STATE never exercises).
-	rt := fakeShimInspect(t, `[{"status":{"state":""},"configuration":{}}]`, 0)
+	rt := fakeShimInspect(t, `[{"status":{"state":""},"configuration":{"labels":{"opossum.project":"demo"}}}]`, 0)
 	p := project("demo", map[string]*compose.Service{"db": {Image: "postgres:16"}})
 	var out bytes.Buffer
 	if err := orchestrator.New(p, rt, "opossum", &out).Ps(orchestrator.PsOptions{}); err != nil {
@@ -2920,6 +2923,10 @@ func TestUpLeavesAContainerWhoseOwnerCannotBeReadAlone(t *testing.T) {
 			"`container inspect " + svc + ".demo.opossum` shows what the runtime says — run `opossum up` again once it answers, " +
 			"or, if it belongs to another project, give this project its own DNS domain (e.g. --dns-domain demo)"
 	}
+	noLabel := func(svc string) string {
+		return `container "` + svc + `.demo.opossum" already exists and carries no opossum.project label, so it was not made by this project and is left alone; ` +
+			"remove it (`container delete --force " + svc + ".demo.opossum`) to free the name, or give this project its own DNS domain (e.g. --dns-domain demo)"
+	}
 	for _, tc := range []struct {
 		name, refused, want string
 		env                 []string
@@ -2930,6 +2937,10 @@ func TestUpLeavesAContainerWhoseOwnerCannotBeReadAlone(t *testing.T) {
 			[]string{"INSPECT_PROJECT=otherproj"}},
 		{"no answer about the service that starts last", "web.demo.opossum", noAnswer("web"), []string{"INSPECT_FAIL=web.demo.opossum"}},
 		{"no answer about the service that starts first", "db.demo.opossum", noAnswer("db"), []string{"INSPECT_FAIL=db.demo.opossum"}},
+		// Made outside opossum: no project label. docker compose v5.5.0 refuses
+		// the name too (`Conflict. The container name … is already in use`).
+		{"no project label on the service that starts last", "web.demo.opossum", noLabel("web"), []string{"INSPECT_UNLABELED=web.demo.opossum"}},
+		{"no project label on the service that starts first", "db.demo.opossum", noLabel("db"), []string{"INSPECT_UNLABELED=db.demo.opossum"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rt, log := fakeShim(t)
@@ -3092,9 +3103,10 @@ func TestLogsAllServicesInOrder(t *testing.T) {
 	if d, w := indexOf(lines, "logs db.demo.opossum"), indexOf(lines, "logs web.demo.opossum"); d < 0 || w < 0 || d > w {
 		t.Errorf("db logs should come before web (db=%d web=%d)", d, w)
 	}
-	// Multiple services get a per-service header on stdout.
-	if !strings.Contains(out.String(), "==> db <==") {
-		t.Errorf("expected a per-service header, got:\n%s", out.String())
+	// Each line carries its service's prefix on stdout, one service's lines
+	// after the other's in the same order, with no header.
+	if want := "db-1   | log-line db.demo.opossum\nweb-1  | log-line web.demo.opossum\n"; out.String() != want {
+		t.Errorf("\n got %q\nwant %q", out.String(), want)
 	}
 }
 
@@ -3113,9 +3125,9 @@ func TestLogsSelectedServiceWithFollow(t *testing.T) {
 	if !hasLine(lines, "logs -f web.demo.opossum") {
 		t.Errorf("expected followed logs for web only, got %v", lines)
 	}
-	// Only the named service is shown; a single stream gets no header.
-	if hasLine(lines, "logs -f db.demo.opossum") || strings.Contains(out.String(), "==>") {
-		t.Errorf("only web should be followed, with no header; got %v / %q", lines, out.String())
+	// Only the named service is shown.
+	if hasLine(lines, "logs -f db.demo.opossum") || out.String() != "web-1  | log-line web.demo.opossum\n" {
+		t.Errorf("only web should be followed; got %v / %q", lines, out.String())
 	}
 }
 
@@ -3125,7 +3137,7 @@ func TestLogsFollowMultipleMultiplexed(t *testing.T) {
 	rt, _ := fakeShim(t)
 	p := project("demo", map[string]*compose.Service{
 		"web": {Image: "web:latest"},
-		"api": {Image: "api:latest"}, // same length as web → no prefix padding
+		"api": {Image: "api:latest"}, // same length as web
 	})
 	var out bytes.Buffer
 	o := orchestrator.New(p, rt, "opossum", &out)
@@ -3133,10 +3145,10 @@ func TestLogsFollowMultipleMultiplexed(t *testing.T) {
 		t.Fatalf("Logs: %v", err)
 	}
 	s := out.String()
-	if !strings.Contains(s, "web | log-line web.demo.opossum") {
+	if !strings.Contains(s, "web-1  | log-line web.demo.opossum\n") {
 		t.Errorf("web logs should be multiplexed with a service prefix, got:\n%s", s)
 	}
-	if !strings.Contains(s, "api | log-line api.demo.opossum") {
+	if !strings.Contains(s, "api-1  | log-line api.demo.opossum\n") {
 		t.Errorf("api logs should be multiplexed with a service prefix, got:\n%s", s)
 	}
 }
@@ -3877,6 +3889,7 @@ func TestUpDetectsIPv4OnlyHostPortConflict(t *testing.T) {
 	port := l.Addr().(*net.TCPAddr).Port
 
 	rt, _ := fakeShim(t)
+	setShimEnv(rt, "INSPECT_ABSENT=web.demo.opossum") // not up yet: the port is held by something else
 	p := project("demo", map[string]*compose.Service{
 		"web": {Image: "web:latest", Ports: []string{fmt.Sprintf("%d:80", port)}},
 	})
@@ -3975,6 +3988,7 @@ func TestUpDoesNotRemapExplicitHostPort(t *testing.T) {
 	port := l.Addr().(*net.TCPAddr).Port
 
 	rt, _ := fakeShim(t)
+	setShimEnv(rt, "INSPECT_ABSENT=web.demo.opossum") // not up yet: the port is held by something else
 	p := project("demo", map[string]*compose.Service{
 		"web": {Image: "web:latest", Ports: []string{fmt.Sprintf("127.0.0.1:%d:80", port)}},
 	})
@@ -4033,6 +4047,7 @@ func TestUpRemapsOnlyBarePortOnMixedService(t *testing.T) {
 	explicitSpec := fmt.Sprintf("127.0.0.1:%d:80", explicitPort)
 
 	rt, _ := fakeShim(t)
+	setShimEnv(rt, "INSPECT_ABSENT=web.demo.opossum") // not up yet: the port is held by something else
 	p := project("demo", map[string]*compose.Service{
 		"web": {
 			Image:        "web:latest",

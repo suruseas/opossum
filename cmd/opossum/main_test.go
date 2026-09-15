@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -332,6 +333,7 @@ func fakeShim(t *testing.T) func() []string {
 	logPath := filepath.Join(dir, "invocations.log")
 	t.Setenv("OPOSSUM_CONTAINER_BIN", fakeShimBin)
 	t.Setenv("FAKE_LOG", logPath)
+	t.Setenv("INSPECT_PROJECT_FROM_NAME", "1")
 	// `up` watches each service for a second before calling it started. These evals
 	// drive the real binary, so the only way to reach that setting is the
 	// environment — and paying it in ~40 of them added 43s of pure sleep to a suite
@@ -1026,6 +1028,92 @@ services:
 	}
 	if joined := strings.Join(readLog(), "\n"); !strings.Contains(joined, "logs -n 5 db.demo.opossum") {
 		t.Errorf("logs should tail db, got:\n%s", joined)
+	}
+}
+
+// The CLI hands --no-log-prefix to logs: with it the line is bare, without it
+// the line carries the service prefix.
+func TestLogsCLINoLogPrefix(t *testing.T) {
+	fakeShim(t)
+	compose := writeCompose(t, `
+name: demo
+services:
+  db:
+    image: postgres:16
+`)
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"logs", "db"}, "db-1  | log-line db.demo.opossum\n"},
+		{[]string{"logs", "--no-log-prefix", "db"}, "log-line db.demo.opossum\n"},
+	} {
+		stdout, _, err := runSplit(t, append([]string{"-f", compose}, tc.args...)...)
+		if err != nil || stdout != tc.want {
+			t.Errorf("%v: got %q, %v; want %q", tc.args, stdout, err, tc.want)
+		}
+	}
+}
+
+// signalOnWrite reports the first write on a channel.
+type signalOnWrite struct {
+	once  sync.Once
+	wrote chan struct{}
+}
+
+func (w *signalOnWrite) Write(p []byte) (int, error) {
+	w.once.Do(func() { close(w.wrote) })
+	return len(p), nil
+}
+
+// A Ctrl-C while `logs` reads exits 130 with nothing said, as docker compose
+// v5.5.1 does (measured), not 1 with a failure to read; a SIGTERM (what a GUI
+// sends to stop it) the same, as there. Each is sent to opossum alone here,
+// so what ends the command is opossum taking the signal and stopping the
+// runtime — one service followed, several multiplexed, and several read one
+// after another.
+func TestLogsCLIExits130OnCtrlC(t *testing.T) {
+	for _, sig := range []syscall.Signal{syscall.SIGINT, syscall.SIGTERM} {
+		for _, args := range [][]string{{"logs", "--follow", "db"}, {"logs", "--follow", "db", "web"}, {"logs", "db", "web"}} {
+			t.Run(sig.String()+"/"+strings.Join(args, " "), func(t *testing.T) {
+				fakeShim(t)
+				t.Setenv("LOGS_SLEEP", "30")
+				compose := writeCompose(t, `
+name: demo
+services:
+  db:
+    image: postgres:16
+  web:
+    image: web:latest
+`)
+				// Held by the test too, so a `logs` that does not take the
+				// signal fails this test by not ending, instead of the signal
+				// ending the test binary.
+				held := make(chan os.Signal, 1)
+				signal.Notify(held, sig)
+				defer signal.Stop(held)
+				out := &signalOnWrite{wrote: make(chan struct{})}
+				var errOut strings.Builder
+				code := make(chan int, 1)
+				go func() { code <- runCLI(append([]string{"-f", compose}, args...), out, &errOut) }()
+				select {
+				case <-out.wrote:
+				case <-time.After(20 * time.Second):
+					t.Fatal("logs wrote nothing")
+				}
+				if err := syscall.Kill(os.Getpid(), sig); err != nil {
+					t.Fatal(err)
+				}
+				select {
+				case c := <-code:
+					if c != 130 || errOut.String() != "" {
+						t.Errorf("want exit 130 and nothing said, got %d and %q", c, errOut.String())
+					}
+				case <-time.After(10 * time.Second):
+					t.Fatal("logs did not end on the signal")
+				}
+			})
+		}
 	}
 }
 

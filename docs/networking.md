@@ -102,9 +102,22 @@ keeps names from colliding. As a backstop for the no-DNS-domain case
 replacing) a container another project already owns. `down` leaves such a
 container alone and says so, and `run` refuses a one-off name another project
 holds. `start`, `stop`, `kill` and `restart` leave such a container, say so, and
-act on the rest of the project; `exec` and `cp` refuse it. A container the
-runtime gives no readable answer about is treated the same way: `up` and `run`
-refuse, and `down` leaves it, names it, and exits non-zero.
+act on the rest of the project; `exec` and `cp` refuse it; `ps` gives it no row
+and says so on stderr (docker compose's gives it no row, silently); `port`
+reports no container of this project's (docker compose's says the service is
+not running); and `logs` and `stats` leave it out and say so (docker compose's
+show nothing for it). A container of the name that carries no `opossum.project` label
+at all was made outside opossum (`container run --name db …`, say) and is
+treated the same way — every service container and one-off opossum makes
+carries the label — so `up` refuses it, as docker compose refuses a container
+of the name without its labels (`Conflict. The container name … is already in
+use`), and `down` leaves it and says so (docker compose leaves it silently). A
+container the runtime gives no readable answer about is treated the same way
+by every one of these: `up`, `run`, `exec` and `cp` refuse it; `down`, `start`,
+`stop`, `kill`, `restart`, `ps`, `logs` and `stats` leave it, name it, act on
+the rest, and exit non-zero; `port` reports no container of this project's.
+When every container `logs` or `stats` was asked for is someone else's, they
+print nothing and exit zero, as docker compose's do.
 
 ## Reaching a service on the host
 

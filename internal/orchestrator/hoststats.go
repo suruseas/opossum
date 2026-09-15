@@ -134,10 +134,19 @@ func (o *Orchestrator) StatsHost(services []string) error {
 	if err != nil {
 		return err
 	}
+	// A container that is not this project's gets no row at all — its host
+	// footprint is as much someone else's as its guest usage — and is named on
+	// stderr, as `stats` does; with every container asked for someone else's
+	// nothing is printed, and the ones the runtime gave no readable answer
+	// about make the exit non-zero once the rest are shown, as `stats` does.
 	// Only containers that exist go to `container stats`: a name it does not
-	// know fails the whole snapshot on 1.3.1 (see createdContainers), which
-	// would blank the guest column for every service, not just the missing one.
-	existing := o.createdContainers(targets)
+	// know fails the whole snapshot on 1.3.1 (see ownContainers), which would
+	// blank the guest column for every service, not just the missing one.
+	targets, existing, unanswered := o.ownContainers(targets, "not measured")
+	left := unansweredOwners(unanswered, "opossum stats --host")
+	if len(targets) == 0 {
+		return left
+	}
 
 	// Guest-view usage (best-effort — a container that isn't running just has no
 	// row, which we render as "—" too).
@@ -178,7 +187,7 @@ func (o *Orchestrator) StatsHost(services []string) error {
 		return err
 	}
 	fmt.Fprintln(o.out, "\nHOST FOOTPRINT is each container VM's resident memory on the Mac (host-derived, approximate); — means it couldn't be mapped.")
-	return nil
+	return left
 }
 
 type runtimeStat struct{ usage, limit int64 }

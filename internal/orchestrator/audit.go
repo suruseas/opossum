@@ -110,6 +110,11 @@ func (o *Orchestrator) RunAudited(service string, command []string, opts RunOneO
 	if err := o.checkExternalVolumes(o.withDependencies(service)); err != nil {
 		return nil, err
 	}
+	// A tmpfs mount of the one-off's with an empty option, for the same two
+	// reasons.
+	if err := o.checkTmpfsOptions([]string{service}); err != nil {
+		return nil, err
+	}
 	// A dependency behind a profile that is not active, for the same two
 	// reasons — and a third: the `up` below names the dependencies, so it
 	// would start one instead of refusing it (#1005).

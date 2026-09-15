@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -72,6 +73,13 @@ func main() {
 			return ""
 		}
 		return filepath.Join(stopDir, "stopped-"+hex.EncodeToString([]byte(name)))
+	}
+	// The project label a run gave a name, kept where a stop is.
+	projectPath := func(name string) string {
+		if stopDir == "" {
+			return ""
+		}
+		return filepath.Join(stopDir, "project-"+hex.EncodeToString([]byte(name)))
 	}
 	// stoppedForStats reports whether inspect would call the container
 	// stopped, by the same knobs: $INSPECT_STATE for every container,
@@ -170,7 +178,17 @@ func main() {
 			os.Exit(1)
 		}
 		// Running a name again means it is there again (the `delete` case) and no
-		// longer stopped (the `stop` case).
+		// longer stopped (the `stop` case), carrying the project label this run
+		// gave it (none for a run without one), for a later inspect. `-l` is the
+		// spelling opossum passes; `--label` is the long one.
+		var runProject string
+		for i, a := range args {
+			if i > 0 && (args[i-1] == "-l" || args[i-1] == "--label") {
+				if v, ok := strings.CutPrefix(a, "opossum.project="); ok {
+					runProject = v
+				}
+			}
+		}
 		for i, a := range args {
 			if i > 0 && args[i-1] == "--name" {
 				if stateDir != "" {
@@ -178,6 +196,9 @@ func main() {
 				}
 				if p := stoppedPath(a); p != "" {
 					_ = os.Remove(p)
+				}
+				if p := projectPath(a); p != "" {
+					_ = os.WriteFile(p, []byte(runProject), 0o644)
 				}
 			}
 		}
@@ -363,6 +384,26 @@ func main() {
 			_ = os.Remove(p)
 		}
 
+	case "logs":
+		// One line per container, then, with $LOGS_SLEEP, a stream that stays
+		// open that many seconds, as `container logs -f` does (or a long read
+		// of a large log without -f).
+		// While the stream is open the real CLI catches SIGINT and SIGTERM and
+		// exits 130 and 143 of its own (container 1.4.1).
+		caught := make(chan os.Signal, 1)
+		signal.Notify(caught, syscall.SIGINT, syscall.SIGTERM)
+		fmt.Printf("log-line %s\n", args[len(args)-1])
+		if n, err := strconv.Atoi(os.Getenv("LOGS_SLEEP")); err == nil {
+			select {
+			case sig := <-caught:
+				if sig == syscall.SIGINT {
+					os.Exit(130)
+				}
+				os.Exit(143)
+			case <-time.After(time.Duration(n) * time.Second):
+			}
+		}
+		return
 	case "inspect":
 		// $INSPECT_STATE overrides the reported state, so a test can stage a
 		// container that exited right after starting. The orchestrator's shim has
@@ -391,8 +432,27 @@ func main() {
 		// way a real one carries the label opossum stamped on it at `run` time.
 		// Without it, code that checks ownership before acting sees no owner and a
 		// test of that check proves nothing. Same knob as the internal shim.
+		// Otherwise the label an earlier run of the name carried; then
+		// $INSPECT_PROJECT_FROM_NAME and $INSPECT_UNLABELED, as in the internal shim.
 		labels := ""
-		if proj := os.Getenv("INSPECT_PROJECT"); proj != "" {
+		proj := os.Getenv("INSPECT_PROJECT")
+		recorded := false
+		if p := projectPath(arg(1)); proj == "" && p != "" {
+			if b, err := os.ReadFile(p); err == nil {
+				proj, recorded = string(b), true
+			}
+		}
+		if proj == "" && !recorded && os.Getenv("INSPECT_PROJECT_FROM_NAME") != "" {
+			if parts := strings.Split(arg(1), "."); len(parts) >= 3 {
+				proj = parts[len(parts)-2]
+			}
+		}
+		for _, m := range strings.Fields(os.Getenv("INSPECT_UNLABELED")) {
+			if arg(1) == m {
+				proj = ""
+			}
+		}
+		if proj != "" {
 			labels = `"opossum.project":"` + proj + `"`
 		}
 		state := os.Getenv("INSPECT_STATE")

@@ -52,6 +52,7 @@ func TestAServiceNameTheRuntimeCannotNameAContainerIsRefusedBeforeCreating(t *te
 		for _, path := range []string{"up", "run", "run --audit"} {
 			t.Run(tc.name+"/"+path, func(t *testing.T) {
 				rt, log := fakeShim(t)
+				setShimEnv(rt, "INSPECT_PROJECT=demo") // this project's containers, with a DNS domain or without one (the fake cannot read the project from a name without)
 				proj := project("demo", map[string]*compose.Service{
 					"db":       {Image: "alpine:3.20"},
 					tc.service: {Image: "alpine:3.20", DependsOn: compose.DependsOn{{Name: "db"}}},
@@ -86,6 +87,7 @@ func TestAServiceNameTheRuntimeCannotNameAContainerIsRefusedBeforeCreating(t *te
 	// with, so a DNS domain it refuses is what the advice names.
 	t.Run("a name starting with a digit and a DNS domain the runtime refuses", func(t *testing.T) {
 		rt, _ := fakeShim(t)
+		setShimEnv(rt, "INSPECT_PROJECT=demo") // this project's containers, with a DNS domain or without one (the fake cannot read the project from a name without)
 		err := orchestrator.New(project("demo", map[string]*compose.Service{"9web": {Image: "alpine:3.20"}}), rt, "o+x", &bytes.Buffer{}).Up(true)
 		if want := `container name "9web.demo.o+x" is not one the container runtime (1.4.1) creates — ` + rule + `; use a DNS domain of those characters instead of "o+x" (` + "`--dns-domain`)"; err == nil || err.Error() != want {
 			t.Errorf("\n got %v\nwant %s", err, want)
@@ -94,6 +96,7 @@ func TestAServiceNameTheRuntimeCannotNameAContainerIsRefusedBeforeCreating(t *te
 	// The service the runtime refuses starts second: `up` looks at each.
 	t.Run("the second service to start", func(t *testing.T) {
 		rt, log := fakeShim(t)
+		setShimEnv(rt, "INSPECT_PROJECT=demo") // this project's containers, with a DNS domain or without one (the fake cannot read the project from a name without)
 		proj := project("demo", map[string]*compose.Service{"ab": {Image: "alpine:3.20"}, "z+z": {Image: "alpine:3.20"}})
 		err := orchestrator.New(proj, rt, "opossum", &bytes.Buffer{}).Up(true)
 		if want := renameService("z+z.demo.opossum", "z+z"); err == nil || err.Error() != want {
@@ -123,6 +126,7 @@ func TestAServiceNameItsPeersCannotLookUpIsWarnedAboutAndRuns(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rt, log := fakeShim(t)
+			setShimEnv(rt, "INSPECT_PROJECT=demo") // this project's containers, with a DNS domain or without one (the fake cannot read the project from a name without)
 			var out bytes.Buffer
 			proj := project("demo", map[string]*compose.Service{tc.service: {Image: "alpine:3.20"}})
 			if err := orchestrator.New(proj, rt, tc.domain, &out).Up(true); err != nil {
@@ -156,6 +160,7 @@ func TestAServiceNameItsPeersCannotLookUpIsWarnedAboutAndRuns(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rt, _ := fakeShim(t)
+			setShimEnv(rt, "INSPECT_PROJECT=demo") // this project's containers, with a DNS domain or without one (the fake cannot read the project from a name without)
 			var out bytes.Buffer
 			svcs := map[string]*compose.Service{}
 			for _, n := range tc.services {
@@ -176,6 +181,7 @@ func TestAServiceNameItsPeersCannotLookUpIsWarnedAboutAndRuns(t *testing.T) {
 	// change), the warning is not said again.
 	t.Run("up twice in one command", func(t *testing.T) {
 		rt, _ := fakeShim(t)
+		setShimEnv(rt, "INSPECT_PROJECT=demo") // this project's containers, with a DNS domain or without one (the fake cannot read the project from a name without)
 		var out bytes.Buffer
 		o := orchestrator.New(project("demo", map[string]*compose.Service{"MyDb": {Image: "alpine:3.20"}}), rt, "opossum", &out)
 		for i := 0; i < 2; i++ {
@@ -190,6 +196,7 @@ func TestAServiceNameItsPeersCannotLookUpIsWarnedAboutAndRuns(t *testing.T) {
 	// A service `up` does not start is not warned about.
 	t.Run("a service not started", func(t *testing.T) {
 		rt, _ := fakeShim(t)
+		setShimEnv(rt, "INSPECT_PROJECT=demo") // this project's containers, with a DNS domain or without one (the fake cannot read the project from a name without)
 		var out bytes.Buffer
 		proj := project("demo", map[string]*compose.Service{"api": {Image: "alpine:3.20"}, "MyDb": {Image: "alpine:3.20"}})
 		if err := orchestrator.New(proj, rt, "opossum", &out).Up(true, "api"); err != nil {
@@ -202,6 +209,7 @@ func TestAServiceNameItsPeersCannotLookUpIsWarnedAboutAndRuns(t *testing.T) {
 	// The warning comes before the first container is created.
 	t.Run("before anything is created", func(t *testing.T) {
 		rt, _ := fakeShim(t)
+		setShimEnv(rt, "INSPECT_PROJECT=demo") // this project's containers, with a DNS domain or without one (the fake cannot read the project from a name without)
 		var out bytes.Buffer
 		proj := project("demo", map[string]*compose.Service{"MyDb": {Image: "alpine:3.20"}})
 		if err := orchestrator.New(proj, rt, "opossum", &out).Up(true); err != nil {
@@ -250,6 +258,7 @@ func TestServiceNamesThatDifferOnlyInCaseAreRefusedBeforeCreating(t *testing.T) 
 		for _, domain := range []string{"opossum", ""} {
 			t.Run(tc.name+"/"+domain, func(t *testing.T) {
 				rt, log := fakeShim(t)
+				setShimEnv(rt, "INSPECT_PROJECT=demo") // this project's containers, with a DNS domain or without one (the fake cannot read the project from a name without)
 				svcs := map[string]*compose.Service{}
 				for n, s := range tc.services {
 					c := *s
@@ -273,6 +282,7 @@ func TestServiceNamesThatDifferOnlyInCaseAreRefusedBeforeCreating(t *testing.T) 
 	}
 	t.Run("before orphans are removed", func(t *testing.T) {
 		rt, log := fakeShim(t)
+		setShimEnv(rt, "INSPECT_PROJECT=demo") // this project's containers, with a DNS domain or without one (the fake cannot read the project from a name without)
 		setShimEnv(rt, "LS_CONTAINERS=com.demo.opossum old.demo.opossum", "LS_PROJECT=demo")
 		o := orchestrator.New(project("demo", map[string]*compose.Service{"Com": svc(), "com": svc()}), rt, "opossum", &bytes.Buffer{})
 		o.SetUpOptions(false, false, false, true, false) // --remove-orphans

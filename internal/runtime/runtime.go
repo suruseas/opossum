@@ -1376,6 +1376,10 @@ func (r *Runtime) ExecStream(name string, command []string, o ExecOptions) error
 type LogsOptions struct {
 	Follow bool // stream new output as it arrives (-f)
 	Tail   int  // show only the last N lines (-n); <= 0 means all
+	// NoLogPrefix leaves each line as the container wrote it, without the
+	// service prefix (--no-log-prefix). Read by the orchestrator, which
+	// chooses the prefix; nothing of it is passed to the runtime.
+	NoLogPrefix bool
 }
 
 // Logs streams a container's logs to the parent's stdout/stderr.
@@ -1425,17 +1429,59 @@ func (r *Runtime) logsArgs(name string, o LogsOptions) []string {
 // A real failure (not a Ctrl-C cancel) is surfaced as a prefixed diagnostic line
 // and returned, so a failing stream isn't silent.
 func (r *Runtime) FollowLogs(ctx context.Context, name string, o LogsOptions, w io.Writer, prefix string) error {
+	return r.prefixedLogs(ctx, name, o, w, nil, prefix)
+}
+
+// LogsCancelGrace is how long a logs stream that ended in an error waits for
+// ctx to be cancelled before the end is taken for a failure to read. A Ctrl-C
+// at the terminal reaches opossum and the runtime alike, and container 1.4.1
+// catches it and exits 130 of its own (143 for a SIGTERM), which can come
+// before opossum has taken the same signal and cancelled ctx: that end is the
+// interrupt. A runtime ended from outside, with no signal to opossum, leaves
+// ctx as it is and is a failure once the grace has passed.
+var LogsCancelGrace = 500 * time.Millisecond
+
+// cancelledSoon reports whether ctx is cancelled within LogsCancelGrace.
+func cancelledSoon(ctx context.Context) bool {
+	t := time.NewTimer(LogsCancelGrace)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return true
+	case <-t.C:
+		return false
+	}
+}
+
+// PrefixedLogs writes a container's logs to w, each line prefixed with prefix,
+// until the stream ends (or ctx is cancelled, when following). Unlike
+// FollowLogs, what the runtime itself says on stderr — a failure to read the
+// logs — goes to errw as it was written, not into w as a log line: container
+// 1.4.1 writes the container's own stdout and stderr lines alike to its
+// stdout (measured), so its stderr carries only its own messages.
+func (r *Runtime) PrefixedLogs(ctx context.Context, name string, o LogsOptions, w, errw io.Writer, prefix string) error {
+	return r.prefixedLogs(ctx, name, o, w, errw, prefix)
+}
+
+// prefixedLogs is FollowLogs when errw is nil (the runtime's stderr shares the
+// pipe, and a failure is written into w as a prefixed line) and PrefixedLogs
+// otherwise.
+func (r *Runtime) prefixedLogs(ctx context.Context, name string, o LogsOptions, w, errw io.Writer, prefix string) error {
 	args := r.logsArgs(name, o)
 	r.trace(args)
 	cmd := r.newCmd(ctx, args...)
 	// A real OS pipe (not an io.Writer) so the child writes directly and the reader
-	// sees EOF when it exits — stdout and stderr share it (logs may use either).
+	// sees EOF when it exits — stdout and stderr share it (logs may use either)
+	// unless errw is given.
 	pr, pw, err := os.Pipe()
 	if err != nil {
 		return err
 	}
 	cmd.Stdout = pw
 	cmd.Stderr = pw
+	if errw != nil {
+		cmd.Stderr = errw
+	}
 	if err := cmd.Start(); err != nil {
 		pr.Close()
 		pw.Close()
@@ -1461,7 +1507,9 @@ func (r *Runtime) FollowLogs(ctx context.Context, name string, o LogsOptions, w 
 	for {
 		line, rerr := br.ReadString('\n')
 		if len(line) > 0 {
-			w.Write([]byte(prefix + strings.TrimRight(line, "\r\n") + "\n"))
+			// Only the newline goes: a carriage return the container wrote
+			// is kept, as docker compose v5.5.1 keeps it (measured).
+			w.Write([]byte(prefix + strings.TrimSuffix(line, "\n") + "\n"))
 		}
 		if rerr != nil {
 			break
@@ -1470,8 +1518,10 @@ func (r *Runtime) FollowLogs(ctx context.Context, name string, o LogsOptions, w 
 	pr.Close()
 
 	err = cmd.Wait()
-	if err != nil && ctx.Err() == nil { // a genuine failure, not a Ctrl-C cancel
-		fmt.Fprintf(w, "%s[logs error: %v]\n", prefix, err)
+	if err != nil && ctx.Err() == nil && !cancelledSoon(ctx) { // a genuine failure, not a Ctrl-C
+		if errw == nil {
+			fmt.Fprintf(w, "%s[logs error: %v]\n", prefix, err)
+		}
 		return err
 	}
 	return nil
@@ -1539,12 +1589,18 @@ func (r *Runtime) Stop(name string) {
 
 // Kill sends a signal (default KILL when signal is empty) to a running
 // container, best-effort like Stop.
-func (r *Runtime) Kill(name, signal string) {
+func (r *Runtime) Kill(name, signal string) error {
 	args := []string{"kill"}
 	if signal != "" {
 		args = append(args, "-s", signal)
 	}
-	r.capture(append(args, name)...)
+	// container 1.4.1 exits 1 for a signal it does not know (`invalid signal:
+	// BOGUS`), a stopped container and a missing one (measured); the caller
+	// tells these apart by asking what the container is now.
+	if out, err := r.capture(append(args, name)...); err != nil {
+		return fmt.Errorf("%w\n%s", err, strings.TrimSpace(out))
+	}
+	return nil
 }
 
 // Start starts an existing (stopped) container in place, keeping its config. It

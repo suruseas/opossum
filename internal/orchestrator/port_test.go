@@ -13,7 +13,7 @@ import (
 // `8080:80` and `9090:90/udp`, plus one bound to a specific address so the
 // address is seen to be read rather than assumed. Host and container ports
 // differ in every entry, so a line that prints the wrong side cannot pass.
-const portInspect = `[{"status":{"state":"running","networks":[{"network":"demo-net","ipv4Address":"192.168.64.10/24"}]},"configuration":{"publishedPorts":[` +
+const portInspect = `[{"status":{"state":"running","networks":[{"network":"demo-net","ipv4Address":"192.168.64.10/24"}]},"configuration":{"labels":{"opossum.project":"demo"},"publishedPorts":[` +
 	`{"containerPort":3000,"hostAddress":"0.0.0.0","hostPort":65345,"proto":"tcp"},` +
 	`{"containerPort":80,"hostAddress":"0.0.0.0","hostPort":8080,"proto":"tcp"},` +
 	`{"containerPort":90,"hostAddress":"0.0.0.0","hostPort":9090,"proto":"udp"},` +
@@ -64,7 +64,7 @@ func TestPortRefusesWhatIsNotPublished(t *testing.T) {
 		{"a port never published", portInspect, 22, "tcp",
 			`no port 22/tcp for container web.demo.opossum: 3000/tcp, 80/tcp, 90/udp, 443/tcp`},
 		{"a container publishing nothing",
-			`[{"status":{"state":"running"},"configuration":{"publishedPorts":[]}}]`, 80, "tcp",
+			`[{"status":{"state":"running"},"configuration":{"labels":{"opossum.project":"demo"},"publishedPorts":[]}}]`, 80, "tcp",
 			`no port 80/tcp for container web.demo.opossum: (none published)`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

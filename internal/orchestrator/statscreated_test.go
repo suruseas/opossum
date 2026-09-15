@@ -28,7 +28,7 @@ case "$1" in
     case "$2" in
       *%s*) echo "Error: container not found: $2" >&2; exit 1 ;;
     esac
-    echo '[{"status":{"state":"running","networks":[]},"configuration":{"id":"x","labels":{}}}]' ;;
+    echo '[{"status":{"state":"running","networks":[]},"configuration":{"id":"x","labels":{"opossum.project":"demo"}}}]' ;;
   stats) ;;
   system) echo 'status running' ;;
 esac
@@ -146,8 +146,8 @@ echo "$*" >> "%s"
 case "$1" in
   inspect)
     case "$2" in
-      *db*) echo '[{"status":{"state":"stopped","networks":[]},"configuration":{"id":"x","labels":{}}}]' ;;
-      *) echo '[{"status":{"state":"running","networks":[]},"configuration":{"id":"x","labels":{}}}]' ;;
+      *db*) echo '[{"status":{"state":"stopped","networks":[]},"configuration":{"id":"x","labels":{"opossum.project":"demo"}}}]' ;;
+      *) echo '[{"status":{"state":"running","networks":[]},"configuration":{"id":"x","labels":{"opossum.project":"demo"}}}]' ;;
     esac ;;
   stats) ;;
   system) echo 'status running' ;;

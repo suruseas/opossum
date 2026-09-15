@@ -291,15 +291,18 @@ jobs:
       # nothing here makes an exception.
       #
       # Every answer comes from git directly, never through a pipe whose status
-      # is dropped (steps run under `bash -e` without pipefail): a revision git
-      # cannot read, or a merge it cannot compute, stops the check — unknown is
-      # not the same as fine.
+      # is dropped (the step sets pipefail itself; steps run under `bash -e`
+      # without it): a revision git cannot read, or a merge it cannot compute,
+      # stops the check — unknown is not the same as fine.
       - name: released changelog sections stay released
         if: ${{ !cancelled() && github.event_name == 'pull_request' }}
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
+          # A pipeline's status is its last command's: with pipefail a grep
+          # that could not run on the left of a pipe fails the pipe too.
+          set -o pipefail
           v="$(git version)"
           if ! [[ "$v" =~ ^git\ version\ ([0-9]+)\.([0-9]+) ]]; then
             echo "Cannot tell which git this runner has ($v); this check needs git 2.38 or later."
@@ -324,27 +327,84 @@ jobs:
             exit 1
           fi
           tree="${merge%%$'\n'*}"
-          base_log="$(git show "$BASE:CHANGELOG.md")"
+          # readlog REV:PATH prints the file with a heading line `## x` after
+          # it: it keeps the file's last blank lines, which `$(...)` would drop,
+          # and ends the last section the way a following heading would, so a
+          # section appended after it does not change it; the heading is on a
+          # line of its own whether or not the file ends in a newline. Read
+          # from git directly, and returned on failure explicitly: `-e` does
+          # not apply inside a command substitution, so without `|| return 1`
+          # a failed `git show` would read as an empty file. The caller's
+          # assignment then fails, and that ends the step.
+          readlog() {
+            local raw
+            raw="$(git show "$1" && printf @)" || return 1
+            raw="${raw%@}"
+            case "$raw" in
+              *$'\n') printf '%s## x' "$raw" ;;
+              *) printf '%s\n## x' "$raw" ;;
+            esac
+          }
+          base_log="$(readlog "$BASE:CHANGELOG.md")"
           merged_log=""
           if git cat-file -e "$tree:CHANGELOG.md" 2>/dev/null; then
-            merged_log="$(git show "$tree:CHANGELOG.md")"
+            merged_log="$(readlog "$tree:CHANGELOG.md")"
           fi
+          # The link reference definitions (`[x.y.z]: …`, at the end of the
+          # file) are the released record too, but not the last section's text:
+          # a release adds one for its version. Those of released versions are
+          # compared on their own below — every one the base has must still be
+          # there, as written; `[Unreleased]:` is rewritten by every release,
+          # so only its presence is kept (a release rewrites it only when it is
+          # there).
+          # g is grep with "no match" (exit 1) as an answer and anything else
+          # (exit 2: a failure) as a failure, so that a grep that could not run
+          # never reads as "nothing there".
+          g() { grep "$@" || [ $? -eq 1 ]; }
+          # gq is grep -q for an `if` (not for `$(…)`, where its exit would end
+          # a subshell only): "found" and "not found" are its two answers, and a
+          # grep that could not run ends the step instead of reading as either.
+          gq() { grep -q "$@"; local rc=$?; [ "$rc" -le 1 ] || exit 1; return "$rc"; }
+          links() { g -E '^\[[^]]+\]: ' | g -v '^\[Unreleased\]: '; }
+          nolinks() { g -vE '^\[[^]]+\]: '; }
+          base_links="$(links <<<"$base_log")"
+          base_text="$(nolinks <<<"$base_log")"
+          merged_text="$(nolinks <<<"$merged_log")"
           # section HEADING prints that section of its input: the heading line
-          # and every line up to the next `## ` heading.
-          section() { awk -v h="$1" '$0 == h { on = 1; print; next } on && /^## / { exit } on { print }'; }
-          heads="$(grep -E '^## \[[0-9]' <<<"$base_log" || true)"
-          lost="" changed=""
+          # and every line up to the next `## ` heading. Its own trailing `x`
+          # (a plain one, unlike readlog's heading) keeps the section's last
+          # blank lines in the comparison.
+          section() { awk -v h="$1" '$0 == h { on = 1; print; next } on && /^## / { exit } on { print }' || return 1; printf x; }
+          heads="$(g -E '^## \[[0-9]' <<<"$base_text" | awk '!seen[$0]++')"
+          lost="" changed="" twice="" linklost=""
           while IFS= read -r h; do
             [ -n "$h" ] || continue
-            was="$(section "$h" <<<"$base_log")"
-            now="$(section "$h" <<<"$merged_log")"
-            if [ -z "$now" ]; then
+            was="$(section "$h" <<<"$base_text")"
+            now="$(section "$h" <<<"$merged_text")"
+            nb="$(g -cxF -- "$h" <<<"$base_text")"
+            n="$(g -cxF -- "$h" <<<"$merged_text")"
+            if [ "$now" = "x" ]; then
               lost="$lost  $h"$'\n'
+            elif [ "$n" -gt "$nb" ]; then
+              twice="$twice  $h ($n times)"$'\n'
+            elif [ "$nb" -gt 1 ]; then
+              # The base itself has the heading more than once: nothing this
+              # PR did, and nothing it can be asked to undo. Not compared.
+              echo "The base has $h more than once ($nb times), so that section is not compared."
             elif [ "$was" != "$now" ]; then
               changed="$changed  $h"$'\n'
             fi
           done <<<"$heads"
-          if [ -n "$lost$changed" ]; then
+          while IFS= read -r l; do
+            [ -n "$l" ] || continue
+            if ! gq -xF -- "$l" <<<"$merged_log"; then
+              linklost="$linklost  $l"$'\n'
+            fi
+          done <<<"$base_links"
+          if gq -E '^\[Unreleased\]: ' <<<"$base_log" && ! gq -E '^\[Unreleased\]: ' <<<"$merged_log"; then
+            linklost="$linklost  [Unreleased]: (the line itself; its target is free to change)"$'\n'
+          fi
+          if [ -n "$lost$changed$twice$linklost" ]; then
             if [ -n "$lost" ]; then
               echo "Merging this PR drops released CHANGELOG.md sections the base has:"
               printf '%s' "$lost"
@@ -352,6 +412,14 @@ jobs:
             if [ -n "$changed" ]; then
               echo "Merging this PR changes released CHANGELOG.md sections:"
               printf '%s' "$changed"
+            fi
+            if [ -n "$twice" ]; then
+              echo "Merging this PR leaves a released CHANGELOG.md heading more than once, so its section cannot be compared:"
+              printf '%s' "$twice"
+            fi
+            if [ -n "$linklost" ]; then
+              echo "Merging this PR changes or drops link reference lines the base's CHANGELOG.md has (released versions', and the [Unreleased] line itself):"
+              printf '%s' "$linklost"
             fi
             echo
             echo "Released sections are the published record and never change in a pull request. Take"
@@ -361,12 +429,26 @@ jobs:
           # A fragment the merge adds whose entry the base's released sections
           # already carry: the release folded it in, and a merge put the file
           # back. The first line of the entry is enough to tell.
-          released="$(sed -n '/^## \[[0-9]/,$p' <<<"$base_log")"
-          added="$(git diff --name-only --diff-filter=A "$BASE" "$tree")"
-          for f in $(grep -E '^changelog\.d/[^/]+\.md$' <<<"$added" | grep -v '^changelog\.d/README\.md$' || true); do
+          released="$(sed -n '/^## \[[0-9]/,$p' <<<"$base_text")"
+          # --no-renames: a merge that removes one fragment and adds another of
+          # the same text would otherwise count as a rename, not an addition.
+          # -z: names come NUL-separated and unquoted, whatever characters they
+          # hold, and are read one at a time — not split into words or globbed.
+          # Into a file first, so that a failed `git diff` ends the step (a
+          # process substitution's status is never seen).
+          names="$(mktemp "${TMPDIR:-/tmp}/released-gate.XXXXXX")"
+          trap 'rm -f "$names"' EXIT
+          git diff -z --name-only --no-renames --diff-filter=A "$BASE" "$tree" > "$names"
+          while IFS= read -r -d '' f; do
+            case "$f" in
+              changelog.d/README.md) continue ;;
+              changelog.d/*/*) continue ;;
+              changelog.d/*.md) ;;
+              *) continue ;;
+            esac
             body="$(git show "$tree:$f")"
-            first="$(grep -m1 '^- ' <<<"$body" || true)"
-            if [ -n "$first" ] && grep -qF -- "$first" <<<"$released"; then
+            first="$(g -m1 '^- ' <<<"$body")"
+            if [ -n "$first" ] && gq -F -- "$first" <<<"$released"; then
               echo "This PR adds $f, but its entry is already in a released CHANGELOG.md section:"
               echo "  $first"
               echo
@@ -374,7 +456,8 @@ jobs:
               echo "Remove it and run 'make changelog'."
               exit 1
             fi
-          done
+          done < "$names"
+          rm -f "$names"
           echo "Released sections intact; no consumed fragment came back."
 
       # ---- the release configuration still parses ------------------------

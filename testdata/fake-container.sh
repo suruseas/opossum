@@ -167,17 +167,43 @@ case "$1" in
         *) break ;;
       esac
     done
-    # Running a name makes it there and running again (see stop/delete).
+    # Running a name makes it there and running again (see stop/delete), with
+    # the project label this run gave it (none for a run without one), given
+    # as `-l` (the spelling opossum passes) or `--label`.
+    proj= prev=
+    for a in "$@"; do
+      if [ "$prev" = -l ] || [ "$prev" = --label ]; then
+        case "$a" in opossum.project=*) proj=${a#opossum.project=} ;; esac
+      fi
+      prev=$a
+    done
     prev=
     for a in "$@"; do
       if [ "$prev" = --name ]; then
         m=$(marker gone "$a"); if [ -n "$m" ]; then rm -f "$m"; fi
         m=$(marker stopped "$a"); if [ -n "$m" ]; then rm -f "$m"; fi
+        m=$(marker project "$a"); if [ -n "$m" ]; then printf '%s' "$proj" > "$m"; fi
       fi
       prev=$a
     done
     echo "started container" ;;
-  logs)    echo "fake log line for $*" ;;  # real CLI streams container stdout
+  logs)
+    # The real CLI streams container stdout. With $LOGS_SLEEP the stream stays
+    # open that many seconds, as `container logs -f` does, and a SIGINT or
+    # SIGTERM then ends it with 130 or 143 of its own, and a SIGHUP by the
+    # signal (container 1.4.1). The sleep starts, and the traps are set, before
+    # the line is written, so a signal right after the line finds both.
+    if [ -n "${LOGS_SLEEP:-}" ]; then
+      sleep "$LOGS_SLEEP" & sp=$!
+      trap 'kill "$sp" 2>/dev/null; exit 130' INT
+      trap 'kill "$sp" 2>/dev/null; exit 143' TERM
+      trap 'kill "$sp" 2>/dev/null; trap - HUP; kill -HUP $$' HUP
+      echo "fake log line for $*"
+      wait "$sp"
+    else
+      echo "fake log line for $*"
+    fi
+    ;;
   stop)
     # The exit code answers only whether the name exists (container 1.4.1): 0
     # for a running, stopped or exited container, 1 when there is none.
@@ -241,8 +267,24 @@ case "$1" in
     # configuration.networks is here too, holding a different name from the one
     # under status, so that reading the wrong one of the two is a thing this
     # fixture can show rather than a thing it agrees with.
-    sed "s/\"state\":\"STATE\"/\"state\":\"$state\"/" <<'JSON'
-[{"status":{"state":"STATE","networks":[{"network":"demo-net","ipv4Address":"192.168.64.10/24","ipv6Address":"fdee:0:0:0::10/64","ipv4Gateway":"192.168.64.1"}]},"configuration":{"networks":[{"network":"demo-net-configured"}],"publishedPorts":[{"containerPort":8080,"hostAddress":"0.0.0.0","hostPort":8080,"proto":"tcp"}]}}]
+    # The labels are the project label a run of the name gave it, if any. A name
+    # never run here, with $INSPECT_PROJECT_FROM_NAME set, carries the project
+    # its <service>.<project>.<domain> spelling names; $INSPECT_UNLABELED names
+    # containers that carry none.
+    proj=
+    p=$(marker project "$2")
+    if [ -n "$p" ] && [ -e "$p" ]; then
+      proj=$(cat "$p")
+    elif [ -n "${INSPECT_PROJECT_FROM_NAME:-}" ]; then
+      proj=$(printf '%s' "$2" | awk -F. 'NF >= 3 { print $(NF-1) }')
+    fi
+    for m in ${INSPECT_UNLABELED:-}; do
+      [ "$2" = "$m" ] && proj=
+    done
+    labels=
+    if [ -n "$proj" ]; then labels="\"opossum.project\":\"$proj\""; fi
+    sed -e "s/\"state\":\"STATE\"/\"state\":\"$state\"/" -e "s/\"labels\":{LABELS}/\"labels\":{$labels}/" <<'JSON'
+[{"status":{"state":"STATE","networks":[{"network":"demo-net","ipv4Address":"192.168.64.10/24","ipv6Address":"fdee:0:0:0::10/64","ipv4Gateway":"192.168.64.1"}]},"configuration":{"labels":{LABELS},"networks":[{"network":"demo-net-configured"}],"publishedPorts":[{"containerPort":8080,"hostAddress":"0.0.0.0","hostPort":8080,"proto":"tcp"}]}}]
 JSON
     ;;
   stats)

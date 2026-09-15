@@ -26,7 +26,8 @@ func TestDestroyPlanOrphansAreScopedByLabel(t *testing.T) {
 	setShimEnv(rt,
 		"LS_CONTAINERS=old.demo.opossum", // ours, but no service claims it any more
 		"LS_PROJECT=demo",
-		"LS_FOREIGN=web.other.opossum", // labelled for a different project
+		"LS_FOREIGN=web.other.opossum",    // labelled for a different project
+		"LS_UNLABELED=stray.demo.opossum", // no project label: made outside opossum
 		"INSPECT_PROJECT=demo",
 	)
 	p := project("demo", map[string]*compose.Service{"web": {Image: "web"}})
@@ -42,6 +43,30 @@ func TestDestroyPlanOrphansAreScopedByLabel(t *testing.T) {
 	}
 	if strings.Contains(joined, "other") {
 		t.Errorf("another project's container must never be in the plan, got %v", plan.Containers)
+	}
+	if strings.Contains(joined, "stray") {
+		t.Errorf("a container with no project label was not made by this project and must never be in the plan, got %v", plan.Containers)
+	}
+}
+
+// The service's own name too: a container of it that carries no project
+// label was made outside opossum, and `destroy` — which removes everything
+// opossum created — must not plan to remove it.
+func TestDestroyPlanLeavesAServiceContainerWithNoProjectLabel(t *testing.T) {
+	rt, _ := fakeShim(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	setShimEnv(rt, "INSPECT_PROJECT=demo", "INSPECT_UNLABELED=web.demo.opossum")
+	p := project("demo", map[string]*compose.Service{"web": {Image: "web"}, "db": {Image: "db"}})
+	plan, err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).DestroyPlanFor(false, false, false)
+	if err != nil {
+		t.Fatalf("DestroyPlanFor: %v", err)
+	}
+	joined := strings.Join(plan.Containers, " ")
+	if !strings.Contains(joined, "db.demo.opossum") {
+		t.Errorf("this project's own container should be in the plan, got %v", plan.Containers)
+	}
+	if strings.Contains(joined, "web.demo.opossum") {
+		t.Errorf("a service container with no project label must not be in the plan, got %v", plan.Containers)
 	}
 }
 
