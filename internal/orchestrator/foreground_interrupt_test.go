@@ -16,7 +16,11 @@ import (
 // interrupted case and a real start failure are here, side by side: a verdict
 // that sent every run failure to "interrupted" would pass the first alone.
 func TestForegroundUpInterruptedIsNotReportedAsAStartFailure(t *testing.T) {
-	const startFailureHint = "check why with `opossum logs web`"
+	// The half of the start-failure guidance that both of its wordings share: what
+	// to read depends on whether a container is left (#1103), what to check does
+	// not. Naming the half that varies would make this test about the wording
+	// rather than about telling an interrupt from a failure.
+	const startFailureHint = "verify the image, command, and mounts in the compose file"
 	// The exact sentence a Ctrl-C between services already produces (the loop
 	// head's interrupted()). The attached case must say the same thing, not
 	// merely something with "interrupted" in it.

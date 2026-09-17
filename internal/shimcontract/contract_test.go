@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -40,6 +41,12 @@ type step struct {
 	// output, and rc is how it then ends: an exit code of its own, or -1 when
 	// the signal ended it.
 	signal syscall.Signal
+	// stays, when set, is how long the command must still be running, having
+	// written nothing if it has nothing to write; signal is sent after it
+	// instead of after the first output.
+	stays time.Duration
+	// within, when set, is how soon the command must end by itself.
+	within time.Duration
 }
 
 // A scenario runs its steps in order against one fresh fake with a fresh state
@@ -107,11 +114,20 @@ var contract = []struct {
 		{argv: []string{"run", "-d", "--name", "NAME", "-l", "opossum.project=demo", "alpine"}},
 		{argv: []string{"inspect", "NAME"}, has: `"state":"running"`, lacks: `opossum.project`},
 	}},
-	{"a container that is gone: stop and delete fail, and only then", nil, []step{
+	{"a container that is gone: stop, delete, start and logs all fail", nil, []step{
 		{argv: []string{"run", "-d", "--name", "NAME", "alpine"}},
 		{argv: []string{"delete", "--force", "NAME"}},
 		{argv: []string{"stop", "NAME"}, rc: 1, has: `notFound: "container with ID NAME not found"`},
 		{argv: []string{"delete", "--force", "NAME"}, rc: 1, has: `notFound: "container with ID NAME not found"`},
+		// A command that should have passed the service by would otherwise
+		// look as though it worked: no logs read as an empty log, and a start
+		// that says nothing reads as a container started (#1096).
+		// In the real CLI's words, which are not the same for the two: a fake
+		// that invents a message tells whoever reads it next something the
+		// runtime never says (measured on 1.4.1, quotes left unclosed as they
+		// come).
+		{argv: []string{"start", "NAME"}, rc: 1, has: "get failed: container NAME not found"},
+		{argv: []string{"logs", "NAME"}, rc: 1, has: `failed to open container logs: notFound: "container with ID NAME not found`},
 		// Running the name again makes it there again.
 		{argv: []string{"run", "-d", "--name", "NAME", "alpine"}},
 		{argv: []string{"inspect", "NAME"}, has: `"state":"running"`},
@@ -368,6 +384,24 @@ var contract = []struct {
 		{argv: []string{"logs", "NAME"}, signal: syscall.SIGINT, rc: 130},
 		{argv: []string{"logs", "NAME"}, signal: syscall.SIGTERM, rc: 143},
 	}},
+	// A container that has written nothing yet: `container logs` without -n
+	// reads the log to its end and returns on the empty read, exit 0, before
+	// it would follow; with -n it reads nothing back and, asked to follow,
+	// follows the empty log, and a SIGINT or a SIGTERM ends it with 130 or 143
+	// (container 1.4.1: ContainerLogs.swift, and measured — `-f` 0.1 s exit 0
+	// and 0 bytes; `-f -n 1` still running after 2 s, `code=130 signal=0` and
+	// `code=143 signal=0`). LOGS_SLEEP would keep a fake open that did not
+	// tell the forms apart; OTHER has written its line and is read as ever.
+	{"logs of a container that has written nothing ends at once unless followed with -n", []string{"LOGS_EMPTY=probe.demo.opossum", "LOGS_SLEEP=30"}, []step{
+		{argv: []string{"run", "-d", "--name", "NAME", "alpine"}},
+		{argv: []string{"run", "-d", "--name", "OTHER", "alpine"}},
+		{argv: []string{"logs", "-f", "NAME"}, within: 5 * time.Second, lacks: "NAME"},
+		{argv: []string{"logs", "NAME"}, within: 5 * time.Second, lacks: "NAME"},
+		{argv: []string{"logs", "-n", "1", "NAME"}, within: 5 * time.Second, lacks: "NAME"},
+		{argv: []string{"logs", "-f", "OTHER"}, stays: time.Second, signal: syscall.SIGTERM, rc: 143, has: "OTHER"},
+		{argv: []string{"logs", "-f", "-n", "1", "NAME"}, stays: time.Second, signal: syscall.SIGINT, rc: 130, lacks: "NAME"},
+		{argv: []string{"logs", "-f", "-n", "9223372036854775807", "NAME"}, stays: time.Second, signal: syscall.SIGTERM, rc: 143, lacks: "NAME"},
+	}},
 	{"a network name with upper case is refused in a UTF-8 locale too", []string{"LC_ALL=en_US.UTF-8", "LANG=en_US.UTF-8"}, []step{
 		{argv: []string{"network", "create", "demo-Back"}, rc: 1, has: "Error: invalid network name: demo-Back"},
 		{argv: []string{"network", "create", "Bdemo"}, rc: 1, has: "Error: invalid network name: Bdemo"},
@@ -464,9 +498,14 @@ func TestEveryFakeAnswersTheContract(t *testing.T) {
 						"STATE_DIR=" + state, "FAKE_LOG=" + filepath.Join(state, "calls.log")}, sc.env...)
 					var out []byte
 					var err error
-					if st.signal != 0 {
+					switch {
+					case st.stays != 0:
+						out, err = runStaying(t, cmd, st.stays, st.signal)
+					case st.signal != 0:
 						out, err = runSignalled(t, cmd, st.signal)
-					} else {
+					case st.within != 0:
+						out, err = runWithin(t, cmd, st.within)
+					default:
 						out, err = cmd.CombinedOutput()
 					}
 					rc := 0
@@ -529,6 +568,75 @@ func runSignalled(t *testing.T, cmd *exec.Cmd, sig syscall.Signal) ([]byte, erro
 	}
 	rest, _ := io.ReadAll(r)
 	return append(first[:1], rest...), err
+}
+
+// runStaying starts cmd, fails the test unless it is still running after d,
+// then sends sig and returns what it wrote and how it ended.
+func runStaying(t *testing.T, cmd *exec.Cmd, d time.Duration, sig syscall.Signal) ([]byte, error) {
+	t.Helper()
+	var buf lockedBuf
+	cmd.Stdout, cmd.Stderr = &buf, &buf
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case <-done:
+		t.Fatalf("%v ended within %v; the real CLI is still running", cmd.Args, d)
+	case <-time.After(d):
+	}
+	if err := cmd.Process.Signal(sig); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		return buf.bytes(), err
+	case <-time.After(10 * time.Second):
+		cmd.Process.Kill()
+		t.Fatalf("%v did not end on %v", cmd.Args, sig)
+	}
+	return nil, nil
+}
+
+// runWithin runs cmd and fails the test unless it ends by itself within d.
+func runWithin(t *testing.T, cmd *exec.Cmd, d time.Duration) ([]byte, error) {
+	t.Helper()
+	var buf lockedBuf
+	cmd.Stdout, cmd.Stderr = &buf, &buf
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		return buf.bytes(), err
+	case <-time.After(d):
+		cmd.Process.Kill()
+		<-done
+		t.Fatalf("%v did not end within %v; the real CLI ends at once", cmd.Args, d)
+	}
+	return nil, nil
+}
+
+// lockedBuf is a buffer a command's stdout and stderr write into together.
+type lockedBuf struct {
+	mu sync.Mutex
+	b  []byte
+}
+
+func (l *lockedBuf) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.b = append(l.b, p...)
+	return len(p), nil
+}
+
+func (l *lockedBuf) bytes() []byte {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]byte(nil), l.b...)
 }
 
 func digest(t *testing.T, path string) [32]byte {

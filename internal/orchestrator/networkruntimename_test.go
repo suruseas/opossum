@@ -503,7 +503,12 @@ func TestADependencysLongNetworkIsRefusedBeforeAnythingIsCreated(t *testing.T) {
 				"db":  onLong(&compose.Service{Image: "alpine:3.20", Profiles: []string{"debug"}}),
 				"web": {Image: "alpine:3.20", DependsOn: compose.DependsOn{{Name: "db"}}},
 			}))
-		}, map[string]string{"run": `service "web" depends on "db", whose profile is not active`, "run --audit": `service "web" depends on "db", whose profile is not active`}},
+			// Every path: reading the project is what refuses this, and
+			// --no-deps reads it the same way (docker compose v5.5.1, measured).
+		}, map[string]string{
+			"run": `service "web" depends on "db", whose profile is not active`, "run --audit": `service "web" depends on "db", whose profile is not active`,
+			"run --no-deps": `service "web" depends on "db", whose profile is not active`, "run --audit --no-deps": `service "web" depends on "db", whose profile is not active`,
+		}},
 	} {
 		for _, path := range runPaths {
 			want, refused := shape.refusal[path]

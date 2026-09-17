@@ -122,7 +122,7 @@ func TestTheWordingTableSaysOnlyWhatWasChecked(t *testing.T) {
 	const captures = "../../testdata/error-wordings"
 	// Every signature in the census has a row. Changing this number is how you say
 	// the census changed; a row that goes missing on its own trips it.
-	const wantRows = 12
+	const wantRows = 14
 
 	md, err := os.ReadFile(table)
 	if err != nil {

@@ -6,10 +6,14 @@
 // It logs each invocation's arguments (space-joined) to $FAKE_LOG and returns
 // output shaped like the real CLI. Behaviour is steered entirely through the
 // environment (FAKE_LOG, STATE_DIR, DELETE_STICKY, STOP_FAIL, INSPECT_STATE, INSPECT_STOPPED, INSPECT_OWNER, INSPECT_FAIL, LOGS_FAIL, STATS_FAIL, INSPECT_FAIL_ONCE_STOP_ASKED, INSPECT_FAIL_ONCE_GONE, INSPECT_FAIL_ONCE_GONE_ALL,
-// INSPECT_ABSENT, NET_EXISTS, NET_CREATE_{HANG,FAIL}, NETWORK_ABSENT, BUILD_{HANG,FAIL}, RUN_FAIL,
+// INSPECT_ABSENT, NET_EXISTS, NET_CREATE_{HANG,FAIL}, NETWORK_ABSENT, BUILD_{HANG,FAIL,FAIL_STDERR}, RUN_FAIL,
+// RUN_IMAGE_FETCH_FAIL, RUN_IMAGE_FETCH_REASON, RUN_IMAGE_FETCH_URL, RUN_IMAGE_FETCH_TRUNCATED,
+// RUN_FAIL_STDERR,
 // RUN_HANG, RUN_DIE_SIGNAL, RUN_EXISTS[_WORDING|_HASH], RUN_EXISTS_ANY, HEALTH_*,
 // VOLUME_*, LS_*,
-// IMAGE_ABSENT),
+// IMAGE_ABSENT, INSPECT_HANG_WHILE, INSPECT_ANSWERED, INSPECT_GATE,
+// LOGS_EMPTY[_AFTER], LOGS_FAIL_N, LOGS_DRIP[_AFTER], LOGS_SLEEP, LOGS_SELF_INT,
+// LOGS_TEXT, STOP_THEN_SLEEP_MS, START_THEN_SLEEP_MS, SLOW_ONLY),
 // so tests need no t.Setenv and stay
 // isolated: the orchestrator passes these per-Runtime via RunOptions-style Env.
 package main
@@ -91,13 +95,33 @@ func run(args []string) int {
 				}
 			}
 			_ = os.WriteFile(stoppedPath(dir, name), []byte("1"), 0o644)
+			// $STOP_THEN_SLEEP_MS keeps the stop from returning that long after
+			// the container is stopped — a stop of several services, or a slow
+			// one, that leaves this container stopped for a while. With
+			// $SLOW_ONLY it is that container's stop alone.
+			if ms, err := strconv.Atoi(os.Getenv("STOP_THEN_SLEEP_MS")); err == nil && slowHere(name) {
+				time.Sleep(time.Duration(ms) * time.Millisecond)
+			}
 		}
 
 	case "start":
+		// A container that is not there cannot be started: the real CLI exits 1
+		// saying so — whether it was never made ($INSPECT_ABSENT) or deleted
+		// (the gone marker).
+		if len(args) > 0 && !there(args[len(args)-1]) {
+			fmt.Fprintf(os.Stderr, "Error: get failed: container %s not found\n", args[len(args)-1])
+			return 1
+		}
 		// Starting a stopped container in place: it is running again (the marker
 		// the `stop` case left is cleared), as the real CLI reports it.
 		if dir := os.Getenv("STATE_DIR"); dir != "" && len(args) > 0 {
 			_ = os.Remove(stoppedPath(dir, args[len(args)-1]))
+			// $START_THEN_SLEEP_MS keeps the start from returning that long
+			// after — a slow start that keeps the containers started after it
+			// stopped a while longer. $SLOW_ONLY narrows it as for the stop.
+			if ms, err := strconv.Atoi(os.Getenv("START_THEN_SLEEP_MS")); err == nil && slowHere(args[len(args)-1]) {
+				time.Sleep(time.Duration(ms) * time.Millisecond)
+			}
 		}
 
 	case "delete", "rm":
@@ -135,6 +159,48 @@ func run(args []string) int {
 		// down). Different from absent: a caller must not read it as "gone".
 		for _, m := range strings.Fields(os.Getenv("INSPECT_FAIL")) {
 			if arg(1) == m {
+				fmt.Fprintln(os.Stderr, "Error: apiserver is not running")
+				return 1
+			}
+		}
+		// $INSPECT_HANG_WHILE is a file: while it exists, an inspect does not
+		// return (up to 20 s) — a runtime that has stopped answering at all.
+		// $INSPECT_GATE is a directory: each inspect writes a file named after
+		// its process there and waits (up to 20 s) for one of the same name with
+		// `-go` appended, so a test can hold the looks and let them answer one
+		// by one — and see which ones it never let through.
+		if d := os.Getenv("INSPECT_GATE"); d != "" {
+			p := filepath.Join(d, strconv.Itoa(os.Getpid())+"-"+strconv.FormatInt(time.Now().UnixNano(), 10))
+			_ = os.WriteFile(p, nil, 0o644)
+			for i := 0; i < 1000; i++ {
+				if _, err := os.Stat(p + "-go"); err == nil {
+					break
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+		}
+		if f := os.Getenv("INSPECT_HANG_WHILE"); f != "" {
+			for i := 0; i < 1000; i++ {
+				if _, err := os.Stat(f); err != nil {
+					break
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+		}
+		// $INSPECT_ANSWERED is a file every inspect held by either appends a
+		// line to as it answers, so a test can tell whether one was still
+		// running.
+		if a := os.Getenv("INSPECT_ANSWERED"); a != "" && (os.Getenv("INSPECT_HANG_WHILE") != "" || os.Getenv("INSPECT_GATE") != "") {
+			if af, err := os.OpenFile(a, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+				fmt.Fprintln(af, "answered")
+				af.Close()
+			}
+		}
+		// $INSPECT_FAIL_WHILE is a file: while it exists, every inspect fails
+		// that way — a runtime that stops answering for a while, and then answers
+		// again.
+		if f := os.Getenv("INSPECT_FAIL_WHILE"); f != "" {
+			if _, err := os.Stat(f); err == nil {
 				fmt.Fprintln(os.Stderr, "Error: apiserver is not running")
 				return 1
 			}
@@ -311,8 +377,20 @@ func run(args []string) int {
 		if os.Getenv("BUILD_HANG") != "" {
 			time.Sleep(30 * time.Second)
 		}
+		// $BUILD_FAIL_STDERR is what it says on the way out instead: the runtime's
+		// closing line for some other failure, given whole by the test that
+		// wants it (a registry refusing an image, read out of a capture).
 		if os.Getenv("BUILD_FAIL") != "" {
-			fmt.Fprintln(os.Stderr, "Error: failed to build: process \"/bin/sh -c false\" did not complete successfully: exit code: 1")
+			// The shape of the closing line container 1.4.1 writes for a step
+			// that exits non-zero. The capture it is taken from
+			// (testdata/error-wordings/build-image-refused-141.txt) holds it
+			// for another command and another exit code; the command and the
+			// code here are this fake's own.
+			out := "Error: unknown: \"failed to solve: process \"/bin/sh -c false\" did not complete successfully: exit code: 1\""
+			if s := os.Getenv("BUILD_FAIL_STDERR"); s != "" {
+				out = s
+			}
+			fmt.Fprintln(os.Stderr, out)
 			return 1
 		}
 
@@ -372,6 +450,42 @@ func run(args []string) int {
 		if msg, refused := volumeNameRefused(args); refused {
 			fmt.Fprintln(os.Stderr, msg)
 			return 1
+		}
+		// $RUN_IMAGE_FETCH_FAIL names images the registry will not hand over:
+		// the run fails before any container is made. The line it writes is
+		// the one from the capture the row names ($RUN_IMAGE_FETCH_URL and
+		// $RUN_IMAGE_FETCH_REASON), so what is read here is what the runtime
+		// really wrote — the captures are in testdata/error-wordings. The progress
+		// lines come first, as they do there, and the `Error:` line last: a
+		// fake that wrote only the last line would let code that reads the
+		// whole of stderr pass here and fail on the real thing.
+		if img := os.Getenv("RUN_IMAGE_FETCH_FAIL"); img != "" {
+			for _, a := range args {
+				if a != img {
+					continue
+				}
+				// $RUN_IMAGE_FETCH_URL is the request the runtime says it
+				// made, copied from a capture. Left out, the fake would have
+				// to work the URL out from the image name, and what it made
+				// up did not match any capture — one line said the request
+				// went to one registry while its own reason named another.
+				url := os.Getenv("RUN_IMAGE_FETCH_URL")
+				fmt.Fprintln(os.Stderr, "[0/6] [0s]")
+				fmt.Fprintln(os.Stderr, "[1/6] Fetching image [0s]")
+				if strings.Contains(os.Getenv("RUN_IMAGE_FETCH_URL"), "/blobs/") || os.Getenv("RUN_IMAGE_FETCH_TRUNCATED") != "" {
+					fmt.Fprintln(os.Stderr, "[1/6] Fetching image (4 blobs) [0s]")
+				}
+				// $RUN_IMAGE_FETCH_TRUNCATED is the shape that names no
+				// request: the blob's download ends early and the runtime says
+				// only that (measured).
+				if os.Getenv("RUN_IMAGE_FETCH_TRUNCATED") != "" {
+					fmt.Fprintln(os.Stderr, "Error: stream ended at an unexpected time")
+					return 1
+				}
+				fmt.Fprintf(os.Stderr, "Error: HTTP request to %s failed with response: %s\n",
+					url, os.Getenv("RUN_IMAGE_FETCH_REASON"))
+				return 1
+			}
 		}
 		// Creating it again means it is no longer gone (see the `delete` case),
 		// and no longer stopped (see the `stop` case).
@@ -532,9 +646,15 @@ func run(args []string) int {
 			}
 		}
 		// A foreground run of $RUN_FAIL exits non-zero (drives failure evals).
+		// $RUN_FAIL_STDERR is what it writes on the way out — the container's
+		// own output, which a foreground `up` captures along with the
+		// runtime's.
 		if fail := os.Getenv("RUN_FAIL"); fail != "" {
 			for i, a := range args {
 				if i > 0 && args[i-1] == "--name" && a == fail {
+					if out := os.Getenv("RUN_FAIL_STDERR"); out != "" {
+						fmt.Fprint(os.Stderr, out)
+					}
 					return 1
 				}
 			}
@@ -671,11 +791,34 @@ func run(args []string) int {
 		if len(args) > 0 {
 			last = args[len(args)-1]
 		}
+		// A container that is not there has no logs: the real CLI exits 1
+		// saying so, where reading them as empty would let a command that
+		// should have passed the service by look as though it worked.
+		if last != "" && !there(last) {
+			fmt.Fprintf(os.Stderr, "Error: failed to get logs for container %s (cause: \"internalError: \"failed to open container logs: notFound: \"container with ID %s not found\"\"\")\n", last, last)
+			return 1
+		}
 		// $LOGS_FAIL names containers whose logs cannot be read: the real CLI
 		// prints an error and exits 1.
-		if slices.Contains(strings.Fields(os.Getenv("LOGS_FAIL")), last) {
+		// $LOGS_FAIL_N names the same, but only when asked with -n — a container
+		// removed between one ask and the next.
+		if slices.Contains(strings.Fields(os.Getenv("LOGS_FAIL")), last) || slices.Contains(args, "-n") && slices.Contains(strings.Fields(os.Getenv("LOGS_FAIL_N")), last) {
 			fmt.Fprintf(os.Stderr, "Error: failed to get logs for container %s\n", last)
 			return 1
+		}
+		// $LOGS_EMPTY names containers that have written nothing yet. The real
+		// CLI then ends at once, exit 0 and nothing written, unless it is asked
+		// to follow with -n, when it follows the empty log (container 1.4.1:
+		// ContainerLogs.swift returns on an empty read before following, and
+		// reads nothing back with -n; measured).
+		empty := slices.Contains(strings.Fields(os.Getenv("LOGS_EMPTY")), last)
+		if empty && !(slices.Contains(args, "-f") && slices.Contains(args, "-n")) {
+			// $LOGS_EMPTY_AFTER=<ms> is how long the real CLI takes to find the
+			// log empty (0.1 s measured), stretched so a Ctrl-C can come within it.
+			if ms, err := strconv.Atoi(os.Getenv("LOGS_EMPTY_AFTER")); err == nil {
+				time.Sleep(time.Duration(ms) * time.Millisecond)
+			}
+			return 0
 		}
 		// $LOGS_TEXT is what every container's logs hold, written as is
 		// ({name} is the container): several lines, a blank one, a last one
@@ -686,10 +829,24 @@ func run(args []string) int {
 		// first line, so a signal after it is answered the same way.
 		caught := make(chan os.Signal, 1)
 		signal.Notify(caught, syscall.SIGINT, syscall.SIGTERM)
-		if text, ok := os.LookupEnv("LOGS_TEXT"); ok {
+		switch text, ok := os.LookupEnv("LOGS_TEXT"); {
+		case empty:
+		case ok:
 			fmt.Print(strings.ReplaceAll(text, "{name}", last))
-		} else {
+		default:
 			fmt.Printf("log-line %s\n", last)
+		}
+		// $LOGS_DRIP=<n> writes n more lines after that, 20 ms apart — what the
+		// runtime still hands over a moment after the container has ended.
+		if n, err := strconv.Atoi(os.Getenv("LOGS_DRIP")); err == nil {
+			// $LOGS_DRIP_AFTER=<ms> waits that long before the first of them.
+			if ms, err := strconv.Atoi(os.Getenv("LOGS_DRIP_AFTER")); err == nil {
+				time.Sleep(time.Duration(ms) * time.Millisecond)
+			}
+			for i := 1; i <= n; i++ {
+				time.Sleep(20 * time.Millisecond)
+				fmt.Printf("drip %d %s\n", i, last)
+			}
 		}
 		// $LOGS_SLEEP keeps the stream open that many seconds after the lines,
 		// as `container logs -f` stays open, or as a long read of a large log
@@ -1086,4 +1243,11 @@ func validContainerName(name string) bool {
 		}
 	}
 	return true
+}
+
+// slowHere reports whether a slow knob applies to the container name: every
+// container, or the one $SLOW_ONLY names.
+func slowHere(name string) bool {
+	only := os.Getenv("SLOW_ONLY")
+	return only == "" || only == name
 }

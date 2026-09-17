@@ -37,9 +37,14 @@ var (
 
 	composeFiles []string
 	projectName  string
-	dnsDomain    string
-	verbose      bool
-	envFiles     []string
+	// profiles are the compose profiles this run activates. A root flag, as
+	// docker compose takes `--profile` on every subcommand: it changes what a
+	// command picks out of the compose file, and the commands that work from
+	// the containers a project already has take it and are unchanged by it.
+	profiles  []string
+	dnsDomain string
+	verbose   bool
+	envFiles  []string
 )
 
 // newRootCmd builds the command tree. Extracted from main so tests can execute
@@ -57,6 +62,7 @@ func newRootCmd() *cobra.Command {
 	root.PersistentFlags().StringVar(&dnsDomain, "dns-domain", "opossum", "local DNS domain for bare-name service discovery (create once: sudo container system dns create <domain>)")
 	root.PersistentFlags().BoolVar(&verbose, "verbose", false, "print each underlying container command as it runs (useful for bug reports)")
 	root.PersistentFlags().StringArrayVar(&envFiles, "env-file", nil, "env file(s) for ${VAR} interpolation, replacing the default .env (repeatable; later files win)")
+	root.PersistentFlags().StringArrayVar(&profiles, "profile", nil, "enable services gated behind this compose profile (repeatable; '*' enables every profile; also honors COMPOSE_PROFILES). Changes which services are read from the compose file; what the commands that act on containers already there act on is unchanged by it")
 
 	root.AddCommand(
 		upCmd(), downCmd(), psCmd(), portCmd(), lsCmd(), volumesCmd(), imagesCmd(), logsCmd(), statsCmd(),
@@ -354,6 +360,9 @@ func doctorCmd() *cobra.Command {
 			// without refusing them (the commands that start it refuse them).
 			var proj *compose.Project
 			if o, err := loadOrchestratorWith(io.Discard); err == nil {
+				// Read without the profiles: the estimate is of the whole
+				// compose file, gated services and all, which is what a reader
+				// asking "will this project fit" wants to know.
 				proj = o.Project
 			}
 			var healthy bool
@@ -485,7 +494,6 @@ func quoted(msg string) string {
 
 func upCmd() *cobra.Command {
 	var foreground bool
-	var profiles []string
 	var forceRecreate, build, noBuild, removeOrphans, fromDockerCompose, fromDockerLegacy, dryRun, noSupervisor bool
 	cmd := &cobra.Command{
 		Use:   "up [service...]",
@@ -513,9 +521,8 @@ func upCmd() *cobra.Command {
 			// `profiles:`-gated services start. Before the overlay is planned,
 			// because the plan looks only at the services this run would start
 			// — and again after a reload, which begins from a fresh orchestrator.
-			enableProfiles := func(o *orchestrator.Orchestrator) error {
-				o.EnableProfiles(profiles)
-				o.EnableProfiles(strings.Split(os.Getenv("COMPOSE_PROFILES"), ","))
+			activateProfiles := func(o *orchestrator.Orchestrator) error {
+				enableProfiles(o)
 				// The services the profiles enabled are checked for mounts docker
 				// compose refuses, as the whole project was when it was loaded.
 				if err := o.CheckMounts(); err != nil {
@@ -523,7 +530,7 @@ func upCmd() *cobra.Command {
 				}
 				return nil
 			}
-			if err := enableProfiles(o); err != nil {
+			if err := activateProfiles(o); err != nil {
 				return err
 			}
 			if fromDocker {
@@ -533,7 +540,7 @@ func upCmd() *cobra.Command {
 				}
 				if reloaded != nil {
 					o = reloaded
-					if err := enableProfiles(o); err != nil {
+					if err := activateProfiles(o); err != nil {
 						return err
 					}
 				}
@@ -589,7 +596,6 @@ func upCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&foreground, "foreground", false, "run a single service attached in the foreground instead of detached (rejected for multiple long-running services)")
-	cmd.Flags().StringArrayVar(&profiles, "profile", nil, "enable services gated behind this compose profile (repeatable; '*' enables every profile; also honors COMPOSE_PROFILES)")
 	cmd.Flags().BoolVar(&forceRecreate, "force-recreate", false, "recreate containers even if their configuration is unchanged")
 	cmd.Flags().BoolVar(&build, "build", false, "build images before starting, even if already present")
 	cmd.Flags().BoolVar(&noBuild, "no-build", false, "don't build images (error if one is missing)")
@@ -1024,7 +1030,6 @@ neither is a volume the file no longer mounts.`,
 
 func configCmd() *cobra.Command {
 	var servicesOnly bool
-	var profiles []string
 	cmd := &cobra.Command{
 		Use:   "config",
 		Short: "Validate and print the resolved compose configuration",
@@ -1038,8 +1043,7 @@ func configCmd() *cobra.Command {
 			}
 			// Mirror what `up` would start: gated services appear only when their
 			// profile is active (docker compose parity).
-			o.EnableProfiles(profiles)
-			o.EnableProfiles(strings.Split(os.Getenv("COMPOSE_PROFILES"), ","))
+			enableProfiles(o)
 			if err := o.CheckMounts(); err != nil {
 				return mountRefusal(err)
 			}
@@ -1051,7 +1055,7 @@ func configCmd() *cobra.Command {
 			enabled := o.EnabledServices()
 			w := cmd.OutOrStdout()
 			if servicesOnly {
-				order, err := o.Project.StartupOrder()
+				order, err := o.StartupOrder()
 				if err != nil {
 					return err
 				}
@@ -1082,7 +1086,6 @@ func configCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&servicesOnly, "services", false, "print only the service names")
-	cmd.Flags().StringArrayVar(&profiles, "profile", nil, "include services gated behind this compose profile (repeatable; '*' enables every profile; also honors COMPOSE_PROFILES)")
 	return cmd
 }
 
@@ -1117,7 +1120,6 @@ func announceOverlay(stderr io.Writer) {
 func runCmd() *cobra.Command {
 	var rm, noDeps, noTTY, ssh, audit bool
 	var auditFormat string
-	var profiles []string
 	cmd := &cobra.Command{
 		Use:   "run [--rm] [--no-deps] [--audit] <service> [command...]",
 		Short: "Run a one-off command in a new container for a service",
@@ -1130,8 +1132,7 @@ func runCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			o.EnableProfiles(profiles)
-			o.EnableProfiles(strings.Split(os.Getenv("COMPOSE_PROFILES"), ","))
+			enableProfiles(o)
 			if err := o.CheckMounts(); err != nil {
 				return mountRefusal(err)
 			}
@@ -1183,7 +1184,6 @@ func runCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&rm, "rm", false, "remove the container after it exits")
 	cmd.Flags().BoolVar(&noDeps, "no-deps", false, "don't start linked services")
 	cmd.Flags().BoolVarP(&noTTY, "no-tty", "T", false, "don't allocate a pseudo-terminal, so piped output (e.g. opossum run web cmd | jq) stays clean")
-	cmd.Flags().StringArrayVar(&profiles, "profile", nil, "enable services gated behind this compose profile (repeatable; '*' enables every profile; also honors COMPOSE_PROFILES)")
 	cmd.Flags().BoolVar(&ssh, "ssh", false, "forward the host SSH agent into the container, so private git over SSH works with your host keys")
 	cmd.Flags().BoolVar(&audit, "audit", false, "after the run, report what it did (workspace file diff, egress, exit) — the container's stdout goes to stderr so the report owns stdout")
 	cmd.Flags().StringVar(&auditFormat, "audit-format", "text", "audit report format: text (human summary) or json")
@@ -1555,6 +1555,7 @@ func loadOrchestrator(out io.Writer) (*orchestrator.Orchestrator, error) {
 	if err != nil {
 		return nil, err
 	}
+	enableProfiles(o)
 	// What docker compose refuses for every command — two mounts at one
 	// target in a service no profile gates — is refused here, before any
 	// command runs; the commands that activate profiles ask again for the
@@ -1563,6 +1564,15 @@ func loadOrchestrator(out io.Writer) (*orchestrator.Orchestrator, error) {
 		return nil, mountRefusal(err)
 	}
 	return o, nil
+}
+
+// enableProfiles activates the profiles this run was given — the root
+// `--profile` flags and COMPOSE_PROFILES — on an orchestrator. Every command
+// gets them, as docker compose takes the flag on every subcommand; what they
+// change is which services a command reads out of the compose file.
+func enableProfiles(o *orchestrator.Orchestrator) {
+	o.EnableProfiles(profiles)
+	o.EnableProfiles(strings.Split(os.Getenv("COMPOSE_PROFILES"), ","))
 }
 
 // loadOrchestratorWith reads the project the way every command does, and
@@ -1623,6 +1633,10 @@ func loadOrchestratorToTakeDown(out, stderr io.Writer) (*orchestrator.Orchestrat
 	if err != nil {
 		return nil, err
 	}
+	// The profiles first, as everywhere else: a pair in a service they enable
+	// is named here too, rather than going unmentioned because the command
+	// that takes the project down does not refuse.
+	enableProfiles(o)
 	if err := o.CheckMounts(); err != nil {
 		for _, line := range strings.Split(err.Error(), "\n") {
 			fmt.Fprintf(stderr, "opossum: %s — `up` refuses this compose file; going on, as an earlier opossum may have started it\n", orchestrator.OneLine(line))
@@ -1884,7 +1898,6 @@ func reportEntries(stderr io.Writer, changes []orchestrator.Adaptation) {
 // lifecycle is `up` starts it, `down` stops it, and running a second one would
 // mean two watchers racing to restart the same container.
 func superviseCmd() *cobra.Command {
-	var profiles []string
 	var watch []string
 	cmd := &cobra.Command{
 		Use:    "__supervise",
@@ -1896,8 +1909,7 @@ func superviseCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			o.EnableProfiles(profiles)
-			o.EnableProfiles(strings.Split(os.Getenv("COMPOSE_PROFILES"), ","))
+			enableProfiles(o)
 			if err := o.CheckMounts(); err != nil {
 				return mountRefusal(err)
 			}
@@ -1945,7 +1957,6 @@ func superviseCmd() *cobra.Command {
 			return o.Supervise(ctx, services, logw)
 		},
 	}
-	cmd.Flags().StringArrayVar(&profiles, "profile", nil, "profiles the supervised project was started with")
 	cmd.Flags().StringArrayVar(&watch, "watch-service", nil, "the exact services to watch, as worked out by the `up` that started this watcher")
 	return cmd
 }

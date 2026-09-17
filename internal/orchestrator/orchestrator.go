@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -280,6 +281,19 @@ func (o *Orchestrator) enabled(name string, named map[string]bool) bool {
 	return false
 }
 
+// namedSet is the services a command was given, as `enabled` reads them: naming
+// a service enables it whatever its profiles say.
+func namedSet(services []string) map[string]bool {
+	if len(services) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(services))
+	for _, s := range services {
+		set[s] = true
+	}
+	return set
+}
+
 // EnabledServices reports which services are active under the current profiles
 // (nothing is "named" in a config context), so `config` can mirror what `up`
 // would actually start.
@@ -298,9 +312,10 @@ func (o *Orchestrator) EnabledServices() map[string]bool {
 // gated-inactive dependency as undefined. Both `up` and `config` use this so they
 // agree on what's a valid project.
 func (o *Orchestrator) validateProfileDeps(names []string, named map[string]bool) error {
+	active := o.activeServices(named)
 	for _, name := range names {
 		for _, dep := range o.Project.Services[name].DependsOn {
-			if !o.enabled(dep.Name, named) {
+			if !active[dep.Name] {
 				return fmt.Errorf("service %q depends on %q, whose profile is not active — enable it with --profile or COMPOSE_PROFILES, or name it explicitly", name, dep.Name)
 			}
 		}
@@ -309,12 +324,18 @@ func (o *Orchestrator) validateProfileDeps(names []string, named map[string]bool
 }
 
 // ValidateProfiles errors if any enabled service depends on a gated-inactive one,
-// so `config` rejects the same projects `up` does.
+// so `config` rejects the same projects `up` does. The other two things reading
+// the project refuses are asked for elsewhere: a dependency the file does not
+// define as the file is read, a dependency cycle where a command puts its
+// services in order.
 func (o *Orchestrator) ValidateProfiles() error {
-	var names []string
+	names := make([]string, 0, len(o.Project.Services))
 	for name := range o.EnabledServices() {
 		names = append(names, name)
 	}
+	// In one order, so that a file with two of these is refused for the same
+	// one every time it is read.
+	sort.Strings(names)
 	return o.validateProfileDeps(names, nil)
 }
 
@@ -327,13 +348,17 @@ func (o *Orchestrator) ValidateProfiles() error {
 // named. Services are checked in startup order, a line per service with a
 // pair (its first, as docker compose reports one).
 func (o *Orchestrator) CheckMounts() error {
-	// The order is only the order of the lines: a project whose startup order
-	// cannot be worked out (a dependency cycle, which docker compose does not
-	// look for among services an inactive profile gates) is not refused here
-	// for that — its services are read by name instead, and a pair among them
-	// is named first, as docker compose names it before the cycle; a project
-	// with no pair reports its cycle where it did before.
-	order, err := o.Project.StartupOrder()
+	// The order is only the order of the lines: a project that cannot be
+	// ordered still has its pair named, its services read by name instead.
+	// That is docker compose's order for a pair beside a dependency cycle
+	// (measured: the pair, in 24 runs of 24 over three commands). Beside a
+	// depends_on the file does not define, docker compose says one or the
+	// other from run to run (measured: both, over 8 runs of each of three
+	// commands), so there is no order there to follow and opossum keeps this
+	// one — the pair first, the same way every time. A cycle behind a profile
+	// that is not active stops nothing, and a pair in that project is named
+	// as ever.
+	order, err := o.startupOrder()
 	if err != nil {
 		order = order[:0]
 		for name := range o.Project.Services {
@@ -671,9 +696,19 @@ var containerNamePart = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
 // name, its `name:`, an external volume's real name — so it is not cut the way
 // an anonymous volume's path is; docker compose v5.5.0 fails creating a volume
 // of such a key or `name:` too (`file name too long` from the engine). What is
-// offered to shorten follows from where the name came from. A one-off's own
-// volumes are looked at here; its dependencies' by the `up` that starts them.
-func (o *Orchestrator) checkVolumeNames(services []string) error {
+// offered to shorten follows from where the name came from.
+//
+// made holds the services whose containers this command will create: an
+// anonymous volume is made with its container, so it is looked at only for
+// those, where a named or external one is looked for whatever starts — a
+// one-off looks at its dependencies' named volumes here, `--no-deps` included,
+// because docker compose creates them for it either way and makes no anonymous
+// one (measured, #1072). A nil made means every service given is created.
+func (o *Orchestrator) checkVolumeNames(services []string, made ...string) error {
+	makes := map[string]bool{}
+	for _, name := range made {
+		makes[name] = true
+	}
 	for _, svcName := range services {
 		for _, entry := range o.Project.Services[svcName].Volumes {
 			kind, src := compose.ClassifyMount(entry)
@@ -682,6 +717,9 @@ func (o *Orchestrator) checkVolumeNames(services []string) error {
 			case kind == compose.MountBind:
 				continue
 			case kind == compose.MountAnonymous:
+				if len(made) > 0 && !makes[svcName] {
+					continue
+				}
 				name = o.classifyVolume(svcName, entry).Volume
 				fix = fmt.Sprintf("the path part is already cut, so shorten the service name %q or the project name (`-p`, or `name:` in the compose file)", svcName)
 			case o.isExternalVolume(src):
@@ -712,8 +750,10 @@ func (o *Orchestrator) checkVolumeNames(services []string) error {
 // here. An entry with no options after its `:` (`/t:`) is not refused, as it
 // is not there. The entries are the service's after the collapse, the ones
 // opossum passes on, so one a later entry alike up to the first `=` replaced
-// is not looked at (docker compose v5.5.1 runs such a file). A one-off's own
-// mounts are looked at here; its dependencies' by the `up` that starts them.
+// is not looked at (docker compose v5.5.1 runs such a file). The services given
+// are those whose containers the command will make: a one-off's own and its
+// dependencies', or only its own under `--no-deps`, whose dependencies get no
+// container to mount anything (measured, #1072).
 func (o *Orchestrator) checkTmpfsOptions(services []string) error {
 	for _, svcName := range services {
 		for _, entry := range o.Project.Services[svcName].Tmpfs {
@@ -782,21 +822,168 @@ func (o *Orchestrator) checkServiceNamesDifferInCase(services []string) error {
 	return nil
 }
 
-// checkRunDependenciesEnabled refuses a one-off whose dependencies it would
-// start (not with --no-deps) when one of them is behind a profile that is not
-// active, rather than starting it anyway: the run target itself is "named",
-// but its dependencies must be enabled on their own, as in `up` (docker compose
-// v5.5.0 refuses such a run too, calling the dependency undefined). The `up`
-// that starts the dependencies names them, so it would not refuse; both kinds
-// of one-off ask here first.
-func (o *Orchestrator) checkRunDependenciesEnabled(service string, svc *compose.Service, opts RunOneOffOptions) error {
-	if opts.NoDeps {
+// checkProjectLoads refuses what docker compose v5.5.1 refuses while it reads
+// the project at all — before anything about the services this command was
+// asked for, and wherever among the services it reads the fault sits
+// (measured, #1072): a
+// service that depends on one behind a profile that is not active, which docker
+// reads as a dependency on an undefined service, and then a dependency cycle.
+//
+// Only the services the profiles leave active are read this way: a gated
+// service's dependencies, and a cycle among gated services, are not seen until
+// something enables them (measured). named holds the services this command was
+// given, which enables them as `--profile` would.
+func (o *Orchestrator) checkProjectLoads(named map[string]bool) error {
+	set := o.activeServices(named)
+	active := make([]string, 0, len(set))
+	for name := range set {
+		active = append(active, name)
+	}
+	sort.Strings(active)
+	for _, name := range active {
+		for _, dep := range o.Project.Services[name].DependsOn.Names() {
+			if _, ok := o.Project.Services[dep]; !ok {
+				continue // reading the file refuses a dependency it does not define
+			}
+			if !set[dep] {
+				return fmt.Errorf("service %q depends on %q, whose profile is not active — enable it with --profile or COMPOSE_PROFILES, or name it explicitly", name, dep)
+			}
+		}
+	}
+	return o.cycleAmong(active)
+}
+
+// activeServices is the services this command reads: the ones the profiles
+// leave active, the ones it names — and what those depend on behind their own
+// profiles, and only those. docker compose v5.5.1, measured (#1072): `run web`
+// on web[x] -> db[x] runs; on web[x] -> db[y] it refuses; and a service of x
+// this run does not name keeps its own gate, so a fault under it is not read,
+// where `--profile x` opens the whole profile and reads them all.
+func (o *Orchestrator) activeServices(named map[string]bool) map[string]bool {
+	carried := map[string]bool{}
+	asked := make([]string, 0, len(named))
+	for name := range named {
+		asked = append(asked, name)
+	}
+	sort.Strings(asked) // the answer must not ride on the order a map hands them back
+	for _, name := range asked {
+		svc := o.Project.Services[name]
+		if svc == nil {
+			continue
+		}
+		own := map[string]bool{}
+		for _, p := range svc.Profiles {
+			own[p] = true
+		}
+		// Walked once per named service, each with its own seen: a service two
+		// of them reach is carried under both their profiles, so what lies
+		// beyond it is read for each — naming a and b must not depend on which
+		// of them was written first.
+		seen := map[string]bool{}
+		var walk func(string)
+		walk = func(from string) {
+			for _, dep := range o.Project.Services[from].DependsOn.Names() {
+				d := o.Project.Services[dep]
+				if d == nil || seen[dep] {
+					continue
+				}
+				shares := false
+				for _, p := range d.Profiles {
+					if own[p] {
+						shares = true
+					}
+				}
+				if !shares {
+					continue
+				}
+				seen[dep] = true
+				carried[dep] = true
+				walk(dep)
+			}
+		}
+		walk(name)
+	}
+	set := make(map[string]bool, len(o.Project.Services))
+	for name := range o.Project.Services {
+		if carried[name] || o.enabled(name, named) {
+			set[name] = true
+		}
+	}
+	return set
+}
+
+// startupOrder orders every service of the project, each after the ones it
+// depends on — the gated ones included, because opossum takes the whole
+// project down where docker compose leaves a gated container running, and a
+// service must be stopped before what it depends on whichever of them a
+// profile gates. What the profiles decide is which cycles are this command's
+// business: one among services the active profiles leave active is refused, as
+// it always was, and one among services behind a profile nothing turned on is
+// not read (docker compose v5.5.1, measured, #1088: it reads, stops and takes
+// such a project down without a word). A command that was given service names
+// checks what they carry before this, where naming them turns their own
+// profiles on.
+func (o *Orchestrator) startupOrder() ([]string, error) {
+	return o.Project.StartupOrderReading(o.activeList())
+}
+
+// activeList is the services the profiles leave active, by name, in one order.
+func (o *Orchestrator) activeList() []string {
+	set := o.activeServices(nil)
+	active := make([]string, 0, len(set))
+	for name := range set {
+		active = append(active, name)
+	}
+	sort.Strings(active)
+	return active
+}
+
+// StartupOrder is the order for the commands built outside this package:
+// `config --services` prints the services in it.
+func (o *Orchestrator) StartupOrder() ([]string, error) { return o.startupOrder() }
+
+// cycleAmong reports a dependency cycle among the given services, in the words
+// StartupOrder uses for one: the check belongs to reading the project, so both
+// say the same thing about the same file.
+func (o *Orchestrator) cycleAmong(services []string) error {
+	const (
+		unvisited = iota
+		visiting
+		done
+	)
+	state := make(map[string]int, len(services))
+	active := make(map[string]bool, len(services))
+	for _, name := range services {
+		active[name] = true
+	}
+	var stack []string
+	var visit func(string) error
+	visit = func(name string) error {
+		switch state[name] {
+		case done:
+			return nil
+		case visiting:
+			return fmt.Errorf("dependency cycle detected: %v -> %s", stack, name)
+		}
+		state[name] = visiting
+		stack = append(stack, name)
+		deps := append([]string(nil), o.Project.Services[name].DependsOn.Names()...)
+		sort.Strings(deps) // as StartupOrder walks them, so both name the same cycle
+		for _, dep := range deps {
+			if !active[dep] {
+				continue // defensive: the caller passes a set closed under its dependencies
+			}
+			if err := visit(dep); err != nil {
+				return err
+			}
+		}
+		stack = stack[:len(stack)-1]
+		state[name] = done
 		return nil
 	}
-	named := map[string]bool{service: true}
-	for _, d := range svc.DependsOn.Names() {
-		if !o.enabled(d, named) {
-			return fmt.Errorf("service %q depends on %q, whose profile is not active — enable it with --profile or COMPOSE_PROFILES, or name it explicitly", service, d)
+	for _, name := range services {
+		if err := visit(name); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -905,7 +1092,17 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 		return ErrRuntimeAbsent()
 	}
 
-	order, err := o.Project.StartupOrder()
+	// What reading the project refuses comes first, wherever in the file it
+	// sits and whatever this `up` was asked for: a service that depends on one
+	// behind an inactive profile, then a cycle (measured, #1072).
+	named := map[string]bool{}
+	for _, s := range services {
+		named[s] = true
+	}
+	if err := o.checkProjectLoads(named); err != nil {
+		return err
+	}
+	order, err := o.startupOrder()
 	if err != nil {
 		return err
 	}
@@ -918,10 +1115,6 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 	// is active or it's named explicitly. With no names, drop inactive-profile
 	// services; either way, a started service may not depend on a disabled one
 	// (docker compose treats that as an undefined dependency).
-	named := map[string]bool{}
-	for _, s := range services {
-		named[s] = true
-	}
 	if len(services) == 0 {
 		kept := order[:0]
 		for _, name := range order {
@@ -988,18 +1181,22 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 			return err
 		}
 	}
-	if err := o.checkVolumeNames(order); err != nil {
-		return err
-	}
 	// A network or volume a service declares `external: true` that doesn't exist
 	// — opossum uses them by name and never creates them. Refused before an orphan
 	// is removed, network first, as docker compose v5.5.0 refuses them: a missing
 	// network would otherwise surface only as a raw "network not found" mid-start,
-	// and a missing volume would be created empty by the runtime.
+	// and a missing volume would be created empty by the runtime. Before the
+	// names of the volumes this would create, as docker compose v5.5.1 asks for
+	// what must already be there first — an external volume it cannot find is
+	// refused for being absent even when its name is too long for the runtime
+	// (measured, #1072).
 	if err := o.checkExternalNetworks(order); err != nil {
 		return err
 	}
 	if err := o.checkExternalVolumes(order); err != nil {
+		return err
+	}
+	if err := o.checkVolumeNames(order); err != nil {
 		return err
 	}
 	// After the external networks and volumes, as docker compose v5.5.1
@@ -1162,6 +1359,17 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 			}
 			if len(unknown) > 0 {
 				parts = append(parts, fmt.Sprintf("tried to roll back %s, but the runtime could not be asked whether it is gone — `container ls -a` shows it", strings.Join(unknown, ", ")))
+			}
+			// The failure being reported names a way out, and whether that way
+			// still exists was decided a few lines ago: a start failure points at
+			// `opossum logs`, which reads nothing once the container is gone. Told
+			// here rather than where the failure was made, because the removal
+			// happens in between — measured on the runtime over five paths, and all
+			// four of the ones that reach this message had already removed the
+			// container by the time anyone could read it.
+			var sf *startFailure
+			if errors.As(err, &sf) && slices.Contains(gone, sf.service) {
+				sf.noContainer = true
 			}
 			if len(parts) > 0 {
 				if len(left) == 0 && len(unknown) == 0 {
@@ -1976,7 +2184,9 @@ func (o *Orchestrator) selectServices(order, requested []string) ([]string, erro
 				return
 			}
 			want[name] = true
-			// StartupOrder already rejected cycles, so this recursion terminates.
+			// want is set before the walk goes on, so a cycle among services
+			// this command does not read — which is not refused — is walked
+			// once and no further.
 			for _, dep := range o.Project.Services[name].DependsOn {
 				visit(dep.Name)
 			}
@@ -2048,7 +2258,12 @@ func (r ownerRefusal) Error() string { return r.err.Error() }
 // container is none of them. One inspect for all three answers: a second call
 // could fail after the first answered, or answer after the first failed.
 func (o *Orchestrator) otherOwner(cname string) (owner string, unlabeled, unknown bool) {
-	info := o.rt.Inspect(cname)
+	return ownerOf(o.rt.Inspect(cname), o.Project.Name)
+}
+
+// ownerOf reads a look at a container: whose project it is, whether it carries
+// no project label at all, and whether the runtime would not say.
+func ownerOf(info runtime.ContainerInfo, project string) (owner string, unlabeled, unknown bool) {
 	if info.Unknown {
 		return "", false, true
 	}
@@ -2058,10 +2273,55 @@ func (o *Orchestrator) otherOwner(cname string) (owner string, unlabeled, unknow
 	switch proj := info.Labels[projectLabel]; {
 	case proj == "":
 		return "", true, false
-	case proj != o.Project.Name:
+	case proj != project:
 		return proj, false, false
 	}
 	return "", false, false
+}
+
+// withContainers keeps the services whose container ownContainers found: the
+// names of the ones that are there, taken from the same look, so nothing is
+// asked of the runtime twice.
+func (o *Orchestrator) withContainers(services, created []string) []string {
+	there := make(map[string]bool, len(created))
+	for _, cname := range created {
+		there[cname] = true
+	}
+	kept := make([]string, 0, len(services))
+	for _, name := range services {
+		if there[o.containerName(name)] {
+			kept = append(kept, name)
+		}
+	}
+	return kept
+}
+
+// worksOn reports whether the command should work on this service: the
+// container is this project's, and — for a command working over the whole
+// project rather than services it was given — there. Such a command passes by
+// a service nobody has started: one behind a profile that was never turned on,
+// or one an `up <service>` did not reach. There is nothing to stop, start or
+// read the logs of, and docker compose v5.5.1 exits 0 over such a project and
+// says nothing about that service (measured, #1096), where opossum used to
+// fail on it — or say it was stopping a container that was not there.
+//
+// A service the command was given by name goes through ours instead: what the
+// answer should be when someone asks for a service that is not running is a
+// question of its own (#1098), and silence there would hide a name typed
+// wrong.
+//
+// A container made between this look and the work is not worked on, which is
+// what docker compose does: its `stop` and `logs` act on the containers the
+// look found. `down` is the one that still asks about every service either
+// way — it promises a project that is gone, not a project as it was a moment
+// ago.
+func (o *Orchestrator) worksOn(name string, whole bool, unanswered *[]string) bool {
+	cname := o.containerName(name)
+	info := o.rt.Inspect(cname)
+	if !o.oursByInfo(cname, info, unanswered) {
+		return false
+	}
+	return !whole || info.Exists
 }
 
 // ours says whether the container name is this project's to stop, start, kill
@@ -2071,7 +2331,15 @@ func (o *Orchestrator) otherOwner(cname string) (owner string, unlabeled, unknow
 // name when it is done. A missing container is ours: there is nothing there
 // to take from anyone.
 func (o *Orchestrator) ours(cname string, unanswered *[]string) bool {
-	owner, unlabeled, unknown := o.otherOwner(cname)
+	return o.oursByInfo(cname, o.rt.Inspect(cname), unanswered)
+}
+
+// oursByInfo is ours over a look already taken: the commands that need to know
+// both who owns the container and whether it is there ask the runtime once and
+// answer both from that, because two looks can disagree about a container that
+// is starting or ending between them.
+func (o *Orchestrator) oursByInfo(cname string, info runtime.ContainerInfo, unanswered *[]string) bool {
+	owner, unlabeled, unknown := ownerOf(info, o.Project.Name)
 	switch {
 	case unknown:
 		*unanswered = append(*unanswered, cname)
@@ -2214,7 +2482,7 @@ func (o *Orchestrator) Down(removeVolumes bool, rmi string, removeOrphans bool) 
 	// the one `down` makes before the compose file is read can only guess the
 	// project name from the directory, which is wrong whenever the file names it.
 	ClearWatched(o.Project.Name)
-	order, err := o.Project.StartupOrder()
+	order, err := o.startupOrder()
 	if err != nil {
 		return err
 	}
@@ -2231,8 +2499,16 @@ func (o *Orchestrator) Down(removeVolumes bool, rmi string, removeOrphans bool) 
 	for i := len(order) - 1; i >= 0; i-- {
 		name := order[i]
 		cname := o.containerName(name)
-		if mine(cname) {
-			o.logf("Stopping %s\n", name)
+		info := o.rt.Inspect(cname)
+		if o.oursByInfo(cname, info, &unanswered) {
+			// Said only for a container that is there: a service nobody
+			// started has nothing to stop, and saying so reads as work done
+			// (#1096). The stop and the delete are asked for either way —
+			// they are best-effort, and a container that appeared between the
+			// look and here must still come down.
+			if info.Exists {
+				o.logf("Stopping %s\n", name)
+			}
 			o.rt.Stop(cname)
 			o.rt.Delete(cname)
 		}
@@ -2314,7 +2590,7 @@ func (o *Orchestrator) imageStatuses() ([]ImageStatus, error) {
 	if !o.rt.SystemRunning() {
 		return nil, ErrRuntimeStopped()
 	}
-	order, err := o.Project.StartupOrder()
+	order, err := o.startupOrder()
 	if err != nil {
 		return nil, err
 	}
@@ -2700,6 +2976,20 @@ func (o *Orchestrator) decodeStartError(name string, err error) error {
 	}
 	if hint := runErrorHint(o.Project.Services[name], err); hint != "" {
 		return fmt.Errorf("starting service %q: %w%s", name, err, hint)
+	}
+	// The registry would not hand the image over, so no container was made and
+	// there are no logs to read: the way out is the name and whether it can be
+	// reached, which is what `pull` says over the same failure. Asked after the
+	// coded hints, so a failure they name keeps its code.
+	// Not for a service the compose file builds: its image is made here, so a
+	// registry that refuses is not about a name anyone typed, and `opossum
+	// build` is where the answer is. (measured: nothing in the five shapes
+	// comes from a built image — they are all a run of an image by name.)
+	if svc := o.Project.Services[name]; svc != nil && svc.Build == nil && o.imageFetchFailed(name, err) {
+		// svc.Image is what the run asked the registry for: a service the file
+		// builds is the only one whose run uses another name, and it is not
+		// here.
+		return fmt.Errorf("starting service %q: %w\n  %s", name, err, imageUnreachable(svc.Image))
 	}
 	return startFailed(name, err)
 }
@@ -3449,7 +3739,7 @@ func (o *Orchestrator) serviceStatuses() (rows []ServiceStatus, notes, unanswere
 	if !o.rt.SystemRunning() {
 		return nil, nil, nil, ErrRuntimeStopped()
 	}
-	order, err := o.Project.StartupOrder()
+	order, err := o.startupOrder()
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -3812,7 +4102,13 @@ func (o *Orchestrator) Logs(services []string, opts runtime.LogsOptions) error {
 	// the exit is zero, as docker compose's; the ones the runtime gave no
 	// readable answer about make the exit non-zero once the rest are shown,
 	// as `down` exits over the ones it left.
-	targets, _, unanswered := o.ownContainers(targets, "not shown")
+	// A service nobody has started has no logs to show, and is passed by when
+	// the command was given no names (#1096); one asked for by name still
+	// answers for itself.
+	targets, created, unanswered := o.ownContainers(targets, "not shown")
+	if len(services) == 0 {
+		targets = o.withContainers(targets, created)
+	}
 	left := unansweredOwners(unanswered, "opossum logs")
 	prefixes := logPrefixes(targets, opts.NoLogPrefix)
 	base := o.ctx
@@ -3844,7 +4140,16 @@ func (o *Orchestrator) Logs(services []string, opts runtime.LogsOptions) error {
 	// ends it there, whatever the stream was doing: what the cancel did to the
 	// stream (a child killed, one not started) is not a failure to read.
 	for i, name := range targets {
-		err := o.rt.PrefixedLogs(ctx, o.containerName(name), opts, o.out, os.Stderr, prefixes[i])
+		stream := func(c context.Context, w io.Writer) error {
+			return o.rt.PrefixedLogs(c, o.containerName(name), opts, w, os.Stderr, prefixes[i])
+		}
+		var err error
+		exited := false
+		if opts.Follow {
+			exited, err = o.followUntilExit(ctx, name, o.out, stream)
+		} else {
+			err = stream(ctx, o.out)
+		}
 		if ctx.Err() != nil {
 			return ErrInterrupted
 		}
@@ -3853,8 +4158,153 @@ func (o *Orchestrator) Logs(services []string, opts runtime.LogsOptions) error {
 			// not answer about, as `start` names them beside its failures.
 			return withOwners(fmt.Errorf("logs for service %q: %w\n  confirm the service is up with `opossum ps`", name, err), left)
 		}
+		if exited {
+			o.logf("%s exited\n", name+"-1")
+		}
 	}
 	return left
+}
+
+// LogsExitPoll is how often `logs --follow` looks at the state of a container
+// it follows; LogsExitSettle is how long the container must stay not running
+// before that counts as its end; LogsExitDrain is how long its stream must then
+// go without a new line — none being written, and none finished — before it
+// is ended.
+var (
+	LogsExitPoll   = time.Second
+	LogsExitSettle = 3 * time.Second
+	LogsExitDrain  = 500 * time.Millisecond
+)
+
+// lastWrite is a writer that remembers when a write last finished, and
+// whether one is under way (a slow reader holds it).
+type lastWrite struct {
+	w       io.Writer
+	at      atomic.Int64 // unix nanoseconds
+	writing atomic.Int32
+}
+
+func (l *lastWrite) Write(p []byte) (int, error) {
+	l.writing.Add(1)
+	defer l.writing.Add(-1)
+	n, err := l.w.Write(p)
+	l.at.Store(time.Now().UnixNano())
+	return n, err
+}
+
+// idle reports whether nothing has been written for d and nothing is being.
+func (l *lastWrite) idle(now time.Time, d time.Duration) bool {
+	return l.writing.Load() == 0 && now.Sub(time.Unix(0, l.at.Load())) >= d
+}
+
+// followUntilExit runs stream, a service's followed logs written to w, until it
+// ends, and ends it once the service's container has ended: container 1.4.1's
+// `container logs -f` goes on after the container exits, is stopped or is
+// removed (measured), where docker compose v5.5.1 ends a followed container's
+// stream then and says so (`web-1 exited with code 3`).
+//
+// The container counts as ended once it has been seen running while followed
+// — docker compose goes on following one that had already exited before
+// `logs -f` began — and has then stayed not running (stopped, or gone) for
+// LogsExitSettle: a restart (`opossum restart`) leaves it stopped for a moment
+// and starts the same container again, whose stream goes on, as docker compose
+// goes on following it; while `opossum restart` is under way (it holds a
+// marker) the gap is not counted at all, however long it lasts. A look the
+// runtime does not answer changes nothing: the time since the container was
+// first seen not running goes on being counted through it. Once ended, the
+// stream is not cut at once: the runtime may still be handing over what the
+// container wrote last, so it is ended when it has gone LogsExitDrain without
+// a new line, a line being written to a slow reader counting as one. A service
+// with a `restart:` policy is not watched: the supervisor starts the same
+// container again and the stream goes on with it.
+// exited reports that the container's end ended the stream. The watch is
+// over when this returns.
+func (o *Orchestrator) followUntilExit(ctx context.Context, service string, w io.Writer, stream func(context.Context, io.Writer) error) (exited bool, err error) {
+	sctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	lw := &lastWrite{w: w}
+	lw.at.Store(time.Now().UnixNano())
+	var ended atomic.Bool
+	if pol, perr := o.Project.Services[service].RestartPolicy(); perr != nil || !pol.Wants() {
+		done := make(chan struct{})
+		watched := make(chan struct{})
+		defer func() {
+			close(done)
+			// A look under way is waited for; after a Ctrl-C or SIGTERM —
+			// already taken, or taken while waiting — only for
+			// runtime.LogsCancelGrace, the span a stream that ended on its own
+			// gives the cancel: a runtime that does not answer would hold the
+			// command up, and one that answers in time leaves no `container
+			// inspect` of this command still running once it has returned. The
+			// watcher starts no look once it has seen either is over.
+			select {
+			case <-watched:
+				return
+			case <-ctx.Done():
+			}
+			select {
+			case <-watched:
+			case <-time.After(runtime.LogsCancelGrace):
+			}
+		}()
+		go func() {
+			defer close(watched)
+			tick := time.NewTicker(LogsExitPoll)
+			defer tick.Stop()
+			seen := false
+			var stoppedSince, endedAt time.Time
+			// Looked at once straight away, then at each tick: a container
+			// that stops within the first tick has been seen running.
+			for first := true; ; first = false {
+				// Asked before every look, the first too: a tick that came
+				// while the look before was answered is not taken after the
+				// stream is over.
+				select {
+				case <-done:
+					return
+				case <-sctx.Done():
+					return
+				default:
+				}
+				if !first {
+					select {
+					case <-done:
+						return
+					case <-sctx.Done():
+						return
+					case <-tick.C:
+					}
+				}
+				now := time.Now()
+				if !endedAt.IsZero() && lw.idle(now, LogsExitDrain) {
+					ended.Store(true)
+					cancel()
+					return
+				}
+				info := o.rt.Inspect(o.containerName(service))
+				switch {
+				case o.isRestarting(service):
+					// `restart` is stopping and starting it: the gap, however
+					// long, is not the end.
+					stoppedSince, endedAt = time.Time{}, time.Time{}
+				case info.Unknown:
+				case info.Exists && info.State == "running":
+					seen = true
+					stoppedSince, endedAt = time.Time{}, time.Time{}
+				case !seen:
+				case stoppedSince.IsZero():
+					stoppedSince = now
+				case endedAt.IsZero() && now.Sub(stoppedSince) >= LogsExitSettle:
+					endedAt = now
+				}
+			}
+		}()
+	}
+	err = stream(sctx, lw)
+	if ended.Load() && ctx.Err() == nil {
+		return true, nil
+	}
+	return false, err
 }
 
 // syncWriter serializes concurrent writes from several log-follow goroutines onto
@@ -3902,7 +4352,13 @@ func (o *Orchestrator) followMultiplexed(ctx context.Context, targets []string, 
 		wg.Add(1)
 		go func(i int, name, prefix string) {
 			defer wg.Done()
-			errs[i] = o.rt.FollowLogs(ctx, o.containerName(name), opts, out, prefix)
+			exited, err := o.followUntilExit(ctx, name, out, func(c context.Context, w io.Writer) error {
+				return o.rt.FollowLogs(c, o.containerName(name), opts, w, prefix)
+			})
+			errs[i] = err
+			if exited {
+				out.Write([]byte(OneLine(name+"-1") + " exited\n"))
+			}
 		}(i, name, prefixes[i])
 	}
 	wg.Wait()
@@ -4096,7 +4552,7 @@ func (o *Orchestrator) resolveCopyArg(arg string) string {
 // restart, and stats.
 func (o *Orchestrator) resolveServices(services []string) ([]string, error) {
 	if len(services) == 0 {
-		return o.Project.StartupOrder()
+		return o.startupOrder()
 	}
 	// A service named twice is one service, in the position it was first
 	// named: docker compose v5.5.0 prints `logs web web` once, and a command
@@ -4158,14 +4614,59 @@ func (o *Orchestrator) Import(services ...string) error {
 // buildFailed wraps a build error with a pointer to the Docker-import fallback,
 // so a builder that can't handle a Dockerfile (or is misbehaving) isn't a dead
 // end.
+//
+// Not over a registry that refused an image the Dockerfile names: that is not
+// the builder failing to cope, and Docker is refused the same image (measured
+// with nothing logged in and the image not held locally: `docker build` over
+// the same Dockerfile fails on the same name). The build error already carries
+// what to check. The way round does work where Docker has the image and the
+// runtime does not — held locally, or behind a login only Docker has. The hint
+// does not say so: a login is better answered by the runtime logging in
+// ("registry auth" there), and docs/compatibility.md names both cases where the
+// way round itself is described.
 func buildFailed(service string, err error) error {
+	if errors.Is(err, runtime.ErrBuildImageRefused) {
+		return fmt.Errorf("building service %q: %w", service, err)
+	}
 	return fmt.Errorf("building service %q: %w\n"+
 		"  (if Apple's builder can't handle this Dockerfile, build it with Docker and import it: opossum import %s)", service, err, service)
 }
 
-// startFailed wraps a generic (non-decoded) container-start failure with a pointer
-// to the logs — the raw runtime error rarely says why the container died, but its
-// own logs usually do.
+// startFailure is a generic (non-decoded) container-start failure. It is a type
+// rather than a formatted string because the way out depends on something that
+// has not happened yet when the failure is made: the rollback runs afterwards
+// and usually removes the container, and `opossum logs` can only be read while
+// the container is there. The rollback marks it (removed), and the wording is
+// chosen when the message is finally read.
+type startFailure struct {
+	service string
+	err     error
+	// noContainer is set by the rollback when it confirmed this service has no
+	// container left. Confirmed, not assumed: a rollback that could not delete
+	// it, or could not ask the runtime, leaves the container standing and its
+	// logs readable.
+	noContainer bool
+}
+
+func (e *startFailure) Error() string {
+	way := fmt.Sprintf("check why with `opossum logs %s`, or verify the image, command, and mounts in the compose file", e.service)
+	if e.noContainer {
+		// Pointing at the logs here sends the reader to a container that is not
+		// there: `opossum logs` answers `container … not found`, and the guidance
+		// reads as advice that was never written. Said as "none is left" rather
+		// than "the rollback removed it", because the two cases the teardown
+		// cannot tell apart — a container it deleted, and one that was never made
+		// (an image that would not come down) — are the same for a reader who
+		// wants to read logs. What is left is what the runtime already printed
+		// above: the stderr is streamed live, before any teardown.
+		way = "there is no container left to read logs from — " +
+			"the failure above is what there is; verify the image, command, and mounts in the compose file"
+	}
+	return fmt.Sprintf("starting service %q: %v\n  %s", e.service, e.err, way)
+}
+
+func (e *startFailure) Unwrap() error { return e.err }
+
 // disownLast takes the container this iteration just put on the rollback list
 // back off it: the runtime refused to start it because something else holds
 // the name, so it is not this up's to stop or remove. The list's last entry is
@@ -4188,9 +4689,69 @@ func nameTakenError(svc, cname, why string) error {
 		"  see it with `container ls -a`; once it is gone, or is the one you want, run `opossum up` again", svc, cname, why)
 }
 
+// imageFetchFailed reports whether a run failed while the registry was being
+// asked for the image, and the runtime then said there is no container of this
+// service's name. container 1.4.1 says the first in a line of its own — `Error: HTTP request to <url> failed with response:
+// …` — naming the request it made: a read of the image's manifest or of one of
+// its blobs. The answers differ (a registry that needs a login and an image
+// that is not there both answer 401, because Docker Hub answers 401 for a
+// repository that does not exist; a tag that is not there answers 404; a blob
+// that is not there answers 404 with the registry's own JSON — measured, five
+// shapes asked of the runtime directly — the two blob shapes against a
+// registry on this machine over `--scheme http`, a flag opossum passes
+// nowhere, so what they are evidence of is the wording and not the path
+// opossum takes to it), so what is read is the request. Read the answer
+// instead and an image name typed wrong would be called a login problem.
+//
+// Two things keep this from answering for a container's own output: the line
+// has to be the runtime's (it begins the line, and carries the whole shape),
+// and the runtime has to say there is no container of the name — a foreground
+// `up` hands this function the container's stderr as well as the runtime's,
+// and a service that talks to a registry prints lines that look like these. A
+// runtime that will not say is not a runtime that said no.
+//
+// One measured shape is not told apart: a blob whose download ends early says
+// `Error: stream ended at an unexpected time` and names no request at all.
+// Nothing in it says the image was what failed, so it keeps the answer every
+// other start failure gets. Widening to the progress lines would reach it —
+// and would also reach a container that started after its image came down
+// fine, which has not been measured.
+func (o *Orchestrator) imageFetchFailed(service string, err error) bool {
+	var re *runtime.RunError
+	if !errors.As(err, &re) {
+		return false
+	}
+	said := false
+	for _, line := range strings.Split(re.Stderr, "\n") {
+		if !strings.HasPrefix(line, "Error: HTTP request to ") || !strings.Contains(line, " failed with response: ") {
+			continue
+		}
+		if strings.Contains(line, "/manifests/") || strings.Contains(line, "/blobs/") {
+			said = true
+		}
+	}
+	if !said {
+		return false
+	}
+	// And nothing was made: a container that printed the line itself is still
+	// there to be asked about, and its logs are where its trouble is. A
+	// runtime that would not say is not the same as one that said no — read
+	// as "gone", an apiserver that stopped answering would quietly take this
+	// guard off (#957) — so an answer that did not come keeps the guidance
+	// this failure had.
+	info := o.rt.Inspect(o.containerName(service))
+	return !info.Exists && !info.Unknown
+}
+
+// imageUnreachable is the way out for an image the runtime could not get, in
+// the words `pull` uses for it: one sentence, two things to check, because the
+// runtime's answer does not always tell them apart.
+func imageUnreachable(image string) string {
+	return fmt.Sprintf("check the image name %q and that it's reachable (registry auth / network)", image)
+}
+
 func startFailed(service string, err error) error {
-	return fmt.Errorf("starting service %q: %w\n"+
-		"  check why with `opossum logs %s`, or verify the image, command, and mounts in the compose file", service, err, service)
+	return &startFailure{service: service, err: err}
 }
 
 // RunOneOffOptions configures a one-off `run`.
@@ -4226,6 +4787,15 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 	if err != nil {
 		return err
 	}
+	// What reading the project refuses — a dependency behind an inactive
+	// profile, then a cycle — once the environment is read and before anything
+	// about the one-off itself, as docker compose v5.5.1 refuses those first
+	// and wherever in the file they sit (measured; it refuses them before a
+	// missing env_file too, which this does not follow). `--no-deps` does not
+	// change this: the project is read the same way either way.
+	if err := o.checkProjectLoads(map[string]bool{service: true}); err != nil {
+		return err
+	}
 	// The stale one-off deleted below is found by name, and a container of
 	// another project can carry that name (with `--dns-domain ""`, names are bare
 	// service names): refuse here, before anything starts, as `up` does for its
@@ -4242,13 +4812,29 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 	if err := o.checkContainerName(service, o.containerName(service+"-run")); err != nil {
 		return err
 	}
-	if err := o.checkVolumeNames([]string{service}); err != nil {
+	// The one-off and the services it depends on, in the order docker compose
+	// v5.5.1 refuses them (measured, #1072): what the runtime must already have
+	// (an external network, then an external volume), then the names it would
+	// have to create, then what the engine would refuse when the container is
+	// made. `--no-deps` changes only the last of those: a dependency's named
+	// volume and the external things it names are still checked, because docker
+	// creates and looks for them either way, while its container — and so its
+	// tmpfs — is never made.
+	chain := o.withDependencies(service)
+	made := chain
+	if opts.NoDeps {
+		made = []string{service}
+	}
+	if err := o.checkExternalNetworks(chain); err != nil {
 		return err
 	}
-	if err := o.checkExternalVolumes(o.withDependencies(service)); err != nil {
+	if err := o.checkExternalVolumes(chain); err != nil {
 		return err
 	}
-	if err := o.checkTmpfsOptions([]string{service}); err != nil {
+	if err := o.checkVolumeNames(chain, made...); err != nil {
+		return err
+	}
+	if err := o.checkTmpfsOptions(made); err != nil {
 		return err
 	}
 
@@ -4265,9 +4851,6 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 	willStartDeps := !opts.NoDeps && len(svc.DependsOn.Names()) > 0
 	o.reportIgnoredFields([]string{service}, !willStartDeps)
 
-	if err := o.checkRunDependenciesEnabled(service, svc, opts); err != nil {
-		return err
-	}
 	if !opts.NoDeps {
 		if deps := svc.DependsOn.Names(); len(deps) > 0 {
 			if err := o.Up(true, deps...); err != nil {
@@ -4482,7 +5065,15 @@ func (o *Orchestrator) Build(services []string) error {
 	if err != nil {
 		return err
 	}
+	named := namedSet(services)
 	for _, name := range targets {
+		// A service gated behind a profile that is not active is not built,
+		// as docker compose v5.5.1 leaves it out (measured: `build` with no
+		// service warns that none was selected). Naming it enables it, as
+		// naming it does for `up`.
+		if !o.enabled(name, named) {
+			continue
+		}
 		svc := o.Project.Services[name]
 		if svc.Build == nil {
 			continue
@@ -4503,14 +5094,21 @@ func (o *Orchestrator) Pull(services []string) error {
 	if err != nil {
 		return err
 	}
+	named := namedSet(services)
 	for _, name := range targets {
+		// Gated behind a profile that is not active: not pulled, as docker
+		// compose v5.5.1 pulls only the active ones (measured). Naming it
+		// enables it, as there.
+		if !o.enabled(name, named) {
+			continue
+		}
 		svc := o.Project.Services[name]
 		if svc.Image == "" {
 			continue
 		}
 		o.logf("Pulling %s (%s)\n", name, svc.Image)
 		if err := o.rt.Pull(svc.Image); err != nil {
-			return fmt.Errorf("pulling service %q: %w\n  check the image name %q and that it's reachable (registry auth / network)", name, err, svc.Image)
+			return fmt.Errorf("pulling service %q: %w\n  %s", name, err, imageUnreachable(svc.Image))
 		}
 	}
 	return nil
@@ -4519,6 +5117,7 @@ func (o *Orchestrator) Pull(services []string) error {
 // Start starts already-created (stopped) containers in dependency order (all, or
 // the named ones), without recreating them.
 func (o *Orchestrator) Start(services []string) error {
+	whole := len(services) == 0
 	targets, err := o.resolveServices(services)
 	if err != nil {
 		return err
@@ -4543,7 +5142,7 @@ func (o *Orchestrator) Start(services []string) error {
 			failed = append(failed, fmt.Errorf("not starting service %q: it depends on %q, which did not start", name, dep))
 			continue
 		}
-		if !o.ours(o.containerName(name), &unanswered) {
+		if !o.worksOn(name, whole, &unanswered) {
 			continue
 		}
 		o.logf("Starting %s\n", name)
@@ -4609,7 +5208,7 @@ func (l errorList) Unwrap() []error { return l.errs }
 // dependency named after its dependent is still started, or found failing,
 // first.
 func (o *Orchestrator) inStartupOrder(targets []string) ([]string, error) {
-	order, err := o.Project.StartupOrder()
+	order, err := o.startupOrder()
 	if err != nil {
 		return nil, err
 	}
@@ -4663,6 +5262,7 @@ func (o *Orchestrator) firstNotStartedDependency(name string, notStarted map[str
 // Every service is signalled whatever an earlier one did, and more than one
 // failure is listed one entry each, as `start` lists its failures.
 func (o *Orchestrator) Kill(services []string, signal string) error {
+	whole := len(services) == 0
 	targets, err := o.resolveServices(services)
 	if err != nil {
 		return err
@@ -4671,7 +5271,7 @@ func (o *Orchestrator) Kill(services []string, signal string) error {
 	var failed []error
 	for i := len(targets) - 1; i >= 0; i-- {
 		name, cname := targets[i], o.containerName(targets[i])
-		if !o.ours(cname, &unanswered) {
+		if !o.worksOn(name, whole, &unanswered) {
 			continue
 		}
 		o.logf("Killing %s\n", name)
@@ -4699,13 +5299,14 @@ func (o *Orchestrator) Kill(services []string, signal string) error {
 // Stop stops services without removing them (unlike Down). With no names it stops
 // the whole project in reverse dependency order; otherwise just the named ones.
 func (o *Orchestrator) Stop(services []string) error {
+	whole := len(services) == 0
 	targets, err := o.resolveServices(services)
 	if err != nil {
 		return err
 	}
 	var unanswered []string
 	for i := len(targets) - 1; i >= 0; i-- {
-		if !o.ours(o.containerName(targets[i]), &unanswered) {
+		if !o.worksOn(targets[i], whole, &unanswered) {
 			continue
 		}
 		o.logf("Stopping %s\n", targets[i])
@@ -4721,6 +5322,7 @@ func (o *Orchestrator) Stop(services []string) error {
 // (containers and network are not recreated). With no names it restarts the
 // whole project; otherwise just the named ones.
 func (o *Orchestrator) Restart(services []string) error {
+	whole := len(services) == 0
 	targets, err := o.resolveServices(services)
 	if err != nil {
 		return err
@@ -4730,11 +5332,18 @@ func (o *Orchestrator) Restart(services []string) error {
 	// started again.
 	var unanswered, mine []string
 	for _, name := range targets {
-		if o.ours(o.containerName(name), &unanswered) {
+		if o.worksOn(name, whole, &unanswered) {
 			mine = append(mine, name)
 		}
 	}
-	// Restarting says "bring this back", so an earlier `stop` no longer stands.
+	// Restarting says "bring this back", so an earlier `stop` no longer stands;
+	// and while it is under way a `logs --follow` is told the gap is not the
+	// container's end (followUntilExit), however long the stops and starts take.
+	// The marks first: while this waits for another restart of the same
+	// services, an earlier `stop` still stands — it is this restart that
+	// undoes it, and only once it is under way.
+	_, releaseMarks := o.markRestartingAll(mine)
+	defer releaseMarks()
 	for _, name := range mine {
 		o.ClearStopped(name)
 	}

@@ -177,7 +177,11 @@ func TestATmpfsEntryWithAnEmptyOptionIsLookedAtOnTheServicesThatStart(t *testing
 					}
 					return
 				}
-				if want := "starting dependencies: " + tmpfsOptionRefusal("db", "/d:exec,"); err == nil || err.Error() != want {
+				// Refused by the run's own look at what it is about to create,
+				// before the dependencies start — where it used to come back
+				// from their `up`, wearing that prefix. docker compose refuses
+				// before it creates anything either (measured, #1072).
+				if want := tmpfsOptionRefusal("db", "/d:exec,"); err == nil || err.Error() != want {
 					t.Errorf("\n got %v\nwant %s", err, want)
 				}
 				if l := createdSomething(log()); l != "" {

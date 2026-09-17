@@ -20,6 +20,12 @@ func TestStartFailedHasLogsHint(t *testing.T) {
 	}
 }
 
+// inspectRunningWeb is a shim case that answers `inspect` for web's container,
+// there and this project's, for the tests whose subject is a runtime command
+// failing on a container that exists. It answers with web's name whatever it
+// is asked about, so a project with a second service needs its own.
+const inspectRunningWeb = `  inspect) echo '[{"status":{"state":"running"},"configuration":{"id":"web.demo.opossum","labels":{"opossum.project":"demo"}}}]' ;;` + "\n"
+
 func lifecycleProject() *compose.Project {
 	return &compose.Project{Name: "demo", Services: map[string]*compose.Service{
 		"web": {Name: "web", Image: "web:latest"},
@@ -28,7 +34,9 @@ func lifecycleProject() *compose.Project {
 
 func TestStartHasNextStep(t *testing.T) {
 	// `container start` fails → o.Start must explain that the container must exist.
-	shim := scriptShim(t, "  start) exit 1 ;;\n")
+	// The container is there — a service with none is passed by (#1096) — and
+	// `container start` fails on it.
+	shim := scriptShim(t, "  start) exit 1 ;;\n"+inspectRunningWeb)
 	err := New(lifecycleProject(), shim, "opossum", &bytes.Buffer{}).Start(nil)
 	if err == nil {
 		t.Fatal("expected Start to fail")
@@ -40,7 +48,7 @@ func TestStartHasNextStep(t *testing.T) {
 }
 
 func TestRestartHasNextStep(t *testing.T) {
-	shim := scriptShim(t, "  start) exit 1 ;;\n") // stop succeeds, start fails
+	shim := scriptShim(t, "  start) exit 1 ;;\n"+inspectRunningWeb) // stop succeeds, start fails
 	err := New(lifecycleProject(), shim, "opossum", &bytes.Buffer{}).Restart(nil)
 	if err == nil {
 		t.Fatal("expected Restart to fail")
@@ -72,7 +80,7 @@ func TestPullHasNextStep(t *testing.T) {
 }
 
 func TestLogsHasNextStep(t *testing.T) {
-	shim := scriptShim(t, "  logs) exit 1 ;;\n")
+	shim := scriptShim(t, "  logs) exit 1 ;;\n"+inspectRunningWeb)
 	err := New(lifecycleProject(), shim, "opossum", &bytes.Buffer{}).Logs(nil, runtime.LogsOptions{})
 	if err == nil {
 		t.Fatal("expected Logs to fail")

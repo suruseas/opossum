@@ -33,7 +33,10 @@ opossum down                                 # stop + remove + drop the network 
 
 `-f <file>` selects compose files (repeatable, later wins); `-p <name>` sets the
 project name; `--verbose` echoes each `container` command; `--dns-domain` overrides
-the discovery domain (default `opossum`).
+the discovery domain (default `opossum`); `--profile <name>` enables services
+gated behind a compose profile (repeatable, taken by every command, and
+`COMPOSE_PROFILES` does the same); `--env-file <file>` replaces the default
+`.env` for `${VAR}` interpolation (repeatable).
 
 A `compose.opossum.yaml` (or `.yml`) next to a discovered compose file is merged
 **last, at the highest precedence** — after the base file and any

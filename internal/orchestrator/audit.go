@@ -86,6 +86,14 @@ func (o *Orchestrator) RunAudited(service string, command []string, opts RunOneO
 	if _, err := svc.ResolvedEnv(); err != nil {
 		return nil, err
 	}
+	// What reading the project refuses — an inactive profile under a
+	// dependency, then a cycle — for the same two reasons, and a third: the
+	// `up` below names the dependencies, so it would start one instead of
+	// refusing it (#1005). Before what is refused about the one-off itself, as
+	// docker compose v5.5.1 refuses those first.
+	if err := o.checkProjectLoads(map[string]bool{service: true}); err != nil {
+		return nil, err
+	}
 	// The one-off's name, for the same two reasons: a refusal spent on the run
 	// below would read `exit -1`, and the dependencies would already be up.
 	if err := o.ensureNotForeign(o.containerName(service+"-run"), "opossum run"); err != nil {
@@ -101,24 +109,26 @@ func (o *Orchestrator) RunAudited(service string, command []string, opts RunOneO
 	if err := o.checkContainerName(service, o.containerName(service+"-run")); err != nil {
 		return nil, err
 	}
-	// The names of the volumes the one-off mounts, for the same two reasons.
-	if err := o.checkVolumeNames([]string{service}); err != nil {
+	// The one-off and the services it depends on, in the order docker compose
+	// v5.5.1 refuses them (measured, #1072) and for the same two reasons: what
+	// the runtime must already have, then the names this would create, then
+	// what the engine would refuse when the container is made. Only the
+	// containers this run will make are asked about that last one.
+	chain := o.withDependencies(service)
+	made := chain
+	if opts.NoDeps {
+		made = []string{service}
+	}
+	if err := o.checkExternalNetworks(chain); err != nil {
 		return nil, err
 	}
-	// A missing external volume the one-off or any of its dependencies mounts,
-	// for the same two reasons.
-	if err := o.checkExternalVolumes(o.withDependencies(service)); err != nil {
+	if err := o.checkExternalVolumes(chain); err != nil {
 		return nil, err
 	}
-	// A tmpfs mount of the one-off's with an empty option, for the same two
-	// reasons.
-	if err := o.checkTmpfsOptions([]string{service}); err != nil {
+	if err := o.checkVolumeNames(chain, made...); err != nil {
 		return nil, err
 	}
-	// A dependency behind a profile that is not active, for the same two
-	// reasons — and a third: the `up` below names the dependencies, so it
-	// would start one instead of refusing it (#1005).
-	if err := o.checkRunDependenciesEnabled(service, svc, opts); err != nil {
+	if err := o.checkTmpfsOptions(made); err != nil {
 		return nil, err
 	}
 	report := &AuditReport{Service: service, Command: command}

@@ -1275,6 +1275,27 @@ func TestRestartStopsThenStarts(t *testing.T) {
 	}
 }
 
+// The same order when the names run against the alphabet: `restart` marks the
+// services it is about to take down in the order of their names, and the order
+// it stops and starts them in is the dependency order all the same.
+func TestRestartStopsThenStartsAgainstTheAlphabet(t *testing.T) {
+	rt, log := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"zdb": {Image: "postgres:16"},
+		"app": {Image: "web:latest", DependsOn: compose.DependsOn{{Name: "zdb"}}},
+	})
+	if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Restart(nil); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	lines := log()
+	if a, z := indexOf(lines, "stop app.demo.opossum"), indexOf(lines, "stop zdb.demo.opossum"); a < 0 || z < 0 || a > z {
+		t.Errorf("want app stopped before zdb (app=%d zdb=%d) in %v", a, z, lines)
+	}
+	if z, a := indexOf(lines, "start zdb.demo.opossum"), indexOf(lines, "start app.demo.opossum"); z < 0 || a < 0 || z > a {
+		t.Errorf("want zdb started before app (zdb=%d app=%d) in %v", z, a, lines)
+	}
+}
+
 func TestStopUnknownServiceRejected(t *testing.T) {
 	rt, _ := fakeShim(t)
 	p := project("demo", map[string]*compose.Service{"db": {Image: "postgres:16"}})

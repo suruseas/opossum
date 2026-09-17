@@ -29,9 +29,6 @@ func TestAVolumeNameLongerThanTheRuntimeTakesIsRefusedBeforeCreating(t *testing.
 		return `shorten the volume key "` + key + "\" or the project name (`-p`, or `name:` in the compose file)"
 	}
 	nameFix := func(key string) string { return "shorten the `name:` of the volume \"" + key + `"` }
-	extFix := func(key string) string {
-		return `the runtime cannot mount a volume by that name, so use an external volume with a shorter name for "` + key + `"`
-	}
 	type row struct {
 		name    string
 		web     *compose.Service
@@ -50,10 +47,14 @@ func TestAVolumeNameLongerThanTheRuntimeTakesIsRefusedBeforeCreating(t *testing.
 		{"a name: at 256", web("data:/data"), map[string]compose.VolumeDecl{"data": {Name: r("n", 256)}},
 			volumeNameRefusal("web", r("n", 256), nameFix("data"))},
 		{"an external name: at 255", web("ext:/data"), map[string]compose.VolumeDecl{"ext": {External: true, Name: r("e", 255)}}, ""},
+		// An external volume the runtime does not have is refused for being
+		// absent before its name is weighed, as docker compose v5.5.1 refuses
+		// it (measured 2026-09-16: a 256-character external name gives
+		// `external volume "eee…" not found`, not a word about its length).
 		{"an external name: at 256", web("ext:/data"), map[string]compose.VolumeDecl{"ext": {External: true, Name: r("e", 256)}},
-			volumeNameRefusal("web", r("e", 256), extFix("ext"))},
+			externalVolumeRefusal(r("e", 256))},
 		{"an external key at 256", web(r("x", 256) + ":/data"), map[string]compose.VolumeDecl{r("x", 256): {External: true}},
-			volumeNameRefusal("web", r("x", 256), extFix(r("x", 256)))},
+			externalVolumeRefusal(r("x", 256))},
 		// The long one second among the service's mounts, after a bind mount and
 		// a short named volume.
 		{"the second named volume at 256", web("./src:/src", "short:/s", r("k", 251)+":/data"),
@@ -165,14 +166,11 @@ func TestAVolumeNameIsLookedAtOnTheServicesThatStart(t *testing.T) {
 			})
 			proj.Volumes = decl
 			err := orchestrator.New(proj, rt, "opossum", &bytes.Buffer{}).RunOneOff("web", []string{"true"}, orchestrator.RunOneOffOptions{NoDeps: noDeps})
-			if noDeps {
-				if err != nil || runLine(log()) < 0 {
-					t.Errorf("want the one-off run, got err %v and %v", err, log())
-				}
-				return
-			}
-			// The one-off's `up` of its dependencies wraps what it refuses.
-			if want := "starting dependencies: " + refusal("db"); err == nil || err.Error() != want {
+			// Either way: the volume a dependency names is created for it even
+			// under --no-deps, which does not start its container, so docker
+			// compose v5.5.1 refuses the name in both (measured, #1072). The
+			// run looks for itself, so nothing wraps the words.
+			if want := refusal("db"); err == nil || err.Error() != want {
 				t.Errorf("\n got %v\nwant %s", err, want)
 			}
 			if l := createdSomething(log()); l != "" {
@@ -274,10 +272,11 @@ func TestAnAnonymousVolumeWithNoRoomLeftIsRefused(t *testing.T) {
 	})
 }
 
-// An audited one-off looks at its own volumes before the snapshot; its
-// dependencies' are looked at by the `up` that starts them, so a dependency's
-// long volume is refused there, and not at all with --no-deps.
-func TestAnAuditedRunLeavesItsDependenciesVolumesToTheirUp(t *testing.T) {
+// An audited one-off looks at the volumes of the services it would create the
+// volumes of — its own and its dependencies' — before the snapshot, with or
+// without --no-deps: docker compose creates a dependency's named volume either
+// way (measured, #1072).
+func TestAnAuditedRunLooksAtItsDependenciesVolumes(t *testing.T) {
 	long := strings.Repeat("k", 251) // demo_<251> is 256
 	for _, noDeps := range []bool{false, true} {
 		t.Run("--no-deps "+map[bool]string{false: "off", true: "on"}[noDeps], func(t *testing.T) {
@@ -288,13 +287,7 @@ func TestAnAuditedRunLeavesItsDependenciesVolumesToTheirUp(t *testing.T) {
 			})
 			proj.Volumes = map[string]compose.VolumeDecl{long: {}}
 			_, err := orchestrator.New(proj, rt, "opossum", &bytes.Buffer{}).RunAudited("web", []string{"true"}, orchestrator.RunOneOffOptions{NoDeps: noDeps})
-			if noDeps {
-				if err != nil || runLine(log()) < 0 {
-					t.Errorf("want the one-off run without looking at its dependency, got err %v and %v", err, log())
-				}
-				return
-			}
-			want := "starting dependencies: " + volumeNameRefusal("db", "demo_"+long, `shorten the volume key "`+long+"\" or the project name (`-p`, or `name:` in the compose file)")
+			want := volumeNameRefusal("db", "demo_"+long, `shorten the volume key "`+long+"\" or the project name (`-p`, or `name:` in the compose file)")
 			if err == nil || err.Error() != want {
 				t.Errorf("\n got %v\nwant %s", err, want)
 			}
@@ -315,7 +308,9 @@ func TestAVolumeNameRefusalShowsADotKeyAsWritten(t *testing.T) {
 	}{
 		{"a key", key + ": {}", key, volumeNameRefusal("web", "demo_"+key, `shorten the volume key "`+key+"\" or the project name (`-p`, or `name:` in the compose file)")},
 		{"a name:", ".hn: {name: " + nm + "}", ".hn", volumeNameRefusal("web", nm, "shorten the `name:` of the volume \".hn\"")},
-		{"an external name:", ".he: {external: true, name: " + nm + "}", ".he", volumeNameRefusal("web", nm, `the runtime cannot mount a volume by that name, so use an external volume with a shorter name for ".he"`)},
+		// An external volume that is not there is refused for being absent
+		// before its name is weighed, as docker compose refuses it (#1072).
+		{"an external name:", ".he: {external: true, name: " + nm + "}", ".he", externalVolumeRefusal(nm)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -332,6 +327,43 @@ func TestAVolumeNameRefusalShowsADotKeyAsWritten(t *testing.T) {
 			err = orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true)
 			if err == nil || err.Error() != tc.want {
 				t.Errorf("\n got %v\nwant %s", err, tc.want)
+			}
+			if l := createdSomething(log()); l != "" {
+				t.Errorf("want nothing created before the refusal, got %q", l)
+			}
+		})
+	}
+}
+
+// A volume declared `external: true` whose name the runtime cannot create is
+// still refused for its length when the runtime cannot say whether it is there
+// — `volume ls` failing is not "the volume is missing", so the check that
+// looks for it lets the project through and this one names the length, with
+// the way out an external volume has (a shorter `name:`, since opossum never
+// creates it).
+func TestAnExternalVolumeNameIsRefusedWhenTheRuntimeCannotListVolumes(t *testing.T) {
+	long := strings.Repeat("e", 256)
+	for _, path := range []string{"up", "run", "run --audit"} {
+		t.Run(path, func(t *testing.T) {
+			rt, log := fakeShim(t)
+			setShimEnv(rt, "VOLUME_LS_FAIL=1")
+			proj := project("demo", map[string]*compose.Service{
+				"web": {Image: "alpine:3.20", Volumes: compose.Volumes{"ext:/data"}},
+			})
+			proj.Volumes = map[string]compose.VolumeDecl{"ext": {External: true, Name: long}}
+			o := orchestrator.New(proj, rt, "opossum", &bytes.Buffer{})
+			var err error
+			switch path {
+			case "up":
+				err = o.Up(true)
+			case "run --audit":
+				_, err = o.RunAudited("web", []string{"true"}, orchestrator.RunOneOffOptions{})
+			default:
+				err = o.RunOneOff("web", []string{"true"}, orchestrator.RunOneOffOptions{})
+			}
+			want := volumeNameRefusal("web", long, `the runtime cannot mount a volume by that name, so use an external volume with a shorter name for "ext"`)
+			if err == nil || err.Error() != want {
+				t.Errorf("\n got %v\nwant %s", err, want)
 			}
 			if l := createdSomething(log()); l != "" {
 				t.Errorf("want nothing created before the refusal, got %q", l)

@@ -154,19 +154,55 @@ func TestCommandsRefuseMountsDockerComposeRefuses(t *testing.T) {
 		})
 	}
 	for _, tc := range []struct {
-		name string
-		args []string
-		env  string
+		name  string
+		args  []string
+		env   string
+		takes bool // takes the project down: the pair is named, not refused
 	}{
-		{"config --profile x", []string{"config", "--services", "--profile", "x"}, ""},
-		{"up --profile x", []string{"up", "--profile", "x"}, ""},
-		{"COMPOSE_PROFILES=x up", []string{"up"}, "x"},
-		{"run --profile x web", []string{"run", "--no-deps", "--profile", "x", "web", "true"}, ""},
+		{"config --profile x", []string{"config", "--services", "--profile", "x"}, "", false},
+		{"up --profile x", []string{"up", "--profile", "x"}, "", false},
+		{"COMPOSE_PROFILES=x up", []string{"up"}, "x", false},
+		{"run --profile x web", []string{"run", "--no-deps", "--profile", "x", "web", "true"}, "", false},
+		{"down --profile x", []string{"down", "--profile", "x"}, "", true},
+		{"COMPOSE_PROFILES=x stop", []string{"stop"}, "x", true},
+		// Every command reads the profiles, so a pair in a service they enable
+		// is refused wherever docker compose refuses it — not only where the
+		// flag used to be taken.
+		{"ps --profile x", []string{"ps", "--profile", "x"}, "", false},
+		{"COMPOSE_PROFILES=x ps", []string{"ps"}, "x", false},
+		{"logs --profile x", []string{"logs", "--profile", "x"}, "", false},
 	} {
 		t.Run("gated, profile active: "+tc.name, func(t *testing.T) {
 			t.Setenv("COMPOSE_PROFILES", tc.env)
+			want := "services.extra.volumes[0]: target /t already mounted as services.extra.tmpfs[0]"
+			if tc.takes {
+				// These go on to take the project down, so the pair is named
+				// on stderr instead of refused — but it is named, which it was
+				// not before the profiles reached this path.
+				readLog := fakeShim(t)
+				t.Setenv("STATE_DIR", t.TempDir())
+				t.Setenv("XDG_STATE_HOME", t.TempDir())
+				_, stderr, err := runSplit(t, append([]string{"-f", gated}, tc.args...)...)
+				if err != nil {
+					t.Fatalf("want the command to go on, got %v\nstderr:\n%s", err, stderr)
+				}
+				if !strings.Contains(stderr, "opossum: "+want+" — `up` refuses this compose file; going on, as an earlier opossum may have started it") {
+					t.Errorf("want the pair named on stderr, got:\n%s", stderr)
+				}
+				// And it goes on to act, as it does without a profile.
+				acted := false
+				for _, l := range readLog() {
+					if strings.Contains(l, "web.demo.opossum") && (strings.HasPrefix(l, "stop ") || strings.HasPrefix(l, "delete ")) {
+						acted = true
+					}
+				}
+				if !acted {
+					t.Errorf("want the command to act on the project, got:\n%s", strings.Join(readLog(), "\n"))
+				}
+				return
+			}
 			out, err := run(t, append([]string{"-f", gated}, tc.args...)...)
-			if want := "services.extra.volumes[0]: target /t already mounted as services.extra.tmpfs[0]\n"; err == nil || !strings.HasPrefix(err.Error(), want) {
+			if want := want + "\n"; err == nil || !strings.HasPrefix(err.Error(), want) {
 				t.Errorf("want %q refused once the profile is active, its words first, got err %v, out:\n%s", want, err, out)
 			}
 			// The way out, on this path too.

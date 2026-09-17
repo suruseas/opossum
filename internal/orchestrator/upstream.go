@@ -23,4 +23,8 @@ var UpstreamWordings = []runtime.UpstreamWording{
 	{Site: "isStorageAttachmentError", Wording: "VZErrorDomain"},
 	{Site: "isStorageAttachmentError", Wording: "Code=2"},
 	{Site: "isStorageAttachmentError", Wording: "storage device attachment is invalid"},
+	{Site: "imageFetchFailed", Wording: "Error: HTTP request to "},
+	{Site: "imageFetchFailed", Wording: " failed with response: "},
+	{Site: "imageFetchFailed", Wording: "/manifests/"},
+	{Site: "imageFetchFailed", Wording: "/blobs/"},
 }

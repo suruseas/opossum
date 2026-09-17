@@ -10,6 +10,12 @@ import (
 	"github.com/suruseas/opossum/internal/runtime"
 )
 
+// The half of the generic start-failure guidance that holds whichever way it is
+// worded: where to read depends on whether a container is left (#1103), what to
+// check in the file does not. These rows are about which failures get the
+// generic guidance at all, so they mark it by the half that does not move.
+const startFailureGuidance = "verify the image, command, and mounts in the compose file"
+
 // `up` frees a service's name and then starts it. When the runtime still says
 // the name is taken, something the project lock could not see made a container
 // in between — and that container is not this up's to roll back (#912; the
@@ -68,8 +74,8 @@ func TestUpLeavesAContainerItDidNotCreateAlone(t *testing.T) {
 		if !strings.Contains(err.Error(), nameTaken) || !strings.Contains(err.Error(), "container ls -a") {
 			t.Errorf("the refusal should say the name is held and where to look, got: %v", err)
 		}
-		if strings.Contains(err.Error(), "check why with") {
-			t.Errorf("this is not a start failure to debug through logs, got: %v", err)
+		if strings.Contains(err.Error(), startFailureGuidance) {
+			t.Errorf("this is not a generic start failure, got: %v", err)
 		}
 		if strings.Contains(out, "up to date") {
 			t.Errorf("a refused service must not be reported up to date, got:\n%s", out)
@@ -214,7 +220,7 @@ func TestUpLeavesAContainerItDidNotCreateAlone(t *testing.T) {
 		rt, log := fakeShim(t)
 		setShimEnv(rt, "RUN_FAIL="+web)
 		err := orchestrator.New(one(), rt, "opossum", &bytes.Buffer{}).Up(true)
-		if err == nil || !strings.Contains(err.Error(), `starting service "web"`) || !strings.Contains(err.Error(), "check why with") {
+		if err == nil || !strings.Contains(err.Error(), `starting service "web"`) || !strings.Contains(err.Error(), startFailureGuidance) {
 			t.Errorf("an ordinary start failure keeps its wording, got: %v", err)
 		}
 		// The pre-start delete, then the rollback's.
@@ -230,7 +236,7 @@ func TestUpLeavesAContainerItDidNotCreateAlone(t *testing.T) {
 		rt, log := fakeShim(t)
 		setShimEnv(rt, "RUN_EXISTS_ANY=db.demo.opossum")
 		err := orchestrator.New(one(), rt, "opossum", &bytes.Buffer{}).Up(true)
-		if err == nil || !strings.Contains(err.Error(), "check why with") {
+		if err == nil || !strings.Contains(err.Error(), startFailureGuidance) {
 			t.Errorf("a refusal about another name is an ordinary start failure for this one, got: %v", err)
 		}
 		if err != nil && strings.Contains(err.Error(), nameTaken) {

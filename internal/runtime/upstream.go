@@ -39,6 +39,12 @@ var UpstreamWordings = []UpstreamWording{
 	{Site: "buildhint.go", Wording: "unable to read root manifest"},
 	{Site: "buildhint.go", Wording: "rpc error: code = Unavailable"},
 	{Site: "buildhint.go", Wording: "No space left on device"},
+	// The refused-image line, read from its first byte: the four pieces are one
+	// row in the table.
+	{Site: "isImageRefusedLine", Wording: "Error: "},
+	{Site: "isImageRefusedLine", Wording: `: "HTTP request to `},
+	{Site: "isImageRefusedLine", Wording: " failed with response: "},
+	{Site: "isImageRefusedLine", Wording: "/manifests/"},
 	// One predicate, two rows in the table (volumes and images): both cite
 	// resourceInUse, which is where the match is.
 	{Site: "resourceInUse", Wording: "in use"},

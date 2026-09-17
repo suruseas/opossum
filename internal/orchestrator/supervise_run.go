@@ -4,11 +4,15 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/suruseas/opossum/internal/compose"
@@ -278,6 +282,91 @@ func (o *Orchestrator) ClearStopped(service string) {
 	if path, err := o.stopMarkerPath(service); err == nil {
 		os.Remove(path)
 	}
+}
+
+// restartMarkerPath is where `restart` notes that it is taking this service
+// down to bring it straight back, beside the stop marker.
+func (o *Orchestrator) restartMarkerPath(service string) (string, error) {
+	path, err := o.stopMarkerPath(service)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(filepath.Dir(path), "restarting-"+strings.TrimPrefix(filepath.Base(path), "stopped-")), nil
+}
+
+// markRestarting notes that `restart` is stopping this service to start it
+// again, so a `logs --follow` does not read the gap as the container's end.
+// The note is a lock held on the marker file, not the file alone: the lock
+// goes with the process, so a restart that dies part way (a Ctrl-C) leaves
+// nothing that keeps a follow going for good. The returned func releases it.
+func (o *Orchestrator) markRestarting(service string) func() {
+	path, err := o.restartMarkerPath(service)
+	if err != nil || os.MkdirAll(filepath.Dir(path), 0o755) != nil {
+		return func() {}
+	}
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
+	if err != nil {
+		return func() {}
+	}
+	if syscall.Flock(int(f.Fd()), syscall.LOCK_EX) != nil {
+		f.Close()
+		return func() {}
+	}
+	return func() {
+		// The file stays: another restart of the same service may already be
+		// waiting on this lock, and removing it would leave that one holding a
+		// file nobody can open, which a follow reads as no restart at all. An
+		// unlocked file left behind is read as no restart either way, and
+		// `destroy` takes the directory.
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		f.Close()
+	}
+}
+
+// markRestartingAll marks every service of one `restart`, in the order of their
+// names whatever order they were asked in, so two restarts that name the same
+// services in different orders cannot each hold one the other waits for. It
+// returns those names, sorted and without repeats (a name whose mark could not
+// be taken is among them all the same), and the release for all of them. The
+// services given are left in the order the caller had them: `restart` stops and
+// starts them in dependency order, which is not the order the marks are taken
+// in.
+func (o *Orchestrator) markRestartingAll(services []string) ([]string, func()) {
+	taken := append([]string(nil), services...)
+	sort.Strings(taken)
+	// A name asked for twice would wait for its own mark: one file, two locks
+	// of the same process, and flock counts them apart.
+	taken = slices.Compact(taken)
+	releases := make([]func(), 0, len(taken))
+	for _, name := range taken {
+		releases = append(releases, o.markRestarting(name))
+	}
+	// Released in any order: each mark is its own lock, and one waiting for it
+	// takes it as soon as it is free.
+	return taken, func() {
+		for _, release := range releases {
+			release()
+		}
+	}
+}
+
+// isRestarting reports whether a `restart` holds this service's marker: a
+// marker file nobody holds (left by a restart that died) is not one.
+func (o *Orchestrator) isRestarting(service string) bool {
+	path, err := o.restartMarkerPath(service)
+	if err != nil {
+		return false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN)
+	}
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	return false
 }
 
 func (o *Orchestrator) wasStoppedByUs(service string) bool {

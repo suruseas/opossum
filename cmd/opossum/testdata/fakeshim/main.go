@@ -122,6 +122,20 @@ func main() {
 		_, err := os.Stat(gonePath(kind, name))
 		return err == nil
 	}
+	// there says whether a container of this name is there as far as this fake
+	// is concerned: one named in $INSPECT_ABSENT was never made, one the
+	// delete case marked gone is no longer there. Both answers have to reach
+	// every command, not only `inspect` — a fake that says "no such container"
+	// to one question and hands logs to the next lets a command that should
+	// have passed the service by look as though it worked (#1096).
+	there := func(name string) bool {
+		for _, m := range strings.Fields(os.Getenv("INSPECT_ABSENT")) {
+			if name == m {
+				return false
+			}
+		}
+		return !isGone("container", name)
+	}
 	// The object name is the last argument for every delete form the runtime takes
 	// (`delete --force NAME`, `volume delete NAME`, …).
 	lastArg := func() string {
@@ -379,20 +393,41 @@ func main() {
 			_ = os.Remove(p)
 		}
 	case "start":
+		// A container that is not there cannot be started (container 1.4.1).
+		if !there(lastArg()) {
+			fmt.Fprintf(os.Stderr, "Error: get failed: container %s not found\n", lastArg())
+			os.Exit(1)
+		}
 		// Running again in place: the stop marker is cleared.
 		if p := stoppedPath(lastArg()); p != "" {
 			_ = os.Remove(p)
 		}
 
 	case "logs":
+		// A container that is not there has no logs (container 1.4.1): reading
+		// them as empty would let a command that should have passed the
+		// service by look as though it worked.
+		if !there(lastArg()) {
+			fmt.Fprintf(os.Stderr, "Error: failed to get logs for container %s (cause: \"internalError: \"failed to open container logs: notFound: \"container with ID %s not found\"\"\")\n", lastArg(), lastArg())
+			os.Exit(1)
+		}
 		// One line per container, then, with $LOGS_SLEEP, a stream that stays
 		// open that many seconds, as `container logs -f` does (or a long read
 		// of a large log without -f).
 		// While the stream is open the real CLI catches SIGINT and SIGTERM and
 		// exits 130 and 143 of its own (container 1.4.1).
+		// $LOGS_EMPTY names containers that have written nothing yet: the real
+		// CLI ends at once, exit 0 and nothing written, unless it is asked to
+		// follow with -n, when it follows the empty log (container 1.4.1).
+		empty := slices.Contains(strings.Fields(os.Getenv("LOGS_EMPTY")), args[len(args)-1])
+		if empty && !(slices.Contains(args, "-f") && slices.Contains(args, "-n")) {
+			return
+		}
 		caught := make(chan os.Signal, 1)
 		signal.Notify(caught, syscall.SIGINT, syscall.SIGTERM)
-		fmt.Printf("log-line %s\n", args[len(args)-1])
+		if !empty {
+			fmt.Printf("log-line %s\n", args[len(args)-1])
+		}
 		if n, err := strconv.Atoi(os.Getenv("LOGS_SLEEP")); err == nil {
 			select {
 			case sig := <-caught:

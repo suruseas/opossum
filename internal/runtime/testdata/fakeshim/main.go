@@ -5,6 +5,8 @@
 // Behaviour is steered through the environment so each test stays isolated:
 //   - SHIM_LOG:  append the space-joined args to this file (arg-capture shims)
 //   - SHIM_OUT:  copy this file's contents to stdout (replay/inspect shims)
+//   - SHIM_ERR:  copy this file's contents to stderr (a replay of what the
+//     runtime writes there — a build's output, all of it)
 //   - SHIM_EXIT: exit with this status code
 package main
 
@@ -24,6 +26,11 @@ func main() {
 	if of := os.Getenv("SHIM_OUT"); of != "" {
 		if b, err := os.ReadFile(of); err == nil {
 			os.Stdout.Write(b)
+		}
+	}
+	if ef := os.Getenv("SHIM_ERR"); ef != "" {
+		if b, err := os.ReadFile(ef); err == nil {
+			os.Stderr.Write(b)
 		}
 	}
 	if e := os.Getenv("SHIM_EXIT"); e != "" {

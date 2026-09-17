@@ -422,9 +422,11 @@ HOST FOOTPRINT が黙って `—`／上流はホストのコマンド）。
 | 3 | OPSM-107 | 同上 | `failed to resolve` `in rootfs` | `raw:rootfs-resolve-131.txt` | `raw:rootfs-resolve-131.txt` |
 | 4 | OPSM-201 | 同上 | `Address already in use` | `raw:port-in-use-duplicate-publish-131.txt` | `raw:port-in-use-duplicate-publish-131.txt` |
 | 5 | OPSM-103 | `isStorageAttachmentError` | `VZErrorDomain` `Code=2` `storage device attachment is invalid` | `raw:vzerror-shared-named-volume-131.txt` | `raw:vzerror-shared-named-volume-131.txt` |
+| 5b | image を取れない | `orchestrator.go` `imageFetchFailed` | `Error: HTTP request to ` ` failed with response: ` `/manifests/` `/blobs/` | `unverified` | `raw:image-fetch-refused-141.txt` |
 | 6 | build（cache 破損） | `buildhint.go` | `unable to read root manifest` | `raw:build-cache-path-only-131.txt` | `unverified` |
 | 7 | build（resource） | 同上 | `rpc error: code = Unavailable` | `raw:build-resource-path-only-131.txt` | `unverified` |
 | 8 | build（disk full） | 同上 | `No space left on device` | `raw:build-disk-full-131.txt` | `unverified` |
+| 8b | build（registry が image を断る） | `buildhint.go` `isImageRefusedLine` | `Error: ` `: "HTTP request to ` ` failed with response: ` `/manifests/` | `raw:build-image-refused-141.txt` | `raw:build-image-refused-141.txt`（`/manifests/` のみ。`/blobs/` は unverified） |
 | 9 | volume の削除警告 | `runtime.go` `resourceInUse` | `in use` | `raw:volume-in-use-via-opossum-131.txt` | `raw:volume-in-use-131.txt` |
 | 10 | image の削除警告 | `runtime.go` `DeleteImage` 経由の `resourceInUse` | `in use` | `path-tried:image-in-use-not-reached-131.txt` | `unverified` |
 | 11 | `doctor` の storage 警告 | `doctor.go` `parseReclaimable` | `GB (` | `raw:doctor-inputs-131.txt` | `raw:doctor-inputs-131.txt`（`GB` と `MB` のみ。`B`/`KB`/`TB`/`PB` は unverified） |

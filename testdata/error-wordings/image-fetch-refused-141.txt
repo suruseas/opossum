@@ -1,0 +1,56 @@
+$ container --version
+container CLI version 1.4.1
+
+# Taken 2026-09-17 by asking the runtime directly, nothing logged in
+# (`container registry list` empty). All five exit 1 with no stdout. The first
+# three are `container run --rm <image> true`; the last two are
+# `container run --rm --scheme http localhost:15089/...` against a registry on
+# this machine, which is the only way found to make a blob fail on demand.
+# opossum passes no `--scheme` anywhere, so those two were produced by a
+# command it does not issue: what they are evidence of is the wording the
+# runtime uses for a blob, not that opossum reaches it that way. Whether an
+# https registry words a missing blob the same has not been measured.
+
+$ container run --rm ghcr.io/suruseas/opossum-no-such-private-image:latest true
+--- exit code: 1
+--- stderr ---
+[0/6] [0s]
+[1/6] Fetching image [0s]
+Error: HTTP request to https://ghcr.io/v2/suruseas/opossum-no-such-private-image/manifests/latest failed with response: 401 Unauthorized. Reason: access denied or wrong credentials, no credentials found for host ghcr.io
+
+$ container run --rm docker.io/nosuchorg-inu1089/nosuchimage:latest true
+--- exit code: 1
+--- stderr ---
+[0/6] [0s]
+[1/6] Fetching image [0s]
+Error: HTTP request to https://registry-1.docker.io/v2/nosuchorg-inu1089/nosuchimage/manifests/latest failed with response: 401 Unauthorized. Reason: Unknown, no credentials found for host registry-1.docker.io
+
+$ container run --rm docker.io/library/alpine:nosuchtag-inu1089 true
+--- exit code: 1
+--- stderr ---
+[0/6] [0s]
+[1/6] Fetching image [0s]
+Error: HTTP request to https://registry-1.docker.io/v2/library/alpine/manifests/nosuchtag-inu1089 failed with response: 404 Not Found. Reason: Unknown
+
+# A local registry (registry:2 on localhost:15089) holding a one-layer image
+# whose blob was removed from its storage, then restarted so it answers 404:
+
+$ container run --rm --scheme http localhost:15089/inu/blobtest:v1 true
+--- exit code: 1
+--- stderr ---
+[0/6] [0s]
+[1/6] Fetching image [0s]
+[1/6] Fetching image (4 blobs) [0s]
+Error: HTTP request to http://localhost:15089/v2/inu/blobtest/blobs/sha256:efaa657ec46f9bdb08d66c25346f4389897ab9cd21bc2dbb559863b65cb29a6e failed with response: 404 Not Found. Reason: {"errors":[{"code":"BLOB_UNKNOWN","detail":"sha256:efaa657ec46f9bdb08d66c25346f4389897ab9cd21bc2dbb559863b65cb29a6e","message":"blob unknown to registry"}]}
+
+# The same registry with the blob file removed but not restarted: it still
+# answers 200 and then cannot send the body. This shape names no request, and
+# opossum does not tell it apart from any other start failure.
+
+$ container run --rm --scheme http localhost:15089/inu/blobtest:v1 true
+--- exit code: 1
+--- stderr ---
+[0/6] [0s]
+[1/6] Fetching image [0s]
+[1/6] Fetching image (4 blobs) [0s]
+Error: stream ended at an unexpected time

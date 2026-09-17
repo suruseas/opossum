@@ -1229,3 +1229,184 @@ volumes:
 		}
 	}
 }
+
+// What StartupOrderReading changes is which cycles are an error, not which
+// services get a place or which dependencies decide where they go: a project
+// read only in part still puts every service after the ones it depends on.
+// A cycle among services the caller reads is refused as ever; one that runs
+// through a service it does not read is broken at that edge instead.
+func TestStartupOrderReadingPartOfAProject(t *testing.T) {
+	p, err := Load(writeTemp(t, `
+services:
+  aa: {image: x, depends_on: [zz]}
+  zz: {image: x, profiles: [g]}
+  cyc1: {image: x, profiles: [g], depends_on: [cyc2]}
+  cyc2: {image: x, profiles: [g], depends_on: [cyc1]}
+  keep: {image: x}
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	// Reading everything: the cycle is an error, as StartupOrder has always
+	// said it is.
+	if _, err := p.StartupOrder(); err == nil {
+		t.Error("want the cycle refused when the whole project is read")
+	}
+	order, err := p.StartupOrderReading([]string{"aa", "keep"})
+	if err != nil {
+		t.Fatalf("want the gated cycle passed over, got %v", err)
+	}
+	if len(order) != 5 {
+		t.Errorf("want every service placed, got %v", order)
+	}
+	// The dependency is not read, and still decides where its dependent goes:
+	// zz sorts after aa, so a placement by name alone would put it second.
+	i, j := indexOf(order, "zz"), indexOf(order, "aa")
+	if i < 0 || j < 0 || i > j {
+		t.Errorf("want zz before the aa that depends on it, got %v", order)
+	}
+	// And a cycle that runs through what is being read is still an error.
+	if _, err := p.StartupOrderReading([]string{"cyc1", "cyc2", "keep"}); err == nil {
+		t.Error("want a cycle among the services being read refused")
+	}
+}
+
+// Two cycles sharing a service, one of them running through a service the
+// caller does not read: the one that does not is passed over, and the one that
+// is entirely being read is still refused — whichever of them a walk from the
+// shared service meets first. A judgement made from the path one walk took
+// gets this wrong: the walk down the gated side marks the shared services as
+// finished, and the cycle among the read ones is never met.
+func TestACycleAmongTheServicesBeingReadIsRefusedThoughAnotherRunsOutside(t *testing.T) {
+	p, err := Load(writeTemp(t, `
+services:
+  a: {image: x, depends_on: [b, c]}
+  b: {image: x, profiles: [g], depends_on: [d]}
+  c: {image: x, depends_on: [d]}
+  d: {image: x, depends_on: [a]}
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	order, err := p.StartupOrderReading([]string{"a", "c", "d"})
+	if err == nil {
+		t.Fatalf("want the a -> c -> d -> a cycle refused, got the order %v", order)
+	}
+	if want := "[a c d] -> a"; !strings.Contains(err.Error(), want) {
+		t.Errorf("want the cycle named %q, got %v", want, err)
+	}
+	// The same file with the gated service being read as well is one cycle
+	// through it too, and is refused for whichever it meets first.
+	if _, err := p.StartupOrderReading([]string{"a", "b", "c", "d"}); err == nil {
+		t.Error("want a cycle refused when every service is being read")
+	}
+	// And with the shared service alone, there is no cycle to find.
+	if _, err := p.StartupOrderReading([]string{"a"}); err != nil {
+		t.Errorf("want no cycle among a service by itself, got %v", err)
+	}
+}
+
+// The cycle is named in the words of the services being read, and no others:
+// a service the caller does not read is not where the walk starts, even when
+// it is the first name in the file and reaches the cycle. Naming it would put
+// a service the profiles leave out into a refusal the reader cannot act on.
+// Two services that depend on the same two, written in the other order: the
+// order is by name, not by the order the file writes them, so the same project
+// comes out the same way whoever wrote it. The cycle is named the same way for
+// the same reason — the walk takes each service's dependencies by name, so the
+// path it prints does not ride on the spelling of the file.
+func TestTheOrderAndTheCycleAreByNameAndNotByTheFilesSpelling(t *testing.T) {
+	// The dependent sorts before both of its dependencies, so nothing has
+	// pulled them in before the walk reaches them: what decides which of the
+	// two goes first is this walk taking them by name.
+	for _, deps := range []string{"[zz, mm]", "[mm, zz]"} {
+		p, err := Load(writeTemp(t, `
+services:
+  aaa: {image: x, depends_on: `+deps+`}
+  mm: {image: x}
+  zz: {image: x}
+`))
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		order, err := p.StartupOrder()
+		if err != nil {
+			t.Fatalf("order: %v", err)
+		}
+		if want := []string{"mm", "zz", "aaa"}; strings.Join(order, ",") != strings.Join(want, ",") {
+			t.Errorf("depends_on %s: want %v, got %v", deps, want, order)
+		}
+	}
+	for _, deps := range []string{"[zz, aa]", "[aa, zz]"} {
+		p, err := Load(writeTemp(t, `
+services:
+  web: {image: x, depends_on: `+deps+`}
+  aa: {image: x, depends_on: [web]}
+  zz: {image: x, depends_on: [web]}
+`))
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		_, err = p.StartupOrder()
+		if err == nil {
+			t.Fatal("want the cycle refused")
+		}
+		if want := "[aa web] -> aa"; !strings.Contains(err.Error(), want) {
+			t.Errorf("depends_on %s: want the cycle named %q, got %v", deps, want, err)
+		}
+	}
+}
+
+func TestACycleIsNamedWithoutTheServicesTheCallerDoesNotRead(t *testing.T) {
+	p, err := Load(writeTemp(t, `
+services:
+  agate: {image: x, profiles: [g], depends_on: [m]}
+  keep: {image: x}
+  m: {image: x, depends_on: [n]}
+  n: {image: x, depends_on: [m]}
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	_, err = p.StartupOrderReading([]string{"keep", "m", "n"})
+	if err == nil {
+		t.Fatal("want the m -> n -> m cycle refused")
+	}
+	if want := "[m n] -> m"; !strings.Contains(err.Error(), want) {
+		t.Errorf("want the cycle named %q, got %v", want, err)
+	}
+	if strings.Contains(err.Error(), "agate") {
+		t.Errorf("want no gated service in the refusal, got %v", err)
+	}
+}
+
+// A depends_on naming a service the file does not define is nobody's business
+// here: reading a file refuses that, whatever the profiles say. Ordering must
+// not fall over one all the same — a caller that assembles a project itself,
+// or a reader that comes to refuse it later, must not meet a panic on the way.
+func TestStartupOrderWithADependencyTheFileDoesNotDefine(t *testing.T) {
+	// Built here rather than loaded: reading a file refuses this, and what is
+	// being pinned is that the ordering does not fall over one all the same —
+	// a caller that assembles a project itself, or a reader that comes to
+	// refuse it later, must not meet a panic on the way.
+	p := &Project{Services: map[string]*Service{
+		"keep": {Image: "x"},
+		"a":    {Image: "x", Profiles: []string{"g"}, DependsOn: DependsOn{{Name: "nosuch"}}},
+	}}
+	order, err := p.StartupOrder()
+	if err != nil {
+		t.Fatalf("order: %v", err)
+	}
+	if len(order) != 2 || indexOf(order, "keep") < 0 || indexOf(order, "a") < 0 {
+		t.Errorf("want keep and a placed and nothing else, got %v", order)
+	}
+}
+
+func indexOf(names []string, want string) int {
+	for i, n := range names {
+		if n == want {
+			return i
+		}
+	}
+	return -1
+}

@@ -6,6 +6,80 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.32.0] - 2026-09-17
+
+### Fixed
+
+- `--profile` is taken by every command, as docker compose takes it on
+  every subcommand: `opossum --profile debug down` (and `ps`, `logs`,
+  `pull`, `stop`, and the rest) no longer fails with `unknown flag`, and
+  every command that decides which services it reads out of the compose
+  file honors `COMPOSE_PROFILES` too, where before only `up`, `run` and
+  `config` did (`doctor`'s memory estimate is of the whole file either
+  way). `pull` and `build` now leave out a service gated behind a
+  profile that is not active, as docker compose leaves it out, and a
+  mount conflict in a service a profile enables is refused by the
+  commands that read the project, and named on stderr by the ones that
+  take it down (`down`, `destroy`, `stop`, `kill`), which go on. `logs`,
+  `stop`, `start`, `restart`, `kill` and `down` act on every container of
+  the project whatever the profiles say — a known difference from docker
+  compose, which narrows them.
+- `run` (and `run --audit`) refuses a dependency behind a profile that is
+  not active before the one-off's own name held by another project's
+  container, and before the names and mounts it would otherwise refuse,
+  as docker compose v5.5.1 refuses it first; before, the one-off's
+  refusal was given and the dependency's profile named only once those
+  were fixed.
+- `logs --follow` no longer goes on forever when a followed service's
+  container exits, is stopped or is removed while it is followed: once
+  the container has stayed not running for three seconds (a restart is
+  followed on) and what the runtime still hands over has been written,
+  the stream ends with a `web-1 exited` line, four to six seconds after
+  the container's end, or later while lines are still handed over, and
+  the follow ends with exit 0 once every followed stream has, as docker
+  compose v5.5.1 does (container 1.4.1's `container logs -f` goes on
+  after all three). A container already stopped when the follow began
+  is still followed on, as there. docker compose also says the exit
+  code, which container 1.4.1 does not report; a service with a
+  `restart:` policy is still followed on after `stop` or `down`, where
+  docker compose ends it, and a container recreated by `up` is not
+  followed to the new container, whose lines are not shown, where docker
+  compose says the old container exited and follows the new one.
+- `run` and `run --audit` now refuse what reading the compose file
+  refuses before anything about the one-off itself: a service that
+  depends on one behind a profile that is not active, then a dependency
+  cycle, wherever among the services it reads they sit and with
+  `--no-deps` too, as docker compose v5.5.1 refuses them. Naming a
+  service carries what it depends on behind its own profiles, as there.
+  What the one-off and the services it depends on need is then asked for
+  in docker compose's order: an external network that is not there, an
+  external volume that is not there, a volume name container 1.4.1 cannot
+  create, and a `tmpfs:` option the docker engine 29.8.0 refuses — so
+  an external volume that is missing is now named for being missing
+  even when its name is also too long. `--no-deps` looks at a dependency's named
+  volumes and the external network and volume it names, which are looked
+  for either way, and not at the anonymous volumes of its container,
+  which is never made. `up` reads the file the same way and asks in the
+  same order, so it too refuses what reading the file refuses under a
+  service it was not asked to start, as docker compose does (what the
+  services it starts need is asked for those services, there as here)
+  — and `opossum up web` on a `web` behind a profile now starts the `db`
+  it depends on behind the same profile, where it used to refuse it.
+- `logs --follow` of a container that has written nothing yet no longer
+  ends at once with exit 0 and nothing shown: it is followed on, and lines
+  the container writes later are shown, as docker compose v5.5.1 does,
+  and a stop ends it with the `web-1 exited` line (docker compose also
+  says the exit code). container 1.4.1's `container logs -f` ends at once
+  on an empty log unless it is given `-n`, so opossum asks it again with
+  `-n` and every line.
+- A dependency cycle among services behind a profile that is not active is no longer read: it is looked for among the services a command reads, as docker compose v5.5.1 looks for it (measured). Before this, a cycle added behind a profile nobody had turned on refused the commands that read the whole project — including `ps`, `stop`, `down` and `destroy` with no service named, which left a running project with no way to take it down. A cycle among the services a command does read still refuses it, and every service keeps its place in the order, so a project still comes down in the order it went up, reversed.
+- A cycle that runs through a service behind a profile that is not active — where the rest of it is active — is no longer read as a cycle either, so such a project can be listed, stopped and taken down. `up`, `run` and `config` still refuse it, for the dependency on a service whose profile is not active; docker compose refuses it the same way, and refuses the commands that list and take down as well unless it is given a project name with `-p` and left to find the compose file itself. That difference is written in `docs/compatibility.md`.
+- `opossum watch` now says what is wrong with a compose file whose services it cannot put in order, instead of saying the file has no `develop.watch` rules in it. A file with a dependency cycle among the services being read made it report no rules at all, which sent a reader looking for rules they could see they had written.
+- When `opossum up` cannot start a service because the registry refused to hand over its image — it answered the read of the image's manifest or of one of its layers with a refusal — it now points at the image name and whether it can be reached, the way `opossum pull` does over the same failure, instead of telling you to read the logs of a container that was never made. The runtime's own answer is still shown above it: a registry that needs a login, an image that is not there and a tag that is not there each say something different, and some of them answer 401. A service the compose file builds is unchanged (its image is made locally, so `opossum build` is where its answer is), and so is a service another one depends on completing.
+- A service nobody has started — one behind a profile that was never turned on, or one an `opossum up <service>` did not reach — is now passed by, instead of failing the command or being reported as work done. `opossum logs` with no service named printed nothing at all and exited 1 over such a project, so a compose file with a `profiles:` service made `logs` useless until that service had been started once; `start` and `restart` failed the same way, and `stop`, `kill` and `down` said they were stopping a container that was not there. Asking for such a service by name still answers for it, so a name typed wrong is not passed over in silence.
+- A service that fails to start no longer points at `opossum logs <service>` when there is no container left to read. The rollback that follows a failed `up` removes what it started, so the container the message named was usually gone by the time anyone could look — `opossum logs` answered `container … not found`. The way out now follows what the teardown actually found: where the container is still there, or the runtime could not be asked about it, the logs are still where the answer is.
+- A build that fails because a registry refused an image the Dockerfile names — a `FROM` or `COPY --from` with a tag that is not there, or a repository that is not there or cannot be seen — now says so, and points at where the Dockerfile names that image and at whether it can be reached. It used to end with the advice every build failure gets, to build the image with Docker and import it; Docker, asking the same registry for the same name, is refused the same way, unless it already holds that image locally or is logged in where the runtime is not. The runtime's own answer, which names the request, is still shown above it. Every other build failure keeps the Docker way round.
+
 ## [0.31.0] - 2026-09-16
 
 ### Added
@@ -1815,7 +1889,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.31.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.32.0...HEAD
+[0.32.0]: https://github.com/suruseas/opossum/compare/v0.31.0...v0.32.0
 [0.31.0]: https://github.com/suruseas/opossum/compare/v0.30.0...v0.31.0
 [0.30.0]: https://github.com/suruseas/opossum/compare/v0.29.0...v0.30.0
 [0.29.0]: https://github.com/suruseas/opossum/compare/v0.28.0...v0.29.0

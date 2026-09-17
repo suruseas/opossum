@@ -100,6 +100,17 @@ func TestAOneOffRefusesADependencyBehindAnInactiveProfile(t *testing.T) {
 				_, statErr := os.Stat(filepath.Join(base, workspace.SnapshotDirName))
 				snapshotted := statErr == nil
 				switch {
+				case noDeps && shape.refused:
+					// --no-deps does not change how the project is read: docker
+					// compose v5.5.1 refuses this one too (measured 2026-09-16:
+					// `run --rm --no-deps web` on web -> db[profiles: x] gives
+					// `service "web" depends on undefined service "db"`).
+					if err == nil || err.Error() != refusal {
+						t.Errorf("\n got %v\nwant %s", err, refusal)
+					}
+					if started != "" {
+						t.Errorf("want nothing started before the refusal, got %q", started)
+					}
 				case noDeps:
 					if err != nil || started != "web-run.demo.opossum" {
 						t.Errorf("want only the one-off started, got err %v and %q", err, started)
@@ -134,7 +145,9 @@ func TestAOneOffRefusesADependencyBehindAnInactiveProfile(t *testing.T) {
 // the dependencies, before it starts anything — for `run --audit` that is after
 // the workspace snapshot, as for the other refusals of that `up` (#660).
 func TestADependencysDependencyBehindAnInactiveProfileIsRefusedByItsUp(t *testing.T) {
-	const refusal = `starting dependencies: service "mid" depends on "db", whose profile is not active`
+	// Refused by the run's own read of the project, before the dependencies
+	// start — where it used to come back from their `up`, wearing its prefix.
+	const refusal = `service "mid" depends on "db", whose profile is not active`
 	for _, path := range []string{"run", "run --audit"} {
 		t.Run(path, func(t *testing.T) {
 			rt, log := fakeShim(t)

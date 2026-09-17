@@ -22,6 +22,20 @@ marker() {
   # `demo__hid` the same marker, where the runtime keeps them apart.
   printf '%s/%s=%s' "$STATE_DIR" "$1" "$(printf '%s' "$2" | od -An -tx1 | tr -d ' \n')"
 }
+# is_there NAME: whether a container of this name is there as far as this fake
+# is concerned — one named in $INSPECT_ABSENT was never made, one the delete
+# case marked gone is no longer there. Both answers have to reach every
+# command, not only `inspect`: a fake that says "no such container" to one
+# question and hands logs to the next lets a command that should have passed
+# the service by look as though it worked (#1096).
+is_there() {
+  for m in ${INSPECT_ABSENT:-}; do
+    [ "$1" = "$m" ] && return 1
+  done
+  g=$(marker gone "$1")
+  if [ -n "$g" ] && [ -e "$g" ]; then return 1; fi
+  return 0
+}
 # last argument
 last() { for a in "$@"; do :; done; printf '%s' "$a"; }
 
@@ -193,15 +207,31 @@ case "$1" in
     # SIGTERM then ends it with 130 or 143 of its own, and a SIGHUP by the
     # signal (container 1.4.1). The sleep starts, and the traps are set, before
     # the line is written, so a signal right after the line finds both.
+    # $LOGS_EMPTY names containers that have written nothing yet: the real CLI
+    # ends at once, exit 0 and nothing written, unless it is asked to follow
+    # with -n, when it follows the empty log (container 1.4.1).
+    # A container that is not there has no logs (container 1.4.1): reading them
+    # as empty would let a command that should have passed the service by look
+    # as though it worked.
+    n=$(last "$@")
+    if ! is_there "$n"; then
+      echo "Error: failed to get logs for container $n (cause: \"internalError: \"failed to open container logs: notFound: \"container with ID $n not found\"\"\")" >&2; exit 1
+    fi
+    line="fake log line for $*"
+    case " ${LOGS_EMPTY:-} " in
+      *" $(last "$@") "*)
+        case " $* " in *" -f "*) ;; *) exit 0 ;; esac
+        case " $* " in *" -n "*) line="" ;; *) exit 0 ;; esac ;;
+    esac
     if [ -n "${LOGS_SLEEP:-}" ]; then
       sleep "$LOGS_SLEEP" & sp=$!
       trap 'kill "$sp" 2>/dev/null; exit 130' INT
       trap 'kill "$sp" 2>/dev/null; exit 143' TERM
       trap 'kill "$sp" 2>/dev/null; trap - HUP; kill -HUP $$' HUP
-      echo "fake log line for $*"
+      if [ -n "$line" ]; then echo "$line"; fi
       wait "$sp"
-    else
-      echo "fake log line for $*"
+    elif [ -n "$line" ]; then
+      echo "$line"
     fi
     ;;
   stop)
@@ -214,7 +244,12 @@ case "$1" in
     s=$(marker stopped "$n"); if [ -n "$s" ]; then : > "$s"; fi
     ;;
   start)
-    n=$(last "$@"); s=$(marker stopped "$n"); if [ -n "$s" ]; then rm -f "$s"; fi
+    # As for stop: a name that is not there cannot be started (container 1.4.1).
+    n=$(last "$@")
+    if ! is_there "$n"; then
+      echo "Error: get failed: container $n not found" >&2; exit 1
+    fi
+    s=$(marker stopped "$n"); if [ -n "$s" ]; then rm -f "$s"; fi
     ;;
   delete|rm)
     n=$(last "$@"); g=$(marker gone "$n")

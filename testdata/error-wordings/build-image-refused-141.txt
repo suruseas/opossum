@@ -1,0 +1,83 @@
+$ container --version
+container CLI version 1.4.1
+
+# Taken 2026-09-17 by asking the runtime directly, nothing logged in
+# (`container registry list` empty). Each is `container build --progress plain
+# -t <tag> <dir>` over a two-line Dockerfile; all exit 1, all output is on
+# stderr (stdout is 0 bytes), and only the last lines are kept here. The
+# Dockerfile line that matters is given above each.
+#
+# What the five refusals share is the inner sentence, not the wrapper: a tag
+# that is not there is `Error: unknown: "…`, a repository that is not there or
+# cannot be seen is `Error: internalError: "…`. All five were refused on the
+# read of a manifest; a refused layer (`/blobs/`) has not been produced through
+# a build, so nothing here says how the builder words one.
+#
+# The last two are not refusals. One is an ordinary failing step. The other is
+# a step that prints the refusal's own text: the runtime's closing line then
+# begins `Error: unknown: "failed to solve: …` and only quotes that text
+# further in, and the step's own copy never starts a line — the builder puts
+# the step's number and the seconds elapsed (`#5 0.0NN `), or the seconds alone
+# in the closing summary, in front of everything a step writes.
+
+# FROM docker.io/library/alpine:nosuchtag-neko1104
+$ container build --progress plain -t neko1104-a a
+--- exit code: 1
+--- stderr (last 2 lines) ---
+#1 [resolver] fetching image...docker.io/library/alpine:nosuchtag-neko1104
+Error: unknown: "HTTP request to https://registry-1.docker.io/v2/library/alpine/manifests/nosuchtag-neko1104 failed with response: 404 Not Found. Reason: Unknown"
+
+# FROM docker.io/library/nosuchimage-neko1104:latest
+$ container build --progress plain -t neko1104-b b
+--- exit code: 1
+--- stderr (last 2 lines) ---
+#1 [resolver] fetching image...docker.io/library/nosuchimage-neko1104:latest
+Error: internalError: "HTTP request to https://registry-1.docker.io/v2/library/nosuchimage-neko1104/manifests/latest failed with response: 401 Unauthorized. Reason: Unknown, no credentials found for host registry-1.docker.io"
+
+# FROM ghcr.io/suruseas/private-nosuch-neko1104:latest
+$ container build --progress plain -t neko1104-c c
+--- exit code: 1
+--- stderr (last 2 lines) ---
+#1 [resolver] fetching image...ghcr.io/suruseas/private-nosuch-neko1104:latest
+Error: internalError: "HTTP request to https://ghcr.io/v2/suruseas/private-nosuch-neko1104/manifests/latest failed with response: 401 Unauthorized. Reason: access denied or wrong credentials, no credentials found for host ghcr.io"
+
+# FROM docker.io/library/alpine:nosuchtag-neko1104   (the second stage of two; the first is `FROM alpine:3 AS base`)
+$ container build --progress plain -t neko1104-d d
+--- exit code: 1
+--- stderr (last 2 lines) ---
+#1 [resolver] fetching image...docker.io/library/alpine:3
+Error: unknown: "HTTP request to https://registry-1.docker.io/v2/library/alpine/manifests/nosuchtag-neko1104 failed with response: 404 Not Found. Reason: Unknown"
+
+# COPY --from=docker.io/library/alpine:nosuchtag-neko1104 /etc/hostname /x
+$ container build --progress plain -t neko1104-e e
+--- exit code: 1
+--- stderr (last 2 lines) ---
+#1 [resolver] fetching image...docker.io/library/alpine:3
+Error: unknown: "HTTP request to https://registry-1.docker.io/v2/library/alpine/manifests/nosuchtag-neko1104 failed with response: 404 Not Found. Reason: Unknown"
+
+# RUN echo ordinary-failure >&2; exit 3
+$ container build --progress plain -t neko1104-f f
+--- exit code: 1
+--- stderr (last 8 lines) ---
+#5 [linux/arm64 1/2] RUN echo ordinary-failure >&2; exit 3
+#5 0.038 ordinary-failure
+#5 ERROR: process "/bin/sh -c echo ordinary-failure >&2; exit 3" did not complete successfully: exit code: 3
+------
+ > [linux/arm64 1/2] RUN echo ordinary-failure >&2; exit 3:
+0.038 ordinary-failure
+------
+Error: unknown: "failed to solve: process "/bin/sh -c echo ordinary-failure >&2; exit 3" did not complete successfully: exit code: 3"
+
+# RUN echo 'Error: unknown: "HTTP request to https://registry-1.docker.io/v2/library/alpine/manifests/mirror failed with response: 404 Not Found. Reason: Unknown"' >&2; exit 1
+$ container build --progress plain -t neko1104-g g
+--- exit code: 1
+--- stderr (last 8 lines) ---
+#5 [linux/arm64 1/2] RUN echo 'Error: unknown: "HTTP request to https://registry-1.docker.io/v2/library/alpine/manifests/mirror failed with response: 404 Not Found. Reason: Unknown"' >&2; exit 1
+#5 0.034 Error: unknown: "HTTP request to https://registry-1.docker.io/v2/library/alpine/manifests/mirror failed with response: 404 Not Found. Reason: Unknown"
+#5 ERROR: process "/bin/sh -c echo 'Error: unknown: \"HTTP request to https://registry-1.docker.io/v2/library/alpine/manifests/mirror failed with response: 404 Not Found. Reason: Unknown\"' >&2; exit 1" did not complete successfully: exit code: 1
+------
+ > [linux/arm64 1/2] RUN echo 'Error: unknown: "HTTP request to https://registry-1.docker.io/v2/library/alpine/manifests/mirror failed with response: 404 Not Found. Reason: Unknown"' >&2; exit 1:
+0.034 Error: unknown: "HTTP request to https://registry-1.docker.io/v2/library/alpine/manifests/mirror failed with response: 404 Not Found. Reason: Unknown"
+------
+Error: unknown: "failed to solve: process "/bin/sh -c echo 'Error: unknown: \"HTTP request to https://registry-1.docker.io/v2/library/alpine/manifests/mirror failed with response: 404 Not Found. Reason: Unknown\"' >&2; exit 1" did not complete successfully: exit code: 1"
+

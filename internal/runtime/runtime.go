@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -1070,8 +1071,15 @@ func (r *Runtime) Build(o BuildOptions) error {
 	det := &buildErrorDetector{}
 	err := r.streamHeartbeat("building", det, args...)
 	if err != nil {
-		if h := det.hint(o.Redo); h != "" {
-			return fmt.Errorf("%w\n%s", err, h)
+		// Read once: the hint and what the caller is told are then about the
+		// same failure, whatever arrives on the streams afterwards.
+		failure := det.diagnosed()
+		if h := hintFor(failure, o.Redo); h != "" {
+			err = fmt.Errorf("%w\n%s", err, h)
+			if failure == failedImageRefused {
+				err = &buildImageRefused{err}
+			}
+			return err
 		}
 	}
 	return err
@@ -1466,7 +1474,28 @@ func (r *Runtime) PrefixedLogs(ctx context.Context, name string, o LogsOptions, 
 // prefixedLogs is FollowLogs when errw is nil (the runtime's stderr shares the
 // pipe, and a failure is written into w as a prefixed line) and PrefixedLogs
 // otherwise.
+//
+// A followed container that has written nothing yet is followed on, as docker
+// compose v5.5.1 follows it: container 1.4.1's `container logs -f` without -n
+// reads the log to its end and, on an empty read, returns with exit 0 before
+// it follows (ContainerLogs.swift; measured), where with -n it follows an
+// empty log too. So a follow without a tail whose runtime ended cleanly having
+// handed over nothing is asked again with -n and every line: the log was empty
+// a moment ago, so reading it back from the end costs little (with -n the
+// runtime reads the whole log backwards, a chunk at a time, which a large log
+// would make slow — why the first ask has no -n), and nothing is shown twice.
 func (r *Runtime) prefixedLogs(ctx context.Context, name string, o LogsOptions, w, errw io.Writer, prefix string) error {
+	handed, err := r.prefixedLogsOnce(ctx, name, o, w, errw, prefix)
+	if err == nil && !handed && o.Follow && o.Tail <= 0 && ctx.Err() == nil {
+		o.Tail = math.MaxInt
+		_, err = r.prefixedLogsOnce(ctx, name, o, w, errw, prefix)
+	}
+	return err
+}
+
+// prefixedLogsOnce is one `container logs` of prefixedLogs; handed reports
+// whether the runtime handed over anything.
+func (r *Runtime) prefixedLogsOnce(ctx context.Context, name string, o LogsOptions, w, errw io.Writer, prefix string) (handed bool, err error) {
 	args := r.logsArgs(name, o)
 	r.trace(args)
 	cmd := r.newCmd(ctx, args...)
@@ -1475,7 +1504,7 @@ func (r *Runtime) prefixedLogs(ctx context.Context, name string, o LogsOptions, 
 	// unless errw is given.
 	pr, pw, err := os.Pipe()
 	if err != nil {
-		return err
+		return false, err
 	}
 	cmd.Stdout = pw
 	cmd.Stderr = pw
@@ -1485,7 +1514,7 @@ func (r *Runtime) prefixedLogs(ctx context.Context, name string, o LogsOptions, 
 	if err := cmd.Start(); err != nil {
 		pr.Close()
 		pw.Close()
-		return err
+		return false, err
 	}
 	pw.Close() // parent's copy; the child holds the write end, so pr EOFs on exit
 
@@ -1507,6 +1536,7 @@ func (r *Runtime) prefixedLogs(ctx context.Context, name string, o LogsOptions, 
 	for {
 		line, rerr := br.ReadString('\n')
 		if len(line) > 0 {
+			handed = true
 			// Only the newline goes: a carriage return the container wrote
 			// is kept, as docker compose v5.5.1 keeps it (measured).
 			w.Write([]byte(prefix + strings.TrimSuffix(line, "\n") + "\n"))
@@ -1522,9 +1552,9 @@ func (r *Runtime) prefixedLogs(ctx context.Context, name string, o LogsOptions, 
 		if errw == nil {
 			fmt.Fprintf(w, "%s[logs error: %v]\n", prefix, err)
 		}
-		return err
+		return handed, err
 	}
-	return nil
+	return handed, nil
 }
 
 // Stats streams `container stats` for the named containers (CPU %, memory, net,

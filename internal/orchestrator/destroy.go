@@ -116,7 +116,7 @@ func (o *Orchestrator) DestroyPlanFor(keepOverlay, keepImages, keepLocal bool) (
 	if !o.rt.SystemRunning() {
 		return p, ErrRuntimeStopped()
 	}
-	order, err := o.Project.StartupOrder()
+	order, err := o.startupOrder()
 	if err != nil {
 		return p, err
 	}

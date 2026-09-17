@@ -24,10 +24,16 @@ type watchTarget struct {
 }
 
 // watchTargets resolves every service's develop.watch rules into absolute host
-// paths, in startup order. Rules with no action default to "sync".
-func (o *Orchestrator) watchTargets() []watchTarget {
+// paths, in startup order. Rules with no action default to "sync". What
+// reading the project refuses comes back as an error: a file `watch` cannot
+// read is not a file with no rules in it, and saying so would send a reader
+// looking for the rules they wrote.
+func (o *Orchestrator) watchTargets() ([]watchTarget, error) {
 	var ts []watchTarget
-	order, _ := o.Project.StartupOrder()
+	order, err := o.startupOrder()
+	if err != nil {
+		return nil, err
+	}
 	for _, name := range order {
 		svc := o.Project.Services[name]
 		if svc == nil || svc.Develop == nil {
@@ -45,7 +51,7 @@ func (o *Orchestrator) watchTargets() []watchTarget {
 			ts = append(ts, watchTarget{name, action, filepath.Clean(p), w.Target, w.Ignore})
 		}
 	}
-	return ts
+	return ts, nil
 }
 
 // match reports whether changed (an absolute host path) falls under this
@@ -103,7 +109,15 @@ func (t watchTarget) containerTarget(rel string) string {
 // after the sync); kind "" means nothing further. matched reports whether any
 // rule applied.
 func (o *Orchestrator) handleChange(changed string) (svc, kind string, matched bool) {
-	for _, t := range o.watchTargets() {
+	// The project was read before the watch began, and this reads the same
+	// one again rather than the file, so the error cannot be new here; it is
+	// answered all the same, because a rule list that could not be built is
+	// no rules, and no rule matches.
+	targets, err := o.watchTargets()
+	if err != nil {
+		return "", "", false
+	}
+	for _, t := range targets {
 		rel, ok := t.match(changed)
 		if !ok {
 			continue
@@ -208,7 +222,10 @@ func (o *Orchestrator) rebuildService(name string) error {
 // recursively; changes are debounced so a burst of writes (e.g. an editor's
 // save) triggers one sync per file.
 func (o *Orchestrator) Watch(ctx context.Context) error {
-	targets := o.watchTargets()
+	targets, err := o.watchTargets()
+	if err != nil {
+		return err
+	}
 	if len(targets) == 0 {
 		return fmt.Errorf("no develop.watch rules in the compose file")
 	}

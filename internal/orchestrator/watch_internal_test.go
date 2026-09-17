@@ -230,7 +230,10 @@ func TestWatchTargetsDefaultsActionToSync(t *testing.T) {
 		}}},
 	}}
 	o := New(p, &runtime.Runtime{}, "opossum", &bytes.Buffer{})
-	ts := o.watchTargets()
+	ts, err := o.watchTargets()
+	if err != nil {
+		t.Fatalf("watchTargets: %v", err)
+	}
 	if len(ts) != 1 || ts[0].action != "sync" {
 		t.Fatalf("watchTargets = %+v, want one target defaulted to sync", ts)
 	}

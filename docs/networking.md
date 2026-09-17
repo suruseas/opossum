@@ -60,8 +60,10 @@ opossum is a thin orchestration layer — it never re-implements the runtime:
 
 - **Parsing** — reads a subset of the compose schema (`image`, `build`, `ports`,
   `environment`, `volumes`, `depends_on`, `command`, `entrypoint`).
-- **Ordering** — topologically sorts services by `depends_on` (cycles are
-  rejected) and starts them in that order, tears them down in reverse.
+- **Ordering** — topologically sorts services by `depends_on` (a cycle among
+  the services a command reads is rejected; one among services behind a
+  profile that is not active is not read) and starts them in that order, tears
+  them down in reverse.
 - **Service discovery** — creates a per-project network (`<project>-net`) and
   attaches every service to it. The runtime registers a container in its DNS
   server when the container is **named `<name>.<domain>`**, so opossum names each
