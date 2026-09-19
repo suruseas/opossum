@@ -31,19 +31,29 @@ opossum logs --follow web                    # stream a service's logs (no -f: t
 opossum down                                 # stop + remove + drop the network (-v also drops volumes)
 ```
 
-`-f <file>` selects compose files (repeatable, later wins); `-p <name>` sets the
-project name; `--verbose` echoes each `container` command; `--dns-domain` overrides
+`-f <file>` selects compose files (repeatable, later wins; without it
+`COMPOSE_FILE` is read — several files separated by `:` or by
+`COMPOSE_PATH_SEPARATOR` — from the shell and then the `.env` (or the
+`--env-file` given), before a file is looked for); `-p <name>` sets the project name (without it
+`COMPOSE_PROJECT_NAME`, from the same places, then the file's `name:`, then
+its directory);
+`--verbose` echoes each `container` command; `--dns-domain` overrides
 the discovery domain (default `opossum`); `--profile <name>` enables services
 gated behind a compose profile (repeatable, taken by every command, and
-`COMPOSE_PROFILES` does the same); `--env-file <file>` replaces the default
-`.env` for `${VAR}` interpolation (repeatable).
+`COMPOSE_PROFILES` does the same where no `--profile` is given — from the
+shell, then the `.env` (or the `--env-file` given) — docker compose's order,
+spelled out in docs/compatibility.md; the flag and the variable do not add
+up); `--env-file <file>` is read in place of the default `.env`, for `${VAR}`
+interpolation and for the `COMPOSE_*` variables above (repeatable, later
+files win).
 
 A `compose.opossum.yaml` (or `.yml`) next to a discovered compose file is merged
 **last, at the highest precedence** — after the base file and any
 `compose.override.yaml`. docker compose ignores this name, so it's the place for
 opossum-only tweaks that make a project run on Apple `container` without touching
 shared files. Merging one prints a one-line stderr notice; delete the file to opt
-out. (Only auto-merged when no `-f` is given, same as the standard override.)
+out. (Only auto-merged into a compose file opossum found by itself — not when
+`-f` or `COMPOSE_FILE` chose the files — same as the standard override.)
 
 `up --from-docker-compose` **generates** that overlay when it finds a known
 incompatibility — applied fixes for `OPSM-101` (Postgres PGDATA) and `OPSM-105`
@@ -519,6 +529,7 @@ Every `[OPSM-NNN]` opossum can emit (add-only; grouped 1xx storage / 2xx network
 - `OPSM-411` — the supervisor could not open a size-capped log and is writing without a bound. The file can then grow without limit; remove it if it gets large, or restart the project.
 - `OPSM-407` — a service's container exited right after starting, with no health gate to catch it (`up` reports its logs and fails).
 - `OPSM-412` — the image has no arm64 build, so the container cannot start on Apple silicon.
+- `OPSM-413` — a `required: false` dependency did not become healthy, or did not complete successfully; the dependent is started anyway, as docker compose starts it.
 - `OPSM-501` — unsupported top-level compose field(s), ignored.
 - `OPSM-502` — unsupported service compose field(s), ignored (e.g. `network_mode: host`).
 - `OPSM-601` — a `watch` rebuild action failed.

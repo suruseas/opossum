@@ -1,6 +1,7 @@
 package repohygiene_test
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -190,16 +191,64 @@ func TestTheChangelogGateAsksForANoteAboutEverythingThatShips(t *testing.T) {
 	}
 }
 
-// The folded job's two standing promises, read from the YAML. First: no step
-// may quietly ignore its own failure — `continue-on-error` on a checking step
-// turns its red into the job's green, and with everything in one job there is
-// no second check mark to disagree. The one exception is named: the goreleaser
-// validation has carried it since before the fold, deliberately, for a
-// deprecation notice. Second: the stable gate runs even when the go.mod
-// section failed. "One red, one green" says the two compilers disagree; "one
-// red, one skipped" says nothing — the contrast is the reason the second
-// section exists, and the `if` that preserves it is one word to delete.
-func TestTheFoldedJobKeepsItsPromises(t *testing.T) {
+// The two jobs' standing promises, read from the YAML. First: no step may
+// quietly ignore its own failure — `continue-on-error` on a checking step
+// turns its red into the job's green. The one exception is named: the
+// goreleaser validation has carried it since before the jobs were folded,
+// deliberately, for a deprecation notice. Second: each compiler's gate is a
+// job of its own, so that both always report — "one red, one green" says
+// the two compilers disagree, "both red" says the change is broken. In
+// each job the compiler's steps, up to the rm after the gate, stop at the
+// first red one: none carries a condition (a mkdir skipped by a red gofmt
+// while the gate went on would leave the gate a directory that is not
+// there), and only that rm runs whatever happened; the pull-request gates
+// after it in the go.mod job run after a red step on purpose. The two
+// jobs are twins in what decides where they run: the same runner class, the
+// same environment, and no condition on either (every run of the workflow
+// runs both), or one of them is a job the other's promises do not cover. Each gate step runs with a
+// `TMPDIR` of this run's and this job's own under /tmp — not the runner's
+// `_work/_temp`, which is under the runner user's home, where the suites
+// refuse to put a state directory — so two jobs on one machine do not
+// read each other's leftovers.
+// The prose that says when CI runs is held to the triggers: CONTRIBUTING has
+// to say a push to main runs it while `on.push` is there, and may not say the
+// opposite in any of the spellings it once used. One sentence in the positive,
+// because a list of forbidden spellings only catches the ones already thought
+// of: with the negative alone, a version that added "CI does not run on pushes
+// to main" and a version that deleted the section both passed.
+//
+// Read with the line breaks folded, so that wrapping the paragraph again is
+// not a change of meaning here — and a denial split across two lines is still
+// a denial. Which sentence is required follows the workflow: with `on.push`
+// there, the prose has to say main's pushes run; without it, it may not.
+func TestCONTRIBUTINGSaysWhenCIRuns(t *testing.T) {
+	root := repoRoot(t)
+	contributing := strings.Join(strings.Fields(read(t, root, "CONTRIBUTING.md")), " ")
+	b, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "ci.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var top struct {
+		On map[string]any `yaml:"on"`
+	}
+	if err := yaml.Unmarshal(b, &top); err != nil {
+		t.Fatal(err)
+	}
+	_, onPush := top.On["push"]
+	if !strings.Contains(contributing, "CI runs on every push to a pull request, drafted or not") {
+		t.Errorf("CONTRIBUTING.md has to say that CI runs on every push to a pull request, drafted or not (on.pull_request)")
+	}
+	if says := strings.Contains(contributing, "and on every push to main"); says != onPush {
+		t.Errorf("CONTRIBUTING.md says that CI runs on every push to main: %v; the workflow has on.push: %v — the two have to agree", says, onPush)
+	}
+	for _, denial := range []string{"no CI on pushes to main", "does not run on pushes to main", "not run on a push to main", "main is not run"} {
+		if strings.Contains(contributing, denial) == onPush {
+			t.Errorf("CONTRIBUTING.md says %q: %v; the workflow has on.push: %v — the two have to agree", denial, !onPush, onPush)
+		}
+	}
+}
+
+func TestTheTwoJobsKeepTheirPromises(t *testing.T) {
 	root := repoRoot(t)
 	b, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "ci.yml"))
 	if err != nil {
@@ -210,34 +259,157 @@ func TestTheFoldedJobKeepsItsPromises(t *testing.T) {
 		t.Fatalf("reading the workflow: %v", err)
 	}
 	jobs, _ := top["jobs"].(map[string]any)
-	job, _ := jobs["ci"].(map[string]any)
-	steps, _ := job["steps"].([]any)
-	if len(steps) == 0 {
-		t.Fatal("no `ci` job steps; the promises this reads live there")
+	if len(jobs) != 2 {
+		t.Fatalf("the workflow has %d jobs; this check knows two, one per compiler", len(jobs))
 	}
-	var gateIfs []string
-	for i, s := range steps {
-		m, _ := s.(map[string]any)
-		name, _ := m["name"].(string)
-		if _, has := m["continue-on-error"]; has && name != "validate .goreleaser.yaml" {
-			t.Errorf("step %d (%q) carries continue-on-error: its red would read as the job's "+
-				"green, and this job is the only check mark there is", i, name)
-		}
-		if run, _ := m["run"].(string); strings.TrimSpace(run) == "make test" {
-			cond, _ := m["if"].(string)
-			gateIfs = append(gateIfs, cond)
+	ci, _ := jobs["ci"].(map[string]any)
+	stable, _ := jobs["stable"].(map[string]any)
+	if ci == nil || stable == nil {
+		t.Fatalf("the jobs are %v; this check knows `ci` (the go.mod compiler and the pull-request gates) and `stable`", jobs)
+	}
+	// The keys a job may have: `ci` is read by readGate, and `stable` here,
+	// so that a `continue-on-error` or a `needs` on the job — its red read
+	// as green, or the jobs put back in a line — is a key that is not on
+	// the list.
+	allowed(t, "the stable job", stable, "runs-on", "env", "steps")
+	for _, key := range []string{"runs-on", "env"} {
+		if a, b := fmt.Sprint(ci[key]), fmt.Sprint(stable[key]); a != b {
+			t.Errorf("the two jobs differ in %s (%q vs %q); what decides whether a job runs, and where, is the same for both or one of them is not the twin the other's promises assume", key, a, b)
 		}
 	}
-	// The count is gatematch's question; the conditions are this one's.
-	if len(gateIfs) == 2 {
-		if gateIfs[0] != "" {
-			t.Errorf("the first gate step runs on %q; the go.mod section leads, and a condition "+
-				"there is a way for the leading compiler to be skipped", gateIfs[0])
+	// What the stable job checks out: the same action as the go.mod job's,
+	// and the repository and ref the event gives, at the default depth
+	// (nothing there diffs against a base) — a `repository:` or `ref:` would
+	// put another tree under its compiler.
+	// In each job the compiler's steps — from the checkout to the rm after
+	// the gate — carry no condition but the rm's `always()`: they stop at
+	// the first red one. (What follows the rm in the go.mod job, the
+	// pull-request gates and the release-config check, runs after a red
+	// step on purpose; readGate pins those conditions.)
+	for name, job := range map[string]map[string]any{"ci": ci, "stable": stable} {
+		steps, _ := job["steps"].([]any)
+		rm := -1
+		for i, st := range steps {
+			m, _ := st.(map[string]any)
+			if run, _ := m["run"].(string); strings.HasPrefix(strings.TrimSpace(run), "rm -rf ") {
+				rm = i
+				break
+			}
 		}
-		if gateIfs[1] != "${{ !cancelled() }}" {
-			t.Errorf("the second gate step runs on %q, not %q — without it, a red first section "+
-				"turns \"one red, one green\" into \"one red, one skipped\", and the contrast the "+
-				"section exists for is gone", gateIfs[1], "${{ !cancelled() }}")
+		if rm < 0 {
+			t.Errorf("%s: no rm step after the gate", name)
+			continue
+		}
+		for i, st := range steps[:rm+1] {
+			m, _ := st.(map[string]any)
+			label, _ := m["name"].(string)
+			if label == "" {
+				label, _ = m["uses"].(string)
+			}
+			cond, has := m["if"]
+			if i == rm {
+				if cond != "${{ always() }}" {
+					t.Errorf("%s: the rm after the gate runs on %v, not %q", name, cond, "${{ always() }}")
+				}
+				continue
+			}
+			if has {
+				t.Errorf("%s: step %d (%s) runs on %v; up to the rm after the gate the steps carry no condition — they stop at the first red one — except the rm, which runs always", name, i, label, cond)
+			}
+		}
+	}
+	// A push to main carries no pull request: a step that reads
+	// `github.event.pull_request` (the two gates' BASE/HEAD/BODY) has to say
+	// `github.event_name == 'pull_request'` in its condition, or it runs on
+	// main with empty revisions. Every step of both jobs, so that a step
+	// added later is held to it too.
+	for name, job := range map[string]map[string]any{"ci": ci, "stable": stable} {
+		steps, _ := job["steps"].([]any)
+		for i, st := range steps {
+			m, _ := st.(map[string]any)
+			text := fmt.Sprint(m["env"]) + fmt.Sprint(m["run"]) + fmt.Sprint(m["with"])
+			if !strings.Contains(text, "github.event.pull_request") {
+				continue
+			}
+			// The whole condition, not a word in it: `… == 'pull_request' ||
+			// … == 'push'` contains the word and runs on main all the same.
+			// The spelling is pinned, `!cancelled()` included: such a step is a
+			// gate, and a gate runs after a red step (the fold's promise, kept
+			// by the two gates today) — a condition without it would skip the
+			// gate exactly when the run has something to say. (A step that
+			// reads it only in its own `if` is not held to this: on main the
+			// value is empty, the condition is false, and the step is skipped
+			// — the danger is an empty value used as data.)
+			if cond, _ := m["if"].(string); cond != "${{ !cancelled() && github.event_name == 'pull_request' }}" {
+				t.Errorf("%s: step %d (%v) reads github.event.pull_request but runs on %q; on a push to main the event carries no pull request, and a gate runs after a red step, so the condition has to be exactly ${{ !cancelled() && github.event_name == 'pull_request' }} (the spelling is pinned)", name, i, m["name"], cond)
+			}
+		}
+	}
+	stableSteps, _ := stable["steps"].([]any)
+	if len(stableSteps) > 0 {
+		checkout, _ := stableSteps[0].(map[string]any)
+		allowed(t, "the stable job's checkout step", checkout, "uses")
+		if u, _ := checkout["uses"].(string); u != "actions/checkout@v7" {
+			t.Errorf("the stable job's first step uses %q; this check treats it as a plain checkout and does not run it", u)
+		}
+	}
+	// Where: the self-hosted runner class, which the reasons at the top of
+	// the file rest on (a job there is not billed by the minute; when a
+	// second runner joins, two share one machine, so the gates keep their
+	// temporary directories apart).
+	if got := fmt.Sprint(ci["runs-on"]); got != "[self-hosted Linux X64]" {
+		t.Errorf("the jobs run on %s; this check knows the self-hosted runner class [self-hosted, Linux, X64] and nothing else", got)
+	}
+	for name, job := range map[string]map[string]any{"ci": ci, "stable": stable} {
+		steps, _ := job["steps"].([]any)
+		if len(steps) == 0 {
+			t.Fatalf("no `%s` job steps; the promises this reads live there", name)
+		}
+		gates := 0
+		const tmp = "/tmp/opossum-ci-${{ github.run_id }}-${{ github.job }}"
+		for i, s := range steps {
+			m, _ := s.(map[string]any)
+			stepName, _ := m["name"].(string)
+			if _, has := m["continue-on-error"]; has && stepName != "validate .goreleaser.yaml" {
+				t.Errorf("%s: step %d (%q) carries continue-on-error: its red would read as the job's green", name, i, stepName)
+			}
+			if run, _ := m["run"].(string); strings.TrimSpace(run) == "make test" {
+				gates++
+				const want = ""
+				if cond, _ := m["if"].(string); cond != want {
+					t.Errorf("%s: the gate step runs on %q; a condition there is a way for this compiler to be skipped, or run on nothing", name, cond)
+				}
+				env, _ := m["env"].(map[string]any)
+				if len(env) != 1 || env["TMPDIR"] != tmp {
+					t.Errorf("%s: the gate step runs with env %v; this check knows TMPDIR=/tmp/opossum-ci-<run>-<job> (this run's and this job's own, outside the runner user's home, so two jobs on one machine do not share it and the suites' home guard holds) and nothing else", name, env)
+				}
+				// The directory is made just before the gate and removed just
+				// after it, whatever the gate said — the same path, spelt
+				// once here: a directory left behind piles up on the runner,
+				// one per run, with nothing else to remove it.
+				if i == 0 || i == len(steps)-1 {
+					t.Errorf("%s: the gate is step %d of %d; it needs the mkdir before it and the rm after it", name, i+1, len(steps))
+					continue
+				}
+				before, _ := steps[i-1].(map[string]any)
+				after, _ := steps[i+1].(map[string]any)
+				if run, _ := before["run"].(string); strings.TrimSpace(run) != `mkdir -p "`+tmp+`"` {
+					t.Errorf("%s: the step before the gate runs %q, not the mkdir of the gate's TMPDIR", name, strings.TrimSpace(run))
+				}
+				if cond, _ := before["if"].(string); cond != want {
+					t.Errorf("%s: the mkdir before the gate runs on %q, the gate on %q; the directory has to be there whenever the gate runs", name, cond, want)
+				}
+				if run, _ := after["run"].(string); strings.TrimSpace(run) != `rm -rf "`+tmp+`"` {
+					t.Errorf("%s: the step after the gate runs %q, not the rm of the gate's TMPDIR", name, strings.TrimSpace(run))
+				}
+				if cond, _ := after["if"].(string); cond != "${{ always() }}" {
+					t.Errorf("%s: the rm after the gate runs on %q, not %q — the spelling is pinned, and the directory has to go whatever the gate said", name, cond, "${{ always() }}")
+				}
+			}
+		}
+		// The count across the file is gatematch's question; per job it is one.
+		if gates != 1 {
+			t.Errorf("%s: %d gate steps; each job runs its compiler's gate once", name, gates)
 		}
 	}
 }
@@ -351,29 +523,35 @@ func readGate(t *testing.T, root string) gate {
 	// others.
 	allowed(t, "the workflow", top, "name", "on", "jobs")
 	on, _ := top["on"].(map[string]any)
-	// Two triggers, both pinned. The pull_request types are the billing
-	// decision written as structure: a draft's opening and its pushes are
-	// free, marking it ready is the request for attestation, and
-	// `synchronize` is absent on purpose — its presence billed every review
-	// round. A type added or removed here changes when the gate runs, which
-	// is exactly the kind of change that must be taught, not discovered.
-	// The dispatch trigger is the release's one manual main-tree run.
-	allowed(t, "the triggers", on, "pull_request", "workflow_dispatch")
+	// Three triggers, all pinned: every push to a pull request (drafted or
+	// not — a draft's run finds a broken shape early, now that the runners
+	// are self-hosted and a run costs no minutes), every push to main (a
+	// green about main's own tree), and a run by hand. A type or a branch
+	// added or removed here changes when the gate runs, which is exactly
+	// the kind of change that must be taught, not discovered.
+	allowed(t, "the triggers", on, "pull_request", "push", "workflow_dispatch")
 	pr, ok := on["pull_request"].(map[string]any)
 	if !ok {
 		t.Fatalf("the workflow's triggers are %v; this check knows the gate as something that runs on a pull request", on)
 	}
 	allowed(t, "the pull_request trigger", pr, "types")
 	types, _ := pr["types"].([]any)
-	if len(types) != 3 || types[0] != "opened" || types[1] != "ready_for_review" || types[2] != "synchronize" {
-		t.Fatalf("the pull_request types are %v; this check knows [opened, ready_for_review, "+
-			"synchronize] — opened for a pull request born ready, ready_for_review as the "+
-			"request for attestation, and synchronize so the attestation follows the head "+
-			"(the draft skip is what keeps a draft's pushes free; drop synchronize and a "+
-			"push after the ready mark leaves the green pointing at some other tree)", types)
+	if len(types) != 3 || types[0] != "opened" || types[1] != "synchronize" || types[2] != "reopened" {
+		t.Fatalf("the pull_request types are %v; this check knows [opened, synchronize, "+
+			"reopened] — every push to the pull request, drafted or not, and its "+
+			"reopening (drop synchronize and a push leaves the green pointing at some "+
+			"other tree)", types)
+	}
+	push, ok := on["push"].(map[string]any)
+	if !ok {
+		t.Fatalf("the workflow's triggers are %v; this check knows the gate as something that runs on a push to main", on)
+	}
+	allowed(t, "the push trigger", push, "branches")
+	if branches, _ := push["branches"].([]any); len(branches) != 1 || branches[0] != "main" {
+		t.Fatalf("the push trigger runs on %v; this check knows main and nothing else", branches)
 	}
 	if _, ok := on["workflow_dispatch"]; !ok {
-		t.Fatal("no workflow_dispatch trigger; the release's final main-tree run has no way in")
+		t.Fatal("no workflow_dispatch trigger; a run of main by hand has no way in")
 	}
 	if sub, ok := on["workflow_dispatch"].(map[string]any); ok && len(sub) > 0 {
 		t.Fatalf("the workflow_dispatch trigger carries %v; inputs are a way to make the manual "+
@@ -384,21 +562,14 @@ func readGate(t *testing.T, root string) gate {
 	if !ok {
 		t.Fatal("no `ci` job in the workflow; the gate lives among its steps and this check no longer finds it")
 	}
-	// What the job may say, and the one skip it may make. The job-level `if`
-	// exists to make drafts free, and its exact text is pinned because every
-	// other condition is a way for the gate to not run on something that can
-	// merge — a draft cannot, GitHub refuses that natively, so skipping it
-	// skips nothing the gate is for. On workflow_dispatch the event has no
-	// pull_request, the expression is empty, !empty is true, and the manual
-	// run goes ahead. The environment the job hands every script is pinned
-	// for the same reason the keys are: a variable added here reaches the
-	// gate's script too, and this check would be running that script without
-	// it.
-	allowed(t, "the job", job, "if", "runs-on", "env", "steps")
-	if jobIf, _ := job["if"].(string); jobIf != "${{ !github.event.pull_request.draft }}" {
-		t.Fatalf("the job runs on %q; this check knows one skip — drafts, which cannot merge — "+
-			"and a different condition may skip something that can", jobIf)
-	}
+	// What the job may say: no `if` — a condition on the job is a way for
+	// the gate to not run on something that can merge (the draft skip that
+	// used to be here kept a draft's pushes free of billed minutes; the
+	// runners are self-hosted now, and a draft's run is wanted). The
+	// environment the job hands every script is pinned for the same reason
+	// the keys are: a variable added here reaches the gate's script too, and
+	// this check would be running that script without it.
+	allowed(t, "the job", job, "runs-on", "env", "steps")
 	jobEnv, _ := job["env"].(map[string]any)
 	if len(jobEnv) != 1 || jobEnv["GOTOOLCHAIN"] != "local" {
 		t.Fatalf("the job hands every script env %v; this check knows GOTOOLCHAIN=local and nothing else", jobEnv)

@@ -727,6 +727,40 @@ nmcheck                               named      local
 53f55c9f-57c1-40da-bebc-6ba37f66d917  anonymous  local
 ```
 
+## `container build -l` と `image inspect` の label（初出 2026-09-17、container 1.4.1）
+
+opossum は build に `-l opossum.project=<project>` を付ける（#1113）。読む側（`down --rmi local` が
+「この project の build が作った image か」を訊く）はまだ無い（#1126）。そのための採取。
+
+```
+$ container build --progress plain -l opossum.project=p1114 -l opossum.service=web -t neko1114/labeled:v1 .
+--- exit code: 0
+$ container image inspect neko1114/labeled:v1      # 抜粋：label のある場所
+[{"variants":[{"config":{"config":{"Labels":{"opossum.project":"p1114","opossum.service":"web"}, …}}}], …}]
+```
+
+あわせて測ったこと（同日、独立レビューアの実測を含む）：
+
+- `-l` と Dockerfile の `LABEL` が同じ key のとき、**`-l` が勝つ**
+- `-l` を足しても外しても build cache は効く（`#5 CACHED`）
+- docker compose v5.5.1 は自分の build に `com.docker.compose.project`／`.service`／`.version` を付け、
+  `docker image save` → `container image load`（`opossum import`）のあとも **そのまま残る**
+- `-t` に tag の無い名前を渡すと `:latest` で入り、`image inspect`・`run` は tag の有無どちらの綴りでも見つける
+
+## Dockerfile の `# syntax=` は読まれない（初出 2026-09-17、container 1.4.1 / docker 29.8.0）
+
+`docs/compatibility.md` の `build` の行の主張の採取。3 回、別々の人が測って同じ結果
+（#1112 の 1 巡目のレビューア・inu・#1114 の 4 巡目のレビューア）。
+
+```
+# Dockerfile の 1 行目が  # syntax=neko1114/nosuchfrontend:v99  （存在しない frontend）
+$ container build --progress plain -t <tag> .
+--- exit code: 0        （image ができる）
+$ docker build -t <tag> .
+--- exit code: 1
+ERROR: failed to resolve source metadata for docker.io/neko1114/nosuchfrontend:v99
+```
+
 ## 公開文書の実機主張（#533 の unverified 分 / 2026-09-05 に 1.3.1 で採取）
 
 README・`docs/compatibility.md`・`docs/troubleshooting.md`・`docs/networking.md`・`docs/agent-sandbox.md` が

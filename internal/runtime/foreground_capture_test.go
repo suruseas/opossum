@@ -44,16 +44,37 @@ func TestForegroundRunCapturesStderrForDecode(t *testing.T) {
 }
 
 func TestTTYForegroundRunDoesNotCapture(t *testing.T) {
-	// A TTY run keeps its real terminal fds untouched — no capture, so a plain error.
-	shim := filepath.Join(t.TempDir(), "c")
-	writeShimFile(t, shim, "#!/bin/sh\nexit 1\n")
-	r := &Runtime{Bin: shim}
-	err := r.Run(RunOptions{Image: "x", Detach: false, TTY: true})
-	if err == nil {
-		t.Fatal("expected the run to fail")
-	}
-	var re *RunError
-	if errors.As(err, &re) {
-		t.Error("a TTY run must not be wrapped in a *RunError (its fds aren't tee'd)")
+	// A run with the caller's terminal attached keeps its real terminal fds
+	// untouched — no capture, so a plain error. A -t of the service's own
+	// (`tty: true` under `up`) has no terminal behind it and is captured like
+	// any foreground run, so its failure can be read.
+	for _, tc := range []struct {
+		name     string
+		opts     RunOptions
+		captured bool
+	}{
+		{"the caller's terminal attached", RunOptions{Image: "x", Detach: false, TTY: true, Attached: true}, false},
+		{"-t without a terminal behind it", RunOptions{Image: "x", Detach: false, TTY: true}, true},
+		{"no -t", RunOptions{Image: "x", Detach: false}, true},
+		// Attached without -t is a pair no caller makes; read as the name
+		// says, it is nothing, and the run is captured as any other.
+		{"attached but no -t", RunOptions{Image: "x", Detach: false, Attached: true}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			shim := filepath.Join(t.TempDir(), "c")
+			writeShimFile(t, shim, "#!/bin/sh\necho refused >&2\nexit 1\n")
+			r := &Runtime{Bin: shim}
+			err := r.Run(tc.opts)
+			if err == nil {
+				t.Fatal("expected the run to fail")
+			}
+			var re *RunError
+			if got := errors.As(err, &re); got != tc.captured {
+				t.Fatalf("wrapped in a *RunError: %v, want %v (%v)", got, tc.captured, err)
+			}
+			if tc.captured && !strings.Contains(re.Stderr, "refused") {
+				t.Errorf("the captured stderr should carry what the runtime said, got %q", re.Stderr)
+			}
+		})
 	}
 }

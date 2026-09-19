@@ -131,8 +131,8 @@ func (o *Orchestrator) handleChange(changed string) (svc, kind string, matched b
 		case "rebuild":
 			return t.service, "rebuild", true
 		default:
-			fmt.Fprintf(o.out, "watch: %q change needs action %q for %s, which isn't automated yet — re-run `opossum up --build`\n",
-				changed, t.action, t.service)
+			fmt.Fprintf(o.out, "watch: %q change needs action %q for %s, which isn't automated yet — re-run `opossum up --build%s`\n",
+				changed, t.action, t.service, o.runFlags)
 		}
 		return "", "", true
 	}
@@ -157,7 +157,7 @@ func (o *Orchestrator) applyChanges(paths []string) {
 	for svc := range rebuilds {
 		fmt.Fprintf(o.out, "rebuilding %s…\n", svc)
 		if err := o.rebuildService(svc); err != nil {
-			o.warnf(codeWatchRebuild, "rebuild %s failed: %v — fix the error above and save again, or re-run `opossum up --build %s`\n", svc, err, svc)
+			o.warnf(codeWatchRebuild, "rebuild %s failed: %v — fix the error above and save again, or re-run `opossum up --build%s %s`\n", svc, err, o.runFlags, ShellWord(svc))
 		}
 	}
 	for svc := range restarts {
@@ -177,7 +177,7 @@ func (o *Orchestrator) applyChanges(paths []string) {
 					svc, strings.Join(refusal.unanswered, ", "), strings.Join(refusal.unanswered, " "), svc)
 				continue
 			}
-			o.warnf(codeWatchRestart, "restart %s failed: %v — the container may be gone; run `opossum up %s` to recreate it\n", svc, err, svc)
+			o.warnf(codeWatchRestart, "restart %s failed: %v — the container may be gone; run `opossum up%s %s` to recreate it\n", svc, err, o.runFlags, ShellWord(svc))
 		}
 	}
 }

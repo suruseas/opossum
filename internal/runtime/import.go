@@ -9,9 +9,10 @@ import (
 // ImportFromDocker copies an image out of Docker's image store into container's
 // store. Images are OCI-standard, but the two runtimes keep separate stores, so
 // this streams `docker image save <dockerRef>` into `container image load`. If
-// targetTag differs from dockerRef (e.g. a service builds to a custom `image:`
-// name but opossum expects `<project>-<service>:latest`), the loaded image is
-// retagged so a later `up` finds it present and skips the build.
+// targetTag differs from dockerRef the loaded image is retagged under it. Nothing
+// in opossum asks for that any more — it names a built image as docker compose
+// does, so both callers pass one name twice — and the retag stays for a caller
+// that wants the image under another name.
 //
 // docker is invoked ONLY here: opossum's normal path never shells out to docker,
 // and this reports a clear message when the CLI is missing.

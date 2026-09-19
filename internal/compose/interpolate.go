@@ -123,10 +123,55 @@ func (s envScope) inner(between map[string]string) envScope {
 	}
 }
 
+// projectNameVar is the variable docker compose reads the project's name from,
+// and profilesVar the one it reads the active profiles from.
+const (
+	projectNameVar = "COMPOSE_PROJECT_NAME"
+	profilesVar    = "COMPOSE_PROFILES"
+)
+
+// EnvProjectName is Project.EnvName for a caller that has no project to ask: the
+// name COMPOSE_PROJECT_NAME gives, read the way a load from dir would read it
+// (the shell over the `.env` in dir, or over envFiles when given), without
+// reading any compose file.
+func EnvProjectName(dir string, envFiles []string) (string, error) {
+	return EnvValue(dir, envFiles, projectNameVar)
+}
+
+// EnvValue is what a variable that configures opossum itself — not one a
+// compose file refers to — is set to, read the way a load from dir reads its
+// variables: the shell over the `.env` in dir, or over envFiles when given. ""
+// when it is not set, and when it is set and empty.
+func EnvValue(dir string, envFiles []string, name string) (string, error) {
+	scope, err := loadEnv(dir, envFiles)
+	if err != nil {
+		return "", err
+	}
+	v, _ := scope.lookup()(name)
+	return v, nil
+}
+
 // loadEnv builds the scope used for interpolation: values from a `.env` file in
 // dir (or the given --env-file paths), the process environment, and the built-in.
 // A missing default .env file is not an error.
 func loadEnv(dir string, envFiles []string) (envScope, error) {
+	return loadEnvLayers(dir, "", envFiles)
+}
+
+// loadEnvLayers is loadEnv with a second `.env` under the first: the one in
+// under, read for what the `.env` in dir (and the shell) do not set. It is how
+// docker compose reads a project whose compose file COMPOSE_FILE chose in
+// another directory than the one it runs in — the working directory's `.env`
+// first, then the compose file's directory's (measured on v5.5.1):
+//
+//   - a variable the first sets — to nothing, too — is the first's;
+//   - a value in the second sees the shell, the first file, and the lines above
+//     it in its own file, in that order, so the first file's value of a variable
+//     wins over the second's own; a value in the first sees nothing of the second;
+//   - with an `--env-file` there is one env file and no second place.
+//
+// under is "" (or dir itself) where there is no second place.
+func loadEnvLayers(dir, under string, envFiles []string) (envScope, error) {
 	scope := envScope{
 		outer: func(name string) (string, bool) { return os.LookupEnv(name) },
 		level: map[string]string{},
@@ -153,12 +198,32 @@ func loadEnv(dir string, envFiles []string) (envScope, error) {
 			if _, err := os.Stat(f); err != nil {
 				return envScope{}, fmt.Errorf("env file %q: %w", f, err)
 			}
+		} else if isDir(f) {
+			// A `.env` that is a directory is no `.env`: docker compose reads on
+			// as if it were not there (measured). One that was named is refused.
+			continue
 		}
 		if _, err := parseDotEnv(f, scope); err != nil {
 			return envScope{}, err
 		}
 	}
+	if file := filepath.Join(under, ".env"); !named && under != "" && under != dir && !isDir(file) {
+		second := scope.inner(nil)
+		if _, err := parseDotEnv(file, second); err != nil {
+			return envScope{}, err
+		}
+		for k, v := range second.level {
+			if _, set := scope.level[k]; !set {
+				scope.level[k] = v
+			}
+		}
+	}
 	return scope, nil
+}
+
+func isDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 // mapLookup adapts a map to a varLookup. The map is captured by reference, so a

@@ -163,10 +163,15 @@ docker compose build       # if you haven't already (or the images are already t
 opossum up --from-docker-compose   # import each built image from Docker, then start
 ```
 
-opossum names a built image `<project>-<service>` just like `docker compose`,
-defaulting the project to the directory name — so the import lines up. If your
-directory name contains `_` or `.` the two tools normalize it differently; pass
-the **same** `-p <name>` to both commands in that case.
+opossum names a built image just like `docker compose` (the service's `image:`
+if it has one, `<project>-<service>` if not), and takes the project's name from
+the same places (`-p`, `COMPOSE_PROJECT_NAME`, the file's `name:`, the directory)
+— so the import lines up. If your directory name contains `_` or
+`.` the two tools normalize it differently, and opossum rewrites those
+characters in a `-p` value as well (`-p my_app` is `my-app` to opossum and
+`my_app` to docker compose), so pass both commands the **same** `-p <name>`, in
+lowercase with neither character in it (docker compose refuses a `-p` with
+capitals; opossum lowercases it without a word).
 
 That's it — the same project, running on Apple `container`. Work with it using
 the verbs you already know:
@@ -242,8 +247,9 @@ opossum -f path/to/compose.yaml up      # custom compose file
 opossum -p myproj up                     # override the project name
 ```
 
-With no `-f`, opossum discovers a compose file in the working directory, using
-docker-compose's precedence: `compose.yaml`, `compose.yml`,
+With no `-f` and no `COMPOSE_FILE` (read from the shell or the `.env`, as docker
+compose reads it), opossum discovers a compose file in the working directory,
+using docker-compose's precedence: `compose.yaml`, `compose.yml`,
 `docker-compose.yaml`, then `docker-compose.yml` — so an existing
 `docker-compose.yml` runs as-is.
 

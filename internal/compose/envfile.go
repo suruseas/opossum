@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 // resolveEnvFiles reads the service's env_file(s) (relative to dir) and folds
@@ -29,6 +30,13 @@ func resolveEnvFiles(dir string, files EnvFiles, env []string, scope envScope) (
 	}
 	var fromFiles []string
 	inner := scope.inner(explicitEnv(env))
+	// A file listed more than once (in one file, across `-f` files, or
+	// through `extends`) is read at every listing, its values standing where
+	// they last appear and each listing's `required` and `format` counting;
+	// docker compose (v5.5.1) reads it once, where first listed, with its
+	// last listing's attributes — and spells a listing that came through
+	// `extends` relative to the project, where this spells it absolute
+	// (#1152).
 	for _, f := range files {
 		p := f.Path
 		if !filepath.IsAbs(p) {
@@ -40,7 +48,19 @@ func resolveEnvFiles(dir string, files EnvFiles, env []string, scope envScope) (
 			}
 			return nil, fmt.Errorf("env_file %q not found", f.Path)
 		}
-		m, err := parseDotEnv(p, inner)
+		var m map[string]string
+		var err error
+		switch f.Format {
+		case "":
+			m, err = parseDotEnv(p, inner)
+		case "raw":
+			m, err = parseRawEnv(p, inner)
+		default:
+			// Judged here, where the file is read, as docker compose (v5.5.1)
+			// judges it: an entry whose file is not read is not refused for
+			// its format. The word is compared as written — `RAW` is not it.
+			return nil, fmt.Errorf("unsupported env_file format %q for %s — write `format: raw`, or leave the key out for the default", f.Format, f.Path)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -104,4 +124,63 @@ func mergeEnv(base, override []string) []string {
 		out[i] = val[k]
 	}
 	return out
+}
+
+// parseRawEnv reads an env file the way docker compose (v5.5.1) reads one
+// under `format: raw`: a line is KEY=VALUE split at its first `=`, and the
+// value is whatever follows, as written — quotes, `$` and `${VAR}`, a ` #`,
+// trailing blanks, all of it. Nothing is expanded, so a `${VAR}` reaches the
+// container as those characters. A line with no `=` is skipped (so is a
+// `KEY: VALUE` line, which the default reading takes), a blank line and one
+// whose first non-blank character is `#` are skipped, a byte-order mark at
+// the very start is dropped, and CRLF reads as LF. A quote that is not
+// closed on its line is not continued onto the next: each line is its own.
+//
+// The name has the blanks before it dropped (any Unicode blank) and nothing
+// else: a space or a tab inside or after it (`A B=1`, `A =1`, and
+// `export A=1`, whose `export` is not a prefix here) is refused, as is a
+// line with no name before the `=`. All are refused by docker compose the
+// same way; the default reading takes `A B=1` and `A =1`, and drops
+// `export `.
+//
+// Values are written through to scope as they are read, so a later env_file
+// (of either format) sees this file's keys the way it sees any earlier one's.
+func parseRawEnv(path string, scope envScope) (map[string]string, error) {
+	if scope.level == nil {
+		return nil, fmt.Errorf("reading %s: the scope has no level map", path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return map[string]string{}, nil
+		}
+		return nil, fmt.Errorf("reading %s: %w", path, err)
+	}
+	text := strings.TrimPrefix(string(data), "\ufeff")
+	out := map[string]string{}
+	for i, line := range strings.Split(text, "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		if t := strings.TrimSpace(line); t == "" || strings.HasPrefix(t, "#") {
+			continue
+		}
+		key, val, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimLeftFunc(key, unicode.IsSpace)
+		if key == "" {
+			return nil, fmt.Errorf("%s:%d: no variable name before the `=`", path, i+1)
+		}
+		if strings.ContainsAny(key, " \t") {
+			// A space or a tab, and only those: docker compose takes a name
+			// with a vertical tab, a form feed, a carriage return or a
+			// no-break space in it, though it drops all of those in front
+			// of the name. The name is safe to quote back; the value is not
+			// (it is where secrets live), and is not.
+			return nil, fmt.Errorf("%s:%d: variable %q contains whitespace — under `format: raw` a line is KEY=VALUE with nothing before the `=` but the name (no `export`)", path, i+1, key)
+		}
+		out[key] = val
+		scope.level[key] = val
+	}
+	return out, nil
 }

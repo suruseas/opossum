@@ -34,6 +34,22 @@ var (
 	// nameWithoutFlag is the project name the compose file and its directory imply,
 	// recorded by loadOrchestrator before -p overrides it.
 	nameWithoutFlag string
+	// formerName is what opossum called this project before it read
+	// COMPOSE_PROJECT_NAME — the file's `name:`, or the directory — and "" when
+	// `-p` names the project. Where it differs from the project's name, what
+	// was made under it is out of every command's reach (see noteFormerName).
+	formerName string
+
+	// filesChosen is what chose the compose files of the project loadOrchestrator
+	// last loaded, for what comes after the load and has to speak of the same
+	// files: the migration's advice, the supervisor's arguments.
+	filesChosen chosenFiles
+
+	// superviseEnvDir is `__supervise --env-dir`: see chooseFiles.
+	superviseEnvDir string
+
+	// defaultDNSDomain is what --dns-domain is when nothing says.
+	defaultDNSDomain = "opossum"
 
 	composeFiles []string
 	projectName  string
@@ -57,12 +73,12 @@ func newRootCmd() *cobra.Command {
 		SilenceErrors: true,
 		Version:       version,
 	}
-	root.PersistentFlags().StringArrayVarP(&composeFiles, "file", "f", nil, "path to a compose file (repeatable; later files override earlier ones). Default: a discovered compose file plus its override")
-	root.PersistentFlags().StringVarP(&projectName, "project-name", "p", "", "project name (defaults to the compose file's directory)")
-	root.PersistentFlags().StringVar(&dnsDomain, "dns-domain", "opossum", "local DNS domain for bare-name service discovery (create once: sudo container system dns create <domain>)")
+	root.PersistentFlags().StringArrayVarP(&composeFiles, "file", "f", nil, "path to a compose file (repeatable; later files override earlier ones). Default: COMPOSE_FILE from the shell or the .env, then a discovered compose file plus its override")
+	root.PersistentFlags().StringVarP(&projectName, "project-name", "p", "", "project name (default: COMPOSE_PROJECT_NAME from the shell or the .env, then the compose file's `name:`, then its directory)")
+	root.PersistentFlags().StringVar(&dnsDomain, "dns-domain", defaultDNSDomain, "local DNS domain for bare-name service discovery (create once: sudo container system dns create <domain>)")
 	root.PersistentFlags().BoolVar(&verbose, "verbose", false, "print each underlying container command as it runs (useful for bug reports)")
-	root.PersistentFlags().StringArrayVar(&envFiles, "env-file", nil, "env file(s) for ${VAR} interpolation, replacing the default .env (repeatable; later files win)")
-	root.PersistentFlags().StringArrayVar(&profiles, "profile", nil, "enable services gated behind this compose profile (repeatable; '*' enables every profile; also honors COMPOSE_PROFILES). Changes which services are read from the compose file; what the commands that act on containers already there act on is unchanged by it")
+	root.PersistentFlags().StringArrayVar(&envFiles, "env-file", nil, "env file(s) read in place of the default .env, for ${VAR} interpolation and for COMPOSE_PROJECT_NAME, COMPOSE_FILE, COMPOSE_PATH_SEPARATOR and COMPOSE_PROFILES (repeatable; later files win)")
+	root.PersistentFlags().StringArrayVar(&profiles, "profile", nil, "enable services gated behind this compose profile (repeatable; '*' enables every profile). Without it COMPOSE_PROFILES is read, from the shell and then the .env; given, it is the only source, as with docker compose. Changes which services are read from the compose file; what the commands that act on containers already there act on is unchanged by it")
 
 	root.AddCommand(
 		upCmd(), downCmd(), psCmd(), portCmd(), lsCmd(), volumesCmd(), imagesCmd(), logsCmd(), statsCmd(),
@@ -514,10 +530,11 @@ func upCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			noteFormerName(o, cmd.ErrOrStderr())
 			// Bringing a docker compose project over: write the known fixes into an
 			// overlay and reload, so `up` reaches startup in one command instead of
 			// making the user read a warning and edit their file.
-			// Activate compose profiles from --profile and COMPOSE_PROFILES so
+			// Activate compose profiles — from --profile, or else COMPOSE_PROFILES — so
 			// `profiles:`-gated services start. Before the overlay is planned,
 			// because the plan looks only at the services this run would start
 			// — and again after a reload, which begins from a fresh orchestrator.
@@ -534,7 +551,7 @@ func upCmd() *cobra.Command {
 				return err
 			}
 			if fromDocker {
-				reloaded, err := adaptProject(cmd.ErrOrStderr(), o, dryRun, args, profiles)
+				reloaded, err := adaptProject(cmd.ErrOrStderr(), o, dryRun, args)
 				if err != nil {
 					return err
 				}
@@ -644,11 +661,12 @@ func downCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			noteFormerName(o, cmd.ErrOrStderr())
 			return o.Down(volumes, rmi, removeOrphans)
 		},
 	}
 	cmd.Flags().BoolVarP(&volumes, "volumes", "v", false, "also remove named volumes declared by services")
-	cmd.Flags().StringVar(&rmi, "rmi", "", "also remove images: \"local\" (opossum-built) or \"all\" (built + pulled)")
+	cmd.Flags().StringVar(&rmi, "rmi", "", "also remove images: \"local\" (built services' <project>-<service>:latest) or \"all\" (also the images services name)")
 	cmd.Flags().BoolVar(&removeOrphans, "remove-orphans", false, "also remove containers for services no longer in the compose file")
 	return cmd
 }
@@ -701,6 +719,9 @@ func destroyCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// `destroy` says it removes everything opossum made for the project,
+			// which is where "and that is all of it" is most likely to be read.
+			noteFormerName(o, cmd.ErrOrStderr())
 			plan, err := o.DestroyPlanFor(keepOverlay, keepImages, keepLocal)
 			if err != nil {
 				return err
@@ -934,6 +955,7 @@ func psCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			noteFormerName(o, cmd.ErrOrStderr())
 			return o.Ps(opts)
 		},
 	}
@@ -1109,7 +1131,7 @@ var stdinIsTerminal = func() bool {
 // a TTY), so an AI agent capturing stderr sees it too. Only the no-`-f` path
 // auto-merges the overlay, so nothing is announced when `-f` was given.
 func announceOverlay(stderr io.Writer) {
-	if len(composeFiles) != 0 {
+	if chosen, err := chooseFiles(); err != nil || len(chosen.paths) != 0 {
 		return
 	}
 	if ol := compose.DiscoverOpossumOverlay("."); ol != "" {
@@ -1324,8 +1346,8 @@ func statsCmd() *cobra.Command {
 //
 // dryRun plans and reports without touching the filesystem, so `--dry-run` shows
 // the project as it would actually start rather than as it stands unadapted.
-func adaptProject(stderr io.Writer, o *orchestrator.Orchestrator, dryRun bool, named, profiles []string) (*orchestrator.Orchestrator, error) {
-	if len(composeFiles) != 0 {
+func adaptProject(stderr io.Writer, o *orchestrator.Orchestrator, dryRun bool, named []string) (*orchestrator.Orchestrator, error) {
+	if chosen := filesChosen; len(chosen.paths) != 0 {
 		// Explain the no-op: the user asked for the migration and would otherwise
 		// see nothing at all happen.
 		//
@@ -1353,12 +1375,29 @@ func adaptProject(stderr io.Writer, o *orchestrator.Orchestrator, dryRun bool, n
 			// another directory, another name, a directory with a different
 			// project's compose in it. Named as a second -f, the overlay merges
 			// wherever it is, against the file it was written for.
-			fmt.Fprintf(stderr, "opossum: found %d change(s) this project needs, but -f was given, and an "+
+			// How to name both depends on what named the first: files
+			// COMPOSE_FILE chose stay chosen by COMPOSE_FILE. Named with `-f`
+			// instead they would be read with their own directory's `.env` —
+			// another project than the one these findings are about. What else
+			// the run was given — `--env-file`, `-p`, `--profile`, services — the
+			// command repeats, by either means.
+			//
+			// The overlay goes beside the first file — the project's directory,
+			// which its relative paths are read from — and the command names it
+			// there: said as a bare file name, it was only right for a reader whose
+			// compose file is in the working directory.
+			overlay := filepath.Join(filepath.Dir(chosen.paths[0]), orchestrator.OverlayFileName)
+			// Either way the command carries the rest of this run's root flags
+			// and the services it named: the findings are this run's.
+			again := "opossum up --from-docker-compose" + thisRunFlags() + " -f " + shellWord(overlay) + serviceArgs(named)
+			if chosen.byEnv {
+				again = fmt.Sprintf("COMPOSE_FILE=%s opossum up --from-docker-compose%s%s", shellWord(chosen.value+chosen.sep+overlay), thisRunFlags(), serviceArgs(named))
+			}
+			fmt.Fprintf(stderr, "opossum: found %d change(s) this project needs, but %s, and an "+
 				"overlay is merged on its own only when opossum discovers the compose file itself — "+
 				"so none was written. Here is what one would hold. To use it, write it as %s next to %s "+
-				"and name both:\n  opossum up --from-docker-compose%s -f %s\n",
-				len(changes), orchestrator.OverlayFileName, composeFiles[0], fileFlags(composeFiles),
-				orchestrator.OverlayFileName)
+				"and name both:\n  %s\n",
+				len(changes), chosen.how(), overlay, chosen.paths[0], again)
 			// Listed here rather than pointing at warnings further down: on this
 			// path there are none. The headlines are the index; the text below
 			// them is the file, and the notes' prose in it counts as reported.
@@ -1408,9 +1447,9 @@ func adaptProject(stderr io.Writer, o *orchestrator.Orchestrator, dryRun bool, n
 				// The rewrite has to be the run that found these: the plan looks
 				// only at the services this run enables, so a rewrite without
 				// this run's --profile flags and named services would look at
-				// fewer and leave "these" out again. COMPOSE_PROFILES needs no
-				// repeating — it is the shell's, and the rewrite runs in it.
-				rerun := "opossum up --from-docker-compose" + profileFlags(profiles) + serviceArgs(named)
+				// fewer and leave "these" out again. So it carries this run's root
+				// flags — the `--env-file` a profile may come from among them.
+				rerun := "opossum up --from-docker-compose" + thisRunFlags() + serviceArgs(named)
 				fmt.Fprintf(stderr, "opossum: %s was generated by opossum, so `rm %[1]s && %s` "+
 					"rewrites it with these included. Any edits you made to it would go too.\n", filepath.Base(existing), rerun)
 			} else {
@@ -1547,7 +1586,12 @@ func reloadWith(stderr io.Writer, o *orchestrator.Orchestrator, body string) (*o
 	proj.Name = o.Project.Name
 	rt := runtime.New()
 	rt.Verbose = verbose
-	return orchestrator.New(proj, rt, dnsDomain, o.Out()), nil
+	reloaded := orchestrator.New(proj, rt, dnsDomain, o.Out())
+	// Told the flags like every other, though nothing it prints reads them
+	// yet: the messages that do are `watch`'s, and the `up` it goes on to has
+	// no `watch`.
+	reloaded.SetRunFlags(thisRunFlags())
+	return reloaded, nil
 }
 
 func loadOrchestrator(out io.Writer) (*orchestrator.Orchestrator, error) {
@@ -1566,19 +1610,35 @@ func loadOrchestrator(out io.Writer) (*orchestrator.Orchestrator, error) {
 	return o, nil
 }
 
-// enableProfiles activates the profiles this run was given — the root
-// `--profile` flags and COMPOSE_PROFILES — on an orchestrator. Every command
-// gets them, as docker compose takes the flag on every subcommand; what they
-// change is which services a command reads out of the compose file.
+// enableProfiles activates the profiles this run was given on an orchestrator.
+// They come from the first of these that says anything, and not from the sum
+// of them — docker compose's rule (measured on v5.5.1): the root `--profile`
+// flags (an empty one counts as said), then COMPOSE_PROFILES in the shell (set
+// and empty counts too, and hides the next), then COMPOSE_PROFILES in the
+// `.env` files the project was read with, or in the `--env-file` given. Every
+// command gets them, as docker compose takes the flag on every subcommand;
+// what they change is which services a command reads out of the compose file.
 func enableProfiles(o *orchestrator.Orchestrator) {
-	o.EnableProfiles(profiles)
-	o.EnableProfiles(strings.Split(os.Getenv("COMPOSE_PROFILES"), ","))
+	if len(profiles) != 0 {
+		o.EnableProfiles(profiles)
+		return
+	}
+	// What the load read it as: from the shell, then the `.env` (or the
+	// `--env-file`) the project was read with — and for a file COMPOSE_FILE chose
+	// in another directory, then that directory's `.env`.
+	value := o.Project.EnvProfiles
+	o.EnableProfiles(strings.Split(value, ","))
 }
 
 // loadOrchestratorWith reads the project the way every command does, and
 // checks nothing about it that a command may want to decide for itself.
 func loadOrchestratorWith(out io.Writer) (*orchestrator.Orchestrator, error) {
-	files := composeFiles
+	chosen, err := chooseFiles()
+	if err != nil {
+		return nil, err
+	}
+	filesChosen = chosen
+	files := chosen.paths
 	if len(files) == 0 {
 		// No -f: discover a standard compose file, plus its override if present
 		// (docker compose auto-merges compose.override.yaml / docker-compose.override.yml).
@@ -1597,28 +1657,45 @@ func loadOrchestratorWith(out io.Writer) (*orchestrator.Orchestrator, error) {
 			files = append(files, ol)
 		}
 	}
-	proj, err := compose.LoadFiles(files, envFiles)
+	proj, err := compose.LoadFilesEnvDir(files, envFiles, chosen.envDir)
 	if err != nil {
 		return nil, err
 	}
-	// What this project is called when nobody overrides it: the compose file's own
-	// `name:`, or failing that its directory. Remembered before -p is applied so a
-	// destructive command can tell "you named another project" from "this file names
-	// its project something other than its folder", which is ordinary.
-	if proj.Name != "" {
+	// What this project is called when no flag says: COMPOSE_PROJECT_NAME from
+	// the shell or the `.env`, then the compose file's own `name:`, then its
+	// directory — docker compose's order (measured on v5.5.1). Remembered before
+	// -p is applied so a destructive command can tell "you named another project"
+	// from "this directory names its project something other than its folder",
+	// which is ordinary.
+	switch {
+	case proj.EnvName != "":
+		nameWithoutFlag = compose.SanitizeName(proj.EnvName)
+	case proj.Name != "":
 		nameWithoutFlag = compose.SanitizeName(proj.Name)
-	} else {
+	default:
 		nameWithoutFlag = compose.SanitizeName(filepath.Base(proj.BaseDir))
 	}
+	// What the name would have been before COMPOSE_PROJECT_NAME was read.
+	without := compose.SanitizeName(filepath.Base(proj.BaseDir))
+	if proj.Name != "" {
+		without = compose.SanitizeName(proj.Name)
+	}
+	formerName = ""
 	switch {
 	case projectName != "":
 		proj.Name = compose.SanitizeName(projectName)
 	default:
 		proj.Name = nameWithoutFlag
+		// The same as the name wherever COMPOSE_PROJECT_NAME is not what names
+		// the project, and then there is no former name to look under — which
+		// is LeftUnderFormerName's to tell, in one place.
+		formerName = without
 	}
 	rt := runtime.New()
 	rt.Verbose = verbose
-	return orchestrator.New(proj, rt, dnsDomain, out), nil
+	o := orchestrator.New(proj, rt, dnsDomain, out)
+	o.SetRunFlags(thisRunFlags())
+	return o, nil
 }
 
 // loadOrchestratorToTakeDown is loadOrchestrator for the commands that stop
@@ -1812,24 +1889,52 @@ func reportGated(stderr io.Writer, gated []string) {
 }
 
 // profileFlags spells the --profile flags a run was given, as they would be
-// typed again.
+// typed again. One that names nothing is spelled too: it is still the flag, and
+// keeps COMPOSE_PROFILES from being read.
 func profileFlags(profiles []string) string {
 	var b strings.Builder
 	for _, p := range profiles {
-		if p = strings.TrimSpace(p); p != "" {
-			b.WriteString(" --profile ")
-			b.WriteString(p)
-		}
+		b.WriteString(" --profile ")
+		b.WriteString(shellWord(strings.TrimSpace(p)))
 	}
 	return b.String()
 }
 
-// serviceArgs spells the services a run named, as they would be typed again.
+// serviceArgs spells the services a run named, as they would be typed again —
+// as words a shell reads back whole: opossum takes names docker compose does not.
 func serviceArgs(named []string) string {
 	var b strings.Builder
 	for _, n := range named {
 		b.WriteString(" ")
-		b.WriteString(n)
+		b.WriteString(shellWord(n))
+	}
+	return b.String()
+}
+
+// thisRunFlags spells the root flags this run was given, as they would be
+// typed again: what a command the output suggests has to carry to read the
+// project this run read and reach what it made — the compose files, the env
+// files, the project's name, the profiles and the DNS domain. This helper
+// repeats no COMPOSE_FILE and no COMPOSE_PROFILES: they are the shell's, the
+// `.env`'s or the `--env-file`'s, and the `--env-file` is carried (the one
+// command that spells COMPOSE_FILE again, to add its overlay, does so itself).
+// The note about a former name spells `-p <former>` itself, and is only ever
+// printed for a run given no `-p`, so the name here does not clash with it.
+func thisRunFlags() string {
+	var b strings.Builder
+	b.WriteString(fileFlags(composeFiles))
+	for _, f := range envFiles {
+		b.WriteString(" --env-file ")
+		b.WriteString(shellWord(f))
+	}
+	if projectName != "" {
+		b.WriteString(" -p ")
+		b.WriteString(shellWord(projectName))
+	}
+	b.WriteString(profileFlags(profiles))
+	if dnsDomain != defaultDNSDomain {
+		b.WriteString(" --dns-domain ")
+		b.WriteString(shellWord(dnsDomain))
 	}
 	return b.String()
 }
@@ -1839,10 +1944,14 @@ func fileFlags(files []string) string {
 	var b strings.Builder
 	for _, f := range files {
 		b.WriteString(" -f ")
-		b.WriteString(f)
+		b.WriteString(shellWord(f))
 	}
 	return b.String()
 }
+
+// shellWord is orchestrator.ShellWord: the one spelling of a word a shell
+// reads back whole, for every command opossum prints.
+var shellWord = orchestrator.ShellWord
 
 // reportOverlayText prints the overlay's text for a reader who is not getting
 // the file: every line two spaces in, minus the leading comment block in which
@@ -1957,6 +2066,7 @@ func superviseCmd() *cobra.Command {
 			return o.Supervise(ctx, services, logw)
 		},
 	}
+	cmd.Flags().StringVar(&superviseEnvDir, "env-dir", "", "the directory whose `.env` the `up` that started this watcher read first, where that is not the compose file's own")
 	cmd.Flags().StringArrayVar(&watch, "watch-service", nil, "the exact services to watch, as worked out by the `up` that started this watcher")
 	return cmd
 }
@@ -2022,11 +2132,24 @@ func startSupervisorFor(stderr io.Writer, o *orchestrator.Orchestrator, disabled
 	// and the watcher would die on startup — while `up` had just announced that
 	// supervision was running.
 	args := []string{"__supervise", "-p", o.Project.Name, "--dns-domain", dnsDomain}
-	for _, f := range composeFiles {
+	// The files as this run chose them — by `-f` or by COMPOSE_FILE — named to
+	// the child with `-f`, which outranks a COMPOSE_FILE it inherits (a relative
+	// one would mean another file from where the child stands).
+	chosen := filesChosen
+	for _, f := range chosen.paths {
 		args = append(args, "-f", absPathOr(f))
 	}
 	for _, f := range envFiles {
 		args = append(args, "--env-file", absPathOr(f))
+	}
+	// …and read with the same `.env` files. Files COMPOSE_FILE chose are read
+	// with the working directory's over their own directory's; handed over with
+	// `-f` they would be read with their own directory's alone, and the child
+	// would resolve another project than the one this `up` started. So the
+	// directory is named as well. (Not as an `--env-file`: that would be the
+	// one env file, and the second would not be read.)
+	if chosen.byEnv && len(envFiles) == 0 {
+		args = append(args, "--env-dir", chosen.envDir)
 	}
 	// The child re-resolves the project, so it needs the same profiles — otherwise
 	// it would decide a different set of services is in play.
@@ -2078,10 +2201,132 @@ func absPathOr(p string) string {
 	return p
 }
 
+// noteFormerName says, on stderr, that this project still has containers or
+// volumes under the name opossum used for it before it read
+// COMPOSE_PROJECT_NAME. The name is how every command finds what it acts on, so
+// those are out of reach without `-p`: `ps` lists nothing, `down` stops nothing
+// while they run on, and `up` starts a second project over empty volumes beside
+// the ones with the data (measured against the version before). Said by the
+// commands where that shows — those three, and `destroy`, which claims to have
+// removed everything. It costs two listings, and only where
+// COMPOSE_PROJECT_NAME is what names the project (elsewhere the former name is
+// the name, and nothing is asked).
+func noteFormerName(o *orchestrator.Orchestrator, stderr io.Writer) {
+	if formerName == "" {
+		return
+	}
+	containers, volumes := o.LeftUnderFormerName(formerName)
+	if note := orchestrator.FormerNameNote(o.Project.Name, formerName, containers, volumes, thisRunFlags()); note != "" {
+		fmt.Fprintln(stderr, note)
+	}
+}
+
+// chosenFiles is the compose files a command was told to read, and how it was
+// told. Everything that asks "were the files chosen, or found?" asks here — the
+// load, the overlay that is merged only into files that were found, the
+// migration that writes one, and the supervisor's child, which has to read the
+// same files the same way from another directory.
+type chosenFiles struct {
+	// paths are the files, as given; nil when none were chosen and one is
+	// looked for.
+	paths []string
+	// byEnv is whether COMPOSE_FILE chose them rather than `-f`.
+	byEnv bool
+	// value and sep are COMPOSE_FILE as it was set and what separates its
+	// files, for advice that has to keep COMPOSE_FILE choosing them.
+	value, sep string
+	// envDir is the directory whose `.env` the project is read with when no
+	// `--env-file` says otherwise: "" is the first file's own, which is where
+	// `-f` has it. COMPOSE_FILE has it in the working directory — where
+	// COMPOSE_FILE itself was read from (measured on docker compose v5.5.1).
+	envDir string
+}
+
+// how says, for a message, what chose the files.
+func (c chosenFiles) how() string {
+	if c.byEnv {
+		return "COMPOSE_FILE names the compose file"
+	}
+	return "-f was given"
+}
+
+// chooseFiles reads the choice in docker compose's order (measured on v5.5.1):
+// `-f`, then COMPOSE_FILE in the shell, then COMPOSE_FILE in the working
+// directory's `.env` (or in the `--env-file` given). Several files are
+// separated by the platform's path-list separator (`:` here), or by
+// COMPOSE_PATH_SEPARATOR when that is set, in either place. A COMPOSE_FILE that
+// is set and empty reads as not set — docker compose refuses it; here it is
+// what it was before COMPOSE_FILE was read at all. Refused, as docker compose
+// refuses them: a file that is not there, a directory or anything else that is
+// not a regular file, an empty element.
+func chooseFiles() (chosenFiles, error) {
+	if len(composeFiles) != 0 {
+		// superviseEnvDir is "" except in a restart supervisor started for
+		// files COMPOSE_FILE chose: it is handed the files by `-f` whatever
+		// chose them, and with them the directory their first `.env` is in.
+		return chosenFiles{paths: composeFiles, envDir: superviseEnvDir}, nil
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return chosenFiles{}, nil
+	}
+	value, err := compose.EnvValue(wd, envFiles, "COMPOSE_FILE")
+	if err != nil || value == "" {
+		// An env file that cannot be read is the load's to report.
+		return chosenFiles{}, nil
+	}
+	sep, _ := compose.EnvValue(wd, envFiles, "COMPOSE_PATH_SEPARATOR")
+	if sep == "" {
+		sep = string(os.PathListSeparator)
+	}
+	from := "the working directory's `.env`"
+	if len(envFiles) != 0 {
+		from = "the --env-file given"
+	}
+	where := fmt.Sprintf("\n  COMPOSE_FILE comes from the shell or %s; several files are separated by %q (COMPOSE_PATH_SEPARATOR changes that)", from, sep)
+	paths := strings.Split(value, sep)
+	for _, p := range paths {
+		// An empty element is refused, as docker compose refuses it (measured:
+		// `a.yaml::b.yaml`, `a.yaml:`, `:a.yaml`, `:`). Passed over, a value of
+		// nothing but separators would name no file at all, and the file that
+		// happens to be found would run instead — without a word, which is what
+		// reading COMPOSE_FILE is here to stop.
+		if p == "" {
+			return chosenFiles{}, fmt.Errorf("COMPOSE_FILE (%q) has an empty element between its separators — name a compose file there, or take the separator out%s", value, where)
+		}
+		info, err := os.Stat(p)
+		if err != nil {
+			return chosenFiles{}, fmt.Errorf("compose file %q, named by COMPOSE_FILE (%q), cannot be read: %w%s", p, value, err, where)
+		}
+		if info.IsDir() {
+			return chosenFiles{}, fmt.Errorf("compose file %q, named by COMPOSE_FILE (%q), is a directory — name the compose file in it%s", p, value, where)
+		}
+		// Anything else that is not a regular file — a fifo, a device — is
+		// refused here, unopened, as docker compose refuses it for COMPOSE_FILE
+		// (measured; a link is what it points at). A variable nobody typed
+		// should not be able to start a read that never ends.
+		if !info.Mode().IsRegular() {
+			return chosenFiles{}, fmt.Errorf("compose file %q, named by COMPOSE_FILE (%q), is not a regular file%s", p, value, where)
+		}
+	}
+	return chosenFiles{paths: paths, byEnv: true, value: value, sep: sep, envDir: wd}, nil
+}
+
 // projectNameWithoutCompose derives the project name the way loadOrchestrator
-// would, minus the part that needs the compose file (its `name:`). It is enough
-// to find a running supervisor: `-p` is authoritative when given, and otherwise
-// the directory name is what `up` used unless the file named the project.
+// would, minus the part that needs the compose file (its `name:`). It is what
+// finds a running supervisor when the file cannot be read: `-p` is authoritative
+// when given, then COMPOSE_PROJECT_NAME from the shell or this directory's
+// `.env` (or the `--env-file` given), and otherwise the directory name is what
+// `up` used unless the file named the project.
+//
+// It asks about the working directory, where the load asks about the compose
+// file's as well (and, with `-f`, that one alone): with `-f` pointing outside
+// the working directory the two fall back to different directories, and with
+// COMPOSE_FILE — which needs nothing typed — they differ where the name is in
+// the file's directory's `.env` alone, and this one comes to the wrong name:
+// the supervisor of a project whose file has gone is then not found, and `-p
+// <name> down` is the way to it. That was so for `-f` before either variable
+// was read, and is not mended here (#1134).
 func projectNameWithoutCompose() string {
 	if projectName != "" {
 		return compose.SanitizeName(projectName)
@@ -2089,6 +2334,11 @@ func projectNameWithoutCompose() string {
 	wd, err := os.Getwd()
 	if err != nil {
 		return ""
+	}
+	// An env file that cannot be read is the load's to report, not this
+	// lookup's: it falls through to the directory.
+	if name, err := compose.EnvProjectName(wd, envFiles); err == nil && name != "" {
+		return compose.SanitizeName(name)
 	}
 	return compose.SanitizeName(filepath.Base(wd))
 }

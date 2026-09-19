@@ -87,7 +87,9 @@ func TestUpFromDockerImportsInsteadOfBuilding(t *testing.T) {
 // this guards the identical branch in the up path.
 func TestUpFromDockerUsesImageRefForBuildImageService(t *testing.T) {
 	rt, _ := fakeShim(t)
-	setShimEnv(rt, "IMAGE_ABSENT=pj-api:latest") // built tag absent, so up would import
+	// The image `up` looks for is the one `image:` names (#1113), and it is not
+	// here yet, so `up` brings it over. It used to look for `pj-api:latest`.
+	setShimEnv(rt, "IMAGE_ABSENT=myco/api:9")
 	docker := filepath.Join(t.TempDir(), "docker")
 	if err := os.WriteFile(docker, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)

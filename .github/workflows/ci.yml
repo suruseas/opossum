@@ -6,48 +6,58 @@ name: ci
 # virtualization, which GitHub-hosted runners don't provide; that layer is
 # verified on real hardware (see docs/real-runtime-review.md).
 #
-# One job, on purpose. Actions bills each job separately, one-minute minimum,
-# rounded up — split across four jobs this workflow did 216 seconds of work and
-# billed seven minutes, two of them for six seconds of checks. Folded into one
-# job the bill tracks the work. The cost is wall-clock (the two compilers used
-# to run in parallel) and a single check mark on the PR — which failing step it
-# was is in the step names.
-# Pull requests: free while drafted, billed from the moment they claim to be
-# ready — and following every push from then on. A reader stopped at an
-# earlier version of this line ("and nowhere else") and read it as
-# `synchronize` having been dropped; it is not, and the next paragraph is
-# the part that says so.
-# Of the two things this run used to provide, a clean machine is now the
-# push-time sieve's job (`make sieve`, a fresh Linux container on the
-# developer's own metal, run by the pre-push hook), and what cannot move
-# there is the attestation: a green that someone other than whoever ran it
-# can verify. The account has 2,000 free minutes a month; this file spends
-# them on the one thing only it can do.
-#
-# Structurally free while drafted, structurally current once ready. Running
-# on every push billed every review round — the measured median was two runs
-# per pull request with a top of ten — so a draft's pushes cost nothing (the
-# job skips them) and the local sieve owns that ground. Marking the request
-# ready is the request for attestation, and from that moment `synchronize`
-# runs again on each push: a green that stops following the head is a green
-# about some other tree, which is the one thing attestation must never be.
-# Push fixes as a draft; a push while ready spends a run to keep the
-# attestation honest. No trigger for pushes to main: its tree is the squash
-# of a head already attested. `workflow_dispatch` stays, for the one
-# main-tree run a release cuts a tag over.
+# Two jobs, one per compiler, so that they run side by side: two self-hosted
+# runners on one machine take one each. This workflow used to be one job:
+# Actions bills GitHub-hosted jobs separately, one-minute minimum, rounded
+# up, and folded into one job the bill tracked the work. A self-hosted job
+# is not billed by the minute, so the fold's reason is gone and its price is
+# what is left: the two compilers waiting on each other. Measured: one job,
+# 620 s; two jobs on one runner, 591 s (one after the other, 283 s and
+# 301 s); two jobs on two runners, 425 s (side by side, 419 s and 382 s —
+# each slower than alone, the two sharing one machine's CPU).
+# Each job carries its own checkout and its own compiler; the pull-request
+# gates (the changelog fragment, the released sections) and the
+# release-config check ride with the go.mod compiler's job. Each job's gate
+# runs with a temporary directory of the run's and the job's own (`TMPDIR`,
+# on the gate steps): the leftovers check reads what a run left in that
+# directory, and a directory shared with the other job would show it the
+# other job's work in progress.
+# Every push to a pull request runs it, drafted or not (and a reopened pull
+# request runs again: with the ready mark no longer a trigger, reopening is
+# a way to run the same head again without a push), and so does every push
+# to main. It used to skip a draft's pushes and main's altogether: the
+# runner was GitHub-hosted and billed by the minute, the account had 2,000
+# free minutes a month, and a run took about six minutes in its last shape
+# (one job; measured over 2026-09-01..05, the longest job 368 s) and longer
+# in earlier ones — so a draft was left to the push-time sieve (`make
+# sieve`, a fresh Linux container on the developer's own metal, run by the
+# pre-push hook), marking it ready was the request for attestation, and
+# main's tree, the squash of a head already attested, was not run. On the
+# self-hosted runners none of that costs minutes, and what each run gives
+# is worth having: a draft's run finds a broken shape while it is still
+# being worked on, and main's run is a green about main's own tree, so a
+# release cuts its tag over a run that already happened. A `[skip ci]` in a
+# commit's message makes GitHub skip that push's run, on a pull request as
+# on main (measured: a commit whose message merely mentioned the marker got
+# no run); the squash commit's title is the pull request's title (or the
+# one commit's, when the branch has only one) and its body is the branch's
+# commit messages, one after the other (the repository's squash settings,
+# `COMMIT_OR_PR_TITLE` and `COMMIT_MESSAGES`), so a marker in any commit on
+# the branch reaches main — keep it out of the commits as well as the title
+# and body.
+# `workflow_dispatch` stays, for a run of main by hand. On a push to main the
+# event carries no pull request, and the two pull-request gates below say so
+# in their conditions and are skipped; a step that reads
+# `github.event.pull_request` has to.
 on:
   pull_request:
-    types: [opened, ready_for_review, synchronize]
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main]
   workflow_dispatch:
 
 jobs:
   ci:
-    # A draft is work still under the local sieve; marking it ready is the
-    # request for attestation. `opened` fires for drafts too, and this is what
-    # makes opening one free. On workflow_dispatch the event carries no
-    # pull_request, the expression comes back empty, and !empty is true — the
-    # manual main-tree run a release asks for goes ahead.
-    if: ${{ !github.event.pull_request.draft }}
     # A self-hosted runner: the labels name the machine class, not a machine,
     # so a replacement with the same labels takes over without a change here.
     # release.yml (a darwin build) and pages.yml (the deploy permission) stay
@@ -151,68 +161,22 @@ jobs:
       # frozen weeks earlier and report packages it never ran. One definition,
       # in the Makefile, and a check in internal/repohygiene that this file
       # still points at it — once per compiler, and at nothing else.
-      - name: test (go.mod version, the same gate as `make test`)
-        run: make test
-
-      # ---- the current release -------------------------------------------
       #
-      # This section, and everything after it, runs even when the section
-      # above failed. Folding the jobs was about the bill; whether both
-      # compilers report is about information: "one red, one green" says the
-      # two versions disagree, "both red" says the change is broken — and a
-      # section that never ran turns that reading into "one red, one unknown".
-      # The gofmt divergence between 1.26 and 1.27 was diagnosed from exactly
-      # that contrast, the night before this file was folded.
-      - uses: actions/setup-go@v7
-        if: ${{ !cancelled() }}
-        with:
-          go-version: stable
-          cache: false
-      # When the two sections run the same compiler, everything they exist to
-      # catch — coverage boundaries moving, gofmt changing its mind — cannot
-      # show up in a green run. In the matrix this claim took two half-checks
-      # in two jobs that could not see each other; in one job it is a single
-      # comparison.
-      - name: stable is a different compiler than go.mod asks for
-        if: ${{ !cancelled() }}
-        run: |
-          # Read through the go tool, not with a pattern of our own: it accepts
-          # a tab after the directive, and leading space before it, and a
-          # pattern that misses those comes back empty — which would compare
-          # equal to nothing and pass.
-          go version
-          floor="$(go mod edit -json | jq -r '.Go // empty' | cut -d. -f1,2)"
-          here="$(go version | awk '{print $3}' | sed 's/^go//' | cut -d. -f1,2)"
-          echo "go.mod asks for $floor; stable is $here"
-          if [ -z "$floor" ] || [ -z "$here" ]; then
-            echo "Could not read one of the two versions, so whether they differ is"
-            echo "unknown — and unknown is not the same as fine."
-            exit 1
-          fi
-          if [ "$floor" = "$here" ]; then
-            echo "Both sections of this job are Go $here, so it is running the same"
-            echo "compiler twice. The older section follows go.mod, so this means"
-            echo "the version go.mod asks for has caught up with the current"
-            echo "release: either give it a floor that is genuinely older, or drop"
-            echo "the second section and say here why it is no longer needed."
-            exit 1
-          fi
-      - name: gofmt (stable)
-        if: ${{ !cancelled() }}
-        run: |
-          unformatted="$(gofmt -l .)"
-          if [ -n "$unformatted" ]; then
-            echo "These files need gofmt:"; echo "$unformatted"; exit 1
-          fi
-      - name: go vet (stable)
-        if: ${{ !cancelled() }}
-        run: go vet ./...
-      - name: build (stable)
-        if: ${{ !cancelled() }}
-        run: go build ./...
-      - name: test (stable, the same gate as `make test`)
-        if: ${{ !cancelled() }}
+      # A temporary directory of this run's and this job's own, so two jobs
+      # running side by side on one machine do not read each other's
+      # leftovers. Not the runner's `_work/_temp`: that is under the runner
+      # user's home, and the suites refuse a state directory under the home
+      # (they must never write to the real one). Made just before the gate
+      # and removed after it, whatever the gate said.
+      - name: a temporary directory of this job's own
+        run: mkdir -p "/tmp/opossum-ci-${{ github.run_id }}-${{ github.job }}"
+      - name: test (go.mod version, the same gate as `make test`)
+        env:
+          TMPDIR: /tmp/opossum-ci-${{ github.run_id }}-${{ github.job }}
         run: make test
+      - name: the temporary directory is removed
+        if: ${{ always() }}
+        run: rm -rf "/tmp/opossum-ci-${{ github.run_id }}-${{ github.job }}"
 
       # ---- a user-facing change carries a changelog fragment -------------
       #
@@ -473,3 +437,87 @@ jobs:
         # don't fail CI on the deprecation notice.
         continue-on-error: true
         run: goreleaser check
+
+  # The current release's compiler, in a job of its own (see the top of the
+  # file): the same runner class, the same environment, its own checkout —
+  # nothing here diffs against a base, so the default depth.
+  stable:
+    runs-on: [self-hosted, Linux, X64]
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@v7
+      - name: the runner has the tools the steps below assume
+        run: |
+          missing=""
+          for tool in gcc jq make git; do
+            command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::this runner lacks:$missing — install them on the runner host (apt-get install build-essential jq make git)"
+            exit 1
+          fi
+          echo "runner: $(uname -srm), $(nproc) cpus, tmp=$(dirname "$(mktemp -u)")"
+
+      # ---- the current release -------------------------------------------
+      #
+      # Its own job, so that it reports whatever the go.mod job did: "one
+      # red, one green" says the two versions disagree, "both red" says the
+      # change is broken. The gofmt divergence between 1.26 and 1.27 was
+      # diagnosed from exactly that contrast. Within the job the steps stop
+      # at the first red one, as the go.mod job's compiler steps do: what
+      # the two compilers say of each other is the two jobs' doing, not a
+      # step's. So a red tools check, or a go.mod floor that has caught up
+      # with stable, leaves this job with no test answer at all — the
+      # go.mod job's still stands, and that is the trade accepted here.
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: false
+      # When the two sections run the same compiler, everything they exist to
+      # catch — coverage boundaries moving, gofmt changing its mind — cannot
+      # show up in a green run. In the matrix this claim took two half-checks
+      # in two jobs that could not see each other; here it is a single
+      # comparison, made in this job from go.mod itself.
+      - name: stable is a different compiler than go.mod asks for
+        run: |
+          # Read through the go tool, not with a pattern of our own: it accepts
+          # a tab after the directive, and leading space before it, and a
+          # pattern that misses those comes back empty — which would compare
+          # equal to nothing and pass.
+          go version
+          floor="$(go mod edit -json | jq -r '.Go // empty' | cut -d. -f1,2)"
+          here="$(go version | awk '{print $3}' | sed 's/^go//' | cut -d. -f1,2)"
+          echo "go.mod asks for $floor; stable is $here"
+          if [ -z "$floor" ] || [ -z "$here" ]; then
+            echo "Could not read one of the two versions, so whether they differ is"
+            echo "unknown — and unknown is not the same as fine."
+            exit 1
+          fi
+          if [ "$floor" = "$here" ]; then
+            echo "This job and the go.mod one (\`ci\`) are both Go $here, so the workflow is running"
+            echo "the same compiler twice. The other job follows go.mod, so this means"
+            echo "the version go.mod asks for has caught up with the current"
+            echo "release: either give it a floor that is genuinely older, or drop"
+            echo "this job and say here why it is no longer needed."
+            exit 1
+          fi
+      - name: gofmt (stable)
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"; echo "$unformatted"; exit 1
+          fi
+      - name: go vet (stable)
+        run: go vet ./...
+      - name: build (stable)
+        run: go build ./...
+      - name: a temporary directory of this job's own
+        run: mkdir -p "/tmp/opossum-ci-${{ github.run_id }}-${{ github.job }}"
+      - name: test (stable, the same gate as `make test`)
+        env:
+          TMPDIR: /tmp/opossum-ci-${{ github.run_id }}-${{ github.job }}
+        run: make test
+      - name: the temporary directory is removed
+        if: ${{ always() }}
+        run: rm -rf "/tmp/opossum-ci-${{ github.run_id }}-${{ github.job }}"

@@ -4,10 +4,9 @@
 # The sieve is the push-time half of what CI used to do twice over: a fresh
 # container gives it an empty $HOME, an empty /tmp and no leftover processes,
 # so the "leaves something behind" class of failure — invisible on a lived-in
-# machine — shows up here, before a push, instead of spending one of the
-# month's CI minutes. What stays with CI is the half a local run cannot
-# provide: a green that someone other than whoever ran it can verify. That
-# runs once per pull request, on the head that merges.
+# machine — shows up here, before a push, instead of in CI. What stays with
+# CI is the half a local run cannot provide: a green that someone other than
+# whoever ran it can verify, on every push to a pull request and to main.
 #
 # Minutes, not a second — deliberately, and only at push. The commit hook
 # stays fast so nobody learns --no-verify; a push is rarer, already the moment
@@ -39,7 +38,7 @@ fi
 if ! docker info >/dev/null 2>&1; then
 	echo "pre-push: the sieve needs the Docker daemon, and it is not answering." >&2
 	echo "  Start Docker and push again. Pushing with --no-verify skips the clean-" >&2
-	echo "  environment check entirely — the pull request's one CI run becomes the" >&2
+	echo "  environment check entirely — the pull request's CI run becomes the" >&2
 	echo "  first place a leftover could be seen, and it exists for attestation," >&2
 	echo "  not for finding these." >&2
 	exit 1

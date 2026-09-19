@@ -261,3 +261,70 @@ func TestWatchTriesASkippedRestartOnlyForASyncRestartFile(t *testing.T) {
 		})
 	}
 }
+
+// The commands the watch warnings suggest carry the run's root flags (what
+// SetRunFlags records): a `watch` given `-f sub/x.yaml -p name` is watching a
+// project that `opossum up --build app`, typed in the same directory, would not
+// read (measured: it starts the working directory's file's services instead).
+func TestWatchNextStepsCarryTheRunsFlags(t *testing.T) {
+	const flags = " -f sub/x.yaml -p name"
+	dir := t.TempDir()
+	t.Run("a rebuild that failed", func(t *testing.T) {
+		shim := scriptShim(t, "  system) echo 'status running' ;;\n  ls) echo '[]' ;;\n  run) exit 1 ;;\n")
+		var out bytes.Buffer
+		o := New(watchProject(dir, "rebuild"), shim, "opossum", &out)
+		o.SetRunFlags(flags)
+		o.applyChanges([]string{dir + "/components/x.js"})
+		if s := out.String(); !strings.Contains(s, "`opossum up --build"+flags+" app`") {
+			t.Errorf("want the flags in the command, got: %s", s)
+		}
+	})
+	t.Run("a restart that failed", func(t *testing.T) {
+		shim := scriptShim(t, "  start) exit 1 ;;\n")
+		var out bytes.Buffer
+		o := New(watchProject(dir, "sync+restart"), shim, "opossum", &out)
+		o.SetRunFlags(flags)
+		o.applyChanges([]string{dir + "/components/x.js"})
+		if s := out.String(); !strings.Contains(s, "`opossum up"+flags+" app`") {
+			t.Errorf("want the flags in the command, got: %s", s)
+		}
+	})
+	// …and spell the service as a word a shell reads back whole: opossum takes
+	// names docker compose does not.
+	t.Run("a rebuild that failed, of a service a shell would take apart", func(t *testing.T) {
+		shim := scriptShim(t, "  system) echo 'status running' ;;\n  ls) echo '[]' ;;\n  run) exit 1 ;;\n")
+		var out bytes.Buffer
+		p := watchProject(dir, "rebuild")
+		p.Services["we b"] = p.Services["app"]
+		delete(p.Services, "app")
+		o := New(p, shim, "opossum", &out)
+		o.SetRunFlags(flags)
+		o.applyChanges([]string{dir + "/components/x.js"})
+		if s := out.String(); !strings.Contains(s, "`opossum up --build"+flags+" 'we b'`") {
+			t.Errorf("want the service quoted in the command, got: %s", s)
+		}
+	})
+	t.Run("a restart that failed, of a service a shell would take apart", func(t *testing.T) {
+		shim := scriptShim(t, "  start) exit 1 ;;\n")
+		var out bytes.Buffer
+		p := watchProject(dir, "sync+restart")
+		p.Services["we b"] = p.Services["app"]
+		delete(p.Services, "app")
+		o := New(p, shim, "opossum", &out)
+		o.SetRunFlags(flags)
+		o.applyChanges([]string{dir + "/components/x.js"})
+		if s := out.String(); !strings.Contains(s, "`opossum up"+flags+" 'we b'`") {
+			t.Errorf("want the service quoted in the command, got: %s", s)
+		}
+	})
+	t.Run("an action that is not automated", func(t *testing.T) {
+		shim := scriptShim(t, "")
+		var out bytes.Buffer
+		o := New(watchProject(dir, "sync+exec"), shim, "opossum", &out)
+		o.SetRunFlags(flags)
+		o.handleChange(dir + "/components/x.js")
+		if s := out.String(); !strings.Contains(s, "`opossum up --build"+flags+"`") {
+			t.Errorf("want the flags in the command, got: %s", s)
+		}
+	})
+}

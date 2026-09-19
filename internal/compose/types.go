@@ -20,13 +20,26 @@ import (
 
 // Project is a parsed compose file plus runtime metadata.
 type Project struct {
-	Name     string
-	BaseDir  string // directory the compose file lives in; build/volume paths resolve against it
-	Services map[string]*Service
-	Secrets  map[string]Secret      // top-level file-based secrets, mounted at /run/secrets/<name> (#76)
-	Configs  map[string]Config      // top-level configs, placed in the container as files (file, content or environment form)
-	Volumes  map[string]VolumeDecl  // top-level volume declarations; only `external` is acted on (#64)
-	Networks map[string]NetworkDecl // top-level network declarations; opossum acts on `internal`/`external`/`name`
+	Name string
+	// EnvName is the name COMPOSE_PROJECT_NAME gives the project — from the
+	// shell, or failing that from the `.env` (or `--env-file`) the project was
+	// read with — and "" when neither gives one. It is kept apart from Name,
+	// the file's own `name:`, because it ranks above it: docker compose takes
+	// `-p`, then the shell, then the `.env`, then `name:`, then the directory
+	// (measured on v5.5.1). A variable that is set and empty gives no name and
+	// hides the one in the `.env`, which is what the same lookup does for every
+	// other variable.
+	EnvName string
+	// EnvProfiles is what COMPOSE_PROFILES is set to, read where EnvName is: ""
+	// when nothing sets it, and when it is set to nothing. It is what a run
+	// given no `--profile` goes by.
+	EnvProfiles string
+	BaseDir     string // directory the compose file lives in; build/volume paths resolve against it
+	Services    map[string]*Service
+	Secrets     map[string]Secret      // top-level file-based secrets, mounted at /run/secrets/<name> (#76)
+	Configs     map[string]Config      // top-level configs, placed in the container as files (file, content or environment form)
+	Volumes     map[string]VolumeDecl  // top-level volume declarations; only `external` is acted on (#64)
+	Networks    map[string]NetworkDecl // top-level network declarations; opossum acts on `internal`/`external`/`name`
 
 	// Unsupported holds top-level compose keys opossum doesn't act on (e.g.
 	// networks, volumes), collected so it can warn rather than silently ignore.
@@ -82,7 +95,14 @@ type Service struct {
 	// not read from YAML.
 	AutoHostPort map[string]bool `yaml:"-"`
 	Volumes      Volumes         `yaml:"volumes"`
-	Tmpfs        StringOrSlice   `yaml:"tmpfs"` // service-level tmpfs targets (#93); volume-form `type: tmpfs` folds in (#79)
+	// VolumesFrom names the services whose `volumes:` this one mounts too,
+	// as written (`holder`, or `holder:ro` — the suffix does nothing, as it
+	// does nothing under docker compose). Their entries are folded into
+	// Volumes at the load (expandVolumesFrom); OwnVolumes keeps this
+	// service's own, for `config` to print what was written.
+	VolumesFrom VolumesFrom   `yaml:"volumes_from"`
+	OwnVolumes  Volumes       `yaml:"-"`
+	Tmpfs       StringOrSlice `yaml:"tmpfs"` // service-level tmpfs targets (#93); volume-form `type: tmpfs` folds in (#79)
 	// NoCopy are the container paths whose volume must NOT be filled from the
 	// image. Docker seeds a fresh volume from the image at the mount point, and
 	// `volume: {nocopy: true}` turns that off; opossum emulates the seeding, so it
@@ -103,8 +123,10 @@ type Service struct {
 	ShmSize     scalarStr       `yaml:"shm_size"`     // size of /dev/shm (`1gb`, `64M`, bytes) → --shm-size <bytes>
 	Ulimits     Ulimits         `yaml:"ulimits"`      // resource limits (`nofile: 65536` or `{soft, hard}`) → --ulimit name=soft:hard
 	ReadOnly    bool            `yaml:"read_only"`    // --read-only root filesystem
+	TTY         bool            `yaml:"tty"`          // -t: a pseudo-terminal for the service's process (`up`); `run` decides by the terminal it was typed at
 	CapAdd      StringOrSlice   `yaml:"cap_add"`      // --cap-add Linux capabilities
 	CapDrop     StringOrSlice   `yaml:"cap_drop"`     // --cap-drop Linux capabilities
+	GroupAdd    GroupAdd        `yaml:"group_add"`    // one numeric supplementary group → --gid (the shapes the runtime cannot take are refused before anything starts)
 	NetworkMode string          `yaml:"network_mode"` // only "none" acted on: full network isolation (--network none)
 	MacAddress  string          `yaml:"mac_address"`  // the container's MAC on its first network (`--network <name>,mac=…`)
 	Labels      Labels          `yaml:"labels"`       // put on the container as `-l key=value`, before opossum's own labels (which win on a clash, as docker compose's own do)
@@ -590,14 +612,14 @@ var nestedKnownKeys = map[string][]string{
 // `ports entry 1.mode` or `depends_on.db.restart` — docker compose refuses
 // a key it does not know there, and reads the ones it knows that opossum
 // does not act on (a port's `mode`, a bind mount's `bind` options, a
-// dependency's `restart`, a secret's `uid`, an env file's `format`).
+// dependency's `restart`, a secret's `uid`).
 var itemKnownKeys = map[string][]string{
 	"ports":      {"target", "published", "protocol", "host_ip"},
 	"volumes":    {"type", "source", "target", "read_only", "volume"},
 	"secrets":    {"source", "target"},
 	"configs":    {"source", "target"},
-	"env_file":   {"path", "required"},
-	"depends_on": {"condition"},
+	"env_file":   {"path", "required", "format"},
+	"depends_on": {"condition", "required"},
 	// One level down, where an item's key is a mapping opossum reads part
 	// of: a volume mount's `volume:` options, and a tmpfs mount's `tmpfs:`
 	// options (read on a `type: tmpfs` mount only; see itemReadsKey).
@@ -841,7 +863,7 @@ var bareKeyIsAllowed = map[string]bool{"command": true, "entrypoint": true, "dep
 // on) for the fields it was measured on; any other field gets the neutral
 // word from shapeOf.
 var fieldShape = map[string]string{
-	"volumes": "a list", "ports": "a list", "networks": "a list or a mapping", "secrets": "a list",
+	"volumes": "a list", "volumes_from": "a list", "ports": "a list", "networks": "a list or a mapping", "secrets": "a list",
 	"depends_on": "a list or a mapping", "env_file": "a string or a list",
 	"environment": "a mapping or a list", "healthcheck": "a mapping", "ulimits": "a mapping", "shm_size": "a size",
 	"build": "a string or a mapping",
@@ -863,7 +885,7 @@ func shapeOf(k string) string {
 func (s *Service) UnmarshalYAML(value *yaml.Node) error {
 	type raw Service // no UnmarshalYAML -> default struct decoding
 	var r raw
-	if err := readQuotedBools(value, "init", "read_only", "ssh"); err != nil {
+	if err := readQuotedBools(value, "init", "read_only", "ssh", "tty"); err != nil {
 		return err
 	}
 	if err := value.Decode(&r); err != nil {
@@ -2618,10 +2640,13 @@ func (c *Command) UnmarshalYAML(value *yaml.Node) error {
 
 // EnvFileRef is one env_file entry. Required defaults to true (a missing file is
 // an error, matching docker compose); the long form `{path, required: false}`
-// makes an absent file be skipped instead (#85).
+// makes an absent file be skipped instead (#85). Format is the long form's
+// `format`: "" is the dotenv reading (quotes stripped, `${VAR}` expanded),
+// "raw" hands every value over as written (parseRawEnv).
 type EnvFileRef struct {
 	Path     string
 	Required bool
+	Format   string
 }
 
 // EnvFiles accepts a scalar path, a list of paths, and the long-form list of
@@ -2672,6 +2697,7 @@ func (e *EnvFiles) UnmarshalYAML(value *yaml.Node) error {
 			var lf struct {
 				Path     string `yaml:"path"`
 				Required *bool  `yaml:"required"`
+				Format   string `yaml:"format"`
 			}
 			if err := item.Decode(&lf); err != nil {
 				return err
@@ -2679,16 +2705,131 @@ func (e *EnvFiles) UnmarshalYAML(value *yaml.Node) error {
 			if lf.Path == "" {
 				return fmt.Errorf("env_file entry %d of %d has no path — write the file, as in `path: ./app.env`", i+1, len(value.Content))
 			}
+			// `format` is a string or nothing: docker compose (v5.5.1) refuses
+			// `format:` left empty, `format: null` and a number at validation
+			// (`must be a string`), while `format: ""` is the default reading.
+			// The node is read as the decode read it — through an alias or a
+			// merge key. What the string says is judged where the file is
+			// read (resolveEnvFiles), as docker compose judges it: an entry
+			// whose file is not read — absent under `required: false`, or a
+			// service a profile keeps out — is not refused for it.
+			if f, has := resolvedMappingValue(item, "format"); has && (f.Kind != yaml.ScalarNode || f.ShortTag() != "!!str") {
+				return fmt.Errorf("env_file entry %d of %d: format must be a string — write `format: raw`, or leave the key out for the default", i+1, len(value.Content))
+			}
 			req := true
 			if lf.Required != nil {
 				req = *lf.Required
 			}
-			out = append(out, EnvFileRef{Path: lf.Path, Required: req})
+			out = append(out, EnvFileRef{Path: lf.Path, Required: req, Format: lf.Format})
 		}
 		*e = out
 		return nil
 	}
 	return fmt.Errorf("expected a string or a list for env_file, got %s", kindName(value.Kind))
+}
+
+// VolumesFrom is a service's `volumes_from`: a list of service names, each
+// with or without a `:ro`/`:rw` suffix. A `container:<name>` entry names a
+// container outside the compose file, whose mounts this cannot read; it is
+// refused at the load (docker compose refuses one that does not exist when
+// the service starts, and mounts one that does).
+type VolumesFrom []string
+
+func (v *VolumesFrom) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind != yaml.SequenceNode {
+		return fmt.Errorf("volumes_from must be a list, got %s", kindName(value.Kind))
+	}
+	out := make(VolumesFrom, 0, len(value.Content))
+	for i, item := range value.Content {
+		item = unalias(item)
+		if item.Kind != yaml.ScalarNode || item.ShortTag() == "!!null" {
+			return fmt.Errorf("volumes_from entry %d of %d must be a string — a service name, as in `- holder`", i+1, len(value.Content))
+		}
+		if err := refuseNonString("volumes_from", i, len(value.Content), item); err != nil {
+			return err
+		}
+		// An empty name goes on to be refused as a service that is not there,
+		// as docker compose refuses it.
+		if slices.Contains(out, item.Value) {
+			return fmt.Errorf("volumes_from items at %d and %d are equal", slices.Index(out, item.Value), i)
+		}
+		out = append(out, item.Value)
+	}
+	*v = out
+	return nil
+}
+
+// GroupAdd is `group_add`: the supplementary groups the service's process
+// joins — a list of numbers or strings (docker compose v5.5.1, measured
+// 2026-09-19: `config` prints `2000` as `"2000"`). A scalar is refused (`must
+// be a array` there), a bool (`must be a number or string`) and a float
+// (`08`, `1e3`) are refused, an entry written twice is refused (`items at 0
+// and 1 are equal`), and so is an unquoted leading-zero number whose octal
+// reading differs from its decimal one (see octalDiffersFromDecimal).
+// Known differences, kept on purpose: in a single file a number arrives here
+// as written (`0x10`), where docker compose reads it to its decimal — though
+// a file read with others, or through `extends`, reaches this decoder
+// re-encoded, its numbers in decimal as there (each file is decoded as
+// written first, so the leading-zero refusal fires on every path); and a
+// repeated entry is found
+// by its spelling, where docker compose goes by the order (`[2000, "2000"]`
+// goes through there). What the runtime can take of the list is decided
+// where the service is started (see Orchestrator.checkGroupAdd).
+type GroupAdd []string
+
+func (g *GroupAdd) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind != yaml.SequenceNode {
+		return fmt.Errorf("group_add must be a list, got %s — write `group_add: [2000]`", kindName(value.Kind))
+	}
+	out := make(GroupAdd, 0, len(value.Content))
+	for i, item := range value.Content {
+		item = unalias(item)
+		if item.Kind != yaml.ScalarNode || (item.ShortTag() != "!!int" && item.ShortTag() != "!!str") {
+			return fmt.Errorf("group_add entry %d of %d must be a number or a string — a gid, as in `- 2000`", i+1, len(value.Content))
+		}
+		// An unquoted number with a leading zero is octal to YAML — and to
+		// docker compose, which adds 493 for `0755` — while the runtime reads
+		// the same digits as decimal (container 1.4.1 takes `--gid 0755` as
+		// 755; measured). Passed as written it would add another group than
+		// the one docker adds, with nothing said; so it is refused, with both
+		// ways to say which one is meant.
+		if n, differs := octalDiffersFromDecimal(item); differs {
+			return fmt.Errorf("group_add entry %d of %d is %s, which YAML reads as the octal %d where the runtime would read it as decimal — write `- %d` for that group, or quote it (`- \"%s\"`) for the decimal one",
+				i+1, len(value.Content), item.Value, n, n, strings.TrimLeft(strings.TrimLeft(item.Value, "+-"), "0"))
+		}
+		if slices.Contains(out, item.Value) {
+			return fmt.Errorf("group_add items at %d and %d are equal — list the group once", slices.Index(out, item.Value), i)
+		}
+		out = append(out, item.Value)
+	}
+	*g = out
+	return nil
+}
+
+// octalDiffersFromDecimal says, for a YAML integer spelt with a leading zero
+// and more digits after it (`0755`, `020`, `+02000`), whether YAML's octal
+// reading differs from the decimal one a runtime handed the digits makes —
+// and YAML's value. `00` and `07` read the same both ways and pass.
+func octalDiffersFromDecimal(item *yaml.Node) (int64, bool) {
+	// A negative one is refused as negative where the service starts.
+	if item.ShortTag() != "!!int" || strings.HasPrefix(item.Value, "-") {
+		return 0, false
+	}
+	d := strings.TrimPrefix(item.Value, "+")
+	if len(d) < 2 || d[0] != '0' {
+		return 0, false
+	}
+	for _, c := range d[1:] {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+	}
+	var n int64
+	if err := item.Decode(&n); err != nil {
+		return 0, false
+	}
+	dec, err := strconv.ParseInt(strings.TrimLeft(item.Value, "+"), 10, 64)
+	return n, err != nil || dec != n
 }
 
 // StringOrSlice accepts a scalar (taken as one element) or a list. Used by
@@ -2903,6 +3044,40 @@ func readQuotedBools(n *yaml.Node, keys ...string) error {
 		v.Tag, v.Value, v.Style = "!!bool", strconv.FormatBool(b), 0
 	}
 	return nil
+}
+
+// resolvedMappingValue is the value key has in mapping n once aliases and
+// merge keys are read: a value written as `*x` is the node it names, and a
+// key not written in n is looked for in what its `<<` brings in, in order
+// (the first mapping that has it wins, as it does when yaml.v3 decodes the
+// mapping; a key written in n outranks them all). For a check that must
+// see the node's tag — what Decode would read, not where it was written.
+func resolvedMappingValue(n *yaml.Node, key string) (*yaml.Node, bool) {
+	n = unalias(n)
+	if n == nil || n.Kind != yaml.MappingNode {
+		return nil, false
+	}
+	var merged []*yaml.Node
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		k := unalias(n.Content[i])
+		if k.Value == key && k.ShortTag() != "!!merge" {
+			return unalias(n.Content[i+1]), true
+		}
+		if k.ShortTag() == "!!merge" || k.Value == "<<" {
+			m := unalias(n.Content[i+1])
+			if m.Kind == yaml.SequenceNode {
+				merged = append(merged, m.Content...)
+			} else {
+				merged = append(merged, m)
+			}
+		}
+	}
+	for _, m := range merged {
+		if v, has := resolvedMappingValue(m, key); has {
+			return v, true
+		}
+	}
+	return nil, false
 }
 
 // mappingValue is the value written directly under key in mapping n —
@@ -3212,10 +3387,18 @@ const (
 )
 
 // Dependency is one depends_on entry: the target service plus the condition that
-// must hold before the dependent starts.
+// must hold before the dependent starts. Optional is the long form's
+// `required: false` (a dependency is required unless written so): an optional
+// dependency behind a profile that is not active is no fault — `config`
+// prints it as written, `up` and `run` leave it out of the order and the
+// wait — and one that is active is waited for as any other, its
+// failure to become healthy or to complete noted and passed over (docker
+// compose v5.5.1, measured 2026-09-19). A dependency the file does not
+// define is refused whatever `required` says, as there.
 type Dependency struct {
 	Name      string
 	Condition string
+	Optional  bool
 }
 
 // DependsOn accepts the short list form (names, implying service_started) and
@@ -3241,25 +3424,61 @@ func (d *DependsOn) UnmarshalYAML(value *yaml.Node) error {
 		if err := value.Decode(&deps); err != nil {
 			return err
 		}
-		for name := range deps {
+		out := make(DependsOn, 0, len(deps))
+		for _, name := range sortedKeys(deps) {
 			d := deps[name]
+			// The entry is a mapping (`condition:` and, beside it, `required:`)
+			// — or nothing, which reads as the mapping with neither. A word, a
+			// number or a list there is refused as docker compose refuses it
+			// (`must be a mapping`); the keys are then read as the decode would
+			// read them — through an alias or a merge key — so that what is
+			// checked is what is read.
+			if e := unalias(&d); !(e.Kind == yaml.MappingNode || (e.Kind == yaml.ScalarNode && e.ShortTag() == "!!null")) {
+				return fmt.Errorf("depends_on.%s must be a mapping, got %s — write `%s: {condition: service_started}`, or list the name under depends_on", name, kindName(e.Kind), name)
+			}
 			if err := bareKeysIn("depends_on."+name, &d, "condition"); err != nil {
 				return err
 			}
-		}
-		var m map[string]struct {
-			Condition string `yaml:"condition"`
-		}
-		if err := value.Decode(&m); err != nil {
-			return err
-		}
-		out := make(DependsOn, 0, len(m))
-		for name, v := range m {
-			cond := v.Condition
-			if cond == "" {
-				cond = ConditionStarted
+			// `required` is written beside a `condition`, or not at all: docker
+			// compose refuses the one without the other (`missing property
+			// 'condition'`), and refuses `required: null` (`must be a boolean`).
+			// Its value is read as boolWord reads one (`false`, `"False"`, `no`,
+			// `Off`: the YAML 1.1 words, quoted or not, as docker compose reads
+			// them); any other word is refused, as there (`invalid boolean`).
+			dep := Dependency{Name: name, Condition: ConditionStarted}
+			c, hasCond := resolvedMappingValue(&d, "condition")
+			if hasCond {
+				if c.Kind != yaml.ScalarNode {
+					return fmt.Errorf("depends_on.%s.condition must be a string, got %s — write `condition: service_started`", name, kindName(c.Kind))
+				}
+				dep.Condition = c.Value
 			}
-			out = append(out, Dependency{Name: name, Condition: cond})
+			// Decoded as a struct as well as walked: the decode is what refuses
+			// a key written twice (`condition` under `condition`), which
+			// walking the mapping would read as the first and lose the second.
+			var entry struct{ Condition string }
+			if err := d.Decode(&entry); err != nil {
+				return err
+			}
+			if r, has := resolvedMappingValue(&d, "required"); has {
+				if !hasCond {
+					return fmt.Errorf("depends_on.%s: `required` is written without a `condition` — docker compose refuses it (missing property 'condition'); write the condition, as in `condition: service_started`", name)
+				}
+				if r.Kind != yaml.ScalarNode || r.ShortTag() == "!!null" {
+					return fmt.Errorf("depends_on.%s: required must be a boolean — write `required: false`, or leave the key out (true)", name)
+				}
+				switch v, ok := boolWord(r.Value); {
+				case ok && (r.ShortTag() == "!!bool" || r.ShortTag() == "!!str"):
+					dep.Optional = !v
+				case r.ShortTag() == "!!str" || r.ShortTag() == "!!bool":
+					// The key and not the value: it may have come from a `${...}`
+					// reference, as readQuotedBools says.
+					return fmt.Errorf("depends_on.%s: required is not a boolean (invalid boolean) — write `required: false`, or leave the key out (true)", name)
+				default:
+					return fmt.Errorf("depends_on.%s: required must be a boolean, got %s — write `required: false`, or leave the key out (true)", name, nonStringWord(r))
+				}
+			}
+			out = append(out, dep)
 		}
 		sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 		*d = out

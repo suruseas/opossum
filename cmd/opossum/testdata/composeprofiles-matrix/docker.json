@@ -1,0 +1,896 @@
+{
+ "docker_compose": "5.5.1",
+ "cells": [
+  {
+   "flag": false,
+   "shell": "absent",
+   "env": "absent",
+   "source": "dotenv",
+   "rc": 0,
+   "services": [
+    "base"
+   ]
+  },
+  {
+   "flag": false,
+   "shell": "absent",
+   "env": "absent",
+   "source": "envfile",
+   "rc": 0,
+   "services": [
+    "base"
+   ]
+  },
+  {
+   "flag": false,
+   "shell": "absent",
+   "env": "value",
+   "source": "dotenv",
+   "rc": 0,
+   "services": [
+    "base",
+    "sc"
+   ]
+  },
+  {
+   "flag": false,
+   "shell": "absent",
+   "env": "value",
+   "source": "envfile",
+   "rc": 0,
+   "services": [
+    "base",
+    "sc"
+   ]
+  },
+  {
+   "flag": false,
+   "shell": "absent",
+   "env": "empty",
+   "source": "dotenv",
+   "rc": 0,
+   "services": [
+    "base"
+   ]
+  },
+  {
+   "flag": false,
+   "shell": "absent",
+   "env": "empty",
+   "source": "envfile",
+   "rc": 0,
+   "services": [
+    "base"
+   ]
+  },
+  {
+   "flag": false,
+   "shell": "value",
+   "env": "absent",
+   "source": "dotenv",
+   "rc": 0,
+   "services": [
+    "base",
+    "sb"
+   ]
+  },
+  {
+   "flag": false,
+   "shell": "value",
+   "env": "absent",
+   "source": "envfile",
+   "rc": 0,
+   "services": [
+    "base",
+    "sb"
+   ]
+  },
+  {
+   "flag": false,
+   "shell": "value",
+   "env": "value",
+   "source": "dotenv",
+   "rc": 0,
+   "services": [
+    "base",
+    "sb"
+   ]
+  },
+  {
+   "flag": false,
+   "shell": "value",
+   "env": "value",
+   "source": "envfile",
+   "rc": 0,
+   "services": [
+    "base",
+    "sb"
+   ]
+  },
+  {
+   "flag": false,
+   "shell": "value",
+   "env": "empty",
+   "source": "dotenv",
+   "rc": 0,
+   "services": [
+    "base",
+    "sb"
+   ]
+  },
+  {
+   "flag": false,
+   "shell": "value",
+   "env": "empty",
+   "source": "envfile",
+   "rc": 0,
+   "services": [
+    "base",
+    "sb"
+   ]
+  },
+  {
+   "flag": false,
+   "shell": "empty",
+   "env": "absent",
+   "source": "dotenv",
+   "rc": 0,
+   "services": [
+    "base"
+   ]
+  },
+  {
+   "flag": false,
+   "shell": "empty",
+   "env": "absent",
+   "source": "envfile",
+   "rc": 0,
+   "services": [
+    "base"
+   ]
+  },
+  {
+   "flag": false,
+   "shell": "empty",
+   "env": "value",
+   "source": "dotenv",
+   "rc": 0,
+   "services": [
+    "base"
+   ]
+  },
+  {
+   "flag": false,
+   "shell": "empty",
+   "env": "value",
+   "source": "envfile",
+   "rc": 0,
+   "services": [
+    "base"
+   ]
+  },
+  {
+   "flag": false,
+   "shell": "empty",
+   "env": "empty",
+   "source": "dotenv",
+   "rc": 0,
+   "services": [
+    "base"
+   ]
+  },
+  {
+   "flag": false,
+   "shell": "empty",
+   "env": "empty",
+   "source": "envfile",
+   "rc": 0,
+   "services": [
+    "base"
+   ]
+  },
+  {
+   "flag": true,
+   "shell": "absent",
+   "env": "absent",
+   "source": "dotenv",
+   "rc": 0,
+   "services": [
+    "base",
+    "sa"
+   ]
+  },
+  {
+   "flag": true,
+   "shell": "absent",
+   "env": "absent",
+   "source": "envfile",
+   "rc": 0,
+   "services": [
+    "base",
+    "sa"
+   ]
+  },
+  {
+   "flag": true,
+   "shell": "absent",
+   "env": "value",
+   "source": "dotenv",
+   "rc": 0,
+   "services": [
+    "base",
+    "sa"
+   ]
+  },
+  {
+   "flag": true,
+   "shell": "absent",
+   "env": "value",
+   "source": "envfile",
+   "rc": 0,
+   "services": [
+    "base",
+    "sa"
+   ]
+  },
+  {
+   "flag": true,
+   "shell": "absent",
+   "env": "empty",
+   "source": "dotenv",
+   "rc": 0,
+   "services": [
+    "base",
+    "sa"
+   ]
+  },
+  {
+   "flag": true,
+   "shell": "absent",
+   "env": "empty",
+   "source": "envfile",
+   "rc": 0,
+   "services": [
+    "base",
+    "sa"
+   ]
+  },
+  {
+   "flag": true,
+   "shell": "value",
+   "env": "absent",
+   "source": "dotenv",
+   "rc": 0,
+   "services": [
+    "base",
+    "sa"
+   ]
+  },
+  {
+   "flag": true,
+   "shell": "value",
+   "env": "absent",
+   "source": "envfile",
+   "rc": 0,
+   "services": [
+    "base",
+    "sa"
+   ]
+  },
+  {
+   "flag": true,
+   "shell": "value",
+   "env": "value",
+   "source": "dotenv",
+   "rc": 0,
+   "services": [
+    "base",
+    "sa"
+   ]
+  },
+  {
+   "flag": true,
+   "shell": "value",
+   "env": "value",
+   "source": "envfile",
+   "rc": 0,
+   "services": [
+    "base",
+    "sa"
+   ]
+  },
+  {
+   "flag": true,
+   "shell": "value",
+   "env": "empty",
+   "source": "dotenv",
+   "rc": 0,
+   "services": [
+    "base",
+    "sa"
+   ]
+  },
+  {
+   "flag": true,
+   "shell": "value",
+   "env": "empty",
+   "source": "envfile",
+   "rc": 0,
+   "services": [
+    "base",
+    "sa"
+   ]
+  },
+  {
+   "flag": true,
+   "shell": "empty",
+   "env": "absent",
+   "source": "dotenv",
+   "rc": 0,
+   "services": [
+    "base",
+    "sa"
+   ]
+  },
+  {
+   "flag": true,
+   "shell": "empty",
+   "env": "absent",
+   "source": "envfile",
+   "rc": 0,
+   "services": [
+    "base",
+    "sa"
+   ]
+  },
+  {
+   "flag": true,
+   "shell": "empty",
+   "env": "value",
+   "source": "dotenv",
+   "rc": 0,
+   "services": [
+    "base",
+    "sa"
+   ]
+  },
+  {
+   "flag": true,
+   "shell": "empty",
+   "env": "value",
+   "source": "envfile",
+   "rc": 0,
+   "services": [
+    "base",
+    "sa"
+   ]
+  },
+  {
+   "flag": true,
+   "shell": "empty",
+   "env": "empty",
+   "source": "dotenv",
+   "rc": 0,
+   "services": [
+    "base",
+    "sa"
+   ]
+  },
+  {
+   "flag": true,
+   "shell": "empty",
+   "env": "empty",
+   "source": "envfile",
+   "rc": 0,
+   "services": [
+    "base",
+    "sa"
+   ]
+  }
+ ],
+ "extras": [
+  {
+   "kind": "where",
+   "how": "composefile",
+   "rc": 0,
+   "services": [
+    "base",
+    "sc"
+   ]
+  },
+  {
+   "kind": "where",
+   "how": "flag",
+   "rc": 0,
+   "services": [
+    "base",
+    "sd"
+   ]
+  },
+  {
+   "kind": "second",
+   "how": "composefile",
+   "cwd": null,
+   "sub": "d",
+   "rc": 0,
+   "services": [
+    "base",
+    "sd"
+   ]
+  },
+  {
+   "kind": "second",
+   "how": "composefile",
+   "cwd": "",
+   "sub": "d",
+   "rc": 0,
+   "services": [
+    "base"
+   ]
+  },
+  {
+   "kind": "second",
+   "how": "composefile",
+   "cwd": "c",
+   "sub": null,
+   "rc": 0,
+   "services": [
+    "base",
+    "sc"
+   ]
+  },
+  {
+   "kind": "second",
+   "how": "composefile+envfile",
+   "cwd": null,
+   "sub": "d",
+   "rc": 0,
+   "services": [
+    "base"
+   ]
+  },
+  {
+   "kind": "second",
+   "how": "flag",
+   "cwd": "c",
+   "sub": null,
+   "rc": 0,
+   "services": [
+    "base"
+   ]
+  },
+  {
+   "kind": "second",
+   "how": "flag",
+   "cwd": "c",
+   "sub": "",
+   "rc": 0,
+   "services": [
+    "base"
+   ]
+  },
+  {
+   "kind": "layered",
+   "cwdenv": "OTHER=1\n",
+   "subenv": "COMPOSE_PROFILES=d\n",
+   "flags": [],
+   "rc": 0,
+   "services": [
+    "base",
+    "sd"
+   ]
+  },
+  {
+   "kind": "layered",
+   "cwdenv": null,
+   "subenv": "COMPOSE_PROFILES=d\n",
+   "flags": [
+    "a"
+   ],
+   "rc": 0,
+   "services": [
+    "base",
+    "sa"
+   ]
+  },
+  {
+   "kind": "layered",
+   "cwdenv": "X=a\n",
+   "subenv": "X=d\nCOMPOSE_PROFILES=${X}\n",
+   "flags": [],
+   "rc": 0,
+   "services": [
+    "base",
+    "sa"
+   ]
+  },
+  {
+   "kind": "layered",
+   "cwdenv": "X=d\n",
+   "subenv": "COMPOSE_PROFILES=${X}\n",
+   "flags": [],
+   "rc": 0,
+   "services": [
+    "base",
+    "sd"
+   ]
+  },
+  {
+   "kind": "layered",
+   "cwdenv": "X=a\nCOMPOSE_PROFILES=${X}\n",
+   "subenv": null,
+   "flags": [],
+   "rc": 0,
+   "services": [
+    "base",
+    "sa"
+   ]
+  },
+  {
+   "kind": "flagvalue",
+   "flags": [
+    " a "
+   ],
+   "rc": 0,
+   "services": [
+    "base"
+   ]
+  },
+  {
+   "kind": "flagvalue",
+   "flags": [
+    "a,b"
+   ],
+   "rc": 0,
+   "services": [
+    "base"
+   ]
+  },
+  {
+   "kind": "twoenvfiles",
+   "one": "a",
+   "two": "b",
+   "rc": 0,
+   "services": [
+    "base",
+    "sb"
+   ]
+  },
+  {
+   "kind": "twoenvfiles",
+   "one": "a",
+   "two": null,
+   "rc": 0,
+   "services": [
+    "base",
+    "sa"
+   ]
+  },
+  {
+   "kind": "twoenvfiles",
+   "one": null,
+   "two": "b",
+   "rc": 0,
+   "services": [
+    "base",
+    "sb"
+   ]
+  },
+  {
+   "kind": "twoenvfiles",
+   "one": "a",
+   "two": "",
+   "rc": 0,
+   "services": [
+    "base"
+   ]
+  },
+  {
+   "kind": "emptyflag",
+   "place": "dotenv",
+   "flags": [
+    ""
+   ],
+   "rc": 0,
+   "services": [
+    "base"
+   ]
+  },
+  {
+   "kind": "emptyflag",
+   "place": "shell",
+   "flags": [
+    ""
+   ],
+   "rc": 0,
+   "services": [
+    "base"
+   ]
+  },
+  {
+   "kind": "emptyflag",
+   "place": "dotenv",
+   "flags": [
+    "a",
+    ""
+   ],
+   "rc": 0,
+   "services": [
+    "base",
+    "sa"
+   ]
+  },
+  {
+   "kind": "emptyflag",
+   "place": "shell",
+   "flags": [
+    "a",
+    ""
+   ],
+   "rc": 0,
+   "services": [
+    "base",
+    "sa"
+   ]
+  },
+  {
+   "kind": "emptyflag",
+   "place": "dotenv",
+   "flags": [
+    "",
+    "a"
+   ],
+   "rc": 0,
+   "services": [
+    "base",
+    "sa"
+   ]
+  },
+  {
+   "kind": "emptyflag",
+   "place": "shell",
+   "flags": [
+    "",
+    "a"
+   ],
+   "rc": 0,
+   "services": [
+    "base",
+    "sa"
+   ]
+  },
+  {
+   "kind": "spelling",
+   "place": "dotenv",
+   "value": "a,b",
+   "rc": 0,
+   "services": [
+    "base",
+    "sa",
+    "sb"
+   ]
+  },
+  {
+   "kind": "spelling",
+   "place": "shell",
+   "value": "a,b",
+   "rc": 0,
+   "services": [
+    "base",
+    "sa",
+    "sb"
+   ]
+  },
+  {
+   "kind": "spelling",
+   "place": "dotenv",
+   "value": "a, b",
+   "rc": 0,
+   "services": [
+    "base",
+    "sa",
+    "sb"
+   ]
+  },
+  {
+   "kind": "spelling",
+   "place": "shell",
+   "value": "a, b",
+   "rc": 0,
+   "services": [
+    "base",
+    "sa",
+    "sb"
+   ]
+  },
+  {
+   "kind": "spelling",
+   "place": "dotenv",
+   "value": " a ,b ",
+   "rc": 0,
+   "services": [
+    "base",
+    "sa",
+    "sb"
+   ]
+  },
+  {
+   "kind": "spelling",
+   "place": "shell",
+   "value": " a ,b ",
+   "rc": 0,
+   "services": [
+    "base",
+    "sa",
+    "sb"
+   ]
+  },
+  {
+   "kind": "spelling",
+   "place": "dotenv",
+   "value": "a,,b",
+   "rc": 0,
+   "services": [
+    "base",
+    "sa",
+    "sb"
+   ]
+  },
+  {
+   "kind": "spelling",
+   "place": "shell",
+   "value": "a,,b",
+   "rc": 0,
+   "services": [
+    "base",
+    "sa",
+    "sb"
+   ]
+  },
+  {
+   "kind": "spelling",
+   "place": "dotenv",
+   "value": ",",
+   "rc": 0,
+   "services": [
+    "base"
+   ]
+  },
+  {
+   "kind": "spelling",
+   "place": "shell",
+   "value": ",",
+   "rc": 0,
+   "services": [
+    "base"
+   ]
+  },
+  {
+   "kind": "spelling",
+   "place": "dotenv",
+   "value": "*",
+   "rc": 0,
+   "services": [
+    "base",
+    "sa",
+    "sb",
+    "sc",
+    "sd"
+   ]
+  },
+  {
+   "kind": "spelling",
+   "place": "shell",
+   "value": "*",
+   "rc": 0,
+   "services": [
+    "base",
+    "sa",
+    "sb",
+    "sc",
+    "sd"
+   ]
+  },
+  {
+   "kind": "spelling",
+   "place": "dotenv",
+   "value": "a,*",
+   "rc": 0,
+   "services": [
+    "base",
+    "sa",
+    "sb",
+    "sc",
+    "sd"
+   ]
+  },
+  {
+   "kind": "spelling",
+   "place": "shell",
+   "value": "a,*",
+   "rc": 0,
+   "services": [
+    "base",
+    "sa",
+    "sb",
+    "sc",
+    "sd"
+   ]
+  },
+  {
+   "kind": "spelling",
+   "place": "dotenv",
+   "value": "nosuch",
+   "rc": 0,
+   "services": [
+    "base"
+   ]
+  },
+  {
+   "kind": "spelling",
+   "place": "shell",
+   "value": "nosuch",
+   "rc": 0,
+   "services": [
+    "base"
+   ]
+  },
+  {
+   "kind": "spelling",
+   "place": "dotenv",
+   "value": "a b",
+   "rc": 0,
+   "services": [
+    "base"
+   ]
+  },
+  {
+   "kind": "spelling",
+   "place": "shell",
+   "value": "a b",
+   "rc": 0,
+   "services": [
+    "base"
+   ]
+  },
+  {
+   "kind": "spelling",
+   "place": "dotenv",
+   "value": "\"a,b\"",
+   "rc": 0,
+   "services": [
+    "base",
+    "sa",
+    "sb"
+   ]
+  },
+  {
+   "kind": "spelling",
+   "place": "shell",
+   "value": "\"a,b\"",
+   "rc": 0,
+   "services": [
+    "base"
+   ]
+  },
+  {
+   "kind": "spelling",
+   "place": "dotenv",
+   "value": "'a'",
+   "rc": 0,
+   "services": [
+    "base",
+    "sa"
+   ]
+  },
+  {
+   "kind": "spelling",
+   "place": "shell",
+   "value": "'a'",
+   "rc": 0,
+   "services": [
+    "base"
+   ]
+  }
+ ]
+}

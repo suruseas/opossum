@@ -1,0 +1,2295 @@
+{
+ "docker_compose": "5.5.1",
+ "cells": [
+  {
+   "kind": "var",
+   "how": "composefile",
+   "cwd": "nofile",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "var",
+   "how": "composefile",
+   "cwd": "nofile",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "subv"
+  },
+  {
+   "kind": "var",
+   "how": "composefile",
+   "cwd": "nofile",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "var",
+   "how": "composefile",
+   "cwd": "noline",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "var",
+   "how": "composefile",
+   "cwd": "noline",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "subv"
+  },
+  {
+   "kind": "var",
+   "how": "composefile",
+   "cwd": "noline",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "var",
+   "how": "composefile",
+   "cwd": "value",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "cwdv"
+  },
+  {
+   "kind": "var",
+   "how": "composefile",
+   "cwd": "value",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "cwdv"
+  },
+  {
+   "kind": "var",
+   "how": "composefile",
+   "cwd": "value",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "cwdv"
+  },
+  {
+   "kind": "var",
+   "how": "composefile",
+   "cwd": "empty",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "var",
+   "how": "composefile",
+   "cwd": "empty",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "var",
+   "how": "composefile",
+   "cwd": "empty",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "var",
+   "how": "dotenv",
+   "cwd": "nofile",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "var",
+   "how": "dotenv",
+   "cwd": "nofile",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "subv"
+  },
+  {
+   "kind": "var",
+   "how": "dotenv",
+   "cwd": "nofile",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "var",
+   "how": "dotenv",
+   "cwd": "noline",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "var",
+   "how": "dotenv",
+   "cwd": "noline",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "subv"
+  },
+  {
+   "kind": "var",
+   "how": "dotenv",
+   "cwd": "noline",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "var",
+   "how": "dotenv",
+   "cwd": "value",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "cwdv"
+  },
+  {
+   "kind": "var",
+   "how": "dotenv",
+   "cwd": "value",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "cwdv"
+  },
+  {
+   "kind": "var",
+   "how": "dotenv",
+   "cwd": "value",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "cwdv"
+  },
+  {
+   "kind": "var",
+   "how": "dotenv",
+   "cwd": "empty",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "var",
+   "how": "dotenv",
+   "cwd": "empty",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "var",
+   "how": "dotenv",
+   "cwd": "empty",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "var",
+   "how": "flag",
+   "cwd": "nofile",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "var",
+   "how": "flag",
+   "cwd": "nofile",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "subv"
+  },
+  {
+   "kind": "var",
+   "how": "flag",
+   "cwd": "nofile",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "var",
+   "how": "flag",
+   "cwd": "noline",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "var",
+   "how": "flag",
+   "cwd": "noline",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "subv"
+  },
+  {
+   "kind": "var",
+   "how": "flag",
+   "cwd": "noline",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "var",
+   "how": "flag",
+   "cwd": "value",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "var",
+   "how": "flag",
+   "cwd": "value",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "subv"
+  },
+  {
+   "kind": "var",
+   "how": "flag",
+   "cwd": "value",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "var",
+   "how": "flag",
+   "cwd": "empty",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "var",
+   "how": "flag",
+   "cwd": "empty",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "subv"
+  },
+  {
+   "kind": "var",
+   "how": "flag",
+   "cwd": "empty",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "var",
+   "how": "envfile",
+   "cwd": "nofile",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "var",
+   "how": "envfile",
+   "cwd": "nofile",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "var",
+   "how": "envfile",
+   "cwd": "nofile",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "var",
+   "how": "envfile",
+   "cwd": "noline",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "var",
+   "how": "envfile",
+   "cwd": "noline",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "var",
+   "how": "envfile",
+   "cwd": "noline",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "var",
+   "how": "envfile",
+   "cwd": "value",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "var",
+   "how": "envfile",
+   "cwd": "value",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "var",
+   "how": "envfile",
+   "cwd": "value",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "var",
+   "how": "envfile",
+   "cwd": "empty",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "var",
+   "how": "envfile",
+   "cwd": "empty",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "var",
+   "how": "envfile",
+   "cwd": "empty",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "composefile",
+   "cwd": "nofile",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "composefile",
+   "cwd": "nofile",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "subname",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "composefile",
+   "cwd": "nofile",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "composefile",
+   "cwd": "noline",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "composefile",
+   "cwd": "noline",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "subname",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "composefile",
+   "cwd": "noline",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "composefile",
+   "cwd": "value",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "cwdname",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "composefile",
+   "cwd": "value",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "cwdname",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "composefile",
+   "cwd": "value",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "cwdname",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "composefile",
+   "cwd": "empty",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "composefile",
+   "cwd": "empty",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "composefile",
+   "cwd": "empty",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "dotenv",
+   "cwd": "nofile",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "dotenv",
+   "cwd": "nofile",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "subname",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "dotenv",
+   "cwd": "nofile",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "dotenv",
+   "cwd": "noline",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "dotenv",
+   "cwd": "noline",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "subname",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "dotenv",
+   "cwd": "noline",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "dotenv",
+   "cwd": "value",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "cwdname",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "dotenv",
+   "cwd": "value",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "cwdname",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "dotenv",
+   "cwd": "value",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "cwdname",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "dotenv",
+   "cwd": "empty",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "dotenv",
+   "cwd": "empty",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "dotenv",
+   "cwd": "empty",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "flag",
+   "cwd": "nofile",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "flag",
+   "cwd": "nofile",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "subname",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "flag",
+   "cwd": "nofile",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "flag",
+   "cwd": "noline",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "flag",
+   "cwd": "noline",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "subname",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "flag",
+   "cwd": "noline",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "flag",
+   "cwd": "value",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "flag",
+   "cwd": "value",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "subname",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "flag",
+   "cwd": "value",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "flag",
+   "cwd": "empty",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "flag",
+   "cwd": "empty",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "subname",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "flag",
+   "cwd": "empty",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "envfile",
+   "cwd": "nofile",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "envfile",
+   "cwd": "nofile",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "envfile",
+   "cwd": "nofile",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "envfile",
+   "cwd": "noline",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "envfile",
+   "cwd": "noline",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "envfile",
+   "cwd": "noline",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "envfile",
+   "cwd": "value",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "envfile",
+   "cwd": "value",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "envfile",
+   "cwd": "value",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "envfile",
+   "cwd": "empty",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "envfile",
+   "cwd": "empty",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "name",
+   "how": "envfile",
+   "cwd": "empty",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "composefile",
+   "cwd": "nofile",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "composefile",
+   "cwd": "nofile",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base",
+    "sd"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "composefile",
+   "cwd": "nofile",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "composefile",
+   "cwd": "noline",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "composefile",
+   "cwd": "noline",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base",
+    "sd"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "composefile",
+   "cwd": "noline",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "composefile",
+   "cwd": "value",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base",
+    "sc"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "composefile",
+   "cwd": "value",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base",
+    "sc"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "composefile",
+   "cwd": "value",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base",
+    "sc"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "composefile",
+   "cwd": "empty",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "composefile",
+   "cwd": "empty",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "composefile",
+   "cwd": "empty",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "dotenv",
+   "cwd": "nofile",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "dotenv",
+   "cwd": "nofile",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base",
+    "sd"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "dotenv",
+   "cwd": "nofile",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "dotenv",
+   "cwd": "noline",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "dotenv",
+   "cwd": "noline",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base",
+    "sd"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "dotenv",
+   "cwd": "noline",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "dotenv",
+   "cwd": "value",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base",
+    "sc"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "dotenv",
+   "cwd": "value",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base",
+    "sc"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "dotenv",
+   "cwd": "value",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base",
+    "sc"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "dotenv",
+   "cwd": "empty",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "dotenv",
+   "cwd": "empty",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "dotenv",
+   "cwd": "empty",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "flag",
+   "cwd": "nofile",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "flag",
+   "cwd": "nofile",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base",
+    "sd"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "flag",
+   "cwd": "nofile",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "flag",
+   "cwd": "noline",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "flag",
+   "cwd": "noline",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base",
+    "sd"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "flag",
+   "cwd": "noline",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "flag",
+   "cwd": "value",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "flag",
+   "cwd": "value",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base",
+    "sd"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "flag",
+   "cwd": "value",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "flag",
+   "cwd": "empty",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "flag",
+   "cwd": "empty",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base",
+    "sd"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "flag",
+   "cwd": "empty",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "envfile",
+   "cwd": "nofile",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "envfile",
+   "cwd": "nofile",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "envfile",
+   "cwd": "nofile",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "envfile",
+   "cwd": "noline",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "envfile",
+   "cwd": "noline",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "envfile",
+   "cwd": "noline",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "envfile",
+   "cwd": "value",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "envfile",
+   "cwd": "value",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "envfile",
+   "cwd": "value",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "envfile",
+   "cwd": "empty",
+   "sub": "nofile",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "envfile",
+   "cwd": "empty",
+   "sub": "value",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "kind": "profiles",
+   "how": "envfile",
+   "cwd": "empty",
+   "sub": "empty",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  }
+ ],
+ "extras": [
+  {
+   "group": "direction",
+   "kind": "var",
+   "label": "sub sees cwd",
+   "cwdenv": "X=cwdv\n",
+   "subenv": "V=${X}\n",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "cwdv"
+  },
+  {
+   "group": "direction",
+   "kind": "var",
+   "label": "cwd does not see sub",
+   "cwdenv": "V=${X}\n",
+   "subenv": "X=subv\n",
+   "rc": 0,
+   "warned": true,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "group": "direction",
+   "kind": "var",
+   "label": "cwd wins, and sees itself",
+   "cwdenv": "X=cwdv\nV=${X}\n",
+   "subenv": "X=subv\n",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "cwdv"
+  },
+  {
+   "group": "direction",
+   "kind": "var",
+   "label": "sub sees cwd over itself",
+   "cwdenv": "X=cwdv\n",
+   "subenv": "X=subv\nV=${X}\n",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "cwdv"
+  },
+  {
+   "group": "order",
+   "kind": "var",
+   "label": "sub sees its own line above",
+   "cwdenv": "OTHER=1\n",
+   "subenv": "Y=subv\nV=${Y}\n",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "subv"
+  },
+  {
+   "group": "order",
+   "kind": "var",
+   "label": "sub does not see its own line below",
+   "cwdenv": "OTHER=1\n",
+   "subenv": "V=${Y}\nY=subv\n",
+   "rc": 0,
+   "warned": true,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "group": "order",
+   "kind": "var",
+   "label": "sub sees cwd over its own line above",
+   "cwdenv": "Y=cwdv\n",
+   "subenv": "Y=subv\nV=${Y}\n",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "cwdv"
+  },
+  {
+   "group": "shell",
+   "kind": "var",
+   "label": "shell value",
+   "cwdenv": "OTHER=1\n",
+   "subenv": "V=subv\n",
+   "shell": {
+    "V": "shellv"
+   },
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "shellv"
+  },
+  {
+   "group": "shell",
+   "kind": "var",
+   "label": "shell empty",
+   "cwdenv": "OTHER=1\n",
+   "subenv": "V=subv\n",
+   "shell": {
+    "V": ""
+   },
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "group": "direction",
+   "kind": "name",
+   "label": "sub sees cwd",
+   "cwdenv": "X=cwdname\n",
+   "subenv": "COMPOSE_PROJECT_NAME=${X}\n",
+   "rc": 0,
+   "warned": false,
+   "name": "cwdname",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "group": "direction",
+   "kind": "name",
+   "label": "cwd does not see sub",
+   "cwdenv": "COMPOSE_PROJECT_NAME=${X}\n",
+   "subenv": "X=subname\n",
+   "rc": 0,
+   "warned": true,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "group": "direction",
+   "kind": "name",
+   "label": "cwd wins, and sees itself",
+   "cwdenv": "X=cwdname\nCOMPOSE_PROJECT_NAME=${X}\n",
+   "subenv": "X=subname\n",
+   "rc": 0,
+   "warned": false,
+   "name": "cwdname",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "group": "direction",
+   "kind": "name",
+   "label": "sub sees cwd over itself",
+   "cwdenv": "X=cwdname\n",
+   "subenv": "X=subname\nCOMPOSE_PROJECT_NAME=${X}\n",
+   "rc": 0,
+   "warned": false,
+   "name": "cwdname",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "group": "order",
+   "kind": "name",
+   "label": "sub sees its own line above",
+   "cwdenv": "OTHER=1\n",
+   "subenv": "Y=subname\nCOMPOSE_PROJECT_NAME=${Y}\n",
+   "rc": 0,
+   "warned": false,
+   "name": "subname",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "group": "order",
+   "kind": "name",
+   "label": "sub does not see its own line below",
+   "cwdenv": "OTHER=1\n",
+   "subenv": "COMPOSE_PROJECT_NAME=${Y}\nY=subname\n",
+   "rc": 0,
+   "warned": true,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "group": "order",
+   "kind": "name",
+   "label": "sub sees cwd over its own line above",
+   "cwdenv": "Y=cwdname\n",
+   "subenv": "Y=subname\nCOMPOSE_PROJECT_NAME=${Y}\n",
+   "rc": 0,
+   "warned": false,
+   "name": "cwdname",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "group": "shell",
+   "kind": "name",
+   "label": "shell value",
+   "cwdenv": "OTHER=1\n",
+   "subenv": "COMPOSE_PROJECT_NAME=subname\n",
+   "shell": {
+    "COMPOSE_PROJECT_NAME": "shellv"
+   },
+   "rc": 0,
+   "warned": false,
+   "name": "shellv",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "group": "shell",
+   "kind": "name",
+   "label": "shell empty",
+   "cwdenv": "OTHER=1\n",
+   "subenv": "COMPOSE_PROJECT_NAME=subname\n",
+   "shell": {
+    "COMPOSE_PROJECT_NAME": ""
+   },
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "group": "direction",
+   "kind": "profiles",
+   "label": "sub sees cwd",
+   "cwdenv": "X=c\n",
+   "subenv": "COMPOSE_PROFILES=${X}\n",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base",
+    "sc"
+   ],
+   "V": "unset"
+  },
+  {
+   "group": "direction",
+   "kind": "profiles",
+   "label": "cwd does not see sub",
+   "cwdenv": "COMPOSE_PROFILES=${X}\n",
+   "subenv": "X=d\n",
+   "rc": 0,
+   "warned": true,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "group": "direction",
+   "kind": "profiles",
+   "label": "cwd wins, and sees itself",
+   "cwdenv": "X=c\nCOMPOSE_PROFILES=${X}\n",
+   "subenv": "X=d\n",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base",
+    "sc"
+   ],
+   "V": "unset"
+  },
+  {
+   "group": "direction",
+   "kind": "profiles",
+   "label": "sub sees cwd over itself",
+   "cwdenv": "X=c\n",
+   "subenv": "X=d\nCOMPOSE_PROFILES=${X}\n",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base",
+    "sc"
+   ],
+   "V": "unset"
+  },
+  {
+   "group": "order",
+   "kind": "profiles",
+   "label": "sub sees its own line above",
+   "cwdenv": "OTHER=1\n",
+   "subenv": "Y=d\nCOMPOSE_PROFILES=${Y}\n",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base",
+    "sd"
+   ],
+   "V": "unset"
+  },
+  {
+   "group": "order",
+   "kind": "profiles",
+   "label": "sub does not see its own line below",
+   "cwdenv": "OTHER=1\n",
+   "subenv": "COMPOSE_PROFILES=${Y}\nY=d\n",
+   "rc": 0,
+   "warned": true,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  },
+  {
+   "group": "order",
+   "kind": "profiles",
+   "label": "sub sees cwd over its own line above",
+   "cwdenv": "Y=c\n",
+   "subenv": "Y=d\nCOMPOSE_PROFILES=${Y}\n",
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base",
+    "sc"
+   ],
+   "V": "unset"
+  },
+  {
+   "group": "shell",
+   "kind": "profiles",
+   "label": "shell value",
+   "cwdenv": "OTHER=1\n",
+   "subenv": "COMPOSE_PROFILES=d\n",
+   "shell": {
+    "COMPOSE_PROFILES": "c"
+   },
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base",
+    "sc"
+   ],
+   "V": "unset"
+  },
+  {
+   "group": "shell",
+   "kind": "profiles",
+   "label": "shell empty",
+   "cwdenv": "OTHER=1\n",
+   "subenv": "COMPOSE_PROFILES=d\n",
+   "shell": {
+    "COMPOSE_PROFILES": ""
+   },
+   "rc": 0,
+   "warned": false,
+   "name": "sub",
+   "services": [
+    "base"
+   ],
+   "V": "unset"
+  }
+ ]
+}

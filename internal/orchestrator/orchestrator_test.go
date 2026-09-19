@@ -567,7 +567,7 @@ func TestUpBuildsAndTags(t *testing.T) {
 		t.Fatalf("Up: %v", err)
 	}
 	lines := log()
-	if !hasLine(lines, "build --progress plain -t demo-api:latest /ctx") {
+	if !hasLine(lines, "build --progress plain -t demo-api:latest -l opossum.project=demo /ctx") {
 		t.Errorf("expected build with project-scoped tag, got %v", lines)
 	}
 	// The built image tag is what gets run.
@@ -588,7 +588,7 @@ func TestUpBuildTargetFlag(t *testing.T) {
 	if err := o.Up(true); err != nil {
 		t.Fatalf("Up: %v", err)
 	}
-	if !hasLine(log(), "build --progress plain -t demo-api:latest --target builder /ctx") {
+	if !hasLine(log(), "build --progress plain -t demo-api:latest -l opossum.project=demo --target builder /ctx") {
 		t.Errorf("expected build to pass --target builder, got %v", log())
 	}
 }
@@ -630,7 +630,7 @@ func TestBuildContextUnderTmpOrASymlinkIsBuiltWithoutResolvingSymlinks(t *testin
 			if strings.Contains(out.String(), "build context") || strings.Contains(out.String(), "[OPSM-3") {
 				t.Errorf("no warning about the build context any more, got:\n%s", out.String())
 			}
-			if !hasLine(log(), "build --progress plain -t demo-api:latest "+tc.want) {
+			if !hasLine(log(), "build --progress plain -t demo-api:latest -l opossum.project=demo "+tc.want) {
 				t.Errorf("context %q must be built as %q, got %v", tc.ctx, tc.want, log())
 			}
 		})
@@ -928,7 +928,7 @@ func TestBuildAndPullSelectByServiceKind(t *testing.T) {
 	}
 	lines := log()
 	// Only the build service is built; the image-only service is skipped.
-	if !hasLine(lines, "build --progress plain -t demo-api:latest /ctx") {
+	if !hasLine(lines, "build --progress plain -t demo-api:latest -l opossum.project=demo /ctx") {
 		t.Errorf("expected api to be built, got %v", lines)
 	}
 	if countLines(lines, "build ") != 1 {
@@ -2752,7 +2752,7 @@ func TestUpProfilesDependencyOnDisabledErrors(t *testing.T) {
 	// Held with both names in their places: which service depends and which
 	// is gated is what the reader acts on, and exchanged they read as sound
 	// English pointing at the wrong service (#559).
-	if want := `service "web" depends on "helper", whose profile is not active — enable it with --profile or COMPOSE_PROFILES, or name it explicitly`; err == nil || !strings.Contains(err.Error(), want) {
+	if want := `service "web" depends on "helper", whose profile is not active — name it explicitly, or enable its profile beside the ones this run has active: with another --profile in a run that has one, or in COMPOSE_PROFILES in a run with no --profile — where this run reads it, since a COMPOSE_PROFILES in the shell replaces one in the .env, as the flag replaces both (none of them add up)`; err == nil || !strings.Contains(err.Error(), want) {
 		t.Fatalf("expected a disabled-dependency error saying %q, got %v", want, err)
 	}
 }
@@ -2801,7 +2801,7 @@ func TestRunProfilesDependencyOnDisabledErrors(t *testing.T) {
 		"helper": {Image: "helper:latest", Profiles: []string{"opt"}},
 	})
 	err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).RunOneOff("web", nil, orchestrator.RunOneOffOptions{})
-	if want := `service "web" depends on "helper", whose profile is not active — enable it with --profile or COMPOSE_PROFILES, or name it explicitly`; err == nil || !strings.Contains(err.Error(), want) {
+	if want := `service "web" depends on "helper", whose profile is not active — enable its profile beside the ones this run has active: with another --profile in a run that has one, or in COMPOSE_PROFILES in a run with no --profile — where this run reads it, since a COMPOSE_PROFILES in the shell replaces one in the .env, as the flag replaces both (none of them add up)`; err == nil || !strings.Contains(err.Error(), want) {
 		t.Fatalf("run should error on a gated-inactive dependency saying %q, got %v", want, err)
 	}
 }

@@ -125,7 +125,7 @@ docker compose build       # まだビルドしていなければ（イメージ
 opossum up --from-docker-compose   # ビルド済みイメージを Docker から取り込んで起動
 ```
 
-ビルド済みイメージの名前は `docker compose` も opossum も同じ `<project>-<service>` 形式で、プロジェクト名の既定はどちらもディレクトリ名です。そのため取り込んだイメージがそのまま `up` で使われます。ただしディレクトリ名に `_` や `.` が含まれると2つのツールで正規化が食い違うので、その場合は両方のコマンドに **同じ** `-p <name>` を渡してください。
+ビルド済みイメージの名前は `docker compose` も opossum も同じで（service に `image:` があればその名前、無ければ `<project>-<service>` 形式）、プロジェクト名もどちらも同じ所から決めます（`-p`、`COMPOSE_PROJECT_NAME`、compose の `name:`、ディレクトリ名の順）。そのため取り込んだイメージがそのまま `up` で使われます。ただしディレクトリ名に `_` や `.` が含まれると2つのツールで正規化が食い違います。opossum は `-p` の値でもこれらの文字を書き換えるので（`-p my_app` は opossum では `my-app`、docker compose では `my_app`）、その場合は両方のコマンドに、`_` も `.` も含まない小文字だけの **同じ** `-p <name>` を渡してください（大文字を含む `-p` を docker compose は断り、opossum は黙って小文字にします）。
 
 これだけで、同じプロジェクトが Apple `container` の上で動きます。操作コマンドも見慣れたものです：
 
@@ -185,7 +185,7 @@ opossum -f path/to/compose.yaml up      # compose ファイルを指定
 opossum -p myproj up                     # プロジェクト名を上書き
 ```
 
-`-f` を省くと、opossum は作業ディレクトリの compose ファイルを docker-compose と同じ優先順（`compose.yaml`、`compose.yml`、`docker-compose.yaml`、`docker-compose.yml`）で探します。手元の `docker-compose.yml` はそのまま動きます。
+`-f` も `COMPOSE_FILE`（docker compose と同じく shell か `.env` から読みます）も無ければ、opossum は作業ディレクトリの compose ファイルを docker-compose と同じ優先順（`compose.yaml`、`compose.yml`、`docker-compose.yaml`、`docker-compose.yml`）で探します。手元の `docker-compose.yml` はそのまま動きます。
 
 同梱の例（ビルド不要の `hello.yaml` とフル機能の `compose.yaml`）で試せます。各サブコマンドの実例は [`examples/README.md`](examples/README.md) にあります：
 

@@ -1,0 +1,581 @@
+{
+ "docker_compose": "5.5.1",
+ "cells": [
+  {
+   "source": "flag",
+   "where": "cwd",
+   "cwdname": "absent",
+   "subname": false,
+   "rc": 0,
+   "name": "proj",
+   "services": [
+    "target"
+   ],
+   "V": "from-cwd-env"
+  },
+  {
+   "source": "flag",
+   "where": "cwd",
+   "cwdname": "absent",
+   "subname": true,
+   "rc": 0,
+   "name": "proj",
+   "services": [
+    "target"
+   ],
+   "V": "from-cwd-env"
+  },
+  {
+   "source": "flag",
+   "where": "cwd",
+   "cwdname": "value",
+   "subname": false,
+   "rc": 0,
+   "name": "cwdname",
+   "services": [
+    "target"
+   ],
+   "V": "from-cwd-env"
+  },
+  {
+   "source": "flag",
+   "where": "cwd",
+   "cwdname": "value",
+   "subname": true,
+   "rc": 0,
+   "name": "cwdname",
+   "services": [
+    "target"
+   ],
+   "V": "from-cwd-env"
+  },
+  {
+   "source": "flag",
+   "where": "cwd",
+   "cwdname": "empty",
+   "subname": false,
+   "rc": 0,
+   "name": "proj",
+   "services": [
+    "target"
+   ],
+   "V": "from-cwd-env"
+  },
+  {
+   "source": "flag",
+   "where": "cwd",
+   "cwdname": "empty",
+   "subname": true,
+   "rc": 0,
+   "name": "proj",
+   "services": [
+    "target"
+   ],
+   "V": "from-cwd-env"
+  },
+  {
+   "source": "flag",
+   "where": "other",
+   "cwdname": "absent",
+   "subname": false,
+   "rc": 0,
+   "name": "sub",
+   "services": [
+    "target"
+   ],
+   "V": "from-sub-env"
+  },
+  {
+   "source": "flag",
+   "where": "other",
+   "cwdname": "absent",
+   "subname": true,
+   "rc": 0,
+   "name": "subname",
+   "services": [
+    "target"
+   ],
+   "V": "from-sub-env"
+  },
+  {
+   "source": "flag",
+   "where": "other",
+   "cwdname": "value",
+   "subname": false,
+   "rc": 0,
+   "name": "sub",
+   "services": [
+    "target"
+   ],
+   "V": "from-sub-env"
+  },
+  {
+   "source": "flag",
+   "where": "other",
+   "cwdname": "value",
+   "subname": true,
+   "rc": 0,
+   "name": "subname",
+   "services": [
+    "target"
+   ],
+   "V": "from-sub-env"
+  },
+  {
+   "source": "flag",
+   "where": "other",
+   "cwdname": "empty",
+   "subname": false,
+   "rc": 0,
+   "name": "sub",
+   "services": [
+    "target"
+   ],
+   "V": "from-sub-env"
+  },
+  {
+   "source": "flag",
+   "where": "other",
+   "cwdname": "empty",
+   "subname": true,
+   "rc": 0,
+   "name": "subname",
+   "services": [
+    "target"
+   ],
+   "V": "from-sub-env"
+  },
+  {
+   "source": "shell",
+   "where": "cwd",
+   "cwdname": "absent",
+   "subname": false,
+   "rc": 0,
+   "name": "proj",
+   "services": [
+    "target"
+   ],
+   "V": "from-cwd-env"
+  },
+  {
+   "source": "shell",
+   "where": "cwd",
+   "cwdname": "absent",
+   "subname": true,
+   "rc": 0,
+   "name": "proj",
+   "services": [
+    "target"
+   ],
+   "V": "from-cwd-env"
+  },
+  {
+   "source": "shell",
+   "where": "cwd",
+   "cwdname": "value",
+   "subname": false,
+   "rc": 0,
+   "name": "cwdname",
+   "services": [
+    "target"
+   ],
+   "V": "from-cwd-env"
+  },
+  {
+   "source": "shell",
+   "where": "cwd",
+   "cwdname": "value",
+   "subname": true,
+   "rc": 0,
+   "name": "cwdname",
+   "services": [
+    "target"
+   ],
+   "V": "from-cwd-env"
+  },
+  {
+   "source": "shell",
+   "where": "cwd",
+   "cwdname": "empty",
+   "subname": false,
+   "rc": 0,
+   "name": "proj",
+   "services": [
+    "target"
+   ],
+   "V": "from-cwd-env"
+  },
+  {
+   "source": "shell",
+   "where": "cwd",
+   "cwdname": "empty",
+   "subname": true,
+   "rc": 0,
+   "name": "proj",
+   "services": [
+    "target"
+   ],
+   "V": "from-cwd-env"
+  },
+  {
+   "source": "shell",
+   "where": "other",
+   "cwdname": "absent",
+   "subname": false,
+   "rc": 0,
+   "name": "sub",
+   "services": [
+    "target"
+   ],
+   "V": "from-cwd-env"
+  },
+  {
+   "source": "shell",
+   "where": "other",
+   "cwdname": "absent",
+   "subname": true,
+   "rc": 0,
+   "name": "subname",
+   "services": [
+    "target"
+   ],
+   "V": "from-cwd-env"
+  },
+  {
+   "source": "shell",
+   "where": "other",
+   "cwdname": "value",
+   "subname": false,
+   "rc": 0,
+   "name": "cwdname",
+   "services": [
+    "target"
+   ],
+   "V": "from-cwd-env"
+  },
+  {
+   "source": "shell",
+   "where": "other",
+   "cwdname": "value",
+   "subname": true,
+   "rc": 0,
+   "name": "cwdname",
+   "services": [
+    "target"
+   ],
+   "V": "from-cwd-env"
+  },
+  {
+   "source": "shell",
+   "where": "other",
+   "cwdname": "empty",
+   "subname": false,
+   "rc": 0,
+   "name": "sub",
+   "services": [
+    "target"
+   ],
+   "V": "from-cwd-env"
+  },
+  {
+   "source": "shell",
+   "where": "other",
+   "cwdname": "empty",
+   "subname": true,
+   "rc": 0,
+   "name": "sub",
+   "services": [
+    "target"
+   ],
+   "V": "from-cwd-env"
+  },
+  {
+   "source": "dotenv",
+   "where": "cwd",
+   "cwdname": "absent",
+   "subname": false,
+   "rc": 0,
+   "name": "proj",
+   "services": [
+    "target"
+   ],
+   "V": "from-cwd-env"
+  },
+  {
+   "source": "dotenv",
+   "where": "cwd",
+   "cwdname": "absent",
+   "subname": true,
+   "rc": 0,
+   "name": "proj",
+   "services": [
+    "target"
+   ],
+   "V": "from-cwd-env"
+  },
+  {
+   "source": "dotenv",
+   "where": "cwd",
+   "cwdname": "value",
+   "subname": false,
+   "rc": 0,
+   "name": "cwdname",
+   "services": [
+    "target"
+   ],
+   "V": "from-cwd-env"
+  },
+  {
+   "source": "dotenv",
+   "where": "cwd",
+   "cwdname": "value",
+   "subname": true,
+   "rc": 0,
+   "name": "cwdname",
+   "services": [
+    "target"
+   ],
+   "V": "from-cwd-env"
+  },
+  {
+   "source": "dotenv",
+   "where": "cwd",
+   "cwdname": "empty",
+   "subname": false,
+   "rc": 0,
+   "name": "proj",
+   "services": [
+    "target"
+   ],
+   "V": "from-cwd-env"
+  },
+  {
+   "source": "dotenv",
+   "where": "cwd",
+   "cwdname": "empty",
+   "subname": true,
+   "rc": 0,
+   "name": "proj",
+   "services": [
+    "target"
+   ],
+   "V": "from-cwd-env"
+  },
+  {
+   "source": "dotenv",
+   "where": "other",
+   "cwdname": "absent",
+   "subname": false,
+   "rc": 0,
+   "name": "sub",
+   "services": [
+    "target"
+   ],
+   "V": "from-cwd-env"
+  },
+  {
+   "source": "dotenv",
+   "where": "other",
+   "cwdname": "absent",
+   "subname": true,
+   "rc": 0,
+   "name": "subname",
+   "services": [
+    "target"
+   ],
+   "V": "from-cwd-env"
+  },
+  {
+   "source": "dotenv",
+   "where": "other",
+   "cwdname": "value",
+   "subname": false,
+   "rc": 0,
+   "name": "cwdname",
+   "services": [
+    "target"
+   ],
+   "V": "from-cwd-env"
+  },
+  {
+   "source": "dotenv",
+   "where": "other",
+   "cwdname": "value",
+   "subname": true,
+   "rc": 0,
+   "name": "cwdname",
+   "services": [
+    "target"
+   ],
+   "V": "from-cwd-env"
+  },
+  {
+   "source": "dotenv",
+   "where": "other",
+   "cwdname": "empty",
+   "subname": false,
+   "rc": 0,
+   "name": "sub",
+   "services": [
+    "target"
+   ],
+   "V": "from-cwd-env"
+  },
+  {
+   "source": "dotenv",
+   "where": "other",
+   "cwdname": "empty",
+   "subname": true,
+   "rc": 0,
+   "name": "sub",
+   "services": [
+    "target"
+   ],
+   "V": "from-cwd-env"
+  },
+  {
+   "source": "envfile",
+   "where": "cwd",
+   "cwdname": "absent",
+   "subname": false,
+   "rc": 0,
+   "name": "proj",
+   "services": [
+    "target"
+   ],
+   "V": "from-envfile"
+  },
+  {
+   "source": "envfile",
+   "where": "cwd",
+   "cwdname": "absent",
+   "subname": true,
+   "rc": 0,
+   "name": "proj",
+   "services": [
+    "target"
+   ],
+   "V": "from-envfile"
+  },
+  {
+   "source": "envfile",
+   "where": "cwd",
+   "cwdname": "value",
+   "subname": false,
+   "rc": 0,
+   "name": "envfilename",
+   "services": [
+    "target"
+   ],
+   "V": "from-envfile"
+  },
+  {
+   "source": "envfile",
+   "where": "cwd",
+   "cwdname": "value",
+   "subname": true,
+   "rc": 0,
+   "name": "envfilename",
+   "services": [
+    "target"
+   ],
+   "V": "from-envfile"
+  },
+  {
+   "source": "envfile",
+   "where": "cwd",
+   "cwdname": "empty",
+   "subname": false,
+   "rc": 0,
+   "name": "proj",
+   "services": [
+    "target"
+   ],
+   "V": "from-envfile"
+  },
+  {
+   "source": "envfile",
+   "where": "cwd",
+   "cwdname": "empty",
+   "subname": true,
+   "rc": 0,
+   "name": "proj",
+   "services": [
+    "target"
+   ],
+   "V": "from-envfile"
+  },
+  {
+   "source": "envfile",
+   "where": "other",
+   "cwdname": "absent",
+   "subname": false,
+   "rc": 0,
+   "name": "sub",
+   "services": [
+    "target"
+   ],
+   "V": "from-envfile"
+  },
+  {
+   "source": "envfile",
+   "where": "other",
+   "cwdname": "absent",
+   "subname": true,
+   "rc": 0,
+   "name": "sub",
+   "services": [
+    "target"
+   ],
+   "V": "from-envfile"
+  },
+  {
+   "source": "envfile",
+   "where": "other",
+   "cwdname": "value",
+   "subname": false,
+   "rc": 0,
+   "name": "envfilename",
+   "services": [
+    "target"
+   ],
+   "V": "from-envfile"
+  },
+  {
+   "source": "envfile",
+   "where": "other",
+   "cwdname": "value",
+   "subname": true,
+   "rc": 0,
+   "name": "envfilename",
+   "services": [
+    "target"
+   ],
+   "V": "from-envfile"
+  },
+  {
+   "source": "envfile",
+   "where": "other",
+   "cwdname": "empty",
+   "subname": false,
+   "rc": 0,
+   "name": "sub",
+   "services": [
+    "target"
+   ],
+   "V": "from-envfile"
+  },
+  {
+   "source": "envfile",
+   "where": "other",
+   "cwdname": "empty",
+   "subname": true,
+   "rc": 0,
+   "name": "sub",
+   "services": [
+    "target"
+   ],
+   "V": "from-envfile"
+  }
+ ]
+}

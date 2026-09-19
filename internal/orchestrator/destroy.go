@@ -161,13 +161,18 @@ func (o *Orchestrator) DestroyPlanFor(keepOverlay, keepImages, keepLocal bool) (
 	if !keepImages {
 		seen := map[string]bool{}
 		for _, name := range order {
-			ref, _ := o.serviceImage(name, o.Project.Services[name])
-			if ref == "" || seen[ref] {
-				continue
-			}
-			seen[ref] = true
-			if o.rt.ImageExists(ref) {
-				p.Images = append(p.Images, ref)
+			svc := o.Project.Services[name]
+			ref, _ := o.serviceImage(name, svc)
+			// And the name a built image had before `image:` was read, which a
+			// project brought up back then still has it under.
+			for _, r := range []string{ref, o.formerBuiltImage(name, svc)} {
+				if r == "" || seen[r] {
+					continue
+				}
+				seen[r] = true
+				if o.rt.ImageExists(r) {
+					p.Images = append(p.Images, r)
+				}
 			}
 		}
 		sort.Strings(p.Images)

@@ -124,6 +124,7 @@ type configService struct {
 	Ports       []string             `yaml:"ports,omitempty"`
 	Restart     string               `yaml:"restart,omitempty"`
 	Volumes     []any                `yaml:"volumes,omitempty"`
+	VolumesFrom []string             `yaml:"volumes_from,omitempty"`
 	Tmpfs       []string             `yaml:"tmpfs,omitempty"`
 	MemLimit    string               `yaml:"mem_limit,omitempty"`
 	CPUs        string               `yaml:"cpus,omitempty"`
@@ -134,8 +135,10 @@ type configService struct {
 	ShmSize     string               `yaml:"shm_size,omitempty"`
 	Ulimits     map[string]any       `yaml:"ulimits,omitempty"`
 	ReadOnly    bool                 `yaml:"read_only,omitempty"`
+	TTY         bool                 `yaml:"tty,omitempty"`
 	CapAdd      []string             `yaml:"cap_add,omitempty"`
 	CapDrop     []string             `yaml:"cap_drop,omitempty"`
+	GroupAdd    []string             `yaml:"group_add,omitempty"`
 	NetworkMode string               `yaml:"network_mode,omitempty"`
 	MacAddress  string               `yaml:"mac_address,omitempty"`
 	Labels      map[string]string    `yaml:"labels,omitempty"`
@@ -153,8 +156,11 @@ type configBuild struct {
 	Target     string   `yaml:"target,omitempty"`
 }
 
+// configDep prints a dependency as docker compose prints one: the condition,
+// and `required` on every dependency, `true` where the file left it out.
 type configDep struct {
 	Condition string `yaml:"condition"`
+	Required  bool   `yaml:"required"`
 }
 
 type configHealthcheck struct {
@@ -192,6 +198,7 @@ func RenderConfig(p *Project) (string, error) {
 			Ports:       svc.Ports,
 			Restart:     svc.Restart,
 			Volumes:     configMounts(svc),
+			VolumesFrom: svc.VolumesFrom,
 			Tmpfs:       svc.Tmpfs,
 			MemLimit:    mem,
 			CPUs:        cpu,
@@ -202,8 +209,10 @@ func RenderConfig(p *Project) (string, error) {
 			ShmSize:     string(svc.ShmSize),
 			Ulimits:     ulimitMap(svc.Ulimits),
 			ReadOnly:    svc.ReadOnly,
+			TTY:         svc.TTY,
 			CapAdd:      svc.CapAdd,
 			CapDrop:     svc.CapDrop,
+			GroupAdd:    svc.GroupAdd,
 			NetworkMode: svc.NetworkMode,
 			MacAddress:  svc.MacAddress,
 			Labels:      labelMap(svc.Labels),
@@ -217,7 +226,7 @@ func RenderConfig(p *Project) (string, error) {
 		if len(svc.DependsOn) > 0 {
 			cs.DependsOn = map[string]configDep{}
 			for _, dep := range svc.DependsOn {
-				cs.DependsOn[dep.Name] = configDep{Condition: dep.Condition}
+				cs.DependsOn[dep.Name] = configDep{Condition: dep.Condition, Required: !dep.Optional}
 			}
 		}
 		if hc := svc.Healthcheck; hc != nil {
@@ -389,6 +398,14 @@ func configRefs(refs ConfigRefs) []any {
 // which has no short spelling that stays a volume and is printed in the long
 // form it was written in.
 func configMounts(svc *Service) []any {
+	// What was written under `volumes:`, not what `volumes_from` brought in:
+	// docker compose prints the borrowed mounts nowhere, `volumes_from` as
+	// written and the dependency it adds.
+	if len(svc.VolumesFrom) > 0 {
+		own := *svc
+		own.Volumes = svc.OwnVolumes
+		svc = &own
+	}
 	short := volumesWithNoCopy(svc)
 	nocopy := map[string]bool{}
 	for _, t := range svc.NoCopy {

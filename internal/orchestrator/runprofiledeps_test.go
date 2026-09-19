@@ -35,7 +35,7 @@ func startedNames(lines []string) []string {
 }
 
 func TestAOneOffRefusesADependencyBehindAnInactiveProfile(t *testing.T) {
-	const refusal = `service "web" depends on "db", whose profile is not active — enable it with --profile or COMPOSE_PROFILES, or name it explicitly`
+	const refusal = `service "web" depends on "db", whose profile is not active — enable its profile beside the ones this run has active: with another --profile in a run that has one, or in COMPOSE_PROFILES in a run with no --profile — where this run reads it, since a COMPOSE_PROFILES in the shell replaces one in the .env, as the flag replaces both (none of them add up)`
 	for _, shape := range []struct {
 		name     string
 		services func() map[string]*compose.Service

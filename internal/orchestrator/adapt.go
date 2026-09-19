@@ -372,8 +372,10 @@ func (o *Orchestrator) postgresDataDirFor(svc *compose.Service) dataDirDecision 
 func (o *Orchestrator) imageDataDir(svc *compose.Service) dataDirDecision {
 	if o.rt == nil || svc.Image == "" {
 		// Nobody to ask: a caller planning without a runtime (the plan is printed,
-		// not run). An empty Image is rare — the loader fills in a derived tag for a
-		// service that builds — but it costs nothing to answer the same way.
+		// not run). An empty Image is a service that builds and gives its image
+		// no name of its own; the name it is built under is put together from the
+		// project's, which this function is not given, so it is answered the same
+		// way.
 		return dataDirDecision{path: postgresDataDir, source: pgdataUnreachable}
 	}
 	env, ok := o.imageEnv(svc.Image)

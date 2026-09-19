@@ -68,6 +68,19 @@ var (
 )
 
 func TestLogsFollowEndsWhenTheContainerDoes(t *testing.T) {
+	// stream is how long the fake keeps a followed stream open, where a row
+	// does not say (LOGS_SLEEP). A follow that goes on is one that ran to
+	// the stream's end; a follow the container ended is over well before it.
+	const stream = 4 * time.Second
+	if stream%time.Second != 0 {
+		t.Fatal("stream is handed to the fake in whole seconds (LOGS_SLEEP)")
+	}
+	// endedWithin is how long a follow the container ended may take, where a
+	// row does not say. It has to stay under every row's stream, or the row
+	// could not tell the two apart (checked below). Its value, like the
+	// stream's, is not derived here: what each row spends of it is measured
+	// and tabled where the table is changed.
+	const endedWithin = 3 * time.Second
 	poll, settle, drain := orchestrator.LogsExitPoll, orchestrator.LogsExitSettle, orchestrator.LogsExitDrain
 	orchestrator.LogsExitPoll, orchestrator.LogsExitSettle, orchestrator.LogsExitDrain = 50*time.Millisecond, 300*time.Millisecond, 150*time.Millisecond
 	t.Cleanup(func() {
@@ -75,43 +88,44 @@ func TestLogsFollowEndsWhenTheContainerDoes(t *testing.T) {
 	})
 
 	type row struct {
-		name     string
-		services map[string]*compose.Service
-		follow   []string
-		before   func(rt *runtime.Runtime) // before the follow begins
-		during   func(rt *runtime.Runtime) // once the follow is under way
-		ended    bool                      // the follow ends well before the streams would
-		exited   []string                  // the `exited` lines, in any order
-		noFollow bool                      // read without --follow
-		env      []string                  // fake knobs for the row
-		lastLine string                    // the line that must come before `exited`, if any
-		poll     time.Duration             // this row's poll, when not the table's
-		at0      bool                      // `during` as soon as the lines are written
-		restart  bool                      // `during` is `opossum restart web`
-		slow     bool                      // the reader stalls
-		within   time.Duration             // ended within this (default 3 s); the row keeps its streams open a second longer
+		name      string
+		services  map[string]*compose.Service
+		follow    []string
+		before    func(rt *runtime.Runtime) // before the follow begins
+		during    func(rt *runtime.Runtime) // once the follow is under way
+		ended     bool                      // the follow ends well before the streams would
+		exited    []string                  // the `exited` lines, in any order
+		noFollow  bool                      // read without --follow
+		env       []string                  // fake knobs for the row
+		lastLine  string                    // the line that must come before `exited`, if any
+		poll      time.Duration             // this row's poll, when not the table's
+		at0       bool                      // `during` as soon as the lines are written
+		restart   bool                      // `during` is `opossum restart web`
+		slow      bool                      // the reader stalls
+		within    time.Duration             // ended within this (default endedWithin); the row keeps its streams open a second longer
+		prefixToo bool                      // run with --no-log-prefix as well, though no `exited` line is looked for
 	}
 	plain := func() *compose.Service { return &compose.Service{Image: "alpine:3.20"} }
 	restarting := func() *compose.Service { return &compose.Service{Image: "alpine:3.20", Restart: "always"} }
 	rows := []row{
 		{"stopped while followed", map[string]*compose.Service{"web": plain()}, []string{"web"}, nil,
-			func(rt *runtime.Runtime) { rt.Stop("web.demo.opossum") }, true, []string{"web-1"}, false, nil, "", 0, false, false, false, 0},
+			func(rt *runtime.Runtime) { rt.Stop("web.demo.opossum") }, true, []string{"web-1"}, false, nil, "", 0, false, false, false, 0, false},
 		{"deleted while followed", map[string]*compose.Service{"web": plain()}, []string{"web"}, nil,
-			func(rt *runtime.Runtime) { rt.Delete("web.demo.opossum") }, true, []string{"web-1"}, false, nil, "", 0, false, false, false, 0},
+			func(rt *runtime.Runtime) { rt.Delete("web.demo.opossum") }, true, []string{"web-1"}, false, nil, "", 0, false, false, false, 0, false},
 		{"already stopped when the follow began", map[string]*compose.Service{"web": plain()}, []string{"web"},
-			func(rt *runtime.Runtime) { rt.Stop("web.demo.opossum") }, nil, false, nil, false, nil, "", 0, false, false, false, 0},
+			func(rt *runtime.Runtime) { rt.Stop("web.demo.opossum") }, nil, false, nil, false, nil, "", 0, false, false, false, 0, true},
 		{"a restart: policy", map[string]*compose.Service{"web": restarting()}, []string{"web"}, nil,
-			func(rt *runtime.Runtime) { rt.Stop("web.demo.opossum") }, false, nil, false, nil, "", 0, false, false, false, 0},
+			func(rt *runtime.Runtime) { rt.Stop("web.demo.opossum") }, false, nil, false, nil, "", 0, false, false, false, 0, false},
 		{"two followed, one stopped", map[string]*compose.Service{"web": plain(), "db": plain()}, []string{"web", "db"}, nil,
-			func(rt *runtime.Runtime) { rt.Stop("web.demo.opossum") }, false, []string{"web-1"}, false, nil, "", 0, false, false, false, 0},
+			func(rt *runtime.Runtime) { rt.Stop("web.demo.opossum") }, false, []string{"web-1"}, false, nil, "", 0, false, false, false, 0, false},
 		{"two followed, both stopped", map[string]*compose.Service{"web": plain(), "db": plain()}, []string{"web", "db"}, nil,
-			func(rt *runtime.Runtime) { rt.Stop("web.demo.opossum"); rt.Stop("db.demo.opossum") }, true, []string{"web-1", "db-1"}, false, nil, "", 0, false, false, false, 0},
+			func(rt *runtime.Runtime) { rt.Stop("web.demo.opossum"); rt.Stop("db.demo.opossum") }, true, []string{"web-1", "db-1"}, false, nil, "", 0, false, false, false, 0, false},
 		{"one of two named, it stopped", map[string]*compose.Service{"web": plain(), "db": plain()}, []string{"web"}, nil,
-			func(rt *runtime.Runtime) { rt.Stop("web.demo.opossum") }, true, []string{"web-1"}, false, nil, "", 0, false, false, false, 0},
+			func(rt *runtime.Runtime) { rt.Stop("web.demo.opossum") }, true, []string{"web-1"}, false, nil, "", 0, false, false, false, 0, false},
 		// Without --follow the log is read to its end whatever the container
 		// does meanwhile (a long read, stopped part-way), and nothing is said.
 		{"stopped during a read without --follow", map[string]*compose.Service{"web": plain()}, []string{"web"}, nil,
-			func(rt *runtime.Runtime) { rt.Stop("web.demo.opossum") }, false, nil, true, nil, "", 0, false, false, false, 0},
+			func(rt *runtime.Runtime) { rt.Stop("web.demo.opossum") }, false, nil, true, nil, "", 0, false, false, false, 0, false},
 		// A restart leaves the container stopped for a moment and starts it
 		// again: the stream goes on (docker compose says `(restarting)` and
 		// follows on).
@@ -122,15 +136,17 @@ func TestLogsFollowEndsWhenTheContainerDoes(t *testing.T) {
 				rt.Start("web.demo.opossum")
 			}},
 		// What the runtime still hands over after the container has ended
-		// comes before `exited`, not cut off.
+		// comes before `exited`, not cut off. (The drips are timed from the
+		// follow's start, one row's under way at the stop and the other's
+		// starting after it; where the stop falls is in the log below.)
 		{name: "lines still coming after the stop", services: map[string]*compose.Service{"web": plain()}, follow: []string{"web"},
 			during: func(rt *runtime.Runtime) { rt.Stop("web.demo.opossum") }, ended: true, exited: []string{"web-1"},
-			env: []string{"LOGS_DRIP=40", "LOGS_DRIP_AFTER=900"}, lastLine: "drip 40 web.demo.opossum"},
+			env: []string{"LOGS_DRIP=40", "LOGS_DRIP_AFTER=300"}, lastLine: "drip 40 web.demo.opossum"},
 		// The lines still come after the stop is seen and settled: they are
 		// written, and `exited` after them (the stream is not cut on the end).
 		{name: "lines starting after the stop", services: map[string]*compose.Service{"web": plain()}, follow: []string{"web"},
 			during: func(rt *runtime.Runtime) { rt.Stop("web.demo.opossum") }, ended: true, exited: []string{"web-1"},
-			env: []string{"LOGS_DRIP=40", "LOGS_DRIP_AFTER=1150"}, lastLine: "drip 40 web.demo.opossum"},
+			env: []string{"LOGS_DRIP=40", "LOGS_DRIP_AFTER=550"}, lastLine: "drip 40 web.demo.opossum"},
 		// Stopped before the first tick after the follow began: it had been
 		// seen running at once, so the stop counts.
 		{name: "stopped before the first tick", services: map[string]*compose.Service{"web": plain()}, follow: []string{"web"},
@@ -155,7 +171,7 @@ func TestLogsFollowEndsWhenTheContainerDoes(t *testing.T) {
 		// quiet, and are not cut off.
 		{name: "a slow reader, lines still coming after the stop", services: map[string]*compose.Service{"web": plain()}, follow: []string{"web"},
 			during: func(rt *runtime.Runtime) { rt.Stop("web.demo.opossum") }, ended: true, exited: []string{"web-1"},
-			env: []string{"LOGS_DRIP=60", "LOGS_DRIP_AFTER=1150", "LOGS_SLEEP=8"}, lastLine: "drip 60 web.demo.opossum", slow: true, within: 7 * time.Second},
+			env: []string{"LOGS_DRIP=60", "LOGS_DRIP_AFTER=550", "LOGS_SLEEP=8"}, lastLine: "drip 60 web.demo.opossum", slow: true, within: 7 * time.Second},
 		// A restart that died part way left its marker, which nobody holds: a
 		// stop after it is the end.
 		{name: "a marker left by a restart that died", services: map[string]*compose.Service{"web": plain()}, follow: []string{"web"},
@@ -172,7 +188,8 @@ func TestLogsFollowEndsWhenTheContainerDoes(t *testing.T) {
 				rt.Stop("web.demo.opossum")
 			}, env: []string{"STOP_THEN_SLEEP_MS=800", "LOGS_SLEEP=8"}, ended: true, exited: []string{"web-1"}, within: 7 * time.Second},
 		// Restarting one service is not a reason to go on following another
-		// that stopped meanwhile.
+		// that stopped meanwhile. (db's restart holds the row for four seconds,
+		// so its stream stays open six: the row acts while it is followed.)
 		{name: "one stopped while another is restarted", services: map[string]*compose.Service{"web": plain(), "db": plain()}, follow: []string{"web", "db"},
 			during: func(rt *runtime.Runtime) {
 				var wg sync.WaitGroup
@@ -182,7 +199,7 @@ func TestLogsFollowEndsWhenTheContainerDoes(t *testing.T) {
 				go func() { defer wg.Done(); rt.Stop("web.demo.opossum") }()
 				expectExitedWithin("web-1", 2*time.Second)
 				wg.Wait()
-			}, env: []string{"STOP_THEN_SLEEP_MS=4000"}, exited: []string{"web-1"}},
+			}, env: []string{"STOP_THEN_SLEEP_MS=4000", "LOGS_SLEEP=6"}, exited: []string{"web-1"}},
 		// `opossum restart` of several services holds the followed one's
 		// marker for all of it: while another's stop, then another's start,
 		// keeps it stopped longer than the settle time, it is followed on.
@@ -238,16 +255,27 @@ func TestLogsFollowEndsWhenTheContainerDoes(t *testing.T) {
 						os.WriteFile(f, nil, 0o644)
 					}
 				}
-			}, false, nil, false, nil, "", 0, false, false, false, 0},
+			}, false, nil, false, nil, "", 0, false, false, false, 0, false},
 	}
 	for _, tc := range rows {
-		for _, noPrefix := range []bool{false, true} {
+		// --no-log-prefix changes the lines, not the end: it is run again only
+		// where an `exited` line (or a last line before it) is looked for — and
+		// on one row whose follow goes on, so that a prefix-less follow that
+		// counted every stream as ended (a mutation the rows with an `exited`
+		// line let through) is still caught.
+		variants := []bool{false}
+		if len(tc.exited) > 0 || tc.lastLine != "" || tc.prefixToo {
+			variants = append(variants, true)
+		}
+		for _, noPrefix := range variants {
 			t.Run(tc.name+map[bool]string{false: "", true: ", --no-log-prefix"}[noPrefix], func(t *testing.T) {
 				t.Setenv("XDG_STATE_HOME", t.TempDir())
 				rt, _ := fakeShim(t)
-				// The streams stay open 4 s, as a follow does; ending well
-				// before that is the container's end.
-				setShimEnv(rt, "LOGS_SLEEP=4", "INSPECT_FAIL_WHILE="+filepath.Join(t.TempDir(), "not-answering"))
+				// The stream stays open for stream, where the row does not say
+				// (LOGS_SLEEP): a follow that ends on the container's end is over
+				// within `within`, and one that goes on until its streams end
+				// takes at least stream. What each row takes is in the log below.
+				setShimEnv(rt, "LOGS_SLEEP="+strconv.Itoa(int(stream/time.Second)), "INSPECT_FAIL_WHILE="+filepath.Join(t.TempDir(), "not-answering"))
 				setShimEnv(rt, tc.env...)
 				if tc.before != nil {
 					tc.before(rt)
@@ -299,13 +327,13 @@ func TestLogsFollowEndsWhenTheContainerDoes(t *testing.T) {
 				go func() {
 					done <- o.Logs(tc.follow, runtime.LogsOptions{Follow: !tc.noFollow, NoLogPrefix: noPrefix})
 				}()
-				// Under way: every followed stream has written its line, and the
-				// state has been looked at a few times.
+				// Under way: every followed stream has written its line; a row
+				// that does not act at once waits eight polls more.
 				for i := 0; i < 200 && strings.Count(out.String(), "log-line") < len(tc.follow); i++ {
 					time.Sleep(10 * time.Millisecond)
 				}
 				if !tc.at0 {
-					time.Sleep(20 * orchestrator.LogsExitPoll)
+					time.Sleep(8 * orchestrator.LogsExitPoll)
 				}
 				if tc.during != nil {
 					tc.during(rt)
@@ -313,24 +341,52 @@ func TestLogsFollowEndsWhenTheContainerDoes(t *testing.T) {
 				if tc.restart {
 					restartOf("web")
 				}
+				// A row's action has to be over while the stream is still open,
+				// or it is acting on nothing — and a follow that goes on would
+				// pass for the wrong reason. The log below is said at once; the
+				// check is said once the follow has ended, so that a row which
+				// fails it has nothing left running into the next one (a follow
+				// that never ends is failed as it is).
+				rowStream := stream
+				for _, e := range tc.env {
+					if n, ok := strings.CutPrefix(e, "LOGS_SLEEP="); ok {
+						secs, err := strconv.Atoi(n)
+						if err != nil {
+							t.Fatal(err)
+						}
+						rowStream = time.Duration(secs) * time.Second
+					}
+				}
+				acted := time.Since(start)
+				// Said on every run, before the wait, so a `-v` log shows the
+				// row's action against its stream, even for a follow that
+				// never ends.
+				t.Logf("the row's action took %v of its %v stream", acted, rowStream)
 				var err error
 				select {
 				case err = <-done:
 				case <-time.After(20 * time.Second):
 					t.Fatal("the follow did not end")
 				}
+				if acted > rowStream {
+					t.Errorf("the row's action ran past the stream: %v of %v", acted, rowStream)
+				}
 				took := time.Since(start)
+				t.Logf("the follow took %v", took)
 				if err != nil {
 					t.Errorf("want a zero exit, got %v", err)
 				}
-				within := 3 * time.Second
+				within := endedWithin
 				if tc.within != 0 {
 					within = tc.within
+				}
+				if within >= rowStream {
+					t.Fatalf("the row's ended-within (%v) is not under its stream (%v): a follow that ran to the stream's end would pass as one the container ended", within, rowStream)
 				}
 				if tc.ended && took > within {
 					t.Errorf("want the follow ended by the container's end, took %v", took)
 				}
-				if !tc.ended && took < 3*time.Second {
+				if !tc.ended && took < rowStream-200*time.Millisecond {
 					t.Errorf("want the follow to go on until its streams end, it ended after %v", took)
 				}
 				var lines []string

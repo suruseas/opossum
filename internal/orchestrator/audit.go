@@ -91,7 +91,7 @@ func (o *Orchestrator) RunAudited(service string, command []string, opts RunOneO
 	// `up` below names the dependencies, so it would start one instead of
 	// refusing it (#1005). Before what is refused about the one-off itself, as
 	// docker compose v5.5.1 refuses those first.
-	if err := o.checkProjectLoads(map[string]bool{service: true}); err != nil {
+	if err := o.checkProjectLoads(map[string]bool{service: true}, false); err != nil {
 		return nil, err
 	}
 	// The one-off's name, for the same two reasons: a refusal spent on the run
@@ -129,6 +129,9 @@ func (o *Orchestrator) RunAudited(service string, command []string, opts RunOneO
 		return nil, err
 	}
 	if err := o.checkTmpfsOptions(made); err != nil {
+		return nil, err
+	}
+	if err := o.checkGroupAdd(made); err != nil {
 		return nil, err
 	}
 	report := &AuditReport{Service: service, Command: command}

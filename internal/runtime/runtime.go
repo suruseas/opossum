@@ -1040,6 +1040,11 @@ type BuildOptions struct {
 	Dockerfile string
 	Args       []string
 	Target     string // --target: multi-stage build stage
+	// Labels are `key=value` pairs put on the built image (`-l`). An image keeps
+	// them (measured on 1.4.1: `image inspect` answers with them), so they say
+	// afterwards which build made an image — a name alone does not, now that a
+	// built image can carry a name the compose file chose.
+	Labels []string
 	// Redo is the opossum command that led to this build (e.g. "opossum up"),
 	// echoed in recovery hints so the reader is told to retype what they actually
 	// typed. Empty means unknown: hints then name no command rather than a wrong
@@ -1052,6 +1057,9 @@ type BuildOptions struct {
 // advancing on screen instead of sitting on an in-place line that looks stuck.
 func (r *Runtime) Build(o BuildOptions) error {
 	args := []string{"build", "--progress", "plain", "-t", o.Tag}
+	for _, l := range o.Labels {
+		args = append(args, "-l", l)
+	}
 	if o.Dockerfile != "" {
 		args = append(args, "-f", o.Dockerfile)
 	}
@@ -1109,7 +1117,16 @@ type RunOptions struct {
 	// child sees an immediate EOF, which breaks stdin-driven tools (e.g. an MCP
 	// server speaking JSON-RPC over stdio).
 	Interactive bool
-	TTY         bool // -t: allocate a pseudo-terminal (only when our stdin is one)
+	TTY         bool // -t: a pseudo-terminal for the container's process
+	// Attached says the caller's own terminal stands behind that -t (a `run`
+	// typed at one): the child's stderr stays the terminal's own — stdin and
+	// stdout are the same either way — so nothing is captured and a failure
+	// comes back bare. Without it, or without -t, -t is the service's (`tty:
+	// true` under `up`) and a failure is read as any other foreground run's:
+	// stderr tee'd into a small buffer and the error wrapped with it, so a
+	// refused name or a missing image is told apart from a service that
+	// exited. Read together with TTY, as the name says; alone it does nothing.
+	Attached bool
 	// SSH forwards the host's SSH agent socket into the container (--ssh), so a
 	// service can clone/push private git over SSH using the host's keys without
 	// baking them into the image.
@@ -1117,6 +1134,7 @@ type RunOptions struct {
 	// Thin passthroughs of common compose run options to the matching
 	// `container run` flags.
 	User       string   // --user (name|uid[:gid])
+	GID        string   // --gid: one supplementary group, numeric (container 1.4.1 takes one, and ignores it beside any --user)
 	WorkingDir string   // --workdir
 	Init       bool     // --init (reap zombies)
 	ReadOnly   bool     // --read-only root filesystem
@@ -1168,6 +1186,12 @@ func (r *Runtime) Run(o RunOptions) error {
 	}
 	for _, u := range o.Ulimits {
 		args = append(args, "--ulimit", u)
+	}
+	// Never beside --user: the orchestrator refuses that pair before a run
+	// is built and hands no GID for it (container 1.4.1 ignores --gid next
+	// to --user), so their order here is not a thing the runtime sees.
+	if o.GID != "" {
+		args = append(args, "--gid", o.GID)
 	}
 	if o.User != "" {
 		args = append(args, "--user", o.User)
@@ -1249,13 +1273,19 @@ func (r *Runtime) Run(o RunOptions) error {
 		}
 		return nil
 	}
-	// A foreground run (a one-off) streams live. When it's not on a TTY we can also
-	// tee stderr into a small capped buffer so the same bootstrap failure (VZError)
-	// is decodable here too — that text appears at the very start of the run, so the
-	// head is enough and memory stays bounded even for a long-running one-off. A TTY
-	// run keeps its real terminal fds (tee'ing would drop it out of TTY mode), so it
-	// isn't captured.
-	if o.TTY {
+	// A foreground run (a one-off) streams live. When the caller's terminal is
+	// not attached we can also tee stderr into a small capped buffer so the same
+	// bootstrap failure (VZError) is decodable here too — that text appears at
+	// the very start of the run, so the head is enough and memory stays bounded
+	// even for a long-running one-off. A run with the terminal attached keeps
+	// stderr as the terminal's own (a tee would make it a pipe), so it isn't
+	// captured; stdin and stdout are the same in both branches. A `-t` of the
+	// service's own (`tty: true` under `up`, run to completion or in the
+	// foreground) is not that: the caller's fds are whatever `up` has, and its
+	// failures have to read as a run's — with the fake runtime, before this
+	// branch read Attached, a refused name went unrecognised here and the
+	// rollback reached for a container this up had not created.
+	if o.Attached && o.TTY {
 		return r.stream(args...)
 	}
 	stderr := &cappedBuffer{cap: 8 << 10}

@@ -383,10 +383,11 @@ func asList(v any) any {
 var envLikeKeys = map[string]bool{"environment": true, "labels": true, "args": true}
 
 // dedupSeqKeys are list fields where a repeated entry (e.g. an override restating a
-// port) should collapse to one, matching docker compose. `volumes` is deliberately
+// port, or a `volumes_from` a second file lists again) should collapse to one,
+// matching docker compose. `volumes` is deliberately
 // absent: mergeByTargetKeys handles it with a stricter rule (same mount point, not
 // just same text) that subsumes plain dedup.
-var dedupSeqKeys = map[string]bool{"ports": true, "expose": true}
+var dedupSeqKeys = map[string]bool{"ports": true, "expose": true, "volumes_from": true, "group_add": true}
 
 // mergeByTargetKeys are list fields docker compose merges by *mount point* rather
 // than by whole entry: a later file's mount at a path an earlier file already
@@ -718,7 +719,8 @@ func envListIsClean(v any) bool {
 }
 
 // dedupSeq drops repeated string entries (keeping the first), leaving non-string
-// entries untouched.
+// entries untouched — a number written in two files stays twice, and a
+// field that refuses a repeated item (`group_add`) says so.
 func dedupSeq(xs []any) []any {
 	seen := map[string]bool{}
 	out := make([]any, 0, len(xs))
@@ -738,6 +740,17 @@ func dedupSeq(xs []any) []any {
 // multiple-`-f` semantics: later files override earlier ones (mappings merge by
 // key, most sequences append, command/entrypoint replace).
 func LoadFiles(paths []string, envFiles []string) (*Project, error) {
+	return LoadFilesEnvDir(paths, envFiles, "")
+}
+
+// LoadFilesEnvDir is LoadFiles with the directory whose `.env` the project is
+// read with given apart from the compose files' own. "" is the first file's
+// directory, which is where `-f` and a file that was looked for have it. Files
+// named by COMPOSE_FILE have it where COMPOSE_FILE was read from — the working
+// directory — while their relative paths stay their own directory's, and their
+// own directory's `.env` is read under the working directory's, for what that
+// one does not set (measured on docker compose v5.5.1; see loadEnvLayers).
+func LoadFilesEnvDir(paths []string, envFiles []string, envDir string) (*Project, error) {
 	if len(paths) == 0 {
 		return nil, fmt.Errorf("no compose file given")
 	}
@@ -746,10 +759,13 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 		return nil, err
 	}
 	baseDir := filepath.Dir(abs)
+	if envDir == "" {
+		envDir = baseDir
+	}
 
-	// Expand ${VAR} references before parsing, using a `.env` file next to the
-	// first compose file (or the given --env-file paths) overlaid by the process env.
-	scope, err := loadEnv(baseDir, envFiles)
+	// Expand ${VAR} references before parsing, using the `.env` file in envDir
+	// (or the given --env-file paths) overlaid by the process env.
+	scope, err := loadEnvLayers(envDir, baseDir, envFiles)
 	if err != nil {
 		return nil, err
 	}
@@ -882,8 +898,12 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 		}
 	}
 
+	envName, _ := scope.lookup()(projectNameVar)
+	envProfiles, _ := scope.lookup()(profilesVar)
 	p := &Project{
 		Name:        f.Name,
+		EnvName:     envName,
+		EnvProfiles: envProfiles,
 		BaseDir:     baseDir,
 		Services:    f.Services,
 		Secrets:     f.Secrets,
@@ -908,6 +928,11 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 		if decl.Internal && decl.External {
 			return nil, fmt.Errorf("network %q: internal and external cannot both be set (an external network is used as-is)", name)
 		}
+	}
+	// `volumes_from` is folded before anything reads a service's mounts:
+	// the entries it borrows are mounts like any other from here on.
+	if err := expandVolumesFrom(f.Services, names); err != nil {
+		return nil, err
 	}
 	// In name order: with two services at fault the one reported must not
 	// depend on map iteration, or the same file names a different service
@@ -1316,6 +1341,120 @@ func ClassifyMount(entry string) (MountKind, string) {
 		return MountBind, src
 	}
 	return MountNamed, src
+}
+
+// expandVolumesFrom folds each service's `volumes_from` into its Volumes, the
+// way docker compose (v5.5.1, measured 2026-09-18) mounts them: the named
+// service's `volumes:` entries come first and this service's own after; an
+// entry at a path this service mounts itself (its `volumes:`, or its
+// `tmpfs:`, whose targets are compared as written) is not borrowed, and
+// where two holders mount one path the later's wins (collapseMountsByTarget
+// keeps the later entry); `holder:ro` mounts as `holder` does (the suffix
+// changes nothing there either); what a holder borrowed itself is borrowed
+// on (A from B from C brings C's to A); and the holder becomes a dependency
+// — `depends_on: {holder: {condition: service_started}}` — unless one is
+// written. A service that is not there, and a cycle among these entries,
+// are refused in docker compose's words. A named volume borrowed is then
+// one two services share, which the runtime attaches to one container at a
+// time — the shared-volume note (OPSM-102) reads the folded mounts and says
+// so. Two entries are not carried, and are refused instead of being mounted
+// wrongly: a holder's anonymous volume (`- /data`) at a path this service
+// does not mount itself, which docker compose shares and this would name
+// after the service that mounts it — a second volume — and
+// `container:<name>`, whose mounts live outside the compose file. Both are
+// looked for as the file is read, on every service, profile or no profile
+// (a known difference; docker compose reads a gated service only once
+// something activates it), and the anonymous one before a later holder is
+// seen to take the path (another).
+func expandVolumesFrom(services map[string]*Service, names []string) error {
+	const visiting, done = 1, 2
+	state := map[string]int{}
+	var expand func(name string, stack []string) error
+	expand = func(name string, stack []string) error {
+		svc := services[name]
+		switch state[name] {
+		case done:
+			return nil
+		case visiting:
+			// The cycle alone, from where it comes back to — not the road in
+			// (`b -> c -> b`, not `a -> b -> c -> b`), as docker compose names it.
+			return fmt.Errorf("dependency cycle detected: %s -> %s", strings.Join(stack[slices.Index(stack, name):], " -> "), name)
+		}
+		state[name] = visiting
+		svc.OwnVolumes = svc.Volumes
+		if len(svc.VolumesFrom) == 0 {
+			state[name] = done
+			return nil
+		}
+		var borrowed []string
+		// This service's `tmpfs:` at a path takes it before a borrowed mount
+		// does (docker compose mounts the tmpfs; container 1.4.1 would put
+		// the volume on top of both if both were passed).
+		// A `tmpfs:` target is compared as written (`/x/` is not `/x` there,
+		// as the tmpfs row of the compatibility table says), a mount's with
+		// its trailing `/` dropped.
+		ownTmpfs := map[string]bool{}
+		for _, t := range svc.Tmpfs {
+			ownTmpfs[strings.SplitN(t, ":", 2)[0]] = true
+		}
+		ownAt := map[string]bool{}
+		for _, v := range svc.OwnVolumes {
+			ownAt[mountTarget(v)] = true
+		}
+		// nocopy is the winning mount's: a holder's `nocopy` at a path this
+		// service's own mount, or a later holder's, takes instead does not
+		// come along.
+		nocopyAt := map[string]bool{}
+		for _, ref := range svc.VolumesFrom {
+			holder, _, _ := strings.Cut(ref, ":")
+			if strings.HasPrefix(ref, "container:") {
+				return fmt.Errorf("service %q: volumes_from %q names a container outside this compose file, whose mounts cannot be read here — name the service that mounts them, or write the mounts under `volumes:`", name, ref)
+			}
+			h, ok := services[holder]
+			if !ok || h == nil {
+				return fmt.Errorf("service %q depends on undefined service %q: invalid compose project", name, holder)
+			}
+			if err := expand(holder, append(stack, name)); err != nil {
+				return err
+			}
+			hNoCopy := map[string]bool{} // NoCopy holds targets as mountTarget spells them
+			for _, t := range h.NoCopy {
+				hNoCopy[t] = true
+			}
+			for _, entry := range h.Volumes {
+				target := mountTarget(entry)
+				// Not borrowed where this service mounts the path itself.
+				if ownTmpfs[target] || ownAt[target] {
+					continue
+				}
+				if kind, _ := ClassifyMount(entry); kind == MountAnonymous {
+					return fmt.Errorf("service %q: volumes_from %q would share %s's anonymous volume at %s, which is named after the service that mounts it and would be a second volume here (docker compose shares the one) — declare it under `volumes:` and mount it by name in both", name, ref, holder, target)
+				}
+				borrowed = append(borrowed, entry)
+				nocopyAt[target] = hNoCopy[target]
+			}
+			if !slices.ContainsFunc(svc.DependsOn, func(d Dependency) bool { return d.Name == holder }) {
+				svc.DependsOn = append(svc.DependsOn, Dependency{Name: holder, Condition: ConditionStarted})
+			}
+		}
+		for _, v := range svc.OwnVolumes {
+			delete(nocopyAt, mountTarget(v))
+		}
+		for _, target := range sortedKeys(nocopyAt) {
+			if nocopyAt[target] && !slices.Contains(svc.NoCopy, target) {
+				svc.NoCopy = append(svc.NoCopy, target)
+			}
+		}
+		svc.Volumes = collapseMountsByTarget(append(borrowed, svc.Volumes...))
+		state[name] = done
+		return nil
+	}
+	for _, name := range names {
+		if err := expand(name, nil); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // validateDeps ensures every depends_on target exists, uses a known condition,

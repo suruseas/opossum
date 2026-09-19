@@ -105,6 +105,14 @@ func TestMain(m *testing.M) {
 		os.RemoveAll(d)
 		panic(fmt.Sprintf("building fake shim: %v\n%s", berr, out))
 	}
+	// What opossum reads from the environment to decide which project and which
+	// files a command is about is taken out of it: left set in a developer's
+	// shell or on a runner, COMPOSE_FILE alone sends every test here to another
+	// compose file (measured: 99 of them fail). A test about one of these sets
+	// it for itself; this is only the floor.
+	for _, name := range []string{"COMPOSE_PROJECT_NAME", "COMPOSE_FILE", "COMPOSE_PATH_SEPARATOR", "COMPOSE_PROFILES"} {
+		os.Unsetenv(name)
+	}
 	// Every test in this package runs against this directory rather than the
 	// developer's own. `restart:` starts a supervisor, and a supervisor writes a
 	// pid file and a log under XDG_STATE_HOME — so a test that forgets to say
@@ -143,13 +151,16 @@ func TestMain(m *testing.M) {
 		}
 		code = 1
 	}
-	// And any supervisor at all that was not running when this started. Searching
-	// by path only finds the one path it was given, and a supervisor can be
-	// started from three: the binary built above, this test binary (when a test
-	// forgets OPOSSUM_SELF_BIN), and a copy a test made somewhere of its own.
-	// Asking instead what is new since the suite began covers all three without
-	// naming any of them — and leaves alone whatever was already running on this
-	// machine, which is not this suite's to report.
+	// And any supervisor of this run's that was not running when this started.
+	// Searching by path only finds the one path it was given, and a supervisor
+	// can be started from three: the binary built above, this test binary (when
+	// a test forgets OPOSSUM_SELF_BIN), and a copy a test made somewhere of its
+	// own. Asking instead what is new since the suite began covers all three
+	// without naming any of them — and leaves alone whatever was already running
+	// on this machine, which is not this suite's to report. Nor is a supervisor
+	// another run starts while this one runs: two CI jobs share one runner
+	// machine, each with a temp directory of its own, so the search is bounded
+	// by this run's (see runningSupervisors).
 	now, lookedAfter := runningSupervisors()
 	if lookedAfter && lookedBefore {
 		if started := unreported(newSupervisors(supervisorsBefore, now), reported); len(started) > 0 {
@@ -220,13 +231,68 @@ func uncheckedReport(before, path, after bool) string {
 // look like "no leaks", so something has to be able to see what they said.
 var leakSaid io.Writer = os.Stderr
 
-// runningSupervisors is every opossum supervisor on this machine right now,
-// whoever started it, and whether the look succeeded at all. TestMain asks it
-// before the tests and after, and the difference is what the tests left behind;
-// the tests below ask it too, to check that it can see and that it says when it
-// cannot.
+// runningSupervisors is every opossum supervisor running from this run's temp
+// directory right now, whoever started it, and whether the look succeeded at
+// all. TestMain asks it before the tests and after, and the difference is what
+// the tests left behind; the tests below ask it too, to check that it can see
+// and that it says when it cannot.
+//
+// Bounded by the temp directory rather than the whole machine because two CI
+// jobs of one run share a runner machine, each with a temp directory of its own
+// (the workflow sets TMPDIR per job on the gate steps, and the repository's
+// hygiene tests hold it to that — with the two under one directory, both would
+// be under one root here): a supervisor the other job's suite has running when
+// this one takes its second look would otherwise be reported as new here, and
+// the package would fail with every test passed (measured on run 35379670667,
+// `ci` red while `stable` was still on its tests). Everything this suite starts
+// a supervisor from lives under that directory — the binary built in TestMain,
+// the copies tests make in their t.TempDir(), and the test binary itself, which
+// `go test` builds there unless GOTMPDIR moves it. The test binary's directory
+// is a second root so that a supervisor started from it (a test that forgets
+// OPOSSUM_SELF_BIN) is seen wherever it was built.
 func runningSupervisors() (pids []int, looked bool) {
-	return leakedProcesses("__supervise")
+	roots := []string{os.TempDir()}
+	if self, err := os.Executable(); err == nil {
+		roots = append(roots, filepath.Dir(self))
+	}
+	return processesMatching(supervisorPattern(roots...))
+}
+
+// supervisorPattern is what runningSupervisors asks pgrep for: a supervisor
+// (the word every one of them carries) whose command line names one of the
+// roots — a supervisor's argv[0] is the binary it was started from (the probes
+// in the tests below are scripts, so theirs is /bin/sh and the root is argv[1];
+// the match is anywhere on the line), and that is where the roots appear
+// (measured: with the compose file found by discovery,
+// the argv is `__supervise -p … --dns-domain … --watch-service …` and names no
+// other path). Each root is taken as written and as it resolves: on macOS the
+// temp directory is under /var, a symlink to /private/var, and a process may
+// have been started by either spelling. A root ends in a separator so that a
+// neighbour whose name merely begins the same way — `…-ci` next to `…-ci2` —
+// stays a neighbour.
+func supervisorPattern(roots ...string) string {
+	var dirs []string
+	seen := map[string]bool{}
+	for _, root := range roots {
+		for _, dir := range []string{root, resolvedOr(root)} {
+			dir = filepath.Clean(dir) + string(filepath.Separator)
+			if !seen[dir] {
+				seen[dir] = true
+				dirs = append(dirs, regexp.QuoteMeta(dir))
+			}
+		}
+	}
+	any := "(" + strings.Join(dirs, "|") + ")"
+	return any + ".*__supervise|__supervise.*" + any
+}
+
+// resolvedOr is the path with its symlinks followed, or the path itself when
+// they cannot be.
+func resolvedOr(path string) string {
+	if r, err := filepath.EvalSymlinks(path); err == nil {
+		return r
+	}
+	return path
 }
 
 // unreported drops the pids the search by path already named, so one process is
@@ -246,8 +312,10 @@ func unreported(pids []int, already map[int]bool) []int {
 // newSupervisorReport is what the suite says about supervisors that appeared
 // while it ran. It is a weaker claim than the report by path and says so: these
 // were not running before and are running now, which is usually a test that
-// started one and did not stop it, and is sometimes someone else on this machine
-// starting one while the tests ran. Nothing here can tell those apart, so the
+// started one and did not stop it, and is sometimes another suite sharing
+// this run's temp directory starting one while the tests ran (the search is
+// bounded by that directory and the test binary's, see runningSupervisors).
+// Nothing here can tell those apart, so the
 // command is offered for the first case rather than given as the thing to do —
 // and the second case has an exit worth naming, because a reader who has just
 // been told about a process they recognise should not go looking for a bug.
@@ -261,7 +329,7 @@ func newSupervisorReport(pids []int) string {
 	for _, pid := range pids {
 		fmt.Fprintf(&b, " %d", pid)
 	}
-	b.WriteString("` ends them; if something else on this machine did, leave them be and run the tests again — they will be there before the next run and it will not mention them\n")
+	b.WriteString("` ends them; if something else under this run's temp directory (or beside its test binary) did, leave them be and run the tests again — they will be there before the next run and it will not mention them\n")
 	return b.String()
 }
 
@@ -290,14 +358,20 @@ func newSupervisors(before, now []int) []int {
 // us, and the process it leaves behind is the thing that matters. Where pgrep is
 // not available it finds nothing, and says so rather than reporting none.
 func leakedProcesses(bin string) (pids []int, looked bool) {
+	// Quoted: pgrep -f takes an expression, and a temp directory with a bracket
+	// in its name would turn into a pattern that matches something else — or
+	// nothing, which reads here as "no leaks".
+	return processesMatching(regexp.QuoteMeta(bin))
+}
+
+// processesMatching reports the pids whose command line matches the expression,
+// as pgrep -f reads it, and whether the look succeeded at all.
+func processesMatching(pattern string) (pids []int, looked bool) {
 	if _, err := exec.LookPath("pgrep"); err != nil {
 		fmt.Fprintf(leakSaid, "\nno pgrep here, so nothing checked whether any process outlived the tests\n")
 		return nil, false
 	}
-	// Quoted: pgrep -f takes an expression, and a temp directory with a bracket
-	// in its name would turn into a pattern that matches something else — or
-	// nothing, which reads here as "no leaks".
-	out, err := exec.Command("pgrep", "-f", regexp.QuoteMeta(bin)).Output()
+	out, err := exec.Command("pgrep", "-f", pattern).Output()
 	if err != nil {
 		// Exit 1 is pgrep's way of saying it matched nothing, which is the good
 		// case. Anything else means it did not look, and that is not the same
@@ -2394,7 +2468,7 @@ func TestBuildCLI(t *testing.T) {
 	if _, err := run(t, "-f", compose, "build"); err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	if joined := strings.Join(readLog(), "\n"); !strings.Contains(joined, "build --progress plain -t demo-api:latest /ctx") {
+	if joined := strings.Join(readLog(), "\n"); !strings.Contains(joined, "build --progress plain -t demo-api:latest -l opossum.project=demo /ctx") {
 		t.Errorf("build should build api, got:\n%s", joined)
 	}
 }
@@ -5786,40 +5860,133 @@ func TestOnlySupervisorsThatWereNotAlreadyThereAreReported(t *testing.T) {
 	}
 }
 
-// …and that the list it works on is really every supervisor, including one this
-// suite did not start. The machine this runs on has had one from a test days
-// ago; a search that only found this suite's own would report the same "none"
-// on a machine with nothing on it, and there would be no way to tell.
-func TestTheSupervisorSearchLooksBeyondThisSuite(t *testing.T) {
-	bin := filepath.Join(t.TempDir(), "opossum-supervise-probe")
-	if err := os.WriteFile(bin, []byte("#!/bin/sh\nsleep 60 &\nwait\n"), 0o755); err != nil {
+// …and that the list it works on is every supervisor of this run's, not only
+// the ones started from the binary this suite built — and none of a neighbour's.
+// Each row starts a process carrying the word the search looks for, from
+// somewhere of its own, and says whether the search must see it. The rows that
+// must be seen are the three ways this suite starts one; the rows that must not
+// are the other job of a CI run, whose temp directory sits next to this one's
+// on the same machine (run 35379670667: that job's supervisor, reported here).
+func TestTheSupervisorSearchIsBoundedByThisRunsTempDir(t *testing.T) {
+	base := t.TempDir()
+	self, err := os.Executable()
+	if err != nil {
 		t.Fatal(err)
 	}
-	// Started with the word the search looks for, from a path this suite never
-	// built — which is what a copy a test made somewhere of its own looks like.
-	cmd := exec.Command(bin, "__supervise", "-p", "probe")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
+	selfDir := filepath.Dir(self)
+	// A second spelling of one directory, the way /var is /private/var on
+	// macOS — made here so that the row about it holds on a machine where the
+	// temp directory has only one.
+	if err := os.Mkdir(filepath.Join(base, "real"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		_, _ = cmd.Process.Wait()
-	})
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		found, looked := runningSupervisors()
-		if !looked {
-			t.Fatal("pgrep could not look, so this test would pass by finding nothing")
-		}
-		if slices.Contains(found, cmd.Process.Pid) {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("a supervisor at %s is running as %d and the search did not find it: %v",
-				bin, cmd.Process.Pid, found)
-		}
-		time.Sleep(20 * time.Millisecond)
+	if err := os.Symlink(filepath.Join(base, "real"), filepath.Join(base, "link")); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		// probeDir is where the probe binary goes; tmpdir is what TMPDIR says
+		// while the search runs. Under base unless absolute; "" is base itself.
+		probeDir, tmpdir string
+		// fileOnly starts the probe from outside every root and names a file
+		// under probeDir instead, the way a `-f` does.
+		fileOnly bool
+		// notASupervisor starts the probe without the word.
+		notASupervisor bool
+		// trailingSlash is TMPDIR spelt with a separator at the end.
+		trailingSlash bool
+		seen          bool
+	}{
+		{name: "started from this run's temp directory", seen: true},
+		{name: "started from the resolved spelling of the directory", probeDir: resolvedOr(filepath.Join(base, "link")), tmpdir: "link", seen: true},
+		{name: "the binary is elsewhere and a file of this run's is named", fileOnly: true, seen: true},
+		{name: "the binary is elsewhere and a file under the resolved spelling is named", probeDir: resolvedOr(filepath.Join(base, "link")), tmpdir: "link", fileOnly: true, seen: true},
+		{name: "a bracket in the directory's name", probeDir: "[x]", tmpdir: "[x]", seen: true},
+		// Through the symlink, so that the resolved spelling cannot stand in
+		// for a written one that a separator at the end has broken.
+		{name: "TMPDIR spelt with a separator at the end", probeDir: "link", tmpdir: "link", trailingSlash: true, seen: true},
+		// The word is the other half of the search: a process of this run's
+		// that is not a supervisor — the shim, a compile — is not one.
+		{name: "a process of this run's that is not a supervisor", notASupervisor: true, seen: false},
+		// The test binary's own directory, which GOTMPDIR can put outside the
+		// temp directory: a test that forgets OPOSSUM_SELF_BIN starts one there.
+		{name: "started from beside the test binary, with TMPDIR elsewhere", probeDir: selfDir, tmpdir: "stable", seen: true},
+		{name: "a neighbour's temp directory", probeDir: "ci", tmpdir: "stable", seen: false},
+		{name: "a neighbour whose name begins with this one's", probeDir: "ci-stable", tmpdir: "ci", seen: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			probeDir := filepath.Join(base, tc.probeDir)
+			if filepath.IsAbs(tc.probeDir) {
+				probeDir = tc.probeDir
+			}
+			if err := os.MkdirAll(probeDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			tmpdir := filepath.Join(base, tc.tmpdir)
+			if err := os.MkdirAll(tmpdir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if tc.trailingSlash {
+				tmpdir += string(filepath.Separator)
+			}
+			t.Setenv("TMPDIR", tmpdir)
+
+			script := "#!/bin/sh\nsleep 60 &\nwait\n"
+			var cmd *exec.Cmd
+			if tc.fileOnly {
+				// argv[0] is /bin/sh, and nothing before `__supervise` is under
+				// a root; only the file after it is.
+				cmd = exec.Command("/bin/sh", "-c", "sleep 60 & wait", "sh", "__supervise", "-p", "probe", "-f", filepath.Join(probeDir, "compose.yaml"))
+			} else {
+				bin := filepath.Join(probeDir, "opossum-supervise-probe")
+				if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				// Removed by hand: one row writes it beside the test binary,
+				// which is not a directory of this test's. Under `go test` that
+				// is go's own work directory, which go removes; this is for a
+				// test binary built with -c and run from somewhere kept.
+				t.Cleanup(func() { os.Remove(bin) })
+				if tc.notASupervisor {
+					cmd = exec.Command(bin, "-p", "probe")
+				} else {
+					cmd = exec.Command(bin, "__supervise", "-p", "probe")
+				}
+			}
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				_, _ = cmd.Process.Wait()
+			})
+			// A row that must not be seen has to be judged once the probe is
+			// certainly running, or an early look would pass by finding nothing.
+			// The look by path does not depend on TMPDIR and is what says so.
+			byPath := probeDir
+			deadline := time.Now().Add(10 * time.Second)
+			for {
+				there, looked := leakedProcesses(byPath)
+				if !looked {
+					t.Fatal("pgrep could not look, so this test would pass by finding nothing")
+				}
+				if slices.Contains(there, cmd.Process.Pid) {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("the probe at %s is running as %d and the search by path did not find it: %v", probeDir, cmd.Process.Pid, there)
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			found, looked := runningSupervisors()
+			if !looked {
+				t.Fatal("pgrep could not look, so this test would pass by finding nothing")
+			}
+			if got := slices.Contains(found, cmd.Process.Pid); got != tc.seen {
+				t.Fatalf("with TMPDIR=%s, the probe %d at %s: seen=%v, want %v (found %v)", tmpdir, cmd.Process.Pid, probeDir, got, tc.seen, found)
+			}
+		})
 	}
 }
 
@@ -5835,14 +6002,14 @@ func TestTheSupervisorSearchLooksBeyondThisSuite(t *testing.T) {
 // so did one that opened with a flat claim that the tests started them.
 func TestTheNewSupervisorReportIsWordForWordWhatWeMeanToSay(t *testing.T) {
 	want := "these supervisors were not running when the tests started, and are now: 321 654\n" +
-		"if the tests started them, `kill 321 654` ends them; if something else on this machine did, " +
+		"if the tests started them, `kill 321 654` ends them; if something else under this run's temp directory (or beside its test binary) did, " +
 		"leave them be and run the tests again — they will be there before the next run and it will not mention them\n"
 	if got := newSupervisorReport([]int{321, 654}); got != want {
 		t.Errorf("the report is not what this file says it should be\n got: %q\nwant: %q", got, want)
 	}
 	// One pid reads the same way; the sentence is written for either count.
 	wantOne := "these supervisors were not running when the tests started, and are now: 321\n" +
-		"if the tests started them, `kill 321` ends them; if something else on this machine did, " +
+		"if the tests started them, `kill 321` ends them; if something else under this run's temp directory (or beside its test binary) did, " +
 		"leave them be and run the tests again — they will be there before the next run and it will not mention them\n"
 	if got := newSupervisorReport([]int{321}); got != wantOne {
 		t.Errorf("with one pid the report is not what this file says it should be\n got: %q\nwant: %q", got, wantOne)
@@ -6007,6 +6174,11 @@ const leakProbeEnv = "OPOSSUM_LEAK_PROBE"
 // leak hardest are exactly the ones whose output never arrives.
 const leakProbePidFileEnv = "OPOSSUM_LEAK_PROBE_PIDFILE"
 
+// leakProbeTempDirFileEnv is where the probe writes the temp directory it ran
+// in, so the parent can check that the child's leftovers, if any, are under a
+// directory the parent removes.
+const leakProbeTempDirFileEnv = "OPOSSUM_LEAK_PROBE_TMPDIR_FILE"
+
 // sweepOrphanedProbes ends leaked probe supervisors whose run is over. A run
 // killed by a timeout or a Ctrl-C never reaches its own cleanup, and there is
 // nothing a dead process can do about that — so the next run does it, which is
@@ -6060,6 +6232,11 @@ const leakProbeProjectPrefix = "leakprobe-"
 // supervisor belonging to another run — or to somebody working on this machine.
 const leakProbeProjectEnv = "OPOSSUM_LEAK_PROBE_PROJECT"
 
+// leakProbeNeighbourDirEnv is where the "neighbour" probe puts its copy of the
+// binary: a directory the parent made outside every root the child's search
+// has, the way the other job's temp directory is on a shared runner.
+const leakProbeNeighbourDirEnv = "OPOSSUM_LEAK_PROBE_NEIGHBOUR_DIR"
+
 // TestZZLeakProbeStartsASupervisorAndWalksAway is skipped unless a parent asks
 // for it. When asked, it starts a supervisor and does not stop it — which is the
 // thing TestMain is supposed to catch, and the thing no test in this package
@@ -6075,10 +6252,15 @@ func TestZZLeakProbeStartsASupervisorAndWalksAway(t *testing.T) {
 	}
 	fakeShim(t)
 	self := opossumBin
-	if kind == "elsewhere" {
+	if kind == "elsewhere" || kind == "neighbour" {
 		// A copy the test made somewhere of its own: the search by path never
-		// looks here, so only the before/after difference can see it.
+		// looks here, so only the before/after difference can see it — and it
+		// does only while "somewhere of its own" is under this run's temp
+		// directory. The neighbour's copy is outside it, and is not seen.
 		self = filepath.Join(t.TempDir(), "opossum")
+		if kind == "neighbour" {
+			self = filepath.Join(os.Getenv(leakProbeNeighbourDirEnv), "opossum")
+		}
 		src, err := os.ReadFile(opossumBin)
 		if err != nil {
 			t.Fatal(err)
@@ -6105,6 +6287,11 @@ func TestZZLeakProbeStartsASupervisorAndWalksAway(t *testing.T) {
 		return pid != 0
 	})
 	// Written where the parent can always read it, however this run ends.
+	if f := os.Getenv(leakProbeTempDirFileEnv); f != "" {
+		if err := os.WriteFile(f, []byte(os.TempDir()), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if f := os.Getenv(leakProbePidFileEnv); f != "" {
 		if err := os.WriteFile(f, []byte(strconv.Itoa(pid)), 0o644); err != nil {
 			t.Fatal(err)
@@ -6128,12 +6315,19 @@ func TestALeakedSupervisorFailsTheRunItLeaked(t *testing.T) {
 	)
 	for _, tc := range []struct {
 		kind, want, absent string
+		// passes is whether the child run is meant to come out green.
+		passes bool
 	}{
 		// Started from the binary this suite built: the search by path finds it,
 		// and the difference must not name it a second time.
 		{kind: "built", want: byPath, absent: byDiff},
 		// Started from a copy somewhere else: only the difference can see it.
 		{kind: "elsewhere", want: byDiff, absent: byPath},
+		// Started from a copy outside the child's temp directory, which is what
+		// the other job of a CI run looks like from here: not this run's to
+		// report, so the run passes and says nothing about it (run 35379670667
+		// failed on exactly this, with every test passed).
+		{kind: "neighbour", passes: true},
 	} {
 		t.Run(tc.kind, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
@@ -6142,11 +6336,35 @@ func TestALeakedSupervisorFailsTheRunItLeaked(t *testing.T) {
 				"-run", "TestZZLeakProbeStartsASupervisorAndWalksAway", ".")
 			cmd.Dir = packageDir(t)
 			pidFile := filepath.Join(t.TempDir(), "pid")
+			tmpFile := filepath.Join(filepath.Dir(pidFile), "tmpdir")
 			project := fmt.Sprintf("%s%d-%s", leakProbeProjectPrefix, os.Getpid(), tc.kind)
 			cmd.Env = append(os.Environ(),
 				leakProbeEnv+"="+tc.kind,
 				leakProbePidFileEnv+"="+pidFile,
 				leakProbeProjectEnv+"="+project)
+			// The child runs in a temp directory under this test's own, every
+			// kind of it: the child walks away from a supervisor on purpose,
+			// and that supervisor can still be writing into the child's
+			// t.TempDir while the child removes it — the removal then fails,
+			// quietly, as the child fails anyway, and the directory stays
+			// behind in the run's temp directory, where the suite's leftovers
+			// check finds it (CI run 35446739427). Under this test's own, it
+			// goes with this test's cleanup, which runs after killProbe has
+			// stopped the supervisor (cleanups run last registered first).
+			// Two directories side by side, as the workflow lays them out for
+			// its two jobs: the child runs in one; the neighbour's copy sits
+			// in the other.
+			beside := t.TempDir()
+			own, other := filepath.Join(beside, "ci"), filepath.Join(beside, "stable")
+			for _, d := range []string{own, other} {
+				if err := os.Mkdir(d, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd.Env = append(cmd.Env, "TMPDIR="+own, leakProbeTempDirFileEnv+"="+tmpFile)
+			if tc.kind == "neighbour" {
+				cmd.Env = append(cmd.Env, leakProbeNeighbourDirEnv+"="+other)
+			}
 			// The deadline has to reach the test binary `go` starts, not just
 			// `go`: WaitDelay does not, having only the direct child to work
 			// with. A group of its own does, and Cancel is where the group is
@@ -6168,14 +6386,25 @@ func TestALeakedSupervisorFailsTheRunItLeaked(t *testing.T) {
 			t.Cleanup(func() { killProbe(t, pidFile, project) })
 			out, err := cmd.CombinedOutput()
 
-			if err == nil {
-				t.Errorf("a supervisor was left running and the run passed:\n%s", out)
-			}
-			if !strings.Contains(string(out), tc.want) {
-				t.Errorf("the leak should be reported as %q, missing from:\n%s", tc.want, out)
-			}
-			if strings.Contains(string(out), tc.absent) {
-				t.Errorf("one process, one report: %q should not also appear in:\n%s", tc.absent, out)
+			if tc.passes {
+				if err != nil {
+					t.Errorf("a neighbour's supervisor is not this run's to report, yet the run failed: %v\n%s", err, out)
+				}
+				for _, report := range []string{byPath, byDiff} {
+					if strings.Contains(string(out), report) {
+						t.Errorf("a neighbour's supervisor should not be reported, but %q is in:\n%s", report, out)
+					}
+				}
+			} else {
+				if err == nil {
+					t.Errorf("a supervisor was left running and the run passed:\n%s", out)
+				}
+				if !strings.Contains(string(out), tc.want) {
+					t.Errorf("the leak should be reported as %q, missing from:\n%s", tc.want, out)
+				}
+				if strings.Contains(string(out), tc.absent) {
+					t.Errorf("one process, one report: %q should not also appear in:\n%s", tc.absent, out)
+				}
 			}
 			// The pid in the report has to be the one the probe left, not some
 			// other supervisor that happened to supply the expected words.
@@ -6185,11 +6414,25 @@ func TestALeakedSupervisorFailsTheRunItLeaked(t *testing.T) {
 			if kerr := syscall.Kill(-cmd.Process.Pid, 0); !errors.Is(kerr, syscall.ESRCH) {
 				t.Errorf("the child's process group still has somebody in it: %v", kerr)
 			}
+			// The child ran under this test's temp directory, so whatever it
+			// could not remove goes with this test's cleanup rather than
+			// staying in the run's temp directory. The race that leaves it
+			// behind is not reproduced here (0 of 20 runs on a quiet machine,
+			// once in CI); where the child ran is what keeps it harmless.
+			if ran, terr := os.ReadFile(tmpFile); terr != nil {
+				t.Errorf("the probe should have said where it ran: %v\n%s", terr, out)
+			} else if !strings.HasPrefix(filepath.Clean(string(ran))+string(filepath.Separator), filepath.Clean(own)+string(filepath.Separator)) {
+				t.Errorf("the probe ran in %s, not under this test's %s — what it leaves behind would stay in the run's temp directory", ran, own)
+			}
 			raw, rerr := os.ReadFile(pidFile)
 			if rerr != nil {
 				t.Errorf("the probe should have left a pid behind; without one the check below is skipped exactly when it matters: %v\n%s", rerr, out)
-			} else if !strings.Contains(string(out), strings.TrimSpace(string(raw))) {
-				t.Errorf("the report should name the process the probe left (%s):\n%s", raw, out)
+			} else if named := strings.Contains(string(out), strings.TrimSpace(string(raw))); named == tc.passes {
+				if tc.passes {
+					t.Errorf("the run should not name the neighbour's process (%s):\n%s", raw, out)
+				} else {
+					t.Errorf("the report should name the process the probe left (%s):\n%s", raw, out)
+				}
 			}
 		})
 	}

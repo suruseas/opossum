@@ -25,9 +25,7 @@ func TestAKeyOpossumDoesNotReadInAListItemIsNamedAmongTheIgnoredFields(t *testin
 		{"a volume's consistency", "volumes:\n  - {type: volume, source: data, target: /data, consistency: cached}\n", "volumes entry 1.consistency"},
 		{"a volume option opossum does not read", "volumes:\n  - {type: volume, source: data, target: /data, volume: {nocopy: true, subpath: sub}}\n", "volumes entry 1.volume.subpath"},
 		{"a secret's uid", "secrets:\n  - {source: s, target: s2, uid: \"0\"}\n", "secrets entry 1.uid"},
-		{"an env file's format", "env_file:\n  - {path: ./a.env, format: raw}\n", "env_file entry 1.format"},
 		{"a dependency's restart", "depends_on:\n  db:\n    condition: service_started\n    restart: true\n", "depends_on.db.restart"},
-		{"a dependency's required", "depends_on:\n  db:\n    required: false\n", "depends_on.db.required"},
 		{"through an alias", "ports:\n  - *p\n", "ports entry 1.mode"},
 		{"through a merge key", "ports:\n  - <<: *p\n    published: 8080\n", "ports entry 1.mode"},
 	} {
@@ -48,7 +46,7 @@ func TestAKeyOpossumDoesNotReadInAListItemIsNamedAmongTheIgnoredFields(t *testin
 		"    ports:\n      - \"8080:80\"\n      - {target: 81, published: 8081, protocol: tcp, host_ip: 127.0.0.1, x-note: 1}\n"+
 		"    volumes:\n      - ./src:/src\n      - {type: volume, source: data, target: /data, read_only: true, volume: {nocopy: true}}\n"+
 		"    secrets:\n      - s\n      - {source: s, target: s2}\n"+
-		"    env_file:\n      - {path: ./a.env, required: false}\n"+
+		"    env_file:\n      - {path: ./a.env, required: false, format: raw}\n"+
 		"    depends_on:\n      db:\n        condition: service_started\n"))
 	if err != nil {
 		t.Fatalf("load: %v", err)

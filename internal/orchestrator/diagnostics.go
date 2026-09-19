@@ -62,6 +62,7 @@ const (
 	codeSupervisorLogTrimmed    diagCode = "OPSM-410" // the supervisor's log hit its size cap and lost its older half
 	codeSupervisorLogUncapped   diagCode = "OPSM-411" // the supervisor could not open a size-capped log and is writing without a bound
 	codeImageNoArm64            diagCode = "OPSM-412" // the image has no arm64 build, so the container cannot start here
+	codeOptionalDependency      diagCode = "OPSM-413" // a `required: false` dependency did not become healthy or did not complete; the dependent starts anyway
 	codeServiceExited           diagCode = "OPSM-407" // a service's container exited right after starting (no health gate)
 	codeIgnoredTopField         diagCode = "OPSM-501" // unsupported top-level compose field(s), ignored
 	codeIgnoredField            diagCode = "OPSM-502" // unsupported service compose field(s), ignored
@@ -81,7 +82,7 @@ var allDiagCodes = []diagCode{
 	codeHostPortInUse, codeDNSDomainAbsent, codeInternalEgress, codeDockerSocket, codeExternalNetAbsent, codeHostPortRemapped,
 	codeNetworkSubnetChanged, codeProjectBusy, codeServiceNameUnresolvable, codeExternalVolumeAbsent,
 	codeDepNotRunning, codeOrphans, codeDepNoHealth,
-	codeIgnoredTopField, codeIgnoredField, codeRuntimeAbsent, codeRuntimeStopped, codeRuntimeAutoStart, codeServiceExited, codeSupervisorStarted, codeSupervisorAction, codeImageNoArm64,
+	codeIgnoredTopField, codeIgnoredField, codeRuntimeAbsent, codeRuntimeStopped, codeRuntimeAutoStart, codeServiceExited, codeSupervisorStarted, codeSupervisorAction, codeImageNoArm64, codeOptionalDependency,
 	codeSupervisorLogTrimmed, codeSupervisorLogUncapped,
 	codeWatchRebuild, codeWatchRestart, codeWatchSync, codeWatchSetup, codeWatchError,
 }

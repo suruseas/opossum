@@ -80,7 +80,7 @@ cover: ## run tests with coverage
 # and the gate's -count=1 keeps cached test results out of the question either
 # way. What the sieve does not see: the current Go release. It runs the
 # version go.mod asks for; the second compiler is half of what the pull
-# request's one CI run exists to attest.
+# request's CI run exists to attest.
 # Named, not refused — see sieve/wired.sh. A prerequisite of `test` so that the
 # one command everyone runs is where an unwired clone is heard about.
 wired: ## say so when this clone's push-time sieve is not wired

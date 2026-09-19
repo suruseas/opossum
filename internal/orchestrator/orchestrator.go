@@ -48,7 +48,8 @@ type Orchestrator struct {
 	out           interface{ Write([]byte) (int, error) }
 	sleep         func(time.Duration) // overridable so tests don't wait in real time
 	ctx           context.Context     // cancelled on Ctrl-C so a partial `up` rolls back
-	profiles      map[string]bool     // active compose profiles (--profile / COMPOSE_PROFILES)
+	profiles      map[string]bool     // active compose profiles (--profile, or else COMPOSE_PROFILES)
+	runFlags      string              // this run's root flags as typed, for a command the output suggests (SetRunFlags)
 	up            upOptions           // per-invocation `up` flags
 	// crashGrace is how long verifyStarted watches a just-started service before
 	// concluding it started. Per-Orchestrator so an eval can set its own.
@@ -160,6 +161,14 @@ func (o *Orchestrator) SetDryRun(v bool) {
 	o.rt.DryRun = v
 }
 
+// SetRunFlags records the root flags this run was given, spelled as typed
+// (" -f x.yaml -p name"), for a command the output suggests: it has to carry
+// them to read the project this run read and reach what it made.
+func (o *Orchestrator) SetRunFlags(flags string) { o.runFlags = flags }
+
+// RunFlags is what SetRunFlags recorded.
+func (o *Orchestrator) RunFlags() string { return o.runFlags }
+
 // configHashLabel stamps a container with a fingerprint of its spec, so a later
 // `up` can tell whether the configuration changed and skip recreating it.
 const configHashLabel = "opossum.config-hash"
@@ -221,8 +230,14 @@ func configHash(o runtime.RunOptions) string {
 	if o.ReadOnly {
 		write("read_only")
 	}
+	if o.TTY {
+		write("tty")
+	}
 	if o.User != "" {
 		write("user", o.User)
+	}
+	if o.GID != "" {
+		write("gid", o.GID)
 	}
 	if o.WorkingDir != "" {
 		write("workdir", o.WorkingDir)
@@ -236,8 +251,9 @@ func configHash(o runtime.RunOptions) string {
 	return fmt.Sprintf("%x", h.Sum64())
 }
 
-// EnableProfiles marks compose profiles active (from --profile flags and the
-// COMPOSE_PROFILES env var), so services gated behind them start. `*` is
+// EnableProfiles marks compose profiles active (the caller decides where they
+// come from: `--profile`, or else COMPOSE_PROFILES — not both), so services
+// gated behind them start. `*` is
 // the one name that is not a name: it means every profile (docker compose,
 // measured — `--profile '*'` and `COMPOSE_PROFILES=*` enable every gated
 // service, and a partial glob like `to*` does not).
@@ -315,12 +331,35 @@ func (o *Orchestrator) validateProfileDeps(names []string, named map[string]bool
 	active := o.activeServices(named)
 	for _, name := range names {
 		for _, dep := range o.Project.Services[name].DependsOn {
-			if !active[dep.Name] {
-				return fmt.Errorf("service %q depends on %q, whose profile is not active — enable it with --profile or COMPOSE_PROFILES, or name it explicitly", name, dep.Name)
+			// An optional dependency behind a profile is not a fault; it is
+			// passed over here and left in the project, so that `config`
+			// prints it as docker compose prints it. A command that starts
+			// services drops it (checkProjectLoads) before reading the
+			// dependencies further.
+			if !active[dep.Name] && !dep.Optional {
+				return gatedDependencyRefusal(name, dep.Name, named != nil)
 			}
 		}
 	}
 	return nil
+}
+
+// gatedDependencyRefusal is what a service is refused with when it depends on
+// one behind a profile that is not active. How to enable it depends on the
+// run that got the refusal, so the refusal says it that way: none of the
+// places profiles come from add up (docker compose's rule, measured) — a run
+// given `--profile` is not helped by COMPOSE_PROFILES, and a COMPOSE_PROFILES
+// set in the shell replaces one in the `.env` — so the profile has to be added
+// beside the ones the run already has, where the run reads them. Naming the
+// service is a way out only for a command that takes service names — `up` —
+// and canName says whether this one does (`config` reads no names; `run`
+// takes the one it runs).
+func gatedDependencyRefusal(name, dep string, canName bool) error {
+	how := "enable its profile beside the ones this run has active: with another --profile in a run that has one, or in COMPOSE_PROFILES in a run with no --profile — where this run reads it, since a COMPOSE_PROFILES in the shell replaces one in the .env, as the flag replaces both (none of them add up)"
+	if canName {
+		how = "name it explicitly, or " + how
+	}
+	return fmt.Errorf("service %q depends on %q, whose profile is not active — %s", name, dep, how)
 }
 
 // ValidateProfiles errors if any enabled service depends on a gated-inactive one,
@@ -767,6 +806,96 @@ func (o *Orchestrator) checkTmpfsOptions(services []string) error {
 	return nil
 }
 
+// checkGroupAdd refuses, before anything is created, a `group_add` the
+// runtime cannot take as written. container 1.4.1 (measured 2026-09-19) has
+// `--gid <n>`, which adds one supplementary group: a second `--gid` replaces
+// the first, a name is refused (`See 'container run --help'`), and beside
+// `--user` — with a gid or without (`-u 1000 --gid 2000` leaves the groups
+// at 0) — it does nothing. docker compose takes any number, names resolved
+// in the image, beside any user. So one numeric group on a service that
+// writes no `user:` is passed (gidOf), and every other shape is refused here
+// rather than started without its group — the group is what lets the
+// process at a socket or a device, and without it the failure comes later,
+// as permission denied.
+func (o *Orchestrator) checkGroupAdd(services []string) error {
+	for _, svcName := range services {
+		svc := o.Project.Services[svcName]
+		if len(svc.GroupAdd) == 0 {
+			continue
+		}
+		if len(svc.GroupAdd) > 1 {
+			quoted := make([]string, len(svc.GroupAdd))
+			for i, g := range svc.GroupAdd {
+				quoted[i] = strconv.Quote(g)
+			}
+			return fmt.Errorf("service %q adds %d groups (group_add: %s); container 1.4.1's --gid takes one, and a second replaces the first — keep the one the process needs",
+				svcName, len(svc.GroupAdd), strings.Join(quoted, ", "))
+		}
+		g := svc.GroupAdd[0]
+		switch {
+		case g == "":
+			return fmt.Errorf("service %q adds an empty group (group_add: [\"\"]); the docker engine refuses it too (`unable to find group`) — write the group's number, or drop the entry",
+				svcName)
+		case strings.HasPrefix(g, "-"):
+			return fmt.Errorf("service %q adds the group %s (group_add); a gid is not negative — the docker engine refuses it too (`uids and gids must be in range 0-2147483647`) — write the group's number",
+				svcName, g)
+		case !numericGID(g) && strings.ContainsAny(g, "0123456789"):
+			return fmt.Errorf("service %q adds the group %q (group_add), which is not the digits of a gid — write the number alone, as in `- 2000`",
+				svcName, g)
+		case !numericGID(g):
+			return fmt.Errorf("service %q adds the group %q (group_add); container 1.4.1's --gid takes a number, where docker compose resolves a name in the image — write the group's number",
+				svcName, g)
+		case !inGIDRange(g):
+			return fmt.Errorf("service %q adds the group %s (group_add), which is past 2147483647, the largest gid the docker engine takes — write the group's number",
+				svcName, g)
+		case svc.User != "":
+			return fmt.Errorf("service %q adds the group %s (group_add) beside user: %q; container 1.4.1's --gid does nothing next to --user — drop group_add (the process then runs without the group, and a socket or device that needs it refuses it), or drop user: (the image's own user then runs with the group)",
+				svcName, g, svc.User)
+		}
+	}
+	return nil
+}
+
+// gidOf is the one group `group_add` hands to --gid: the shape checkGroupAdd
+// lets through, and nothing else — held here as well, so that a run built
+// without the check (should one be) never carries a --gid the runtime could
+// not take, or one beside --user; "" without one.
+func gidOf(svc *compose.Service) string {
+	if len(svc.GroupAdd) == 1 && numericGID(svc.GroupAdd[0]) && inGIDRange(svc.GroupAdd[0]) && svc.User == "" {
+		return svc.GroupAdd[0]
+	}
+	return ""
+}
+
+// numericGID is a gid as `--gid` takes one: digits, with a `+` allowed in
+// front (container 1.4.1 reads `+2000` and `0002000` as 2000, measured
+// 2026-09-19; a space, or a `0x` prefix, it refuses). A number in a single
+// file arrives here as written, so `0x10` is not one; one read with other
+// files, or through `extends`, arrives in decimal.
+func numericGID(s string) bool {
+	s = strings.TrimPrefix(s, "+")
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// inGIDRange is the range the docker engine takes (`uids and gids must be in
+// range 0-2147483647`, measured on engine 29.8.0). container 1.4.1 takes
+// more — 0 to 4294967294, `(gid_t)-1` refused with `Invalid argument` and
+// 2^32 by the CLI (measured 2026-09-19) — and the engine's range is kept as
+// the one a compose file was written against, so a file that starts here
+// starts there.
+func inGIDRange(digits string) bool {
+	n, err := strconv.ParseInt(strings.TrimPrefix(digits, "+"), 10, 64)
+	return err == nil && n <= 2147483647
+}
+
 // warnUnresolvableServiceNames warns, before anything is created, about each
 // service a peer may not reach by its bare name although its container is made.
 // Measured on container 1.4.1: a name holding upper case gets no answer from
@@ -833,8 +962,9 @@ func (o *Orchestrator) checkServiceNamesDifferInCase(services []string) error {
 // service's dependencies, and a cycle among gated services, are not seen until
 // something enables them (measured). named holds the services this command was
 // given, which enables them as `--profile` would.
-func (o *Orchestrator) checkProjectLoads(named map[string]bool) error {
+func (o *Orchestrator) checkProjectLoads(named map[string]bool, canName bool) error {
 	set := o.activeServices(named)
+	o.dropOptionalGatedDeps(set)
 	active := make([]string, 0, len(set))
 	for name := range set {
 		active = append(active, name)
@@ -846,7 +976,7 @@ func (o *Orchestrator) checkProjectLoads(named map[string]bool) error {
 				continue // reading the file refuses a dependency it does not define
 			}
 			if !set[dep] {
-				return fmt.Errorf("service %q depends on %q, whose profile is not active — enable it with --profile or COMPOSE_PROFILES, or name it explicitly", name, dep)
+				return gatedDependencyRefusal(name, dep, canName)
 			}
 		}
 	}
@@ -910,6 +1040,32 @@ func (o *Orchestrator) activeServices(named map[string]bool) map[string]bool {
 		}
 	}
 	return set
+}
+
+// dropOptionalGatedDeps leaves out, for this run, every `required: false`
+// dependency on a service the profiles keep out — the way docker compose
+// (v5.5.1, measured 2026-09-19) reads it: not refused, not started, not
+// waited for, wherever the dependency is read from here on. Called from
+// checkProjectLoads, so by `up` and `run` (`start` and `restart` are
+// unchanged by it, measured). A dependency the
+// file does not define is not touched (reading the file refuses it, whatever
+// `required` says), nor is one on a service that is active (it is waited
+// for as any other). Done where the active set is known with the names the
+// command was given — naming a service carries a dependency under a shared
+// profile, optional or not (measured) — and not from the order every service
+// takes (activeList), which knows no names and would leave out what a name
+// carries.
+func (o *Orchestrator) dropOptionalGatedDeps(active map[string]bool) {
+	for _, svc := range o.Project.Services {
+		kept := svc.DependsOn[:0:0]
+		for _, dep := range svc.DependsOn {
+			if _, defined := o.Project.Services[dep.Name]; defined && dep.Optional && !active[dep.Name] {
+				continue
+			}
+			kept = append(kept, dep)
+		}
+		svc.DependsOn = kept
+	}
 }
 
 // startupOrder orders every service of the project, each after the ones it
@@ -1099,7 +1255,7 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 	for _, s := range services {
 		named[s] = true
 	}
-	if err := o.checkProjectLoads(named); err != nil {
+	if err := o.checkProjectLoads(named, true); err != nil {
 		return err
 	}
 	order, err := o.startupOrder()
@@ -1206,6 +1362,12 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 		if err := o.checkTmpfsOptions(order); err != nil {
 			return err
 		}
+	}
+	// Under --dry-run as well: the plan is what `up` would run, and `up`
+	// refuses these shapes rather than running without the group. docker
+	// compose's --dry-run goes through, as docker takes every shape.
+	if err := o.checkGroupAdd(order); err != nil {
+		return err
 	}
 	o.warnUnresolvableServiceNames(order)
 
@@ -1443,21 +1605,18 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 		// Build the image only when it's missing or --build was given (docker
 		// compose builds lazily); --no-build refuses to build. A (re)build means the
 		// image may have changed, so force a recreate below.
-		image := svc.Image
+		image, _ := o.serviceImage(name, svc)
 		rebuilt := false
 		if svc.Build != nil {
-			image = o.Project.Name + "-" + name + ":latest"
 			have := o.rt.ImageExists(image)
 			need := o.up.build || !have
 			switch {
 			case o.up.fromDocker && need:
 				// Bring the image over from Docker instead of building it here.
-				dockerRef := image
-				if svc.Image != "" {
-					dockerRef = svc.Image // docker tags a build+image service by its image:
-				}
-				o.logf("Importing %s from Docker (%s)\n", name, dockerRef)
-				if err := o.rt.ImportFromDocker(dockerRef, image); err != nil {
+				// Docker names the image as opossum does (`image:` if the service
+				// gives one), so the name to bring over is the name to run.
+				o.logf("Importing %s from Docker (%s)\n", name, image)
+				if err := o.rt.ImportFromDocker(image, image); err != nil {
 					return fmt.Errorf("importing service %q: %w", name, err)
 				}
 				rebuilt = true
@@ -1527,6 +1686,8 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 			WorkingDir: svc.WorkingDir,
 			Init:       svc.Init,
 			ReadOnly:   svc.ReadOnly,
+			TTY:        svc.TTY,
+			GID:        gidOf(svc),
 			ShmSize:    string(svc.ShmSize),
 			Ulimits:    svc.Ulimits.Args(),
 			CapAdd:     svc.CapAdd,
@@ -1597,6 +1758,13 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 				if runtime.RunRefusedNameTaken(err, cname) {
 					started, createdSvc = disownLast(started, createdSvc, cname, name)
 					return nameTakenError(name, cname, "a run-to-completion dependency has to be run by this `up` to know it completed")
+				}
+				if !o.requiredToComplete(name) {
+					// Every service that waits for this one to complete does
+					// so with `required: false`: docker compose (v5.5.1,
+					// measured) says so and goes on to start them.
+					o.warnf(codeOptionalDependency, "optional dependency %q didn't complete successfully: %v\n", name, err)
+					continue
 				}
 				return fmt.Errorf("service %q did not complete successfully: %w\n"+
 					"  it's a run-to-completion dependency (a service_completed_successfully target) that exited non-zero — check its output above, or run it directly with `opossum run %s`", name, err, name)
@@ -2365,6 +2533,25 @@ func unansweredOwners(unanswered []string, command string) error {
 		len(unanswered), strings.Join(unanswered, ", "), command)}
 }
 
+// requiredToComplete is whether some dependent in the file needs name to run
+// to completion and requires it (`required` not written false); with every
+// such dependent optional, a failure to complete is noted and passed over.
+// Every dependent in the file counts, as completedTargets counts every one
+// when deciding what runs to completion: a required dependent behind a
+// profile that is not active keeps the failure fatal here, where docker
+// compose (v5.5.1, measured) reads only the dependents it starts and goes
+// on — a known difference, kept so that the two sets are one.
+func (o *Orchestrator) requiredToComplete(name string) bool {
+	for _, svc := range o.Project.Services {
+		for _, dep := range svc.DependsOn {
+			if dep.Name == name && dep.Condition == compose.ConditionCompleted && !dep.Optional {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // completedTargets is the set of services that some dependent needs to run to
 // completion (depends_on condition: service_completed_successfully).
 func (o *Orchestrator) completedTargets() map[string]bool {
@@ -2398,6 +2585,13 @@ func (o *Orchestrator) awaitHealthyDeps(name string, svc *compose.Service) error
 		}
 		o.logf("Waiting for %s to be healthy\n", dep.Name)
 		if err := o.waitHealthy(dep.Name, hc); err != nil {
+			if dep.Optional {
+				// Waited for all the same, then passed over: docker compose
+				// (v5.5.1, measured) waits the whole healthcheck out and
+				// starts the dependent anyway.
+				o.warnf(codeOptionalDependency, "optional dependency %q of service %q is not healthy: %v — starting %s anyway\n", dep.Name, name, err, name)
+				continue
+			}
 			return fmt.Errorf("dependency %q for service %q: %w", dep.Name, name, err)
 		}
 	}
@@ -2479,8 +2673,9 @@ func (o *Orchestrator) Down(removeVolumes bool, rmi string, removeOrphans bool) 
 	}
 	// …and forget what it was watching: the stack is coming down, so a later
 	// `up <service>` has nothing here to carry over. This is the call that counts —
-	// the one `down` makes before the compose file is read can only guess the
-	// project name from the directory, which is wrong whenever the file names it.
+	// the one `down` makes before the compose file is read can only work the
+	// project name out without the file (`-p`, COMPOSE_PROJECT_NAME, the
+	// directory), which is wrong whenever the file names it.
 	ClearWatched(o.Project.Name)
 	order, err := o.startupOrder()
 	if err != nil {
@@ -2541,30 +2736,94 @@ func (o *Orchestrator) Down(removeVolumes bool, rmi string, removeOrphans bool) 
 	return unansweredOwners(unanswered, "opossum down")
 }
 
-// removeImages deletes the services' images after teardown. "local" removes only
-// images opossum built (`<project>-<service>:latest`); "all" also removes the
-// pulled images services reference. Deduped and best-effort.
+// removeImages deletes the services' images after teardown. "local" removes the
+// images under opossum's own name for them, `<project>-<service>:latest`; "all"
+// also removes the images services name. Deduped and best-effort.
+//
+// "local" goes by that name and no other. Under it is what a build of this
+// project made, and nothing else gives an image that name — which cannot be
+// said of a name `image:` gives: the same name may hold something pulled, tagged
+// by hand or built by another project, and `up` builds only when nothing is
+// there, so a file with `build:` can be up without anything having been built.
+// docker compose tells its own builds apart by a label and removes those
+// (measured on v5.5.1); doing the same here is its own change (#1126), and
+// until then an image built under an `image:` name is left by "local" and
+// removed by "all".
+//
+// A service that names its image still had `<project>-<service>:latest` before
+// `image:` was read, and a project brought up back then has its image under
+// it. Nothing else reads that name now, so it is cleared out here — when it is
+// there — rather than left behind for good.
 func (o *Orchestrator) removeImages(order []string, all bool) {
 	seen := map[string]bool{}
-	for _, name := range order {
-		ref, built := o.serviceImage(name, o.Project.Services[name])
-		if ref == "" || seen[ref] || (!built && !all) {
-			continue
+	remove := func(ref string) {
+		if ref == "" || seen[ref] {
+			return
 		}
 		seen[ref] = true
 		o.logf("Removing image %s\n", ref)
 		o.rt.DeleteImage(ref)
 	}
+	for _, name := range order {
+		svc := o.Project.Services[name]
+		if former := o.formerBuiltImage(name, svc); former != "" && o.rt.ImageExists(former) {
+			remove(former)
+		}
+		// opossum's own name for this service's image — which is also what a
+		// file that spells it out as `image:` has.
+		ref, built := o.serviceImage(name, svc)
+		if all || (built && ref == o.builtImageDefaultName(name)) {
+			remove(ref)
+		}
+	}
 }
 
-// serviceImage is the image reference opossum uses for a service: the image it
-// builds (`<project>-<service>:latest`) when the service has a build, else the
-// pulled `image:` reference. built reports which.
+// serviceImage is the image reference opossum uses for a service, and the one
+// place the name of a built image is put together: what builds, looks for,
+// runs, shows (`ps`, `images`), removes (`down --rmi`, `destroy`) and imports a
+// service's image asks here, because one that built under one name and removed
+// under another would leave the image behind. (What reads `image:` for what it
+// says about the image — `pull`, the image-side checks — reads the field
+// itself; for a service that builds and names its image the two are the same.)
+// built reports whether the service has a build, which is not whether anything
+// was built: `up` builds only when no image of that name is there.
+//
+// A service with a build is built under the name its `image:` gives, as docker
+// compose builds it (measured on v5.5.1), and as `<project>-<service>:latest`
+// when it gives none. That is what lets a second service use the first one's
+// image by name: it used to be built as `<project>-<service>:latest` whatever
+// `image:` said, so the second went to a registry for a name that was only
+// ever local. The name is handed over as written — the runtime reads one with
+// no tag as `:latest` when it builds, inspects and runs (measured on 1.4.1), as
+// docker compose does.
 func (o *Orchestrator) serviceImage(name string, svc *compose.Service) (ref string, built bool) {
-	if svc.Build != nil {
-		return o.Project.Name + "-" + name + ":latest", true
+	if svc.Build == nil {
+		return svc.Image, false
 	}
-	return svc.Image, false
+	if svc.Image != "" {
+		return svc.Image, true
+	}
+	return o.builtImageDefaultName(name), true
+}
+
+// builtImageDefaultName is what a built image is called when the service gives
+// it no name.
+func (o *Orchestrator) builtImageDefaultName(name string) string {
+	return o.Project.Name + "-" + name + ":latest"
+}
+
+// formerBuiltImage is the name a service's built image had before `image:` was
+// read — `<project>-<service>:latest` — for a service that builds and names its
+// image, and "" otherwise. A project brought up before the change has its image under it,
+// and nothing else reads that name now, so the commands that remove a project's
+// images clear it out as well rather than leave it behind for good.
+func (o *Orchestrator) formerBuiltImage(name string, svc *compose.Service) string {
+	if svc.Build == nil || svc.Image == "" {
+		return ""
+	}
+	// Where `image:` spells out that very name there is one image, not two;
+	// both callers take each name once, so nothing here has to tell.
+	return o.builtImageDefaultName(name)
 }
 
 // ImagesOptions selects how `opossum images` shows each service's image.
@@ -2986,9 +3245,8 @@ func (o *Orchestrator) decodeStartError(name string, err error) error {
 	// build` is where the answer is. (measured: nothing in the five shapes
 	// comes from a built image — they are all a run of an image by name.)
 	if svc := o.Project.Services[name]; svc != nil && svc.Build == nil && o.imageFetchFailed(name, err) {
-		// svc.Image is what the run asked the registry for: a service the file
-		// builds is the only one whose run uses another name, and it is not
-		// here.
+		// svc.Image is what the run asked the registry for: this is a service
+		// that builds nothing, so its image is the one `image:` names.
 		return fmt.Errorf("starting service %q: %w\n  %s", name, err, imageUnreachable(svc.Image))
 	}
 	return startFailed(name, err)
@@ -3747,10 +4005,7 @@ func (o *Orchestrator) serviceStatuses() (rows []ServiceStatus, notes, unanswere
 	for _, name := range order {
 		svc := o.Project.Services[name]
 		cname := o.containerName(name)
-		image := svc.Image
-		if svc.Build != nil {
-			image = o.Project.Name + "-" + name + ":latest"
-		}
+		image, _ := o.serviceImage(name, svc)
 		info := o.rt.Inspect(cname)
 		// Whose it is comes first: a container the runtime gave no readable
 		// answer about is not "not there".
@@ -4575,8 +4830,9 @@ func (o *Orchestrator) resolveServices(services []string) ([]string, error) {
 // (reuse images an existing `docker compose` already built) or as a fallback
 // when Apple's builder can't handle a Dockerfile. With no services all build
 // services are imported; otherwise the named ones. docker compose and opossum
-// name a built image the same way (`<project>-<service>:latest`), so it lands
-// under the tag `up` looks for.
+// name a built image the same way (the service's `image:` if it has one,
+// `<project>-<service>:latest` if not — see serviceImage), so it lands under
+// the name `up` looks for.
 func (o *Orchestrator) Import(services ...string) error {
 	order, err := o.resolveServices(services)
 	if err != nil {
@@ -4593,12 +4849,9 @@ func (o *Orchestrator) Import(services ...string) error {
 			continue
 		}
 		// docker compose tags a build service by its `image:` if set, otherwise by
-		// `<project>-<service>`. opossum's `up` always looks for the latter, so pull
-		// from whatever Docker named it and retag to what `up` expects.
+		// `<project>-<service>`, and so does opossum: the name to bring over is
+		// the name `up` looks for.
 		dockerRef := target
-		if svc.Image != "" {
-			dockerRef = svc.Image
-		}
 		o.logf("Importing %s from Docker (%s)\n", name, dockerRef)
 		if err := o.rt.ImportFromDocker(dockerRef, target); err != nil {
 			return fmt.Errorf("importing service %q: %w", name, err)
@@ -4793,7 +5046,7 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 	// and wherever in the file they sit (measured; it refuses them before a
 	// missing env_file too, which this does not follow). `--no-deps` does not
 	// change this: the project is read the same way either way.
-	if err := o.checkProjectLoads(map[string]bool{service: true}); err != nil {
+	if err := o.checkProjectLoads(map[string]bool{service: true}, false); err != nil {
 		return err
 	}
 	// The stale one-off deleted below is found by name, and a container of
@@ -4835,6 +5088,9 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 		return err
 	}
 	if err := o.checkTmpfsOptions(made); err != nil {
+		return err
+	}
+	if err := o.checkGroupAdd(made); err != nil {
 		return err
 	}
 
@@ -4884,9 +5140,8 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 		}
 	}
 
-	image := svc.Image
+	image, _ := o.serviceImage(service, svc)
 	if svc.Build != nil {
-		image = o.Project.Name + "-" + service + ":latest"
 		o.logf("Building %s\n", service)
 		if err := o.rt.Build(o.buildOptions(image, svc.Build, "opossum run")); err != nil {
 			// A Ctrl-C mid-build is not a Dockerfile the builder cannot handle.
@@ -4971,12 +5226,14 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 		// JSON-RPC over stdio) work as one-offs.
 		Interactive: true,
 		TTY:         opts.TTY,
+		Attached:    opts.TTY,
 		// Forward the SSH agent if the service asks for it or the caller passed --ssh.
 		SSH:        svc.SSH || opts.SSH,
 		User:       svc.User,
 		WorkingDir: svc.WorkingDir,
 		Init:       svc.Init,
 		ReadOnly:   svc.ReadOnly,
+		GID:        gidOf(svc),
 		ShmSize:    string(svc.ShmSize),
 		Ulimits:    svc.Ulimits.Args(),
 		CapAdd:     svc.CapAdd,
@@ -5078,7 +5335,7 @@ func (o *Orchestrator) Build(services []string) error {
 		if svc.Build == nil {
 			continue
 		}
-		image := o.Project.Name + "-" + name + ":latest"
+		image, _ := o.serviceImage(name, svc)
 		o.logf("Building %s\n", name)
 		if err := o.rt.Build(o.buildOptions(image, svc.Build, "opossum build")); err != nil {
 			return buildFailed(name, err)
@@ -5384,6 +5641,10 @@ func (o *Orchestrator) buildOptions(tag string, b *compose.Build, redo string) r
 		// `container run -e A` does.
 		Args:   compose.ResolveBareNames(b.Args, os.LookupEnv, false),
 		Target: b.Target,
+		// Whose build this is, kept on the image: a built image can carry a name
+		// the compose file chose (`image:`), and a name alone does not say that
+		// this project made what is under it. Nothing reads it yet (#1126).
+		Labels: []string{projectLabel + "=" + o.Project.Name},
 		Redo:   redo,
 	}
 }
