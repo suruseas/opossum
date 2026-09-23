@@ -23,6 +23,9 @@ type buildErrorDetector struct {
 	line         []byte
 	longLine     bool
 	imageRefused bool
+	// refusedLine is the runtime's line for the refused request, whose URL
+	// names the image the build asked for.
+	refusedLine string
 }
 
 // maxHeldLine bounds how much of one line is kept. The runtime's refusal is a
@@ -144,6 +147,7 @@ func (d *buildErrorDetector) readLines(p []byte) {
 func (d *buildErrorDetector) endLine() {
 	if !d.longLine && isImageRefusedLine(string(d.line)) {
 		d.imageRefused = true
+		d.refusedLine = string(d.line)
 	}
 	d.line, d.longLine = d.line[:0], false
 }
@@ -218,6 +222,74 @@ func hintFor(failure buildFailure, redo string) string {
 			"and that it's reachable (registry auth / network), " + again
 	}
 	return ""
+}
+
+// refusedContext is the additional context whose name the refused request
+// asked a registry for as an image, or "" when the request is for none of
+// them. The builder, given a name it has no context for, asks a registry for
+// it with no tag (contextManifestURL) — `https://registry-1.docker.io/v2/library/<name>/manifests/latest`
+// for a bare name (measured on container 1.4.1 with `COPY --from=sharedlib`,
+// on the machine and not in the capture the tests replay: `…/v2/library/sharedlib/manifests/latest
+// failed with response: 401`) — so that is the request matched, tag and all.
+// A request with another tag or a digest is for an image the Dockerfile
+// named with it (`FROM alpine:3.20`), which a context of the same name does
+// not stand in for (docker 29.8.0 buildx, measured 2026-09-20: a context
+// `alpine` is not used for `FROM alpine:nosuchtag`), and the ordinary hint —
+// check that image's name and tag — is the true one there.
+func (d *buildErrorDetector) refusedContext(contexts []string) string {
+	d.mu.Lock()
+	line := d.refusedLine
+	d.mu.Unlock()
+	for _, name := range contexts {
+		if url := contextManifestURL(name); url != "" && strings.Contains(line, `"HTTP request to `+url+" failed with response: ") {
+			return name
+		}
+	}
+	return ""
+}
+
+// contextManifestURL is the request the builder makes for name when no
+// context stands in for it, or "" for a name that is not matched. Measured on
+// container 1.4.1 with `COPY --from=<name>` (2026-09-20): a bare name goes to
+// Docker Hub's library (`sharedlib` → `registry-1.docker.io/v2/library/sharedlib`);
+// a name with a `/` goes to Docker Hub as written (`org/lib` →
+// `registry-1.docker.io/v2/org/lib`, no `library/`), unless its first part
+// looks like a host — a `.` or a `:` in it, or `localhost` — which the request
+// goes to with the rest as the path (`example.com/org/lib` →
+// `example.com/v2/org/lib`).
+//
+// Docker compose does not use a context in place of a name that is a Docker
+// Hub reference spelled out — `library/sharedlib`, `docker.io/org/lib`,
+// `docker.io/library/sharedlib` all go to the registry there (docker 29.8.0,
+// measured 2026-09-20) — so such a name is not matched, and the ordinary hint
+// stays: one under `library/` is left out here, and one naming `docker.io`
+// is asked of `registry-1.docker.io`, not of the host it names, so its URL
+// never matches. One naming `registry-1.docker.io` is left out too: docker
+// compose does use it as a context, but the builder's request for it has not
+// been measured, and the ordinary hint is what it had before. A name with a
+// tag (`org/lib:v1`) is asked for with that tag, not `latest`, and is not
+// matched either.
+func contextManifestURL(name string) string {
+	host, path := "registry-1.docker.io", "library/"+name
+	if first, rest, ok := strings.Cut(name, "/"); ok {
+		switch {
+		case first == "library" || first == "registry-1.docker.io":
+			return ""
+		case strings.ContainsAny(first, ".:") || first == "localhost":
+			host, path = first, rest
+		default:
+			path = name
+		}
+	}
+	return "https://" + host + "/v2/" + path + "/manifests/latest"
+}
+
+// additionalContextHint is the refused-image hint when the image asked for is
+// the name of an additional build context: the name was never an image, and
+// checking its tag would send the reader the wrong way.
+func additionalContextHint(name string) string {
+	return "hint: the build asked a registry for `" + name + "` as an image, and `" + name + "` is one of this service's additional build contexts (`build.additional_contexts`), which opossum does not pass: `container build` takes one context directory and has no way to add another. " +
+		"Copy what the Dockerfile takes from `" + name + "` into the build context, or build the image with docker and bring it over with `opossum up --from-docker-compose`."
 }
 
 // buildFailure is which known failure a build's output is read as.

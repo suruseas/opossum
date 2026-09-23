@@ -47,9 +47,12 @@ its own networking.
 
 Two things to know about internal networks:
 
-- **No name resolution.** A container's resolver is its network's gateway, and an
-  internal network's gateway serves no DNS (queries are refused) — so peers can't
-  resolve each other by service name. Reach the host proxy by
+- **No name resolution through the network itself.** A container's resolver is
+  the gateway of the network it is attached to **first**, and an internal
+  network's gateway serves no DNS (queries are refused) — so a container whose
+  first network is internal resolves nothing by name, while one that joins the
+  internal network after a normal one still resolves through that one (measured
+  2026-09-21). Where nothing resolves, reach the host proxy by
   `${OPOSSUM_HOST_GATEWAY}` (an IP), and address any in-network peer by IP.
 - **Changing `internal:` on an existing network needs a `down` first.** opossum
   doesn't reconfigure a network that already exists; `opossum down` then `up`

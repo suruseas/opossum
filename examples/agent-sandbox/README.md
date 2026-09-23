@@ -162,7 +162,8 @@ Declaration forms for each entry:
   published port (path defaults to `/mcp`).
 - **`service:port`** / **`service:port/path`** — pin the port/path explicitly.
 - **`name=url`** — an explicit URL, for a server reached some other way. The
-  **caged** agent (below) uses this: it has no name resolution and its only internet
+  **caged** agent (below) uses this: its only network is internal, so it resolves no
+  name at all, and its only internet
   is the proxy, so it points at the tool *through the host gateway*.
 
 **Scope:** HTTP-transport MCP servers only. A stdio server has no cross-container

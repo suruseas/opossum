@@ -701,6 +701,27 @@ func (o *Orchestrator) checkNetworkNames(nets []resolvedNetwork) error {
 // a peer looks the service up by it (`db.<project>.<domain>`), so it is not
 // rewritten: that would break the lookup. docker compose v5.5.0 runs these
 // names; this is a limit of the runtime.
+
+// checkOneOffNameFree refuses a `run` whose one-off would carry a name the
+// project gives a service. The one-off's container is `<service>-run`, and
+// container 1.4.1 has one container under a name: starting the one-off makes
+// a new container under it, and the one the service had is gone — measured
+// 2026-09-21, where the container under that name changed its creation time
+// and carried the one-off's command, and a later `up` made the service
+// another container again. What `--rm` removes afterwards is the one-off;
+// without it the one-off is what stays there, stopped. The file decides this,
+// not what is running: the service of that name need not be up yet, and a
+// profile can bring it up while the one-off is running. docker compose meets
+// none of this — its one-off is `<project>-<service>-run-<hash>` — so there is
+// no refusal of its to follow, and this is a difference from it.
+func (o *Orchestrator) checkOneOffNameFree(service string) error {
+	if _, taken := o.Project.Services[service+"-run"]; !taken {
+		return nil
+	}
+	return fmt.Errorf("the one-off for service %q is named %q, and the project has a service of that name — starting it would take the name: the container under it becomes the one-off's, whatever the service had there is gone, and a later `up` makes the service another container; rename the service %q",
+		service, service+"-run", service+"-run")
+}
+
 func (o *Orchestrator) checkContainerName(service, name string) error {
 	if len(name) <= runtime.MaxContainerNameLen {
 		if runtime.ValidContainerName(name) {
@@ -825,35 +846,195 @@ func (o *Orchestrator) checkGroupAdd(services []string) error {
 		}
 		if len(svc.GroupAdd) > 1 {
 			quoted := make([]string, len(svc.GroupAdd))
-			for i, g := range svc.GroupAdd {
-				quoted[i] = strconv.Quote(g)
+			// One spelling can be two groups — an integer `020` is YAML's
+			// octal, the string `"020"` the digits `--gid` reads as 20 — and
+			// then the list would quote it twice over with nothing to tell
+			// the two apart. Where one spelling is two groups, each of them
+			// says which; where the two are one group however they are
+			// handed over (`+16` beside `"+16"`), there is nothing to tell
+			// apart and nothing is added.
+			groupOf := func(g string) string {
+				if numericGID(g) {
+					// ParseInt reads a leading `+` itself, so the spelling
+					// goes in as it is.
+					if n, err := strconv.ParseInt(g, 10, 64); err == nil {
+						return strconv.FormatInt(n, 10)
+					}
+				}
+				return g
 			}
-			return fmt.Errorf("service %q adds %d groups (group_add: %s); container 1.4.1's --gid takes one, and a second replaces the first — keep the one the process needs",
-				svcName, len(svc.GroupAdd), strings.Join(quoted, ", "))
+			groupsFor := map[string]map[string]bool{}
+			for i := range svc.GroupAdd {
+				w := writtenGroup(svc, i)
+				quoted[i] = strconv.Quote(w)
+				if groupsFor[w] == nil {
+					groupsFor[w] = map[string]bool{}
+				}
+				groupsFor[w][groupOf(svc.GroupAdd[i])] = true
+			}
+			for i := range svc.GroupAdd {
+				if len(groupsFor[writtenGroup(svc, i)]) < 2 {
+					continue
+				}
+				// A group is named where the runtime would give that group:
+				// container 1.4.1 takes a gid up to 4294967294 (measured
+				// 2026-09-23 — 4294967295 is taken by the flag and then fails
+				// to create the container, and past that, or a spelling the
+				// flag cannot read as a number, it refuses outright).
+				// Everything else is told apart by what opossum hands over
+				// for it — the reading this whole check compares, left bare
+				// here as every reading in these refusals is.
+				g := svc.GroupAdd[i]
+				if numericGID(g) {
+					if n, err := strconv.ParseInt(g, 10, 64); err == nil && n <= 4294967294 {
+						quoted[i] += fmt.Sprintf(" (the group %d)", n)
+						continue
+					}
+				}
+				quoted[i] += fmt.Sprintf(" (handed over as %s)", g)
+			}
+			// What --gid is handed is read there in decimal (measured on
+			// container 1.4.1: `"016"` and `"+16"` reach it as those
+			// characters and are the group 16, `"0020"` the group 20 — the
+			// quotes matter, since an unquoted `016` is YAML's octal and
+			// reaches --gid as 14). Entries written differently can
+			// therefore be one group, and counting the spellings would tell a
+			// reader to choose between lines that ask for the same thing.
+			// Entries the runtime could not read are folded by the same rule:
+			// what opossum would hand over, whatever the file spells.
+			folded, order := map[string][]int{}, []string{}
+			for i, g := range svc.GroupAdd {
+				key := groupOf(g)
+				if _, seen := folded[key]; !seen {
+					order = append(order, key)
+				}
+				folded[key] = append(folded[key], i)
+			}
+			// Saying "list the group once" promises that the file then
+			// starts, so it is said only where it would: the checks below
+			// read one entry, and a folded value they refuse is refused for
+			// that instead — naming what to write rather than how many times.
+			folds := order[0]
+			usable := numericGID(folds) && inGIDRange(folds) && svc.User == ""
+			if len(order) == 1 && len(svc.GroupAdd) > 1 && usable {
+				// One group, named more than once: the fix is to drop the
+				// repetitions, not to choose among them.
+				times, all := "twice", "both"
+				if len(svc.GroupAdd) > 2 {
+					times, all = fmt.Sprintf("%d times", len(svc.GroupAdd)), "all"
+				}
+				// Not a shape the runtime refuses — one group is one `--gid`,
+				// and either spelling alone starts. What is unsettled is
+				// which of the two opossum would hand over, and it does not
+				// choose.
+				return fmt.Errorf("service %q names one group %s (group_add: %s — %s the group %s); one --gid is handed over, and opossum does not choose which of them to hand it — list the group once",
+					svcName, times, strings.Join(quoted, ", "), all, order[0])
+			}
+			// Which lines are the same group, for the reader choosing one.
+			var alike []string
+			for _, key := range order {
+				at := folded[key]
+				if len(at) < 2 {
+					continue
+				}
+				spelled := make([]string, len(at))
+				for j, i := range at {
+					spelled[j] = quoted[i]
+				}
+				// `both` holds two; three spellings of one group are all of
+				// them, listed the way the rest of this message lists things.
+				how, joined := "both", strings.Join(spelled, " and ")
+				if len(at) > 2 {
+					how = "all"
+					joined = strings.Join(spelled[:len(at)-1], ", ") + " and " + spelled[len(at)-1]
+				}
+				alike = append(alike, fmt.Sprintf("%s are %s the group %s", joined, how, key))
+			}
+			if len(order) > 1 {
+				same := ""
+				if len(alike) > 0 {
+					same = " — " + strings.Join(alike, ", ")
+				}
+				return fmt.Errorf("service %q adds %d groups (group_add: %s%s); container 1.4.1's --gid takes one, and a second replaces the first — keep the one the process needs",
+					svcName, len(order), strings.Join(quoted, ", "), same)
+			}
+			// One group the checks below refuse: they name what to write,
+			// which is what this file needs before the repetition matters.
 		}
 		g := svc.GroupAdd[0]
+		// The refusals name the entry as the file spells it: the loader reads
+		// a number to its decimal (`0x10` is `16`), and a reader told to fix
+		// `16` cannot find it in a file that says `0x10`. One rule holds
+		// across them — what the file spells is quoted, what opossum read out
+		// of it is bare — so that where both are in one sentence (the group
+		// past the largest gid) the reader can tell which is which.
+		w := writtenGroup(svc, 0)
 		switch {
 		case g == "":
 			return fmt.Errorf("service %q adds an empty group (group_add: [\"\"]); the docker engine refuses it too (`unable to find group`) — write the group's number, or drop the entry",
 				svcName)
 		case strings.HasPrefix(g, "-"):
-			return fmt.Errorf("service %q adds the group %s (group_add); a gid is not negative — the docker engine refuses it too (`uids and gids must be in range 0-2147483647`) — write the group's number",
-				svcName, g)
+			return fmt.Errorf("service %q adds the group %q (group_add); a gid is not negative — the docker engine refuses it too (`uids and gids must be in range 0-2147483647`) — write the group's number",
+				svcName, w)
 		case !numericGID(g) && strings.ContainsAny(g, "0123456789"):
 			return fmt.Errorf("service %q adds the group %q (group_add), which is not the digits of a gid — write the number alone, as in `- 2000`",
-				svcName, g)
+				svcName, w)
 		case !numericGID(g):
 			return fmt.Errorf("service %q adds the group %q (group_add); container 1.4.1's --gid takes a number, where docker compose resolves a name in the image — write the group's number",
-				svcName, g)
+				svcName, w)
 		case !inGIDRange(g):
-			return fmt.Errorf("service %q adds the group %s (group_add), which is past 2147483647, the largest gid the docker engine takes — write the group's number",
-				svcName, g)
+			// Both spellings where they differ: the number is the reason here,
+			// and a reader given only `0x80000000` would have to convert it to
+			// see that it is past the largest gid. The reading goes after the
+			// `(group_add)` that says which key this came from, so the two are
+			// not read as two of those.
+			is := "is past"
+			if w != g {
+				is = fmt.Sprintf("reads as the group %s and is past", g)
+			}
+			return fmt.Errorf("service %q adds the group %q (group_add), which %s 2147483647, the largest gid the docker engine takes — write the group's number",
+				svcName, w, is)
 		case svc.User != "":
-			return fmt.Errorf("service %q adds the group %s (group_add) beside user: %q; container 1.4.1's --gid does nothing next to --user — drop group_add (the process then runs without the group, and a socket or device that needs it refuses it), or drop user: (the image's own user then runs with the group)",
-				svcName, g, svc.User)
+			return fmt.Errorf("service %q adds the group %q (group_add) beside user: %q; container 1.4.1's --gid does nothing next to --user — drop group_add (the process then runs without the group, and a socket or device that needs it refuses it), or drop user: (the image's own user then runs with the group)",
+				svcName, w, svc.User)
 		}
 	}
 	return nil
+}
+
+// checkVolumeSubpaths refuses, before anything is created, a named-volume
+// mount that asks for a part of the volume (`volume: {subpath: sub}`).
+// container 1.4.1 has no way to mount a part of a volume — `--mount` takes
+// type, source, target and readonly, `subpath=` is refused as an unknown
+// directive, and `source=vol/sub` as an invalid volume name (measured
+// 2026-09-19) — and mounting the whole volume in its place would hand the
+// service other files than the ones docker compose gives it, with nothing
+// said. docker compose mounts the part.
+func (o *Orchestrator) checkVolumeSubpaths(services []string) error {
+	for _, svcName := range services {
+		if subs := o.Project.Services[svcName].VolumeSubpaths; len(subs) > 0 {
+			named := make([]string, len(subs))
+			for i, v := range subs {
+				named[i] = v.String()
+			}
+			return fmt.Errorf("service %q mounts a part of a volume (%s); container 1.4.1 cannot mount a part of a volume, only the whole of it — mount the whole volume and use the path under it, or keep what is under that path in a volume of its own",
+				svcName, strings.Join(named, ", "))
+		}
+	}
+	return nil
+}
+
+// writtenGroup is the entry as the file spells it, for a refusal to name:
+// the loader records the spellings beside its reading of them
+// (Service.GroupAddWritten). A service built by hand rather than read from a
+// file has none, and its reading is what there is to name; so is every entry
+// of a service whose two lists somehow differ in length, which the loader's
+// own tests hold apart.
+func writtenGroup(svc *compose.Service, i int) string {
+	if len(svc.GroupAddWritten) != len(svc.GroupAdd) {
+		return svc.GroupAdd[i]
+	}
+	return svc.GroupAddWritten[i]
 }
 
 // gidOf is the one group `group_add` hands to --gid: the shape checkGroupAdd
@@ -869,9 +1050,10 @@ func gidOf(svc *compose.Service) string {
 
 // numericGID is a gid as `--gid` takes one: digits, with a `+` allowed in
 // front (container 1.4.1 reads `+2000` and `0002000` as 2000, measured
-// 2026-09-19; a space, or a `0x` prefix, it refuses). A number in a single
-// file arrives here as written, so `0x10` is not one; one read with other
-// files, or through `extends`, arrives in decimal.
+// 2026-09-19; a space, or a `0x` prefix, it refuses). A number the loader
+// could read arrives here in decimal, so `0x10` is 16 by the time this sees
+// it; a quoted one (`"0x10"`) is the string as written, and so is a number
+// too large to fit an integer read from a file on its own.
 func numericGID(s string) bool {
 	s = strings.TrimPrefix(s, "+")
 	if s == "" {
@@ -926,6 +1108,227 @@ func (o *Orchestrator) warnUnresolvableServiceNames(services []string) {
 			"         upper case gets no DNS answer, or another address when spelled like a top-level domain (Web), and a name with \".\"\n"+
 			"         gets none from a musl image (alpine) and an internet address when one exists for it. If another service reaches\n"+
 			"         it by name, rename it in lower case ASCII letters, digits, \"_\" and \"-\".\n", name)
+	}
+}
+
+// warnNamesOnASecondNetwork says which services cannot reach a peer by name.
+// container 1.4.1 registers only a container's first attachment in DNS: a
+// service on two networks answers by name with the address on the network it
+// is attached to first, and that address is unreachable from a service that
+// is not on that network (measured 2026-09-18 with `container network create`
+// and `container run --network a --network b` alone — swapping the order
+// swaps which peer cannot reach it, so this is the runtime's DNS, not the way
+// opossum attaches). The address on the other network does answer, so the
+// peers can still reach each other by address. Docker compose answers with an
+// address the asking service can reach.
+//
+// The networks are compared by the name the runtime gets, not by the key the
+// file writes: two keys declared `external: true` under one name are one
+// network. The order is the order opossum passes `--network` in, which is the
+// order a list writes in one file, and name order for a mapping or for
+// networks merged from several files.
+//
+// Warned, not refused: the project runs, and a pair that never looks the other
+// up is unaffected. A service on one network cannot be in such a pair, and a
+// `network_mode: none` service is on none (`network_mode: host` with networks
+// is read, and its networks count). Without a DNS domain there is no lookup by
+// name to warn about. Two more are left to [OPSM-203]: a peer whose own first
+// network is internal, which resolves nothing at all, and a pair whose shared
+// networks are all internal, where attaching one of them first has not been
+// measured.
+//
+// Said for the services a command starts together: `up` (and `up --dry-run`),
+// and the services a `run` starts on its way to a one-off. The one-off's own
+// container is not among these — it carries another name (`<service>-run`) —
+// and the pairs it is in are named by
+// warnNamesOnASecondNetworkForOneOff.
+func (o *Orchestrator) warnNamesOnASecondNetwork(services []string) {
+	named := make([]namedService, 0, len(services))
+	for _, name := range services {
+		named = append(named, namedService{service: name, answersTo: name})
+	}
+	o.warnNamesAmong(named, "")
+}
+
+// namedService is a service a command starts, and the name its container
+// answers to: the service's own, or `<service>-run` for a one-off, whose
+// container carries that name and is attached to the same networks (measured
+// 2026-09-21).
+type namedService struct{ service, answersTo string }
+
+// warnNamesOnASecondNetworkForOneOff says which of the services a `run`
+// starts cannot reach its one-off by name, and which the one-off cannot
+// reach. The one-off's container carries another name — `<service>-run` —
+// and is attached to the service's own networks, in the same order (measured
+// 2026-09-21: `<service>-run` resolves, and from a peer sharing only a later
+// network it answers with the address on the first one, as the service
+// itself does).
+//
+// Only the pairs the one-off is in: the pairs among the dependencies are the
+// inner `Up`'s to name, and saying them here as well would print each twice.
+func (o *Orchestrator) warnNamesOnASecondNetworkForOneOff(service string) {
+	// A service of the project called `<service>-run` would carry the name
+	// every line here gives the one-off. The run is refused before it reaches
+	// this (checkOneOffNameFree), so the name is the one-off's alone.
+	started := []namedService{{service: service, answersTo: service + "-run"}}
+	// Every service the run starts, not only the ones named under
+	// `depends_on`: the Up the caller ran starts the dependencies'
+	// dependencies too, and a one-off cannot reach those by name either.
+	for _, dep := range o.withDependencies(service) {
+		// withDependencies leads with the service itself, whose container is
+		// the one-off already in the list.
+		if dep != service {
+			started = append(started, namedService{service: dep, answersTo: dep})
+		}
+	}
+	// Only the pairs the one-off is in: the ones among the dependencies were
+	// named by the Up the caller ran just before this.
+	o.warnNamesAmong(started, service)
+}
+
+// warnNamesAmong is warnNamesOnASecondNetwork over services a command starts
+// together, each with the name its container answers to. With `involving`
+// set, only the pairs that service is one side of are named — a `run` says
+// the ones its one-off is in, and leaves the ones among the dependencies to
+// the `Up` that started them, so neither pair is said twice.
+func (o *Orchestrator) warnNamesAmong(started []namedService, involving string) {
+	if o.DNSDomain == "" {
+		return
+	}
+	// The networks a service is attached to, in the order they are passed:
+	// the key the file writes, and the name the runtime gets (two keys
+	// declared `external: true` under one name are one network).
+	type attachment struct{ key, name string }
+	attached := func(name string) []attachment {
+		svc := o.Project.Services[name]
+		if svc == nil {
+			return nil
+		}
+		var out []attachment
+		for _, key := range svc.Networks {
+			n := o.resolveNetwork(key).name
+			if !slices.ContainsFunc(out, func(a attachment) bool { return a.name == n }) {
+				out = append(out, attachment{key: key, name: n})
+			}
+		}
+		return out
+	}
+	// pair is a service that answers on `first` (as its file spells it) and a
+	// peer that shares `shared` with it but not that one.
+	type pair struct {
+		to, from, first, shared string
+		// fixOn is the service whose `networks:` the reader edits: the file
+		// spells that, while `to` may be a one-off's container name.
+		fixOn string
+		// Which side, if either, is a one-off — the two are written
+		// differently, and only one of them is a name to type.
+		toOneOff bool
+		// fromService is the service a one-off on the asking side was made
+		// from; it is what that side is called instead of a name.
+		fromService string
+	}
+	var pairs []pair
+	for _, answering := range started {
+		to := answering.service
+		nets := attached(to)
+		if len(nets) < 2 {
+			continue
+		}
+		first := nets[0]
+		later := map[string]string{} // runtime name -> the key this service writes
+		for _, a := range nets[1:] {
+			later[a.name] = a.key
+		}
+		for _, asking := range started {
+			from := asking.service
+			if from == to {
+				continue
+			}
+			peer := attached(from)
+			// A container's resolver is the gateway of the network it is
+			// attached to first, and an internal network's gateway answers no
+			// query at all: such a peer looks up nothing, and reordering the
+			// networks of the service it is asking about does not change that
+			// (measured 2026-09-21: `getent hosts api` from such a peer gets
+			// no answer, and still none once `api` is reordered). That is
+			// [OPSM-203]'s subject, not this one's.
+			if len(peer) > 0 && o.Project.Networks[peer[0].key].Internal {
+				continue
+			}
+			var shared []string
+			onFirst := false
+			for _, a := range peer {
+				if a.name == first.name {
+					onFirst = true
+				}
+				if key, ok := later[a.name]; ok && !slices.Contains(shared, key) {
+					shared = append(shared, key)
+				}
+			}
+			if onFirst || len(shared) == 0 {
+				continue
+			}
+			if involving != "" && to != involving && from != involving {
+				continue
+			}
+			sort.Strings(shared)
+			// The one to name is a shared network that is not internal: an
+			// internal network answers no name at all (its gateway serves no
+			// DNS — [OPSM-203] says so for every service on it), so attaching
+			// it first would not make the name work. Where every shared
+			// network is internal there is nothing to advise, and [OPSM-203]
+			// is what says why.
+			pick := ""
+			for _, key := range shared {
+				if !o.Project.Networks[key].Internal {
+					pick = key
+					break
+				}
+			}
+			if pick == "" {
+				continue
+			}
+			p := pair{to: answering.answersTo, from: asking.answersTo, first: first.key, shared: pick, fixOn: to}
+			p.toOneOff = answering.answersTo != answering.service
+			if asking.answersTo != asking.service {
+				p.fromService = asking.service
+			}
+			pairs = append(pairs, p)
+		}
+	}
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i].to != pairs[j].to {
+			return pairs[i].to < pairs[j].to
+		}
+		return pairs[i].from < pairs[j].from
+	})
+	for _, p := range pairs {
+		// A one-off is written two ways, by what the reader does with it. On
+		// the side that answers, a peer looks the name up, so the name is
+		// there — with what it is, where the line first names it, since the
+		// file spells no such service. On the side that asks, the reader
+		// types the other name; this one would only say who cannot reach, so
+		// it is not spelled out. This is each line's own: a run that writes
+		// two lines of one kind writes both of them this way.
+		answering := fmt.Sprintf("service %q", p.to)
+		joins := ""
+		if p.toOneOff {
+			answering = fmt.Sprintf("the one-off %q, the container this run starts for service %q,", p.to, p.fixOn)
+			// The fix is written on the service the file names: the one-off
+			// takes its networks in the same order, so moving one there moves
+			// it for the one-off too.
+			joins = " the one-off joins that service's networks in the same order,"
+		}
+		asking, asksAgain := fmt.Sprintf("service %q", p.from), fmt.Sprintf("%q", p.from)
+		if p.fromService != "" {
+			asking = fmt.Sprintf("the one-off this run starts for service %q", p.fromService)
+			asksAgain = "the one-off"
+		}
+		o.warnf(codeSecondNetworkName, "%s answers by name with its address on network %q, the one it is attached to first, so %s —\n"+
+			"         which shares %q with it but not %q — cannot reach it by that name (the address on %q does answer). Attach %q to %q\n"+
+			"         first —%s a list of networks in one file attaches in the order written, a mapping and networks merged from several files\n"+
+			"         in name order — or have %s use the address.\n",
+			answering, p.first, asking, p.shared, p.first, p.shared, p.shared, p.fixOn, joins, asksAgain)
 	}
 }
 
@@ -1369,7 +1772,11 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 	if err := o.checkGroupAdd(order); err != nil {
 		return err
 	}
+	if err := o.checkVolumeSubpaths(order); err != nil {
+		return err
+	}
 	o.warnUnresolvableServiceNames(order)
+	o.warnNamesOnASecondNetwork(order)
 
 	// Containers for services no longer in the compose are removed with
 	// --remove-orphans, otherwise just flagged (docker compose parity).
@@ -3093,7 +3500,7 @@ func (o *Orchestrator) reportIgnoredFields(services []string, includeTopLevel bo
 			}
 		}
 		for _, name := range services {
-			if u := o.Project.Services[name].Unsupported; len(u) > 0 {
+			if u := o.ignoredFields(name); len(u) > 0 {
 				o.warnf(codeIgnoredField, "service %q: ignoring unsupported field(s): %s\n", name, strings.Join(u, ", "))
 			}
 		}
@@ -3106,6 +3513,33 @@ func (o *Orchestrator) reportIgnoredFields(services []string, includeTopLevel bo
 		// to add.
 		o.logf("%s\n", strings.TrimRight(note, "\n"))
 	}
+}
+
+// ignoredFields is the service's ignored fields as `up` and `run` name them:
+// a named-volume mount of a part of the volume, which both refuse before
+// anything is created (checkVolumeSubpaths), is left out, so the note above
+// the refusal does not first call the key ignored. `config`, which does not
+// refuse it, still lists it.
+func (o *Orchestrator) ignoredFields(name string) []string {
+	svc := o.Project.Services[name]
+	refused := map[string]bool{}
+	for _, v := range svc.VolumeSubpaths {
+		// A borrowed one (Entry 0) is the holder's entry, not in this
+		// service's list; no ignored field is numbered 0 either.
+		if v.Entry > 0 {
+			refused[fmt.Sprintf("volumes entry %d.volume.subpath", v.Entry)] = true
+		}
+	}
+	if len(refused) == 0 {
+		return svc.Unsupported
+	}
+	var out []string
+	for _, f := range svc.Unsupported {
+		if !refused[f] {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // ignoredFieldsNote builds the one-line summary of ignored compose fields across
@@ -3121,7 +3555,7 @@ func (o *Orchestrator) ignoredFieldsNote(services []string, includeTopLevel bool
 	names := append([]string(nil), services...)
 	sort.Strings(names)
 	for _, name := range names {
-		for _, f := range o.Project.Services[name].Unsupported {
+		for _, f := range o.ignoredFields(name) {
 			pairs = append(pairs, pair{name, f})
 		}
 	}
@@ -5049,6 +5483,11 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 	if err := o.checkProjectLoads(map[string]bool{service: true}, false); err != nil {
 		return err
 	}
+	// Before the name is looked for in the runtime: what the file says about
+	// it settles the question wherever that container is.
+	if err := o.checkOneOffNameFree(service); err != nil {
+		return err
+	}
 	// The stale one-off deleted below is found by name, and a container of
 	// another project can carry that name (with `--dns-domain ""`, names are bare
 	// service names): refuse here, before anything starts, as `up` does for its
@@ -5093,6 +5532,9 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 	if err := o.checkGroupAdd(made); err != nil {
 		return err
 	}
+	if err := o.checkVolumeSubpaths(made); err != nil {
+		return err
+	}
 
 	// Keep the one-off's own stdout clean (e.g. an MCP server's JSON-RPC over
 	// stdio): dependency startup, build, and volume-seeding progress all go to
@@ -5112,6 +5554,10 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 			if err := o.Up(true, deps...); err != nil {
 				return fmt.Errorf("starting dependencies: %w", err)
 			}
+			// The pairs the one-off is in, under the name its container
+			// carries. The ones among the dependencies were named by the Up
+			// above.
+			o.warnNamesOnASecondNetworkForOneOff(service)
 		}
 	}
 
@@ -5645,7 +6091,10 @@ func (o *Orchestrator) buildOptions(tag string, b *compose.Build, redo string) r
 		// the compose file chose (`image:`), and a name alone does not say that
 		// this project made what is under it. Nothing reads it yet (#1126).
 		Labels: []string{projectLabel + "=" + o.Project.Name},
-		Redo:   redo,
+		// Not passed to the builder; named in the hint if a registry refuses
+		// one of them as an image.
+		AdditionalContexts: b.AdditionalContexts,
+		Redo:               redo,
 	}
 }
 

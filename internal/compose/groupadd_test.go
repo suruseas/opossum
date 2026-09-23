@@ -10,11 +10,12 @@ import (
 
 // `group_add`, as docker compose v5.5.1 reads it (`config`, measured
 // 2026-09-19): a list of numbers or strings — a scalar, a bool, a float or
-// an item written twice refused. Kept as written, where docker compose
-// reads a number to its decimal, and the same spelling twice refused
-// whichever way round, where docker compose goes by the order (the rows
-// marked "known difference", each with the answer this reads). What of it
-// the runtime can take is the orchestrator's question, not this one's.
+// an item written twice refused. A number that fits an integer is read to
+// its decimal as there, whether the file is read alone or with another
+// (measured 2026-09-20); a repeat is found by the spelling together with what
+// opossum hands over for it, where docker compose goes by the value it read (the rows marked "known difference",
+// each with the answer this reads). What of it the runtime can take is the
+// orchestrator's question, not this one's.
 func TestGroupAddIsReadAsDockerComposeReadsIt(t *testing.T) {
 	for _, tc := range []struct {
 		name, body string
@@ -29,46 +30,61 @@ func TestGroupAddIsReadAsDockerComposeReadsIt(t *testing.T) {
 		{"an empty item", "    group_add: [\"\"]\n", []string{""}, ""},
 		{"a negative number", "    group_add: [-1]\n", []string{"-1"}, ""},
 		{"through an alias", "    group_add: [*g]\n", []string{"2000"}, ""},
-		// Known difference: a number is kept as written, where docker
-		// compose reads it to its decimal (`0x10` → `"16"`, `020` → `"16"`,
-		// `0o17` → `"15"`, `0755` → `"493"`, `2_000` → `"2000"`, `+2000` →
-		// `"2000"`, `-0` refused as a float there). Here `config` prints
-		// what was written, and a spelling `--gid` does not take is refused
-		// where the service starts.
-		{"a hex number, kept as written", "    group_add: [0x10]\n", []string{"0x10"}, ""},
-		// An unquoted leading-zero number is octal to YAML and to docker
-		// compose (`0755` adds 493 there) but decimal to the runtime handed
-		// the digits (755): refused, naming both ways to write it. Where the
-		// two readings agree (`00`, `07`) it passes; quoted, it is a string.
-		{"a mode-looking number is refused", "    group_add: [0755]\n", nil, "group_add entry 1 of 1 is 0755, which YAML reads as the octal 493 where the runtime would read it as decimal — write `- 493` for that group, or quote it (`- \"755\"`) for the decimal one"},
-		{"a leading-zero number, 1024 in octal", "    group_add: [02000]\n", nil, "is 02000, which YAML reads as the octal 1024"},
-		{"a signed leading-zero number", "    group_add: [+0755]\n", nil, "is +0755, which YAML reads as the octal 493 where the runtime would read it as decimal — write `- 493` for that group, or quote it (`- \"755\"`) for the decimal one"},
-		// Three characters: 8 in octal, 10 in decimal.
-		{"a three-character leading-zero number", "    group_add: [010]\n", nil, "is 010, which YAML reads as the octal 8 where the runtime would read it as decimal — write `- 8` for that group, or quote it (`- \"10\"`) for the decimal one"},
-		{"another three-character one", "    group_add: [020]\n", nil, "is 020, which YAML reads as the octal 16"},
-		{"a leading-zero number read the same both ways", "    group_add: [07]\n", []string{"07"}, ""},
-		{"double zero", "    group_add: [00]\n", []string{"00"}, ""},
+		// A number that fits an integer is read to its decimal, as docker
+		// compose reads it (`0x10` → `"16"`, `020` → `"16"`, `0o17` →
+		// `"15"`, `0755` → `"493"`, `2_000` → `"2000"`, `+2000` →
+		// `"2000"`), in one file as in two. `config` prints the decimal,
+		// and `--gid` is given the same group docker compose adds.
+		{"a hex number", "    group_add: [0x10]\n", []string{"16"}, ""},
+		{"an octal number", "    group_add: [0o17]\n", []string{"15"}, ""},
+		{"a mode-looking number is its octal", "    group_add: [0755]\n", []string{"493"}, ""},
+		{"a leading-zero number, 1024 in octal", "    group_add: [02000]\n", []string{"1024"}, ""},
+		{"a signed leading-zero number", "    group_add: [+0755]\n", []string{"493"}, ""},
+		{"a three-character leading-zero number", "    group_add: [010]\n", []string{"8"}, ""},
+		{"a leading-zero number read the same both ways", "    group_add: [07]\n", []string{"7"}, ""},
+		{"double zero", "    group_add: [00]\n", []string{"0"}, ""},
+		{"an underscored number", "    group_add: [2_000]\n", []string{"2000"}, ""},
 		{"a quoted leading-zero number is a string", "    group_add: [\"0755\"]\n", []string{"0755"}, ""},
-		{"a negative leading-zero number is left to the start's check", "    group_add: [-010]\n", []string{"-010"}, ""},
-		{"a signed number, kept as written", "    group_add: [+2000]\n", []string{"+2000"}, ""},
-		{"minus zero, kept as written", "    group_add: [-0]\n", []string{"-0"}, ""},
+		{"a negative leading-zero number is left to the start's check", "    group_add: [-010]\n", []string{"-8"}, ""},
+		{"a signed number", "    group_add: [+2000]\n", []string{"2000"}, ""},
+		// Minus zero keeps its sign, so the check where the service starts
+		// still refuses it for being negative; docker compose refuses the
+		// value as a float there.
+		{"minus zero keeps its sign", "    group_add: [-0]\n", []string{"-0"}, ""},
+		{"minus zero written with more zeros", "    group_add: [-00]\n", []string{"-0"}, ""},
+		// Known difference: a repeat is found by the spelling and what is
+		// handed over for it, so two
+		// spellings of one number are two entries here — the check where the
+		// service starts folds them by what would be handed to `--gid` and
+		// refuses them as one group named twice — where docker compose
+		// refuses the file for naming one group twice as it reads it.
+		{"a number then the same in hex", "    group_add: [16, 0x10]\n", []string{"16", "16"}, ""},
+		// The other way round: `[0x10, "16"]` is two entries on docker
+		// compose too, and both read the same group here.
+		{"a number then the same as a string", "    group_add: [0x10, \"16\"]\n", []string{"16", "16"}, ""},
 		{"a quoted hex is a string", "    group_add: [\"0x10\"]\n", []string{"0x10"}, ""},
 		{"a leading-zero non-octal is a float, refused", "    group_add: [08]\n", nil, "group_add entry 1 of 1 must be a number or a string"},
 		{"an exponent is a float, refused", "    group_add: [1e3]\n", nil, "group_add entry 1 of 1 must be a number or a string"},
-		{"a number too large for an integer is a float, refused", "    group_add: [99999999999999999999]\n", nil, "group_add entry 1 of 1 must be a number or a string"},
+		{"a number too large for an unsigned integer is a float, refused", "    group_add: [99999999999999999999]\n", nil, "group_add entry 1 of 1 must be a number or a string"},
+		// Between the two: YAML reads it as an unsigned number, which does
+		// not fit the integer this reads, so it stays as written and the
+		// check where the service starts refuses it.
+		{"a number too large for an integer stays as written", "    group_add: [18446744073709551615]\n", []string{"18446744073709551615"}, ""},
+		{"the same in hex", "    group_add: [0xFFFFFFFFFFFFFFFF]\n", []string{"0xFFFFFFFFFFFFFFFF"}, ""},
 		{"a scalar is refused", "    group_add: 2000\n", nil, "group_add must be a list, got a single value"},
 		{"a quoted scalar is refused", "    group_add: \"2000\"\n", nil, "group_add must be a list"},
 		{"null is refused", "    group_add: null\n", nil, "group_add"},
 		// An item written twice is refused, as docker compose refuses it —
 		// by the spelling, whichever way round. Known difference: docker
-		// compose goes by the order (`[2000, "2000"]` goes through there
-		// with both kept, `["2000", 2000]` does not; `[16, 0x10]` is refused
-		// there as one number twice, and is two spellings here).
+		// compose answers by the order the two are written in (`[2000,
+		// "2000"]` goes through there with both kept, `["2000", 2000]` does
+		// not; `[16, 0x10]` is refused there as one group named twice, and is
+		// two entries here, which the check where the service starts refuses
+		// as one group named twice, asking for it to be listed once).
 		{"the same number twice is refused", "    group_add: [2000, 2000]\n", nil, "group_add items at 0 and 1 are equal"},
 		{"the same string twice is refused", "    group_add: [\"2000\", \"2000\"]\n", nil, "group_add items at 0 and 1 are equal"},
 		{"a string then its number is refused", "    group_add: [\"2000\", 2000]\n", nil, "group_add items at 0 and 1 are equal"},
 		{"a number then its string is refused (docker compose: goes through)", "    group_add: [2000, \"2000\"]\n", nil, "group_add items at 0 and 1 are equal"},
-		{"a number then the same in hex are two spellings (docker compose: refused)", "    group_add: [16, 0x10]\n", []string{"16", "0x10"}, ""},
 		{"a string then a different number", "    group_add: [\"2000\", 3000]\n", []string{"2000", "3000"}, ""},
 		{"three, the third repeating the first", "    group_add: [16, \"32\", 16]\n", nil, "group_add items at 0 and 2 are equal"},
 		{"an int tag on digits reads the digits", "    group_add: [!!int \"16\"]\n", []string{"16"}, ""},
@@ -115,14 +131,17 @@ func TestGroupAddIsReadAsDockerComposeReadsIt(t *testing.T) {
 	}
 }
 
-// Across files a repeated group written as a string is folded, as docker
-// compose folds it (v5.5.1, measured 2026-09-19: `compose.yaml` with
-// `["2000"]` and an override with `["2000"]` print one `"2000"`; `["2000",
-// "3000"]` then `["3000"]` print two). Known difference: a number written in
-// both files is the same item twice here and refused — docker compose folds
-// `[2000]` and `[2000]`, prints both of `[2000]` and `["2000"]`, and refuses
-// `["2000"]` then `[2000]` — the answer here is one: list the group once, or
-// write it the same way in both.
+// Across files a repeated group is folded by what it reads as, whether the
+// files write it as a string or as a number (v5.5.1, measured 2026-09-19 and
+// 2026-09-23: `compose.yaml` with `["2000"]` and an override with `["2000"]`
+// print one `"2000"`; `["2000", "3000"]` then `["3000"]` print two; `[2000]`
+// and `[2000]` print one there too).
+//
+// Known difference, in the rows that say so: docker compose compares an entry
+// by the value it read and only from the second entry on, so it prints both
+// of `[2000]` and `["2000"]` and refuses `["2000"]` then `[2000]`. Here the
+// two are one entry whichever file wrote which, since one `--gid` is handed
+// over in the end.
 func TestGroupAddIsFoldedAcrossFiles(t *testing.T) {
 	for _, tc := range []struct {
 		name, base, over string
@@ -132,9 +151,24 @@ func TestGroupAddIsFoldedAcrossFiles(t *testing.T) {
 		{"the same group in both", "[\"2000\"]", "[\"2000\"]", []string{"2000"}, ""},
 		{"one of two repeated", "[\"2000\", \"3000\"]", "[\"3000\"]", []string{"2000", "3000"}, ""},
 		{"a new one added", "[\"2000\"]", "[\"3000\"]", []string{"2000", "3000"}, ""},
-		{"a number in both (docker compose: folded)", "[2000]", "[2000]", nil, "group_add items at 0 and 1 are equal"},
-		{"a number then its string (docker compose: both printed)", "[2000]", "[\"2000\"]", nil, "group_add items at 0 and 1 are equal"},
-		{"a string then its number (docker compose: refused too)", "[\"2000\"]", "[2000]", nil, "group_add items at 0 and 1 are equal"},
+		// The merge folds a scalar by what it reads as, so a number written
+		// in both files is one entry — as docker compose folds it. A number
+		// beside its string folds here either way round, where docker
+		// compose keeps both when the number comes first and refuses the
+		// file when the string does (measured on v5.5.1): one `--gid` is
+		// handed over in the end, so the two are one entry here whichever
+		// file wrote which.
+		{"a number in both (docker compose: folded)", "[2000]", "[2000]", []string{"2000"}, ""},
+		{"a number then its string (docker compose: both printed)", "[2000]", "[\"2000\"]", []string{"2000"}, ""},
+		{"a string then its number (docker compose: refused)", "[\"2000\"]", "[2000]", []string{"2000"}, ""},
+		// Not one entry: the integer is YAML's octal and the string is the
+		// digits, so they read as two groups and both are kept (docker
+		// compose keeps them too).
+		{"an octal integer beside its string", "[020]", "[\"020\"]", []string{"16", "020"}, ""},
+		// A file naming a group twice on its own is still refused, wherever
+		// it sits.
+		{"twice in the base", "[2000, 2000]", "[3000]", nil, "group_add items at 0 and 1 are equal"},
+		{"twice in the override", "[3000]", "[2000, 2000]", nil, "group_add items at 0 and 1 are equal"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()

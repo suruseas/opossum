@@ -1050,6 +1050,11 @@ type BuildOptions struct {
 	// typed. Empty means unknown: hints then name no command rather than a wrong
 	// one.
 	Redo string
+	// AdditionalContexts are the names of the build's contexts beyond Context
+	// (`build.additional_contexts`), which `container build` cannot be given.
+	// Not passed; read only to say, when a registry refuses one of them as an
+	// image, that it was meant as a context.
+	AdditionalContexts []string
 }
 
 // Build builds an image. It always requests `--progress plain` so build output is
@@ -1082,7 +1087,13 @@ func (r *Runtime) Build(o BuildOptions) error {
 		// Read once: the hint and what the caller is told are then about the
 		// same failure, whatever arrives on the streams afterwards.
 		failure := det.diagnosed()
-		if h := hintFor(failure, o.Redo); h != "" {
+		h := hintFor(failure, o.Redo)
+		if failure == failedImageRefused {
+			if name := det.refusedContext(o.AdditionalContexts); name != "" {
+				h = additionalContextHint(name)
+			}
+		}
+		if h != "" {
 			err = fmt.Errorf("%w\n%s", err, h)
 			if failure == failedImageRefused {
 				err = &buildImageRefused{err}

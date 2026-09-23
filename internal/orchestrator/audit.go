@@ -94,6 +94,12 @@ func (o *Orchestrator) RunAudited(service string, command []string, opts RunOneO
 	if err := o.checkProjectLoads(map[string]bool{service: true}, false); err != nil {
 		return nil, err
 	}
+	// The one-off's name against the file, before it is looked for in the
+	// runtime: what the file says settles the question wherever that
+	// container is.
+	if err := o.checkOneOffNameFree(service); err != nil {
+		return nil, err
+	}
 	// The one-off's name, for the same two reasons: a refusal spent on the run
 	// below would read `exit -1`, and the dependencies would already be up.
 	if err := o.ensureNotForeign(o.containerName(service+"-run"), "opossum run"); err != nil {
@@ -134,6 +140,9 @@ func (o *Orchestrator) RunAudited(service string, command []string, opts RunOneO
 	if err := o.checkGroupAdd(made); err != nil {
 		return nil, err
 	}
+	if err := o.checkVolumeSubpaths(made); err != nil {
+		return nil, err
+	}
 	report := &AuditReport{Service: service, Command: command}
 
 	// Files: snapshot the workspace before the run so we can diff after.
@@ -162,6 +171,9 @@ func (o *Orchestrator) RunAudited(service string, command []string, opts RunOneO
 			if err := o.Up(true, deps...); err != nil {
 				return nil, fmt.Errorf("starting dependencies: %w", err)
 			}
+			// The pairs the one-off is in, under the name its container
+			// carries; the ones among the dependencies were named above.
+			o.warnNamesOnASecondNetworkForOneOff(service)
 		}
 	}
 

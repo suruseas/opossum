@@ -42,7 +42,7 @@ The table below is the same map in detail — each row is one thing you might re
 | Container names / **project isolation** | `<project>-<service>-N`, name-scoped | `<service>.<project>.<domain>` on a per-project network (`<project>-net`); projects stay isolated automatically — see [Running multiple projects](#running-multiple-projects-at-once). The name is at most 63 characters on container 1.4.1 (a one-off's is `<service>-run.<project>.<domain>`): `up` and `run` refuse a longer one before creating anything (for `run --audit`, a dependency's is refused after the workspace snapshot), since peers resolve the service by that name |
 | Restricting **internet egress** | no native control (needs an external firewall) | `internal: true` on a network **removes the route to the internet** (host still reachable); `network_mode: none` = loopback only — see [Constraining egress](agent-sandbox.md) |
 | Multiple networks / **external** | supported, with aliases | multiple networks per service (one `--network` each) and `external: true` (reuse a pre-existing network by name) both work; a declared network is `<project>-<key>` with the key folded to the lower-case name container 1.4.1 takes (`backEnd` → `<project>-backend`), and a network name longer than 63 characters is refused before any container or network is created |
-| Name resolution **on an `internal:` network** | works | **doesn't** — a container's resolver is its network's gateway, and an internal network's gateway serves no DNS (queries are refused, though the gateway itself is reachable), so address peers by **IP** (or reach a host proxy via `${OPOSSUM_HOST_GATEWAY}`) |
+| Name resolution **on an `internal:` network** | works | **only through another network** — a container's resolver is the gateway of the network it is attached to **first**, and an internal network's gateway serves no DNS (queries are refused, though the gateway itself is reachable), so a container whose first network is internal resolves nothing; one that joins an internal network after a normal one resolves through that one. Otherwise address peers by **IP** (or reach a host proxy via `${OPOSSUM_HOST_GATEWAY}`) |
 | Per-network **aliases** / static IPs (`ipv4_address`) | applied | **not applied** — `container run` has no flag for either (the `<project>` subdomain is what keeps names unique) |
 | A network's **subnet** (`ipam.config[].subnet`) | applied | applied — `container network create --subnet` / `--subnet-v6`, one of each at most; two projects declaring the same subnet are refused by the runtime, as by docker |
 
@@ -50,7 +50,7 @@ The three surprises for a docker-compose user, and why:
 
 - **There's no `host.docker.internal`.** Apple `container`'s default network is NAT-only and exposes no host alias, so opossum computes the host's LAN address and hands it to you as `${OPOSSUM_HOST_GATEWAY}`, interpolated into your compose at load time. The host service must listen on `0.0.0.0` (not just loopback) to be reachable from the container.
 - **Bare-name discovery needs a one-time DNS domain.** The runtime's built-in DNS only serves a *registered* domain, so `sudo container system dns create opossum` (once) is what makes `db`/`web` resolve. Skip it and services can't find each other by name (`opossum doctor` flags this, and startup warns with `[OPSM-202]`).
-- **An `internal:` network has no name resolution at all.** A container's resolver is the gateway of the network it sits on, and an internal network's gateway serves no DNS: queries to it are refused, even though the gateway (and the host) still answer pings. So on an internal network, peers must talk by IP, and the one sanctioned way out is a host proxy at `${OPOSSUM_HOST_GATEWAY}`.
+- **An `internal:` network's gateway answers no name.** A container's resolver is the gateway of the network it is attached to **first**, and an internal network's gateway serves no DNS: queries to it are refused, even though the gateway (and the host) still answer pings. So a container whose first network is internal resolves nothing at all, while one that joins an internal network after a normal one still resolves names through the first network's gateway (measured 2026-09-21). Peers that cannot resolve must talk by IP, and the one sanctioned way out is a host proxy at `${OPOSSUM_HOST_GATEWAY}`.
 
 `opossum doctor` checks the two things that most often go wrong here — whether the DNS domain is registered and whether outbound networking works — and prints a one-line fix for each.
 
@@ -73,6 +73,30 @@ opossum is a thin orchestration layer — it never re-implements the runtime:
   name** (`db`, `cache`, …) — matching compose semantics. The domain must be
   created once (see the README's setup section); this relies on `container`'s built-in DNS on
   macOS 26+.
+- **A service on several networks** — the runtime registers a container's
+  **first** attachment in its DNS, so such a service answers by name with its
+  address on the network it is attached to first (the first a list in one file
+  writes; name order for a mapping, or for networks merged from several
+  files). A peer that shares only a later network gets that address back and
+  cannot reach it, while the address on the network they share does answer.
+  `up` says which pairs are in that position (`[OPSM-211]`) among the services
+  it starts, and a `run` says it for the dependencies it starts and for
+  the one-off itself; attach the shared network first, or have the peer use
+  the address. Where the one-off is the side that answers, the message gives
+  the name its container carries (`<service>-run`) and says what it is, since
+  that is the name a peer looks up; where it is the side that asks, it is
+  called the one-off this run starts for that service and not named, since
+  the name to type from there is the other one. The
+  shared network the message names is one that is not `internal: true`, and
+  the peer it names is one whose own first network is not internal — a
+  container's resolver is that network's gateway, and an internal one answers
+  nothing, so such a peer resolves no name at all and reordering the other
+  service's networks would not help. The service that answers may have an
+  internal network first: it is in DNS all the same, answering with the address
+  it has there, which is why reordering its networks is what the message
+  advises (measured 2026-09-23). Those pairs are left to `[OPSM-203]`, and so is
+  a pair all of whose shared networks are internal. Docker compose
+  answers with an address the asking service can reach.
 - **Runtime** — everything is delegated to the `container` CLI
   (`build`, `run`, `stop`, `delete`, `network`, `inspect`).
 

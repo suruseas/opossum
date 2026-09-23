@@ -170,9 +170,11 @@ ignored.** opossum registers every service under the search domain
 default/attachable network reach each other by bare name (`web`, `db`) with no DNS
 config. Writing `dns_search: [web.myproj.opossum]` (or any `dns`/`dns_search`) does
 nothing. Caveats: bare-name discovery needs the domain registered once (`sudo
-container system dns create opossum`, see `[OPSM-202]`); an `internal:` network has
-**no name resolution at all** — peers there must be addressed by IP (see
-`[OPSM-203]`).
+container system dns create opossum`, see `[OPSM-202]`); a container whose **first**
+network is `internal:` resolves no name at all — its resolver is that network's
+gateway, which answers nothing — so it must address peers by IP (see
+`[OPSM-203]`), while one that joins an internal network after a normal one
+still resolves through the normal one (measured on container 1.4.1).
 
 **Rejected (hard load error):** `external: true` secrets; a `secrets` entry with no
 `file:`; a service with neither `image` nor `build`; `network_mode: none` combined
@@ -462,7 +464,9 @@ list; codes are add-only and never change meaning.
   dns create opossum` once, then `up` again (needed for bare-name discovery).
 - **`[OPSM-203]` … `network <n> is internal (host-only): … no internet egress`** →
   expected for an `internal:` network; reach out only through a host proxy at
-  `${OPOSSUM_HOST_GATEWAY}`, and address peers by IP (no name resolution).
+  `${OPOSSUM_HOST_GATEWAY}`. A container attached to it **first** resolves no
+  name at all and has to address peers by IP; one that joins it after a normal
+  network still resolves through that one.
 - **`[OPSM-205]` … `network <n> is declared external: true but doesn't exist`** →
   opossum uses an `external:` network by name and never creates it, so it must
   already exist. Create it (`container network create <n>`), or drop `external:
@@ -507,7 +511,7 @@ Every `[OPSM-NNN]` opossum can emit (add-only; grouped 1xx storage / 2xx network
 - `OPSM-201` — a published host port is already taken, whether the pre-flight saw it or
   the start failed on it.
 - `OPSM-202` — the DNS domain isn't registered (no bare-name discovery).
-- `OPSM-203` — an internal network: no internet egress and no name resolution.
+- `OPSM-203` — an internal network: no internet egress, and no name resolution for a container attached to it first.
 - `OPSM-204` — a service mounts `docker.sock`, which does not answer for the containers here.
 - `OPSM-205` — a network declared `external: true` doesn't exist (pre-flight; create it or drop `external`).
 - `OPSM-206` — a container-only port's mirrored host port was taken; opossum published on a free port.
@@ -515,6 +519,7 @@ Every `[OPSM-NNN]` opossum can emit (add-only; grouped 1xx storage / 2xx network
 - `OPSM-208` — another `up`/`down`/`destroy` for the project is still running (wait, then retry).
 - `OPSM-209` — a service's name may not be reachable by other services: upper case gets no DNS answer, or another address when spelled like a top-level domain (`Web`), and `.` gets none from a musl image (alpine) and an internet address when one exists (rename it in lower case if a peer reaches it by name).
 - `OPSM-210` — a volume declared `external: true` doesn't exist (pre-flight; create it or drop `external`).
+- `OPSM-211` — (`up`; a `run` for the dependencies it starts and for its one-off, named `<service>-run` where a peer would look that name up and called the one-off of its service where it is the side that cannot reach) a service on two or more networks answers by name with its address on the network it is attached to first, so a peer that shares only a later one cannot reach it by name (attach the shared network first — a list attaches in the order written, a mapping and merged networks in name order — or have the peer use the address).
 - `OPSM-401` — a dependency's container exited before becoming healthy (logs embedded).
 - `OPSM-402` — orphan containers left by services no longer in the compose.
 - `OPSM-403` — a `service_healthy` dependency defines no healthcheck (not waited on).

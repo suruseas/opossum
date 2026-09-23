@@ -90,8 +90,10 @@ build can starve.
   case is an app + nginx sharing a `public`/assets volume.) `up` **warns** when it
   sees this — use a **bind mount** (a host path, which *is* shareable) for the
   shared data, or bake it into the image.
-- **`networks:` — aliases and static IPs (`ipv4_address`) aren't applied** (a top-level network's `ipam` subnet is), and an
-  `internal:` network has no name resolution (peers must use IPs). Multiple networks
+- **`networks:` — aliases and static IPs (`ipv4_address`) aren't applied** (a top-level network's `ipam` subnet is), and a container
+  whose **first** network is `internal:` resolves no name at all (it must address
+  peers by IP), while one that joins an internal network after a normal one still
+  resolves through the normal one. Multiple networks
   per service and `external:` reuse both work. See [Networking
   model](networking.md) for the full picture.
 - **`restart:` is honoured by a small per-project supervisor**, not by a resident

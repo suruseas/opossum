@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"path"
 	"reflect"
 	"regexp"
 	"slices"
@@ -108,29 +109,42 @@ type Service struct {
 	// `volume: {nocopy: true}` turns that off; opossum emulates the seeding, so it
 	// has to honour the same switch. Lifted out of Volumes during parsing, like
 	// tmpfs, so the marker never escapes.
-	NoCopy      []string        `yaml:"-"`
-	Secrets     SecretRefs      `yaml:"secrets"`
-	Configs     ConfigRefs      `yaml:"configs"`
-	DependsOn   DependsOn       `yaml:"depends_on"`
-	Healthcheck *Healthcheck    `yaml:"healthcheck"`
-	Profiles    StringOrSlice   `yaml:"profiles"`     // service starts only when one of these profiles is active (empty = always); the type takes a bare name so the shape check below refuses it in the field's own words, not the decoder's
-	MemLimit    scalarStr       `yaml:"mem_limit"`    // legacy memory limit ("512m", "2g", …)
-	CPUs        scalarStr       `yaml:"cpus"`         // legacy CPU limit (may be fractional)
-	SSH         bool            `yaml:"ssh"`          // forward the host SSH agent (--ssh) for private git over SSH
-	User        string          `yaml:"user"`         // --user (name|uid[:gid]) the process runs as
-	WorkingDir  string          `yaml:"working_dir"`  // --workdir the process starts in
-	Init        bool            `yaml:"init"`         // --init: run a tini-like init as PID 1 to reap zombies
-	ShmSize     scalarStr       `yaml:"shm_size"`     // size of /dev/shm (`1gb`, `64M`, bytes) → --shm-size <bytes>
-	Ulimits     Ulimits         `yaml:"ulimits"`      // resource limits (`nofile: 65536` or `{soft, hard}`) → --ulimit name=soft:hard
-	ReadOnly    bool            `yaml:"read_only"`    // --read-only root filesystem
-	TTY         bool            `yaml:"tty"`          // -t: a pseudo-terminal for the service's process (`up`); `run` decides by the terminal it was typed at
-	CapAdd      StringOrSlice   `yaml:"cap_add"`      // --cap-add Linux capabilities
-	CapDrop     StringOrSlice   `yaml:"cap_drop"`     // --cap-drop Linux capabilities
-	GroupAdd    GroupAdd        `yaml:"group_add"`    // one numeric supplementary group → --gid (the shapes the runtime cannot take are refused before anything starts)
-	NetworkMode string          `yaml:"network_mode"` // only "none" acted on: full network isolation (--network none)
-	MacAddress  string          `yaml:"mac_address"`  // the container's MAC on its first network (`--network <name>,mac=…`)
-	Labels      Labels          `yaml:"labels"`       // put on the container as `-l key=value`, before opossum's own labels (which win on a clash, as docker compose's own do)
-	Networks    ServiceNetworks `yaml:"networks"`     // declared networks this service joins (one --network each; aliases/static IPs not applied)
+	NoCopy []string `yaml:"-"`
+	// VolumeSubpaths are the named-volume mounts that ask for only a part of
+	// the volume (`volume: {subpath: sub}`), in the service's own `volumes:`
+	// (volumeSubpaths) and borrowed with `volumes_from`. container 1.4.1 has
+	// no way to mount a part of a volume, so a command that starts the
+	// service refuses them rather than mount the whole volume in its place
+	// (see Orchestrator.checkVolumeSubpaths). A bind or tmpfs mount's
+	// `volume.subpath` is not here: docker compose reads past it as well.
+	VolumeSubpaths []VolumeSubpath `yaml:"-"`
+	Secrets        SecretRefs      `yaml:"secrets"`
+	Configs        ConfigRefs      `yaml:"configs"`
+	DependsOn      DependsOn       `yaml:"depends_on"`
+	Healthcheck    *Healthcheck    `yaml:"healthcheck"`
+	Profiles       StringOrSlice   `yaml:"profiles"`    // service starts only when one of these profiles is active (empty = always); the type takes a bare name so the shape check below refuses it in the field's own words, not the decoder's
+	MemLimit       scalarStr       `yaml:"mem_limit"`   // legacy memory limit ("512m", "2g", …)
+	CPUs           scalarStr       `yaml:"cpus"`        // legacy CPU limit (may be fractional)
+	SSH            bool            `yaml:"ssh"`         // forward the host SSH agent (--ssh) for private git over SSH
+	User           string          `yaml:"user"`        // --user (name|uid[:gid]) the process runs as
+	WorkingDir     string          `yaml:"working_dir"` // --workdir the process starts in
+	Init           bool            `yaml:"init"`        // --init: run a tini-like init as PID 1 to reap zombies
+	ShmSize        scalarStr       `yaml:"shm_size"`    // size of /dev/shm (`1gb`, `64M`, bytes) → --shm-size <bytes>
+	Ulimits        Ulimits         `yaml:"ulimits"`     // resource limits (`nofile: 65536` or `{soft, hard}`) → --ulimit name=soft:hard
+	ReadOnly       bool            `yaml:"read_only"`   // --read-only root filesystem
+	TTY            bool            `yaml:"tty"`         // -t: a pseudo-terminal for the service's process (`up`); `run` decides by the terminal it was typed at
+	CapAdd         StringOrSlice   `yaml:"cap_add"`     // --cap-add Linux capabilities
+	CapDrop        StringOrSlice   `yaml:"cap_drop"`    // --cap-drop Linux capabilities
+	// GroupAddWritten is the `group_add` entries as the file spells them,
+	// beside GroupAdd's reading of them (`0x10` here is `16` in GroupAdd): a
+	// refusal names what the reader wrote. Empty where the service was not
+	// read from a file.
+	GroupAddWritten []string        `yaml:"-"`
+	GroupAdd        GroupAdd        `yaml:"group_add"`    // one numeric supplementary group → --gid (the shapes the runtime cannot take are refused before anything starts)
+	NetworkMode     string          `yaml:"network_mode"` // only "none" acted on: full network isolation (--network none)
+	MacAddress      string          `yaml:"mac_address"`  // the container's MAC on its first network (`--network <name>,mac=…`)
+	Labels          Labels          `yaml:"labels"`       // put on the container as `-l key=value`, before opossum's own labels (which win on a clash, as docker compose's own do)
+	Networks        ServiceNetworks `yaml:"networks"`     // declared networks this service joins (one --network each; aliases/static IPs not applied)
 
 	Deploy  *Deploy  `yaml:"deploy"`  // only deploy.resources.limits.{memory,cpus} is acted on
 	Develop *Develop `yaml:"develop"` // develop.watch drives `opossum watch` (file-change sync)
@@ -908,6 +922,10 @@ func (s *Service) UnmarshalYAML(value *yaml.Node) error {
 	if len(s.Tmpfs) > 1 {
 		s.Tmpfs = collapseTmpfsEntries(s.Tmpfs)
 	}
+
+	// The spellings `group_add` was written in, for the refusals to name (the
+	// decoder reads a number to its decimal, so `0x10` is `16` by then).
+	s.GroupAddWritten = writtenGroupAdd(value)
 	s.mountConflicts = mountConflicts(s.Tmpfs, s.Volumes)
 
 	// Move any tmpfs entries (tagged by Volumes.UnmarshalYAML) out of Volumes
@@ -932,6 +950,9 @@ func (s *Service) UnmarshalYAML(value *yaml.Node) error {
 	var keys map[string]yaml.Node
 	if err := value.Decode(&keys); err != nil {
 		return err
+	}
+	if vols, ok := keys["volumes"]; ok {
+		s.VolumeSubpaths = volumeSubpaths(&vols)
 	}
 	// A field written with nothing after it (`volumes:` alone) decodes to
 	// nothing: the list decoders above are not even called for a null, so the
@@ -1435,6 +1456,81 @@ func (p *Ports) UnmarshalYAML(value *yaml.Node) error {
 	}
 	*p = out
 	return nil
+}
+
+// VolumeSubpath is one named-volume mount of a part of the volume, as the
+// file writes it.
+type VolumeSubpath struct {
+	Source, Target, Subpath string
+	// Entry is the mount's place in the service's own `volumes:` (1 for the
+	// first), as the ignored fields number it; 0 for one borrowed with
+	// `volumes_from`, whose entry is the holder's.
+	Entry int
+}
+
+func (v VolumeSubpath) String() string {
+	if v.Source == "" {
+		return fmt.Sprintf("an anonymous volume at %s (subpath %s)", v.Target, v.Subpath)
+	}
+	return fmt.Sprintf("%s:%s (subpath %s)", v.Source, v.Target, v.Subpath)
+}
+
+// volumeSubpaths reads, from a service's `volumes:` as written, the mounts
+// that ask for a part of a volume: a `type: volume` entry whose
+// `volume.subpath` names something other than the whole of it — the shape
+// docker compose mounts a part of (v5.5.1, measured 2026-09-20: `sub` shows
+// only what is under `sub`; an empty one, `.`, `./` or `sub/..` the whole
+// volume; a bind's or a tmpfs's is read past). Two entries at one target are
+// one mount, the later kept, as collapseVolumeEntries keeps it and as docker
+// compose does: a subpath entry followed by a plain one at its target is the
+// whole volume. Read after the list itself has been decoded, so a shape the
+// decoder refuses never gets here; aliases are followed as the decoder
+// follows them.
+func volumeSubpaths(vols *yaml.Node) []VolumeSubpath {
+	vols = unalias(vols)
+	if vols.Kind != yaml.SequenceNode {
+		return nil
+	}
+	var order []string
+	at := map[string]*VolumeSubpath{}
+	for i, item := range vols.Content {
+		item = unalias(item)
+		var target string
+		var sub *VolumeSubpath
+		switch item.Kind {
+		case yaml.ScalarNode:
+			target = volumeEntryTarget(item.Value)
+		case yaml.MappingNode:
+			var e struct {
+				Type   string `yaml:"type"`
+				Source string `yaml:"source"`
+				Target string `yaml:"target"`
+				Volume struct {
+					Subpath string `yaml:"subpath"`
+				} `yaml:"volume"`
+			}
+			if item.Decode(&e) != nil {
+				continue
+			}
+			target = targetKey(e.Target)
+			if e.Type == "volume" && e.Volume.Subpath != "" && path.Clean(e.Volume.Subpath) != "." {
+				sub = &VolumeSubpath{Source: e.Source, Target: e.Target, Subpath: e.Volume.Subpath, Entry: i + 1}
+			}
+		default:
+			continue
+		}
+		if _, seen := at[target]; !seen {
+			order = append(order, target)
+		}
+		at[target] = sub
+	}
+	var out []VolumeSubpath
+	for _, t := range order {
+		if v := at[t]; v != nil {
+			out = append(out, *v)
+		}
+	}
+	return out
 }
 
 // Volumes is a service's volume mounts. Each entry is normalized to the short
@@ -2574,6 +2670,67 @@ type Build struct {
 	Dockerfile string      `yaml:"dockerfile"`
 	Args       Environment `yaml:"args"`
 	Target     string      `yaml:"target"` // multi-stage build target (#75)
+	// AdditionalContexts are the names of the build's contexts beyond the
+	// main one (`additional_contexts: {lib: ../lib}`). `container build`
+	// takes one context directory, so they are not passed — the key stays
+	// listed among the ignored fields — and a Dockerfile that uses one gets
+	// what the builder finds under that name in a registry: a build that
+	// fails there because there is none can then say which name it was.
+	AdditionalContexts AdditionalContexts `yaml:"additional_contexts"`
+}
+
+// AdditionalContexts reads the names out of `build.additional_contexts`: the
+// keys of a mapping (through an alias or a merge key, as the decoder reads
+// them), or the part before `=` of each item of a list of `name=context`.
+// Nothing is refused here — the key is not acted on, and main read any shape
+// of it without a word — so what cannot be read as a name is left out.
+type AdditionalContexts []string
+
+func (a *AdditionalContexts) UnmarshalYAML(value *yaml.Node) error {
+	var out AdditionalContexts
+	var names func(m *yaml.Node, depth int)
+	names = func(m *yaml.Node, depth int) {
+		m = unalias(m)
+		if m.Kind != yaml.MappingNode || depth > 8 {
+			return
+		}
+		for i := 0; i+1 < len(m.Content); i += 2 {
+			k := unalias(m.Content[i])
+			if k.Kind != yaml.ScalarNode {
+				continue
+			}
+			if k.Value == "<<" && k.ShortTag() == "!!merge" {
+				v := unalias(m.Content[i+1])
+				if v.Kind == yaml.SequenceNode {
+					for _, each := range v.Content {
+						names(each, depth+1)
+					}
+				} else {
+					names(v, depth+1)
+				}
+				continue
+			}
+			if !slices.Contains(out, k.Value) {
+				out = append(out, k.Value)
+			}
+		}
+	}
+	switch value.Kind {
+	case yaml.MappingNode:
+		names(value, 0)
+	case yaml.SequenceNode:
+		for _, item := range value.Content {
+			item = unalias(item)
+			if item.Kind != yaml.ScalarNode {
+				continue
+			}
+			if name, _, ok := strings.Cut(item.Value, "="); ok && name != "" && !slices.Contains(out, name) {
+				out = append(out, name)
+			}
+		}
+	}
+	*a = out
+	return nil
 }
 
 // UnmarshalYAML accepts either a bare string (treated as the build context) or
@@ -2763,73 +2920,114 @@ func (v *VolumesFrom) UnmarshalYAML(value *yaml.Node) error {
 // joins — a list of numbers or strings (docker compose v5.5.1, measured
 // 2026-09-19: `config` prints `2000` as `"2000"`). A scalar is refused (`must
 // be a array` there), a bool (`must be a number or string`) and a float
-// (`08`, `1e3`) are refused, an entry written twice is refused (`items at 0
-// and 1 are equal`), and so is an unquoted leading-zero number whose octal
-// reading differs from its decimal one (see octalDiffersFromDecimal).
-// Known differences, kept on purpose: in a single file a number arrives here
-// as written (`0x10`), where docker compose reads it to its decimal — though
-// a file read with others, or through `extends`, reaches this decoder
-// re-encoded, its numbers in decimal as there (each file is decoded as
-// written first, so the leading-zero refusal fires on every path); and a
-// repeated entry is found
-// by its spelling, where docker compose goes by the order (`[2000, "2000"]`
-// goes through there). What the runtime can take of the list is decided
-// where the service is started (see Orchestrator.checkGroupAdd).
+// (`08`, `1e3`) are refused, and an entry written twice is refused (`items at
+// 0 and 1 are equal`). A number reaches this decoder in its decimal, as
+// docker compose reads it (`0x10` is `16`, `0755` is `493`), as long as it
+// fits an integer, except a zero written with a minus, which keeps its sign so
+// the check where the service starts still sees it as negative.
+// Known difference, kept on purpose: a repeated entry is found by its
+// spelling and by what opossum hands over for it, where docker compose
+// answers by the order the two are written in
+// (`[2000, "2000"]` goes through there and `["2000", 2000]` does not; `[16,
+// 0x10]` does not go through there while it does here — two entries, which the
+// check where the service starts folds into one group and refuses as a group
+// named twice). What the runtime can take of the list is decided where the
+// service is started (see Orchestrator.checkGroupAdd).
 type GroupAdd []string
 
+// writtenGroupAdd is the service's `group_add` entries as the file spells
+// them, or nil when the service writes none. It reads the same node the
+// decoder read, through the same function, so the spellings line up with the
+// groups entry by entry. A list the decoder refuses never reaches a refusal
+// that would name it, and a service whose keys do not decode never reaches
+// one either, so either failure here is nil.
+func writtenGroupAdd(service *yaml.Node) []string {
+	var fields map[string]yaml.Node
+	if service.Decode(&fields) != nil {
+		return nil
+	}
+	node, ok := fields["group_add"]
+	if !ok {
+		return nil
+	}
+	list := unalias(&node)
+	_, written, err := groupAddEntries(list)
+	if err != nil {
+		return nil
+	}
+	return written
+}
+
 func (g *GroupAdd) UnmarshalYAML(value *yaml.Node) error {
-	if value.Kind != yaml.SequenceNode {
-		return fmt.Errorf("group_add must be a list, got %s — write `group_add: [2000]`", kindName(value.Kind))
+	read, _, err := groupAddEntries(value)
+	if err != nil {
+		return err
 	}
-	out := make(GroupAdd, 0, len(value.Content))
-	for i, item := range value.Content {
-		item = unalias(item)
-		if item.Kind != yaml.ScalarNode || (item.ShortTag() != "!!int" && item.ShortTag() != "!!str") {
-			return fmt.Errorf("group_add entry %d of %d must be a number or a string — a gid, as in `- 2000`", i+1, len(value.Content))
-		}
-		// An unquoted number with a leading zero is octal to YAML — and to
-		// docker compose, which adds 493 for `0755` — while the runtime reads
-		// the same digits as decimal (container 1.4.1 takes `--gid 0755` as
-		// 755; measured). Passed as written it would add another group than
-		// the one docker adds, with nothing said; so it is refused, with both
-		// ways to say which one is meant.
-		if n, differs := octalDiffersFromDecimal(item); differs {
-			return fmt.Errorf("group_add entry %d of %d is %s, which YAML reads as the octal %d where the runtime would read it as decimal — write `- %d` for that group, or quote it (`- \"%s\"`) for the decimal one",
-				i+1, len(value.Content), item.Value, n, n, strings.TrimLeft(strings.TrimLeft(item.Value, "+-"), "0"))
-		}
-		if slices.Contains(out, item.Value) {
-			return fmt.Errorf("group_add items at %d and %d are equal — list the group once", slices.Index(out, item.Value), i)
-		}
-		out = append(out, item.Value)
-	}
-	*g = out
+	*g = read
 	return nil
 }
 
-// octalDiffersFromDecimal says, for a YAML integer spelt with a leading zero
-// and more digits after it (`0755`, `020`, `+02000`), whether YAML's octal
-// reading differs from the decimal one a runtime handed the digits makes —
-// and YAML's value. `00` and `07` read the same both ways and pass.
-func octalDiffersFromDecimal(item *yaml.Node) (int64, bool) {
-	// A negative one is refused as negative where the service starts.
-	if item.ShortTag() != "!!int" || strings.HasPrefix(item.Value, "-") {
-		return 0, false
+// groupAddEntries reads a `group_add` list into the groups it names and the
+// spellings the file wrote them in, entry by entry and in the order written.
+// The two come from one reading, so a refusal that names a spelling names the
+// one the loader read that entry from.
+func groupAddEntries(value *yaml.Node) (GroupAdd, []string, error) {
+	if value.Kind != yaml.SequenceNode {
+		return nil, nil, fmt.Errorf("group_add must be a list, got %s — write `group_add: [2000]`", kindName(value.Kind))
 	}
-	d := strings.TrimPrefix(item.Value, "+")
-	if len(d) < 2 || d[0] != '0' {
-		return 0, false
-	}
-	for _, c := range d[1:] {
-		if c < '0' || c > '9' {
-			return 0, false
+	out := make(GroupAdd, 0, len(value.Content))
+	// The entries as the file spells them, which is what a repeat is found by.
+	written := make([]string, 0, len(value.Content))
+	for i, item := range value.Content {
+		item = unalias(item)
+		if item.Kind != yaml.ScalarNode || (item.ShortTag() != "!!int" && item.ShortTag() != "!!str") {
+			return nil, nil, fmt.Errorf("group_add entry %d of %d must be a number or a string — a gid, as in `- 2000`", i+1, len(value.Content))
 		}
+		// A number is read to its decimal, the group docker compose adds:
+		// `0x10` is 16 there, `0755` is 493 (YAML's octal, where the runtime
+		// handed the digits would read 755), `2_000` is 2000. Read with a
+		// second file or through `extends`, the number arrives here in that
+		// spelling already — the merge writes the tree back out — so reading
+		// it here is what makes one file add the same group as two. A zero
+		// written with a minus keeps its sign, so the check where the service
+		// starts still refuses it for being negative.
+		read := item.Value
+		var n int64
+		// A number that does not fit an integer (`0xFFFFFFFFFFFFFFFF`, which
+		// YAML reads as an unsigned one) stays as written, and the check
+		// where the service starts refuses it for not being the digits of a
+		// gid — as it does on main, and as it does for the same number read
+		// with a second file, which arrives here in decimal and is refused
+		// for being past the largest gid.
+		if item.ShortTag() == "!!int" && item.Decode(&n) == nil {
+			read = strconv.FormatInt(n, 10)
+			if n == 0 && strings.HasPrefix(item.Value, "-") {
+				read = "-0"
+			}
+		}
+		// The repeat is looked for by the spelling, as it was: `[0x10, "16"]`
+		// is two entries here and on docker compose, which takes that order
+		// and refuses the other one (`["16", 0x10]`, and `[16, 0x10]`).
+		// Reading the decimal here and comparing that would refuse a file
+		// docker compose and every earlier opossum take — including at
+		// `down`, which would leave a running project with no way to come
+		// down from its own file.
+		//
+		// The spelling alone is not enough to say it is one entry twice: the
+		// same characters can read two ways, since an integer `020` is YAML's
+		// octal (the group 16) while the string `"020"` is the digits `--gid`
+		// reads as 20. Those are two groups, and refusing them here would
+		// stop `down` for a file that names two. So both have to match, which
+		// only ever refuses fewer files than the spelling alone.
+		for j, w := range written {
+			if w == item.Value && out[j] == read {
+				return nil, nil, fmt.Errorf("group_add items at %d and %d are equal — list the group once", j, i)
+			}
+		}
+		written = append(written, item.Value)
+		out = append(out, read)
 	}
-	var n int64
-	if err := item.Decode(&n); err != nil {
-		return 0, false
-	}
-	dec, err := strconv.ParseInt(strings.TrimLeft(item.Value, "+"), 10, 64)
-	return n, err != nil || dec != n
+	return out, written, nil
 }
 
 // StringOrSlice accepts a scalar (taken as one element) or a list. Used by

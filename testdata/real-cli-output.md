@@ -761,6 +761,30 @@ $ docker build -t <tag> .
 ERROR: failed to resolve source metadata for docker.io/neko1114/nosuchfrontend:v99
 ```
 
+## internal network と名前解決（初出 2026-09-21、2026-09-23 に足した、container 1.4.1）
+
+container の DNS は **container が最初に attach した network の gateway** が答える。
+だから「internal な network では名前が引けない」は正しくなく、**引く側の 1 つ目が
+internal かどうか**で決まる。3 度に分けて実機で採った（最後の 1 行は 2026-09-23 に、表の条件を確かめるために採り直したもの）。
+
+| 形 | `getent ahosts <相手>` | `wget http://<相手>:8080/` |
+|---|---|---|
+| 引く側 `[aaa(internal), zzz]`、相手も `zzz` にいる | 無回答 | `bad address` |
+| 引く側 `[zzz, aaa(internal)]`（非 internal が 1 つ目）、相手の 1 つ目も `zzz` | 返る | 届く |
+| 同じ引く側で、相手の 1 つ目が共有していない network（`[front, aaa, zzz]`） | 返る | `download timed out` |
+| 引く側・相手とも internal だけ（`[aaa]`） | 無回答（rc 2） | `bad address 'api:8080'` |
+| **答える側** `[pint(internal), back]`、引く側は `back` のみ | **`192.168.128.2`（`pint` 側）が返る** | `download timed out` |
+| 同じ形で答える側を `[back, pint]` に入れ替え | `192.168.69.2`（`back` 側） | 届く |
+
+読み方：
+
+- **引く側**の 1 つ目が internal → その container は**名前を 1 つも解決できない**（`[OPSM-203]` の担当）。
+- 引く側が解決できても、**届くかどうかは相手の 1 つ目で決まる**（2・3 行目）——返ってくる address は相手の
+  1 つ目のもので、それを共有していなければ届かない。これが `[OPSM-211]` の言っている形。
+- **答える側**の 1 つ目が internal → **DNS には載る**。internal 側の address で答えるので、
+  その network を共有していない相手には届かない（`[OPSM-211]` の担当。順序を入れ替えると届く）。
+- 最後の 2 行は `container inspect` が出す address とも一致した。
+
 ## 公開文書の実機主張（#533 の unverified 分 / 2026-09-05 に 1.3.1 で採取）
 
 README・`docs/compatibility.md`・`docs/troubleshooting.md`・`docs/networking.md`・`docs/agent-sandbox.md` が

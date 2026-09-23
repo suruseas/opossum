@@ -384,7 +384,8 @@ var envLikeKeys = map[string]bool{"environment": true, "labels": true, "args": t
 
 // dedupSeqKeys are list fields where a repeated entry (e.g. an override restating a
 // port, or a `volumes_from` a second file lists again) should collapse to one,
-// matching docker compose. `volumes` is deliberately
+// as docker compose collapses it. What a file repeats within its own list is
+// left alone, which is where the two part company (see appendNew). `volumes` is deliberately
 // absent: mergeByTargetKeys handles it with a stricter rule (same mount point, not
 // just same text) that subsumes plain dedup.
 var dedupSeqKeys = map[string]bool{"ports": true, "expose": true, "volumes_from": true, "group_add": true}
@@ -516,12 +517,17 @@ func mergeValue(base, over any, key string, path string) any {
 		}
 	case []any:
 		if b, ok := base.([]any); ok && !replaceSeqKeys[key] {
+			// This one is handed the two lists rather than one appended list:
+			// what a file wrote on its own is that file's, and only what the
+			// later file adds is compared against the earlier one. The fold
+			// by mount point below is handed the appended list, being about
+			// where each entry lands and not about which file wrote it.
+			if dedupSeqKeys[key] {
+				return appendNew(b, o)
+			}
 			merged := append(append([]any{}, b...), o...)
 			if mergeByTargetKeys[key] {
 				return mergeSeqByTarget(merged)
-			}
-			if dedupSeqKeys[key] {
-				merged = dedupSeq(merged)
 			}
 			return merged
 		}
@@ -718,22 +724,66 @@ func envListIsClean(v any) bool {
 	return true
 }
 
-// dedupSeq drops repeated string entries (keeping the first), leaving non-string
-// entries untouched — a number written in two files stays twice, and a
-// field that refuses a repeated item (`group_add`) says so.
-func dedupSeq(xs []any) []any {
-	seen := map[string]bool{}
-	out := make([]any, 0, len(xs))
-	for _, x := range xs {
-		if s, ok := x.(string); ok {
-			if seen[s] {
-				continue
-			}
-			seen[s] = true
+// appendNew is how two files' lists of these fields become one: the later
+// file's entries are added, except the ones the earlier file already has.
+// What each file wrote on its own is left as it wrote it — a list naming one
+// entry twice is that file's to answer for, and the field that reads it says
+// so. docker compose says so for the first file and not for the later one:
+// it folds a repeat the later file wrote on its own and goes on (`[20]` over
+// `[16, 16]` leaves `20 16`), where the same repeat in the first file is
+// refused (measured on v5.5.1) — a difference `docs/compatibility.md` names.
+//
+// Before this, only entries that arrived as strings were compared, so a
+// number written in both files stayed twice over and `group_add` refused the
+// pair as the same entry twice — as the file was read, which stops `up`,
+// `ps`, `config` and `down` alike, so a project started from those files
+// could not be brought down (measured 2026-09-23 on container 1.4.1; docker
+// compose folds them and goes on, measured on v5.5.1).
+func appendNew(base, over []any) []any {
+	// As many as the earlier file already has, and no more: a later file
+	// naming one entry twice still names it twice, and the field that reads
+	// it says so. Dropping every match would swallow that file's own repeat.
+	have := map[string]int{}
+	for _, x := range base {
+		if key, ok := scalarKey(x); ok {
+			have[key]++
+		}
+	}
+	out := append([]any{}, base...)
+	for _, x := range over {
+		if key, ok := scalarKey(x); ok && have[key] > 0 {
+			have[key]--
+			continue
 		}
 		out = append(out, x)
 	}
 	return out
+}
+
+// scalarKey is how a list entry is compared for being the same entry twice:
+// what it reads as, for the kinds a list of these fields holds — a name, a
+// port, a group. A float or a bool is left out, since folding one would not
+// change what a reader sees: `ports`, `volumes_from` and `group_add` refuse
+// it for its kind before anything asks whether it is there twice, and nothing
+// reads `expose` at all (`up` says the field is ignored). `020` is YAML's octal
+// and reads as 16, where the string `"020"` reads as those characters, so the
+// two are not one entry — which is what docker compose does with them too
+// (measured on v5.5.1).
+func scalarKey(x any) (string, bool) {
+	switch v := x.(type) {
+	case string:
+		return v, true
+	case int:
+		return strconv.Itoa(v), true
+	case int64:
+		// Where an int is 32 bits: yaml.v3 reads a number that fits an int
+		// as one and a larger positive one as a uint64, so on a 64-bit
+		// build nothing arrives here.
+		return strconv.FormatInt(v, 10), true
+	case uint64:
+		return strconv.FormatUint(v, 10), true
+	}
+	return "", false
 }
 
 // LoadFiles parses and merges one or more compose files, applying docker compose's
@@ -1405,6 +1455,9 @@ func expandVolumesFrom(services map[string]*Service, names []string) error {
 		// service's own mount, or a later holder's, takes instead does not
 		// come along.
 		nocopyAt := map[string]bool{}
+		// So is a mount of a part of a volume: the holder's, at a path the
+		// winning mount comes from — nil where the holder mounts it whole.
+		subpathAt := map[string]*VolumeSubpath{}
 		for _, ref := range svc.VolumesFrom {
 			holder, _, _ := strings.Cut(ref, ":")
 			if strings.HasPrefix(ref, "container:") {
@@ -1421,6 +1474,10 @@ func expandVolumesFrom(services map[string]*Service, names []string) error {
 			for _, t := range h.NoCopy {
 				hNoCopy[t] = true
 			}
+			hSubpath := map[string]VolumeSubpath{}
+			for _, v := range h.VolumeSubpaths {
+				hSubpath[mountTarget(v.Source+":"+v.Target)] = v
+			}
 			for _, entry := range h.Volumes {
 				target := mountTarget(entry)
 				// Not borrowed where this service mounts the path itself.
@@ -1432,6 +1489,12 @@ func expandVolumesFrom(services map[string]*Service, names []string) error {
 				}
 				borrowed = append(borrowed, entry)
 				nocopyAt[target] = hNoCopy[target]
+				if v, ok := hSubpath[target]; ok {
+					v.Entry = 0 // the holder's entry, not one of this service's
+					subpathAt[target] = &v
+				} else {
+					subpathAt[target] = nil
+				}
 			}
 			if !slices.ContainsFunc(svc.DependsOn, func(d Dependency) bool { return d.Name == holder }) {
 				svc.DependsOn = append(svc.DependsOn, Dependency{Name: holder, Condition: ConditionStarted})
@@ -1443,6 +1506,11 @@ func expandVolumesFrom(services map[string]*Service, names []string) error {
 		for _, target := range sortedKeys(nocopyAt) {
 			if nocopyAt[target] && !slices.Contains(svc.NoCopy, target) {
 				svc.NoCopy = append(svc.NoCopy, target)
+			}
+		}
+		for _, target := range sortedKeys(subpathAt) {
+			if v := subpathAt[target]; v != nil {
+				svc.VolumeSubpaths = append(svc.VolumeSubpaths, *v)
 			}
 		}
 		svc.Volumes = collapseMountsByTarget(append(borrowed, svc.Volumes...))

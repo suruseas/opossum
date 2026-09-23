@@ -27,15 +27,15 @@ func TestGroupAddReachesTheRuntimeOrIsRefusedFirst(t *testing.T) {
 	}{
 		{"one numeric group", []string{"2000"}, "", "2000", ""},
 		{"no group", nil, "1000:1000", "", ""},
-		{"beside a user without a gid", []string{"2000"}, "1000", "", `service "app" adds the group 2000 (group_add) beside user: "1000"; container 1.4.1's --gid does nothing next to --user`},
+		{"beside a user without a gid", []string{"2000"}, "1000", "", `service "app" adds the group "2000" (group_add) beside user: "1000"; container 1.4.1's --gid does nothing next to --user`},
 		{"beside a user by name", []string{"2000"}, "app", "", `beside user: "app"`},
 		{"the largest gid the engine takes", []string{"2147483647"}, "", "2147483647", ""},
 		{"two groups", []string{"2000", "3000"}, "", "", `service "app" adds 2 groups (group_add: "2000", "3000"); container 1.4.1's --gid takes one, and a second replaces the first — keep the one the process needs`},
 		{"two groups, one empty", []string{"", "3000"}, "", "", `adds 2 groups (group_add: "", "3000")`},
 		{"a group by name", []string{"wheel"}, "", "", `service "app" adds the group "wheel" (group_add); container 1.4.1's --gid takes a number, where docker compose resolves a name in the image — write the group's number`},
 		{"an empty group", []string{""}, "", "", `service "app" adds an empty group (group_add: [""]); the docker engine refuses it too (` + "`unable to find group`" + `) — write the group's number, or drop the entry`},
-		{"a negative number", []string{"-1"}, "", "", `service "app" adds the group -1 (group_add); a gid is not negative — the docker engine refuses it too`},
-		{"a number out of the engine's range", []string{"2147483648"}, "", "", `service "app" adds the group 2147483648 (group_add), which is past 2147483647, the largest gid the docker engine takes`},
+		{"a negative number", []string{"-1"}, "", "", `service "app" adds the group "-1" (group_add); a gid is not negative — the docker engine refuses it too`},
+		{"a number out of the engine's range", []string{"2147483648"}, "", "", `service "app" adds the group "2147483648" (group_add), which is past 2147483647, the largest gid the docker engine takes`},
 		// The quoted forms a number would have been read to: not digits, so
 		// not a gid as --gid takes one.
 		// `+2000` and `0002000` are 2000 to the runtime (container 1.4.1,
@@ -43,11 +43,11 @@ func TestGroupAddReachesTheRuntimeOrIsRefusedFirst(t *testing.T) {
 		{"a signed number", []string{"+2000"}, "", "+2000", ""},
 		{"a zero-padded number", []string{"0002000"}, "", "0002000", ""},
 		{"two plus signs", []string{"++2000"}, "", "", `adds the group "++2000" (group_add), which is not the digits of a gid`},
-		{"a hex number as written", []string{"0x10"}, "", "", `service "app" adds the group "0x10" (group_add), which is not the digits of a gid — write the number alone, as in ` + "`- 2000`"},
+		{"a quoted hex number, which the loader hands over as written", []string{"0x10"}, "", "", `service "app" adds the group "0x10" (group_add), which is not the digits of a gid — write the number alone, as in ` + "`- 2000`"},
 		{"a string with a space before", []string{" 2000"}, "", "", `adds the group " 2000" (group_add), which is not the digits of a gid`},
 		{"a string with a space after", []string{"2000 "}, "", "", `adds the group "2000 " (group_add), which is not the digits of a gid`},
 		{"a group by name with a digit in it", []string{"group1"}, "", "", `adds the group "group1" (group_add), which is not the digits of a gid`},
-		{"beside a user with a gid", []string{"2000"}, "1000:1000", "", `service "app" adds the group 2000 (group_add) beside user: "1000:1000"; container 1.4.1's --gid does nothing next to --user — drop group_add (the process then runs without the group, and a socket or device that needs it refuses it), or drop user: (the image's own user then runs with the group)`},
+		{"beside a user with a gid", []string{"2000"}, "1000:1000", "", `service "app" adds the group "2000" (group_add) beside user: "1000:1000"; container 1.4.1's --gid does nothing next to --user — drop group_add (the process then runs without the group, and a socket or device that needs it refuses it), or drop user: (the image's own user then runs with the group)`},
 		{"beside a user with a gid by name", []string{"2000"}, "app:app", "", `beside user: "app:app"`},
 	} {
 		for _, cmd := range []string{"up", "run", "run --audit"} {

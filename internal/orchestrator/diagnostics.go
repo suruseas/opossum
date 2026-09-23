@@ -51,6 +51,7 @@ const (
 	codeProjectBusy             diagCode = "OPSM-208" // another opossum command holds the project's lock (an `up` or `down` is under way)
 	codeServiceNameUnresolvable diagCode = "OPSM-209" // a service's name can't be looked up by its peers (upper case or ".")
 	codeExternalVolumeAbsent    diagCode = "OPSM-210" // a volume declared external: true doesn't exist
+	codeSecondNetworkName       diagCode = "OPSM-211" // a service on two networks answers by name with its first network's address only
 	codeDepNotRunning           diagCode = "OPSM-401" // a dependency's container exited before becoming healthy
 	codeOrphans                 diagCode = "OPSM-402" // containers left by services no longer in the compose
 	codeDepNoHealth             diagCode = "OPSM-403" // a service_healthy dependency defines no healthcheck
@@ -80,7 +81,7 @@ var allDiagCodes = []diagCode{
 	codeBindFilePlaceholder, codeVolumeNotSeeded, codeSymlinkedSocket, codePGVersionedLayout,
 	codeDataDirNotThisMount,
 	codeHostPortInUse, codeDNSDomainAbsent, codeInternalEgress, codeDockerSocket, codeExternalNetAbsent, codeHostPortRemapped,
-	codeNetworkSubnetChanged, codeProjectBusy, codeServiceNameUnresolvable, codeExternalVolumeAbsent,
+	codeNetworkSubnetChanged, codeProjectBusy, codeServiceNameUnresolvable, codeExternalVolumeAbsent, codeSecondNetworkName,
 	codeDepNotRunning, codeOrphans, codeDepNoHealth,
 	codeIgnoredTopField, codeIgnoredField, codeRuntimeAbsent, codeRuntimeStopped, codeRuntimeAutoStart, codeServiceExited, codeSupervisorStarted, codeSupervisorAction, codeImageNoArm64, codeOptionalDependency,
 	codeSupervisorLogTrimmed, codeSupervisorLogUncapped,
