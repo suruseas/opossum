@@ -160,7 +160,7 @@ func TestAMountOfAnUndeclaredNamedVolumeIsRefused(t *testing.T) {
 		{"the directory itself", ".:/y"},
 		{"the parent directory itself", "..:/y"},
 		{"an absolute host path", "/abs:/y"},
-		{"a home-relative host path", "~/h:/y"},
+		{"a home-relative host path", "~/opossum-test-home:/y"},
 		{"the home directory itself", "~:/y"},
 		{"a hidden name, a path as docker reads it", ".hidden:/y"},
 		{"a path under a hidden name", ".hidden/sub:/y"},

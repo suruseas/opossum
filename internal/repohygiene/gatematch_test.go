@@ -347,7 +347,20 @@ func TestThePushSieveRunsTheGateOnTheCommittedTree(t *testing.T) {
 const (
 	gateSweep = "go run ./cmd/noleftovers go test $$(go list ./... | grep -v '/cmd/busy$$')"
 	gateBusy  = "go run ./cmd/noleftovers go test ./cmd/busy"
-	ciCommand = "make test"
+	// What the workflow writes on the gate's line. The gate itself is
+	// `make test`; which one runs is decided where the run happens, because
+	// the published copy of this repository carries the product without the
+	// workshop — no contributor guidance, no changelog fragments — and the
+	// checks that read those files have nothing to read there.
+	ciCommand = `${{ github.event.repository.private && 'make test' || 'make test-shipped' }}`
+	// The other gate, the one the published copy runs. Its set is not written
+	// out: the compiler is asked which packages the released binary links, so
+	// a package added to the binary is tested without anyone remembering to
+	// add it. That is the whole claim, and it lives in this one line — which
+	// is why the line is pinned rather than the set it produces. Narrowed by
+	// a character, the same command tests a fraction of the binary and says
+	// `ok` for each of the packages it did run.
+	shippedGate = "go run ./cmd/noleftovers go test $$(go list -deps ./cmd/opossum | grep '^github.com/suruseas/opossum')"
 )
 
 // gateCommands is the gate, in running order. Every check below that asks
@@ -523,8 +536,14 @@ func TestWhatCountsAsRunningTheGate(t *testing.T) {
 			gateSweep, " -race -cover -count=1", true},
 		{"the busy line as it stands", "\tgo run ./cmd/noleftovers go test ./cmd/busy -race -cover -count=1",
 			gateBusy, " -race -cover -count=1", true},
-		{"the workflow line", "        run: make test",
+		{"the workflow line", "        run: " + ciCommand,
 			"run: " + ciCommand, "", true},
+		// The gate it names is chosen where the run happens, so the bare
+		// `make test` is no longer the line the workflow writes: a workflow
+		// that went back to it would be running the whole gate on the
+		// published copy, where the files half of it reads are not there.
+		{"the bare command the line used to be", "        run: make test",
+			"run: " + ciCommand, "", false},
 		{"a wrapped recipe is still this line", "\tgo run ./cmd/noleftovers go test ./cmd/busy \\",
 			gateBusy, " \\", true},
 		{"the silence prefix is make's, not the command's", "\t@go run ./cmd/noleftovers go test ./cmd/busy -race",
@@ -724,4 +743,65 @@ func TestWhatCountsAsTellingSomeoneToRunItDirectly(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The published copy runs `make test-shipped`, and nothing until now read what
+// that target does. Six one-line changes to its recipe — dropping `-race`,
+// dropping the noleftovers wrapper, narrowing the grep so `cmd/opossum` falls
+// out of the set, replacing the whole `go list -deps` with one package,
+// deleting the target, and adding `|| true` — each changed which packages run
+// or what they are held to, and each left this package's tests green. The gate
+// the private repository runs has its recipe pinned in three places; the one
+// the published binary is checked by had none.
+//
+// One subtest per promise, so that what a red result says is which promise
+// went.
+func TestTheShippedGateRunsWhatTheBinaryLinks(t *testing.T) {
+	root := repoRoot(t)
+	body := read(t, root, "Makefile")
+	rest, err := restAfter(body, shippedGate, recipeOf("test-shipped"), true)
+
+	t.Run("the recipe asks the compiler which packages the binary links", func(t *testing.T) {
+		if err != nil {
+			t.Errorf("Makefile: %v. The published copy's gate is this one line: `%s`. "+
+				"A set written out by hand instead goes stale the first time a package is "+
+				"added to the binary, and a narrower one reports `ok` for the packages it "+
+				"did run", err, shippedGate)
+		}
+	})
+	if err != nil {
+		return
+	}
+	for _, flag := range []string{"-race", "-cover"} {
+		t.Run("it runs with "+flag, func(t *testing.T) {
+			if !flagsIn(rest)[flag] {
+				t.Errorf("Makefile: `make test-shipped` runs without %s, so the gate the "+
+					"published binary is checked by holds it to less than the gate here "+
+					"does — and the difference shows up as green, not as a missing flag", flag)
+			}
+		})
+	}
+	t.Run("it runs cold every time", func(t *testing.T) {
+		for _, word := range strings.Fields(rest) {
+			if strings.HasPrefix(word, "#") {
+				break
+			}
+			if word == "-count=1" {
+				return
+			}
+		}
+		t.Errorf("Makefile: `make test-shipped` runs without -count=1, so a package unchanged " +
+			"since its last run is reported from the cache. On a GitHub-hosted runner, which " +
+			"is where this gate runs, that cache is one the job restored from a previous run")
+	})
+	t.Run("nothing on the line rescues a red result", func(t *testing.T) {
+		for _, word := range strings.Fields(rest) {
+			if word == "||" || word == "|" || word == ";" || word == "&&" {
+				t.Errorf("Makefile: `make test-shipped` continues past the gate with %q on the "+
+					"same line (%q). Whatever follows decides the recipe's exit status, so the "+
+					"tests' own answer stops being the target's", word, strings.TrimSpace(rest))
+				return
+			}
+		}
+	})
 }

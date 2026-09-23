@@ -853,13 +853,21 @@ func (o *Orchestrator) checkGroupAdd(services []string) error {
 			// says which; where the two are one group however they are
 			// handed over (`+16` beside `"+16"`), there is nothing to tell
 			// apart and nothing is added.
+			// The group `--gid` would read the entry as, which is the same
+			// reading the refusals name (gidReading): a `+` and leading
+			// zeros are no part of the number, and the number is taken as
+			// characters rather than parsed — so how many digits it has
+			// does not decide whether two entries are one group. Reading it
+			// with ParseInt used to, which made `[9223372036854775807,
+			// "+9223372036854775807"]` one group and the same pair one
+			// larger two: a file was told to choose between two groups it
+			// had written once, and choosing left it refused all the same
+			// for a group past the largest gid. An entry `--gid` could not
+			// read as a number at all is its own spelling, there being no
+			// reading to fold it by.
 			groupOf := func(g string) string {
 				if numericGID(g) {
-					// ParseInt reads a leading `+` itself, so the spelling
-					// goes in as it is.
-					if n, err := strconv.ParseInt(g, 10, 64); err == nil {
-						return strconv.FormatInt(n, 10)
-					}
+					return gidReading(g)
 				}
 				return g
 			}
@@ -900,8 +908,10 @@ func (o *Orchestrator) checkGroupAdd(services []string) error {
 			// reaches --gid as 14). Entries written differently can
 			// therefore be one group, and counting the spellings would tell a
 			// reader to choose between lines that ask for the same thing.
-			// Entries the runtime could not read are folded by the same rule:
-			// what opossum would hand over, whatever the file spells.
+			// Entries the runtime could not read are folded by the same rule
+			// where it can read them as a number at all: a spelling `--gid`
+			// takes only as characters (`0xFF`, a name) has no reading to
+			// fold by and stands for itself.
 			folded, order := map[string][]int{}, []string{}
 			for i, g := range svc.GroupAdd {
 				key := groupOf(g)
@@ -988,9 +998,16 @@ func (o *Orchestrator) checkGroupAdd(services []string) error {
 			// see that it is past the largest gid. The reading goes after the
 			// `(group_add)` that says which key this came from, so the two are
 			// not read as two of those.
+			//
+			// What the spelling is held against is the number `--gid` reads,
+			// not the value the loader settled on: a quoted entry reaches the
+			// runtime as those characters and is read there in decimal, so
+			// `"+2147483648"` and `"02147483648"` are as much a spelling and
+			// a reading as `0x80000000` is. Comparing the two settled values
+			// instead left those saying nothing about the number they read as.
 			is := "is past"
-			if w != g {
-				is = fmt.Sprintf("reads as the group %s and is past", g)
+			if n := gidReading(g); n != w {
+				is = fmt.Sprintf("reads as the group %s and is past", n)
 			}
 			return fmt.Errorf("service %q adds the group %q (group_add), which %s 2147483647, the largest gid the docker engine takes — write the group's number",
 				svcName, w, is)
@@ -1065,6 +1082,28 @@ func numericGID(s string) bool {
 		}
 	}
 	return true
+}
+
+// gidReading is the group `--gid` reads a numeric entry as: it reads what it
+// is handed in decimal, so a `+` and leading zeros are no part of the number
+// (measured on container 1.4.1, 2026-09-19: `+2000` and `0002000` are both
+// the group 2000). Written as characters rather than parsed, so a number too
+// large for an integer reads the same way as any other. Only entries
+// numericGID lets through reach this — the refusals that name a reading, and
+// the check that counts how many groups a file names.
+func gidReading(g string) string {
+	s := strings.TrimLeft(strings.TrimPrefix(g, "+"), "0")
+	if s == "" {
+		// Every digit was a zero, so the group is 0. The refusal for a group
+		// past the largest gid never hands that over, zero being in range;
+		// the check that counts the groups a file names does — `[0, "00"]`
+		// is one group written twice, and it is this line that says so.
+		// Nothing, returned here, would leave those two entries with a key
+		// numericGID refuses, so the file would be told neither that it
+		// names one group twice nor which group it names.
+		return "0"
+	}
+	return s
 }
 
 // inGIDRange is the range the docker engine takes (`uids and gids must be in
@@ -2451,10 +2490,20 @@ func (o *Orchestrator) remapAutoHostPorts(order []string) {
 	// 3000 free and both take it, and only the second would fail — at bind time,
 	// far from the compose file that caused it. docker compose gives them
 	// different ports, so track what's been handed out here too.
+	// Keyed by the host port and the protocol, and by nothing else. Two
+	// entries on one port are the same claim however their host addresses
+	// are written: a wildcard listener and one bound to 127.0.0.1 overlap,
+	// and the runtime refuses the pair (`host ports for different publish
+	// port specs may not overlap` — a file opossum had assembled itself,
+	// having handed the wildcard out after the address-bound one). The
+	// protocol is part of it because udp and tcp do not overlap: a service
+	// publishing 8080/udp leaves 8080/tcp free, here as on the runtime (a
+	// file naming both host ports starts).
 	claimed := map[string]bool{}
+	claim := func(network, port string) string { return port + "/" + network }
 	note := func(spec string) {
-		if _, addr, _, ok := hostPortBinding(spec); ok {
-			claimed[addr] = true
+		if network, _, port, ok := hostPortBinding(spec); ok {
+			claimed[claim(network, port)] = true
 		}
 	}
 	for _, name := range order {
@@ -2501,7 +2550,7 @@ func (o *Orchestrator) remapAutoHostPorts(order []string) {
 					continue
 				}
 			}
-			if !claimed[address] && !hostPortInUse(network, address) {
+			if !claimed[claim(network, port)] && !hostPortInUse(network, address) {
 				note(spec) // the mirror is free: keep it, nothing to explain
 				continue
 			}

@@ -2920,8 +2920,11 @@ func (v *VolumesFrom) UnmarshalYAML(value *yaml.Node) error {
 // joins — a list of numbers or strings (docker compose v5.5.1, measured
 // 2026-09-19: `config` prints `2000` as `"2000"`). A scalar is refused (`must
 // be a array` there), a bool (`must be a number or string`) and a float
-// (`08`, `1e3`) are refused, and an entry written twice is refused (`items at
-// 0 and 1 are equal`). A number reaches this decoder in its decimal, as
+// (`08`, `1e3`) are refused. An entry written twice is refused as well, by
+// the pass that reads each file on its own (`items at 0 and 1 are equal`) —
+// not here: this decoder is given the merged document too, where the merge
+// has settled the spellings and two entries a file wrote as `0x10` and `"16"`
+// have become one spelling twice over. A number reaches this decoder in its decimal, as
 // docker compose reads it (`0x10` is `16`, `0755` is `493`), as long as it
 // fits an integer, except a zero written with a minus, which keeps its sign so
 // the check where the service starts still sees it as negative.
@@ -3003,25 +3006,6 @@ func groupAddEntries(value *yaml.Node) (GroupAdd, []string, error) {
 			read = strconv.FormatInt(n, 10)
 			if n == 0 && strings.HasPrefix(item.Value, "-") {
 				read = "-0"
-			}
-		}
-		// The repeat is looked for by the spelling, as it was: `[0x10, "16"]`
-		// is two entries here and on docker compose, which takes that order
-		// and refuses the other one (`["16", 0x10]`, and `[16, 0x10]`).
-		// Reading the decimal here and comparing that would refuse a file
-		// docker compose and every earlier opossum take — including at
-		// `down`, which would leave a running project with no way to come
-		// down from its own file.
-		//
-		// The spelling alone is not enough to say it is one entry twice: the
-		// same characters can read two ways, since an integer `020` is YAML's
-		// octal (the group 16) while the string `"020"` is the digits `--gid`
-		// reads as 20. Those are two groups, and refusing them here would
-		// stop `down` for a file that names two. So both have to match, which
-		// only ever refuses fewer files than the spelling alone.
-		for j, w := range written {
-			if w == item.Value && out[j] == read {
-				return nil, nil, fmt.Errorf("group_add items at %d and %d are equal — list the group once", j, i)
 			}
 		}
 		written = append(written, item.Value)

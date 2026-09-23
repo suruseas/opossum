@@ -95,10 +95,12 @@ func TestTheRefusalNamesTheTwoThatAreTheSameEntry(t *testing.T) {
 	}
 }
 
-// The narrowing reaches every reading of the file: a repeat written twice in
-// one file arrives here whole, and stays refused — where a repeat split across
-// two files is folded by the merge before this sees it (mergedupe_test.go).
-func TestARepeatInOneFileIsStillOneEntryTwice(t *testing.T) {
+// Two spellings of one group arrive whole however the file is read: the merge
+// settles `0x10` to `16`, and the entries are still the two the file wrote.
+// The same entry twice in the one spelling is what is refused as the file is
+// read (TestAFilesOwnRepeatSurvivesTheMerge), and a repeat split across two
+// files is folded by the merge before either sees it (mergedupe_test.go).
+func TestTwoSpellingsInOneFileAreReadAfterAMergeToo(t *testing.T) {
 	dir := t.TempDir()
 	base := filepath.Join(dir, "compose.yaml")
 	overlay := filepath.Join(dir, "over.yaml")
@@ -109,10 +111,16 @@ func TestARepeatInOneFileIsStillOneEntryTwice(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The merge writes the tree back out, so `0x10` arrives as `16` beside
-	// the string `"16"`: one entry twice, in one file's list.
-	_, err := compose.LoadFiles([]string{base, overlay}, nil)
-	if err == nil || !strings.Contains(err.Error(), "are equal — list the group once") {
-		t.Errorf("want the repeat refused, got %v", err)
+	// the string `"16"` — but the question is asked of the file that wrote
+	// them, where the two spellings are two. The check the service is
+	// started by folds them and asks for the group to be listed once, which
+	// is a refusal the project can still come down from.
+	p, err := compose.LoadFiles([]string{base, overlay}, nil)
+	if err != nil {
+		t.Fatalf("want the file read, got %v", err)
+	}
+	if got := strings.Join(p.Services["app"].GroupAdd, ","); got != "16,16" {
+		t.Errorf("group_add = %s, want both entries kept (16,16)", got)
 	}
 }
 

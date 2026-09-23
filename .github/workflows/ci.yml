@@ -63,8 +63,32 @@ jobs:
     # release.yml (a darwin build) and pages.yml (the deploy permission) stay
     # on GitHub-hosted runners. The runner is expected to carry gcc (-race),
     # jq (go.mod version reads), make and git; the first step says which one
-    # is missing rather than letting a later step fail on it obliquely.
-    runs-on: [self-hosted, Linux, X64]
+    # is missing rather than letting a later step fail on it obliquely — so
+    # if the hosted image below turns out not to carry all four, that step
+    # says which one, rather than a later step failing on it obliquely. No
+    # run has happened on a hosted runner yet; the first one will say.
+    # Where this runs depends on which copy of the repository it is. The
+    # private repository is where the work happens and carries the two
+    # self-hosted runners; the published copy, which each release overwrites
+    # with this tree, has none — a job asking for those labels there waits
+    # for a machine that will never take it and is cancelled unrun (24 hours
+    # after one release's push, 21 minutes after another's), and an outside
+    # contributor's pull request gets no answer either. GitHub-hosted runners
+    # are free for a public repository and are GitHub's machines, not the
+    # maintainer's, so the reason the work is kept off hosted runners here —
+    # a contributor's code running on the maintainer's hardware — does not
+    # apply there.
+    #
+    # The expression falls to `ubuntu-latest` when it cannot read the field,
+    # which is the fallback that runs rather than the one that waits for a
+    # runner that will never take it. What falls with it is the rest of the
+    # switch: an unreadable field also turns the cache on and picks
+    # `make test-shipped`, the narrower gate. The three triggers this
+    # workflow has — pull_request, push and workflow_dispatch — all carry
+    # `repository` in their payload, so the field is there to read; this says
+    # where the expression lands if that ever stops being true, not that
+    # landing there is as good.
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted", "Linux", "X64"]') || 'ubuntu-latest' }}
     # The compiler each section installed is the compiler it uses. Left to
     # itself, go reads the `toolchain` line in go.mod and downloads a different
     # one — so the section set up with the version go.mod asks for would
@@ -104,19 +128,25 @@ jobs:
       # takes the version and the file it reads it from as separate inputs, and
       # what it does when both are given, or when one is given empty, is not
       # something this should be relying on.
-      # `cache: false` on both setup-go steps: by default the action saves
-      # GOMODCACHE and GOCACHE to the Actions cache after the job (about
-      # 2.2 GB each, some 9 minutes per step on this runner) and restores
-      # them before it. On the self-hosted runner both directories are on
-      # the runner's own disk and survive between jobs, so the save and the
-      # restore move data the next run already has — 18 of a 23-minute run
-      # went to the two uploads, and the repository's 10 GB cache quota was
-      # full of copies. On a fresh runner the first build compiles from
-      # scratch, once.
+      # The cache follows the runner. By default the action saves GOMODCACHE
+      # and GOCACHE to the Actions cache after the job (about 2.2 GB each,
+      # some 9 minutes per step on this runner) and restores them before it.
+      # On the self-hosted runner both directories are on the runner's own
+      # disk and survive between jobs, so the save and the restore move data
+      # the next run already has — 18 of a 23-minute run went to the two
+      # uploads, and the repository's 10 GB cache quota was full of copies.
+      # A GitHub-hosted runner is a fresh machine every time and keeps
+      # nothing, so there the saved copy is the only one there is and the
+      # reason for turning it off is gone. The runner reads the same field,
+      # and a check holds both spellings so that one cannot be changed
+      # without the other; what a hosted run actually costs with the cache
+      # on is not measured here, and the published copy only picks this file
+      # up at the next release. The check is in the same place as the one
+      # holding `runs-on`, and it reads both jobs' lines.
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-          cache: false
+          cache: ${{ !github.event.repository.private }}
       # Not a formality. setup-go reads the `go` directive with a pattern of
       # its own that wants a literal space, so a tab or a leading space — both
       # of which the go tool accepts — leave it with nothing; and with nothing
@@ -170,10 +200,18 @@ jobs:
       # and removed after it, whatever the gate said.
       - name: a temporary directory of this job's own
         run: mkdir -p "/tmp/opossum-ci-${{ github.run_id }}-${{ github.job }}"
+      # Which gate: the whole one where the workshop is, the product's
+      # packages where only the product is. The published copy carries
+      # neither the contributor guidance nor the changelog fragments, so the
+      # checks that read them have nothing to check there — and a released
+      # binary is what that copy is for. What `make test-shipped` runs is
+      # pinned in the same check that pins `make test`: the set comes from
+      # the compiler, so it follows the binary, and the line that asks for it
+      # is held to the same flags.
       - name: test (go.mod version, the same gate as `make test`)
         env:
           TMPDIR: /tmp/opossum-ci-${{ github.run_id }}-${{ github.job }}
-        run: make test
+        run: ${{ github.event.repository.private && 'make test' || 'make test-shipped' }}
       - name: the temporary directory is removed
         if: ${{ always() }}
         run: rm -rf "/tmp/opossum-ci-${{ github.run_id }}-${{ github.job }}"
@@ -184,8 +222,20 @@ jobs:
       # about shipped code — tests, docs and the repo's own tooling don't need
       # an entry. Put `[skip changelog]` in the PR body for the rare shipped
       # change that genuinely has nothing to announce.
+      # Only in the private repository, too: the published copy carries no
+      # `changelog.d/` — the release that writes that copy has already folded
+      # the fragments into a version's section — so an outside contributor's
+      # pull request there would be asked for a file with nowhere to go. The
+      # condition names the repository rather than the directory's absence,
+      # so that a `changelog.d/` deleted by accident here still fails this
+      # check loudly. `!= false` reads the same as the field itself for every
+      # value this can be handed: the expression evaluator compares across
+      # types by converting to a number, so a missing or null field is 0, as
+      # `false` is, and `null != false` is false — the step is skipped, not
+      # run (measured against the evaluator, not inferred). The longer
+      # spelling is kept because it names the one value being tested for.
       - name: a shipped change needs a changelog.d fragment
-        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        if: ${{ !cancelled() && github.event_name == 'pull_request' && github.event.repository.private != false }}
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
@@ -442,7 +492,8 @@ jobs:
   # file): the same runner class, the same environment, its own checkout —
   # nothing here diffs against a base, so the default depth.
   stable:
-    runs-on: [self-hosted, Linux, X64]
+    # The same switch as the job above, for the same reason.
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted", "Linux", "X64"]') || 'ubuntu-latest' }}
     env:
       GOTOOLCHAIN: local
     steps:
@@ -473,7 +524,7 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: stable
-          cache: false
+          cache: ${{ !github.event.repository.private }}
       # When the two sections run the same compiler, everything they exist to
       # catch — coverage boundaries moving, gofmt changing its mind — cannot
       # show up in a green run. In the matrix this claim took two half-checks
@@ -517,7 +568,7 @@ jobs:
       - name: test (stable, the same gate as `make test`)
         env:
           TMPDIR: /tmp/opossum-ci-${{ github.run_id }}-${{ github.job }}
-        run: make test
+        run: ${{ github.event.repository.private && 'make test' || 'make test-shipped' }}
       - name: the temporary directory is removed
         if: ${{ always() }}
         run: rm -rf "/tmp/opossum-ci-${{ github.run_id }}-${{ github.job }}"

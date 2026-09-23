@@ -340,8 +340,12 @@ func TestTheTwoJobsKeepTheirPromises(t *testing.T) {
 			// reads it only in its own `if` is not held to this: on main the
 			// value is empty, the condition is false, and the step is skipped
 			// — the danger is an empty value used as data.)
-			if cond, _ := m["if"].(string); cond != "${{ !cancelled() && github.event_name == 'pull_request' }}" {
-				t.Errorf("%s: step %d (%v) reads github.event.pull_request but runs on %q; on a push to main the event carries no pull request, and a gate runs after a red step, so the condition has to be exactly ${{ !cancelled() && github.event_name == 'pull_request' }} (the spelling is pinned)", name, i, m["name"], cond)
+			want := onEveryPullRequest
+			if n, _ := m["name"].(string); n == changelogGateName {
+				want = onEveryPullRequestHere
+			}
+			if cond, _ := m["if"].(string); cond != want {
+				t.Errorf("%s: step %d (%v) reads github.event.pull_request but runs on %q; on a push to main the event carries no pull request, and a gate runs after a red step, so the condition has to be exactly %s (the spelling is pinned; only the changelog fragment gate adds the repository test, and only because the published copy carries no changelog.d/)", name, i, m["name"], cond, want)
 			}
 		}
 	}
@@ -357,8 +361,71 @@ func TestTheTwoJobsKeepTheirPromises(t *testing.T) {
 	// the file rest on (a job there is not billed by the minute; when a
 	// second runner joins, two share one machine, so the gates keep their
 	// temporary directories apart).
-	if got := fmt.Sprint(ci["runs-on"]); got != "[self-hosted Linux X64]" {
-		t.Errorf("the jobs run on %s; this check knows the self-hosted runner class [self-hosted, Linux, X64] and nothing else", got)
+	// Which compiler each job installs. The whole reason there are two of
+	// them is that some of what this code reads — and writes — changes
+	// between compilers: coverage block boundaries moved between Go 1.26 and
+	// 1.27 and the mutation sweep answers differently on either side, and
+	// gofmt's own output changed too. Both jobs on one compiler is a green
+	// run that has stopped asking the question, and nothing in the run says
+	// so: the log still names two sections.
+	//
+	// Neither spelling holds a version — one asks go.mod, the other asks for
+	// stable — so pinning them survives a version moving. What is pinned is
+	// that the two ask differently, and which way round: the go.mod job is
+	// the one the pull-request gates ride with, and `stable` is what someone
+	// who just installed Go has.
+	asks := map[string]string{}
+	caches := map[string]string{}
+	for name, job := range map[string]map[string]any{"ci": ci, "stable": stable} {
+		steps, _ := job["steps"].([]any)
+		for _, st := range steps {
+			m, _ := st.(map[string]any)
+			if u, _ := m["uses"].(string); !strings.HasPrefix(u, "actions/setup-go@") {
+				continue
+			}
+			with, _ := m["with"].(map[string]any)
+			caches[name] = "no cache: line at all"
+			if c, has := with["cache"]; has {
+				caches[name] = fmt.Sprint(c)
+			}
+			file, _ := with["go-version-file"].(string)
+			version, _ := with["go-version"].(string)
+			switch {
+			case file != "" && version != "":
+				t.Errorf("the %s job's setup-go asks for both go-version-file %q and go-version %q; setup-go takes the two as separate inputs and what it does with both is not something to rely on", name, file, version)
+			case file != "":
+				asks[name] = "file:" + file
+			case version != "":
+				asks[name] = "version:" + version
+			default:
+				t.Errorf("the %s job's setup-go asks for no compiler at all; left to itself it takes whatever the runner image carries, and the log goes on naming a section that chose nothing", name)
+			}
+		}
+	}
+	for _, name := range []string{"ci", "stable"} {
+		if caches[name] != cacheByRepository {
+			t.Errorf("the %s job's setup-go says cache: %s; this check knows one shape — %s — and "+
+				"nothing else. The line decides whether about 4.4 GB is uploaded and downloaded "+
+				"around every run, and it has to follow the same field the runner does: turned off "+
+				"where the runner keeps its own copy between jobs, on where every run gets a fresh "+
+				"machine that keeps nothing. Written either way round by hand, a run pays for a "+
+				"cache it already has or builds from scratch every time, and neither shows up as a "+
+				"red result", name, caches[name], cacheByRepository)
+		}
+	}
+	if asks["ci"] != "file:go.mod" {
+		t.Errorf("the ci job installs %q; this check knows one shape — the version go.mod asks for, which is the floor the module claims to work on", asks["ci"])
+	}
+	if asks["stable"] != "version:stable" {
+		t.Errorf("the stable job installs %q; this check knows one shape — stable, which is what someone who just installed Go has", asks["stable"])
+	}
+	if asks["ci"] == asks["stable"] {
+		t.Errorf("both jobs install %q; the two exist to run different compilers, and on one compiler neither of the things they are here to catch can show up in a green run", asks["ci"])
+	}
+	for name, job := range map[string]map[string]any{"ci": ci, "stable": stable} {
+		if got := fmt.Sprint(job["runs-on"]); got != runsOnByRepository {
+			t.Errorf("the %s job runs on %s; this check knows one shape — %s — and nothing else. Both jobs carry it: the private repository's self-hosted runners are what the reasons at the top of the file rest on, and the published copy has no runner of its own at all", name, got, runsOnByRepository)
+		}
 	}
 	for name, job := range map[string]map[string]any{"ci": ci, "stable": stable} {
 		steps, _ := job["steps"].([]any)
@@ -373,7 +440,7 @@ func TestTheTwoJobsKeepTheirPromises(t *testing.T) {
 			if _, has := m["continue-on-error"]; has && stepName != "validate .goreleaser.yaml" {
 				t.Errorf("%s: step %d (%q) carries continue-on-error: its red would read as the job's green", name, i, stepName)
 			}
-			if run, _ := m["run"].(string); strings.TrimSpace(run) == "make test" {
+			if run, _ := m["run"].(string); strings.TrimSpace(run) == gateByRepository {
 				gates++
 				const want = ""
 				if cond, _ := m["if"].(string); cond != want {
@@ -507,6 +574,48 @@ type gate struct {
 	script    string
 }
 
+// What the two jobs say about where they run, when the gates run, and which
+// gate they run, in one place, because several checks read them.
+//
+// Where: the private repository carries the self-hosted runners; the copy
+// each release publishes carries none, so a job asking for those labels there
+// waits for a runner that will never take it — a day, and then a cancel — and
+// an outside contributor's pull request gets no answer. The expression falls
+// to the hosted runner when it cannot read the field, so the checks run
+// wherever this lands.
+const runsOnByRepository = `${{ github.event.repository.private && fromJSON('["self-hosted", "Linux", "X64"]') || 'ubuntu-latest' }}`
+
+// Which gate: the whole one where the workshop is, the packages the released
+// binary links where only the product is.
+const gateByRepository = `${{ github.event.repository.private && 'make test' || 'make test-shipped' }}`
+
+// Whether setup-go carries the module and build caches across runs, which
+// follows the same field for the same reason the runner does. The self-hosted
+// runner holds both directories on its own disk between jobs, so saving and
+// restoring them moves data the next run already has — 18 minutes of a
+// 23-minute run went to the two uploads, and the 10 GB cache quota filled with
+// copies. A GitHub-hosted runner is a fresh machine each time and keeps
+// nothing, so there the saved copy is the only one there is. The two lines are
+// written the same way round and are pinned here together: written by hand,
+// one of them turns into either a run paying to upload a cache it already has
+// or a run building everything from scratch, and neither of those is a red
+// result anywhere.
+const cacheByRepository = "${{ !github.event.repository.private }}"
+
+// When: every step that reads `github.event.pull_request` carries this, so
+// that a push to main — which has no pull request — does not run it with
+// empty revisions, and a gate still runs after a red step.
+const onEveryPullRequest = "${{ !cancelled() && github.event_name == 'pull_request' }}"
+
+// The one step that adds to it. The published copy carries no `changelog.d/`,
+// so asking a contributor there for a fragment asks for a file with nowhere
+// to go. The test is the repository, not the directory's absence: a
+// `changelog.d/` deleted by accident here still fails that gate loudly.
+const onEveryPullRequestHere = "${{ !cancelled() && github.event_name == 'pull_request' && github.event.repository.private != false }}"
+
+// The gate step's name, which is how the checks find it.
+const changelogGateName = "a shipped change needs a changelog.d fragment"
+
 func readGate(t *testing.T, root string) gate {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "ci.yml"))
@@ -598,7 +707,7 @@ func readGate(t *testing.T, root string) gate {
 	// The gate is found by its name, exactly once. Among the many steps of a
 	// single job, position cannot locate it, and a second step under the same
 	// name would leave this check reading whichever one it happened to take.
-	const gateName = "a shipped change needs a changelog.d fragment"
+	const gateName = changelogGateName
 	var step map[string]any
 	found := 0
 	for _, s := range steps[1:] {
@@ -613,9 +722,10 @@ func readGate(t *testing.T, root string) gate {
 	}
 	allowed(t, "the gate step", step, "name", "if", "env", "run")
 	cond, _ := step["if"].(string)
-	if cond != "${{ !cancelled() && github.event_name == 'pull_request' }}" {
-		t.Fatalf("the gate step runs on %q; this check knows one condition — on every pull request, "+
-			"even when an earlier step failed — and a different one may mean it never runs", cond)
+	if cond != onEveryPullRequestHere {
+		t.Fatalf("the gate step runs on %q; this check knows one condition — %s, which is every pull "+
+			"request in this repository, even when an earlier step failed — and a different one may "+
+			"mean it never runs", cond, onEveryPullRequestHere)
 	}
 
 	g := gate{condition: cond, env: map[string]string{}}

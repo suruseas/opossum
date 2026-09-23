@@ -255,3 +255,187 @@ services:
 		}
 	}
 }
+
+// A spec that names no protocol names tcp, as docker compose reads it, so
+// `8080` and `8080/tcp` are one published port. They used to be two: the
+// comparison was made on the spec as written, and `/tcp` written in one of
+// them was enough to make the pair look like two ports. The second was then
+// published on a host port nobody asked for, and where both named the host
+// port the runtime refused the pair outright (`host ports for different
+// publish port specs may not overlap`) — a file docker compose starts.
+//
+// What is kept is the first spec as it was written: the question the key
+// answers is whether two entries are the same port, not what to hand the
+// runtime.
+func TestLoadReadsAMissingProtocolAsTCP(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		specs []string
+		want  []string
+	}{
+		{"the protocol written second", []string{"8080/tcp", "8080"}, []string{"8080:8080/tcp"}},
+		{"the protocol written first", []string{"8080", "8080/tcp"}, []string{"8080:8080"}},
+		{"both host ports named", []string{"8080:8080/tcp", "8080:8080"}, []string{"8080:8080/tcp"}},
+		// A different protocol is a different port, and stays two.
+		{"udp beside tcp", []string{"8080/udp", "8080/tcp"}, []string{"8080:8080/udp", "8080:8080/tcp"}},
+		{"udp beside a spec with no protocol", []string{"8080/udp", "8080"}, []string{"8080:8080/udp", "8080:8080"}},
+		// Unchanged: the same spelling twice, and two ports that differ.
+		{"the same spelling twice", []string{"8080/tcp", "8080/tcp"}, []string{"8080:8080/tcp"}},
+		{"two ports", []string{"8080", "9090"}, []string{"8080:8080", "9090:9090"}},
+		// The host port is compared too: these are two published ports that
+		// happen to share a container port.
+		{"one container port on two host ports", []string{"8080:80/tcp", "9090:80"}, []string{"8080:80/tcp", "9090:80"}},
+		// A protocol written in the short form is read without regard to
+		// case and settled in lower case, where docker compose settles it
+		// (v5.5.1 writes `8080/TCP` back as `protocol: tcp`) — so a pair
+		// that differs only in how the protocol is spelled is one port.
+		// Both host ports named is the shape that cannot fall back on a free
+		// port: the runtime refused the pair outright.
+		{"the protocol in upper case", []string{"8080/TCP", "8080/tcp"}, []string{"8080:8080/tcp"}},
+		{"upper case beside no protocol at all", []string{"8080/TCP", "8080"}, []string{"8080:8080/tcp"}},
+		{"upper case with both host ports named", []string{"8080:8080/TCP", "8080:8080/tcp"}, []string{"8080:8080/tcp"}},
+		{"mixed case", []string{"8080/Tcp", "8080/tCP"}, []string{"8080:8080/tcp"}},
+		// Not only tcp: the case is settled for whatever protocol is written.
+		{"udp in upper case", []string{"8080/UDP", "8080/udp"}, []string{"8080:8080/udp"}},
+		// And settling the case does not fold two protocols together.
+		{"upper-case udp beside tcp", []string{"8080/UDP", "8080/tcp"}, []string{"8080:8080/udp", "8080:8080/tcp"}},
+		// The protocol is the only part settled. A host address written in
+		// another case is left as two entries here — whether two spellings
+		// of one address are one published port is a question of its own,
+		// and not one this answers (docker compose's answer to it is not
+		// measured). The row is here to say where the settling stops.
+		{"one host address in two cases", []string{"[::FFFF:1.2.3.4]:8080:80/tcp", "[::ffff:1.2.3.4]:8080:80/tcp"}, []string{"[::FFFF:1.2.3.4]:8080:80/tcp", "[::ffff:1.2.3.4]:8080:80/tcp"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "compose.yaml")
+			body := "services:\n  web:\n    image: nginx\n    ports:\n"
+			for _, spec := range tc.specs {
+				body += "      - \"" + spec + "\"\n"
+			}
+			if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			p, err := Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := p.Services["web"].Ports
+			if len(got) != len(tc.want) {
+				t.Fatalf("ports = %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("ports = %v, want %v", got, tc.want)
+					break
+				}
+			}
+		})
+	}
+}
+
+// Which of the pair opossum may move is the pair's answer, not each spec's: a
+// host port named in either of them is a host port the file chose, however the
+// protocol was spelled.
+func TestAProtocolSpellingDoesNotMakeAHostPortOpossumsToMove(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		specs []string
+		kept  string
+		auto  bool
+	}{
+		{"both bare", []string{"8080/tcp", "8080"}, "8080:8080/tcp", true},
+		{"the host port named in the second", []string{"8080/tcp", "8080:8080"}, "8080:8080/tcp", false},
+		{"the host port named in the first", []string{"8080:8080/tcp", "8080"}, "8080:8080/tcp", false},
+		// Three entries, the named one last: what the pair answered has to
+		// survive the third. Whichever spec is kept, it is the first — an
+		// answer that moved to a later spelling would leave the file's own
+		// host port marked as opossum's to move.
+		{"two bare and then the host port named", []string{"8080", "8080/tcp", "8080:8080"}, "8080:8080", false},
+		{"the host port named first, then two bare", []string{"8080:8080", "8080/tcp", "8080"}, "8080:8080", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "compose.yaml")
+			body := "services:\n  web:\n    image: nginx\n    ports:\n"
+			for _, spec := range tc.specs {
+				body += "      - \"" + spec + "\"\n"
+			}
+			if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			p, err := Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			svc := p.Services["web"]
+			if len(svc.Ports) != 1 || svc.Ports[0] != tc.kept {
+				t.Fatalf("ports = %v, want [%s]", svc.Ports, tc.kept)
+			}
+			if got := svc.AutoHostPort[svc.Ports[0]]; got != tc.auto {
+				t.Errorf("AutoHostPort[%q] = %v, want %v (AutoHostPort = %v)", svc.Ports[0], got, tc.auto, svc.AutoHostPort)
+			}
+			// And no answer left behind for a spec that is not published:
+			// a key that moved would mark a port nobody asked about.
+			for spec := range svc.AutoHostPort {
+				if spec != svc.Ports[0] {
+					t.Errorf("AutoHostPort holds %q, which is not among the published ports %v", spec, svc.Ports)
+				}
+			}
+		})
+	}
+}
+
+// Where the case of a protocol is settled decides one shape, and only one:
+// a long-form entry writing `protocol: TCP` beside a short-form `8080/tcp`.
+// docker compose settles the case in the parser for the short form and not
+// for the long form's own key (measured on v5.5.1: a file with one of each
+// keeps two entries and `up` fails to bind the second, where `protocol: tcp`
+// beside the same short form is one entry and starts), so opossum settles it
+// in the same place. Settling it where two entries are compared instead would
+// fold this pair and start a file docker compose does not.
+func TestTheLongFormProtocolKeepsItsCase(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "compose.yaml")
+	body := "services:\n  web:\n    image: nginx\n    ports:\n" +
+		"      - {target: 8080, published: \"8080\", protocol: TCP}\n" +
+		"      - \"8080:8080/tcp\"\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := p.Services["web"].Ports
+	want := []string{"8080:8080/TCP", "8080:8080/tcp"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("ports = %v, want %v", got, want)
+	}
+}
+
+// The same pair with the short form written in capitals too. This one used to
+// be a single published port — both entries said `/TCP`, so they matched as
+// written — and is two now that the short form settles in lower case while
+// the long form's key does not. The file stops starting, and docker compose
+// does not start it either (measured on v5.5.1: `config` returns both and
+// `up` fails to bind the second), which is why it is left this way.
+func TestTheLongFormProtocolNoLongerMatchesAShortFormInCapitals(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "compose.yaml")
+	body := "services:\n  web:\n    image: nginx\n    ports:\n" +
+		"      - {target: 8080, published: \"8080\", protocol: TCP}\n" +
+		"      - \"8080:8080/TCP\"\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := p.Services["web"].Ports
+	want := []string{"8080:8080/TCP", "8080:8080/tcp"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("ports = %v, want %v", got, want)
+	}
+}

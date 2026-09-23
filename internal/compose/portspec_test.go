@@ -125,7 +125,12 @@ func TestAPortIsCheckedAtLoadTheWayDockerChecksIt(t *testing.T) {
 		{"a bare container range", `"80-90"`, "80-90:80-90"},
 		{"a range of one", `"8080-8080:80"`, "8080-8080:80"},
 		{"udp", `"80:80/udp"`, "80:80/udp"},
-		{"protocol in capitals", `"80:80/TCP"`, "80:80/TCP"},
+		// The protocol is taken without regard to case and settled in lower
+		// case, where docker compose settles it (v5.5.1 writes `80:80/TCP`
+		// back as `protocol: tcp`). It used to be kept as written, which
+		// made `80:80/TCP` and `80:80/tcp` two published ports.
+		{"protocol in capitals", `"80:80/TCP"`, "80:80/tcp"},
+		{"protocol in mixed case", `"80:80/uDp"`, "80:80/udp"},
 		{"sctp", `"80:80/sctp"`, "80:80/sctp"},
 		{"an empty protocol is dropped", `"80:80/"`, "80:80"},
 		{"an IPv4 address", `"127.0.0.1:8080:80"`, "127.0.0.1:8080:80"},

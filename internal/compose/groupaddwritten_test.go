@@ -177,11 +177,13 @@ func TestTheSpellingsAreRecordedThroughExtendsAndInclude(t *testing.T) {
 	}
 }
 
-// Two entries that read as one group only once the file is merged are
-// refused as the same entry twice, where docker compose takes them (v5.5.1,
-// `config` exits 0; measured 2026-09-20). The refusal is the repeat check's:
-// the merge settles `0x10` to `16`, which the second entry already spells.
-func TestEntriesThatReadAlikeOnlyAfterAMergeAreRefusedAsARepeat(t *testing.T) {
+// Two entries that read as one group only once the file is merged are read,
+// as docker compose reads them (v5.5.1, `config` exits 0; measured
+// 2026-09-20). They used to be refused as the same entry twice: the merge
+// settles `0x10` to `16`, which the second entry already spells, and the
+// merged document was asked the question a second time. The entries a file
+// wrote are asked about in that file, where `0x10` is still `0x10`.
+func TestEntriesThatReadAlikeOnlyAfterAMergeAreStillRead(t *testing.T) {
 	dir := t.TempDir()
 	one := filepath.Join(dir, "compose.yaml")
 	if err := os.WriteFile(one, []byte("services:\n  app:\n    image: alpine:3.20\n    group_add: [0x10, \"16\"]\n"), 0o644); err != nil {
@@ -195,8 +197,12 @@ func TestEntriesThatReadAlikeOnlyAfterAMergeAreRefusedAsARepeat(t *testing.T) {
 	if _, err := LoadFiles([]string{one}, nil); err != nil {
 		t.Fatalf("read alone, the file should load: %v", err)
 	}
-	_, err := LoadFiles([]string{one, other}, nil)
-	if err == nil || !strings.Contains(err.Error(), "group_add items at 0 and 1 are equal") {
-		t.Fatalf("want the repeat refused after the merge, got %v", err)
+	// And read with the file beside it, which is what the merge settles.
+	p, err := LoadFiles([]string{one, other}, nil)
+	if err != nil {
+		t.Fatalf("read with another file, the pair should load: %v", err)
+	}
+	if got := strings.Join(p.Services["app"].GroupAdd, ","); got != "16,16" {
+		t.Errorf("group_add = %s, want both entries kept (16,16)", got)
 	}
 }

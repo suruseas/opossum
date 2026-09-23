@@ -727,8 +727,9 @@ func envListIsClean(v any) bool {
 // appendNew is how two files' lists of these fields become one: the later
 // file's entries are added, except the ones the earlier file already has.
 // What each file wrote on its own is left as it wrote it — a list naming one
-// entry twice is that file's to answer for, and the field that reads it says
-// so. docker compose says so for the first file and not for the later one:
+// entry twice is that file's to answer for, and the pass that reads each file
+// on its own says so before the merge is asked anything.
+// docker compose says so for the first file and not for the later one:
 // it folds a repeat the later file wrote on its own and goes on (`[20]` over
 // `[16, 16]` leaves `20 16`), where the same repeat in the first file is
 // refused (measured on v5.5.1) — a difference `docs/compatibility.md` names.
@@ -741,8 +742,10 @@ func envListIsClean(v any) bool {
 // compose folds them and goes on, measured on v5.5.1).
 func appendNew(base, over []any) []any {
 	// As many as the earlier file already has, and no more: a later file
-	// naming one entry twice still names it twice, and the field that reads
-	// it says so. Dropping every match would swallow that file's own repeat.
+	// naming one entry twice still names it twice. Dropping every match
+	// would swallow that file's own repeat — which `group_add` is refused
+	// for before the merge runs, and which the other fields here keep as
+	// the file wrote it.
 	have := map[string]int{}
 	for _, x := range base {
 		if key, ok := scalarKey(x); ok {
@@ -1061,19 +1064,29 @@ func LoadFilesEnvDir(paths []string, envFiles []string, envDir string) (*Project
 		// then drop duplicates the merge couldn't see because it dedups raw text
 		// (e.g. base "3000" + override "3000:3000" both normalize to "3000:3000").
 		if len(svc.Ports) > 0 {
-			seen := make(map[string]bool, len(svc.Ports))
+			// Two entries are the same published port when they name the same
+			// host port, container port and protocol — and a spec that names
+			// no protocol names tcp, as docker compose reads it. That is a
+			// question about the entries, not about what is handed to the
+			// runtime, so it is asked of a key and answered there: what is
+			// kept is the first of them as `ports` read it — `/tcp` and all
+			// or neither, with a protocol written in the short form settled
+			// in lower case (normalizePortSpec) and a host port opossum
+			// supplied already there.
+			seen := map[string]string{} // key -> the spec kept for it
 			ports := make([]string, 0, len(svc.Ports))
 			auto := map[string]bool{}
 			for _, p := range svc.Ports {
 				n, mirrored := normalizePort(p)
-				if seen[n] {
+				k := portKey(n)
+				if kept, ok := seen[k]; ok {
 					// A spec is only opossum's to move if EVERY declaration of it was
 					// bare: `["3000", "3000:3000"]` names the host port explicitly in
 					// one of them, so the user did choose it.
-					auto[n] = auto[n] && mirrored
+					auto[kept] = auto[kept] && mirrored
 					continue
 				}
-				seen[n] = true
+				seen[k] = n
 				auto[n] = mirrored
 				ports = append(ports, n)
 			}
@@ -1622,6 +1635,22 @@ func normalizePort(spec string) (norm string, mirrored bool) {
 	return s + proto, mirrored
 }
 
+// portKey is how two published-port specs are compared for being the same
+// port. A spec carries its protocol after the last `/`, and one that carries
+// none is tcp — docker compose's default, and the runtime's — so `8080` and
+// `8080/tcp` are one port there and here. The case of a protocol written in
+// the short form is settled before this (normalizePortSpec), where docker
+// compose settles it. Only the comparison is made on
+// this: `8080/tcp` written alone still reaches the runtime with its `/tcp`,
+// and `8080` alone still reaches it without, because a spec the file wrote is
+// what is published.
+func portKey(norm string) string {
+	if strings.LastIndexByte(norm, '/') >= 0 {
+		return norm
+	}
+	return norm + "/tcp"
+}
+
 // decodeErr turns a failed YAML decode into words that send the reader to the
 // right place. Four different things arrive here and they need four different
 // sentences.
@@ -1777,6 +1806,18 @@ func validateOne(path string, one interpolated, earlier map[string]any) error {
 	if err := doc.Decode(&f); err != nil {
 		return decodeErr(path, asWritten, blameService(interpolated{node: doc, raw: one.raw}, err))
 	}
+	// A file that names one `group_add` entry twice is refused here, where
+	// the entries are the ones that file wrote: the positions are its own,
+	// and a file beside it neither adds to them nor takes them away. The
+	// merged document is not asked again — merging writes the tree back
+	// out, so `0x10` arrives there as `16` and would read as a repeat of a
+	// `"16"` the same file wrote in another entry, refusing at the load a
+	// file that is refused before the service starts when it is read
+	// alone. That refusal stops `down`, which left a project started from
+	// those files with no way to come down.
+	if err := checkGroupAddRepeats(path, &f); err != nil {
+		return err
+	}
 	// In the first file a service with nothing under it is the mistake it
 	// is in a single file (docker compose refuses it there even when a
 	// later file gives the service a body); in a later file the key was
@@ -1790,6 +1831,47 @@ func validateOne(path string, one interpolated, earlier map[string]any) error {
 		for _, name := range names {
 			if f.Services[name] == nil {
 				return fmt.Errorf("compose file %s: service %q must be a mapping — the key has nothing under it; give it at least `image:` or `build:`, or remove the key", path, name)
+			}
+		}
+	}
+	return nil
+}
+
+// checkGroupAddRepeats refuses a service that writes the same `group_add`
+// entry twice in one file.
+//
+// The same entry twice is the spelling the file wrote together with what
+// opossum hands the runtime for it: the same characters can read two ways —
+// an integer `020` is YAML's octal (the group 16) where the string `"020"`
+// is the digits `--gid` reads as 20 — so those are two groups and not a
+// repeat. Two spellings of one group (`[0x10, "16"]`) are not a repeat
+// either; the check the service is started by folds those and asks for the
+// group to be listed once, which is a refusal a project can still come down
+// from.
+func checkGroupAddRepeats(path string, f *composeFile) error {
+	names := make([]string, 0, len(f.Services))
+	for name := range f.Services {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		svc := f.Services[name]
+		// A service pruned as "not given" is nil. The length test is
+		// defence rather than a case: the spellings come from the same
+		// reading as the values, so a service that has one has the other,
+		// and a `group_add` that arrives through a merge key carries both
+		// (measured — such a file is refused here). Nothing found reaches
+		// it; it is here so that a service whose spellings the loader could
+		// not line up entry for entry is left to the checks that read the
+		// values alone, rather than read past the end of the shorter list.
+		if svc == nil || len(svc.GroupAddWritten) != len(svc.GroupAdd) {
+			continue
+		}
+		for i := range svc.GroupAdd {
+			for j := 0; j < i; j++ {
+				if svc.GroupAddWritten[j] == svc.GroupAddWritten[i] && svc.GroupAdd[j] == svc.GroupAdd[i] {
+					return fmt.Errorf("compose file %s: service %q: group_add items at %d and %d are equal — list the group once", path, name, j, i)
+				}
 			}
 		}
 	}

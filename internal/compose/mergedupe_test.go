@@ -64,11 +64,13 @@ func TestANumberBothFilesWriteIsOneEntryAfterTheMerge(t *testing.T) {
 		// A number past what an integer holds arrives as another kind, and
 		// is folded by the same reading.
 		{"a number past what an integer holds, in both", "    group_add: [18446744073709551615]\n", "    group_add: [18446744073709551615]\n", "18446744073709551615"},
-		// The earlier file's own list is left as it wrote it: two spellings of
-		// one group there are still that file's repeat, and the field that
-		// reads them says so — whether or not the later file says anything
-		// about the same key. Only what the later file adds is compared.
-		// (Held as a refusal by TestAFilesOwnRepeatSurvivesTheMerge.)
+		// The earlier file's own list is left as it wrote it: what it wrote
+		// twice it still holds twice after the merge, whether or not the
+		// later file says anything about the same key. Only what the later
+		// file adds is compared. (The same entry twice is refused as that
+		// file is read — TestAFilesOwnRepeatSurvivesTheMerge; two spellings
+		// of one group are read and left to the check the service is
+		// started by — TestTwoSpellingsOfOneGroupAreReadWhateverElseIsBeside.)
 		//
 		// Each file adds its own: both are kept, in the order they are read.
 		{"two groups, one from each file", "    group_add: [16]\n", "    group_add: [20]\n", "16,20"},
@@ -97,7 +99,7 @@ func TestANumberBothFilesWriteIsOneEntryAfterTheMerge(t *testing.T) {
 // an override of `[16, 16]` leaves `20 16` there (measured on v5.5.1,
 // 2026-09-23), where the second row below refuses it.
 func TestAFilesOwnRepeatSurvivesTheMerge(t *testing.T) {
-	const repeat = "    group_add: [0x10, \"16\"]\n" // one group, two spellings
+	const repeat = "    group_add: [16, 16]\n" // the same entry, twice
 	const other = "    group_add: [0x10]\n"
 	t.Run("in the earlier file, as docker compose refuses it too", func(t *testing.T) {
 		if _, err := loadTwo(t, repeat, other); err == nil || !strings.Contains(err.Error(), "are equal — list the group once") {
@@ -147,5 +149,112 @@ func TestOneFileNamingAGroupTwiceIsStillRefused(t *testing.T) {
 				t.Errorf("want the repeat refused, got %v", err)
 			}
 		})
+	}
+}
+
+// Two spellings of one group are the same answer whether or not another file
+// sits beside the one that wrote them. They are not the same entry twice —
+// the check the service is started by folds them and asks for the group to be
+// listed once — so the file is read, and a project started from it can still
+// be brought down.
+//
+// The merge is what made this worth holding: it writes the tree back out, so
+// `0x10` arrives as `16` and reads as a repeat of the `"16"` beside it. Read
+// alone, `0x10` stays as written and no repeat is there to find. The entries
+// a file wrote are the file's own, and the file beside it neither adds to
+// them nor takes them away.
+func TestTwoSpellingsOfOneGroupAreReadWhateverElseIsBeside(t *testing.T) {
+	const twoSpellings = "    group_add: [0x10, \"16\"]\n"
+	for _, tc := range []struct{ name, base, over, want string }{
+		{"the file alone", twoSpellings, "", "16,16"},
+		{"a file beside it that says nothing about the key", twoSpellings, "    environment:\n      X: \"1\"\n", "16,16"},
+		{"a file beside it that adds another group", twoSpellings, "    group_add: [24]\n", "16,16,24"},
+		{"the two spellings in the later file", "    group_add: [24]\n", twoSpellings, "24,16,16"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var p *compose.Project
+			var err error
+			if tc.over == "" {
+				dir := t.TempDir()
+				path := filepath.Join(dir, "compose.yaml")
+				if werr := os.WriteFile(path, []byte("name: demo\nservices:\n  app:\n    image: alpine:3.20\n"+tc.base), 0o644); werr != nil {
+					t.Fatal(werr)
+				}
+				p, err = compose.LoadFiles([]string{path}, nil)
+			} else {
+				p, err = loadTwo(t, tc.base, tc.over)
+			}
+			if err != nil {
+				t.Fatalf("want the file read, got %v", err)
+			}
+			// What the file holds after the read is what the check the
+			// service is started by is given: both entries, in the order
+			// they were written, with whatever the other file added where
+			// the merge put it.
+			if got := strings.Join(p.Services["app"].GroupAdd, ","); got != tc.want {
+				t.Errorf("group_add = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// The refusal says where: which file wrote the repeat, which service holds
+// it, and which two of that service's entries they are. Each of the three is
+// something this check assembles itself — the file it was handed, the service
+// it is looking at, the positions in that service's own list — and a merged
+// document has none of them to offer (it is one document by then, and the
+// positions are its own). Held row by row, so that a message keeping the
+// shape while naming the wrong one of the three fails.
+func TestTheRefusalSaysWhichFileAndServiceAndEntries(t *testing.T) {
+	const dup = "    group_add: [16, 16]\n"
+	for _, tc := range []struct{ name, base, over, want string }{
+		// The repeat is in the later file: that file is the one named, not
+		// the one being merged into.
+		{"in the later file", "    group_add: [20]\n", dup, `compose.override.yaml: service "app": group_add items at 0 and 1 are equal`},
+		{"in the earlier file", dup, "    group_add: [20]\n", `compose.yaml: service "app": group_add items at 0 and 1 are equal`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := loadTwo(t, tc.base, tc.over)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("want %q in:\n%v", tc.want, err)
+			}
+		})
+	}
+}
+
+// Every service is asked, not the first one alphabetically: a project's
+// services are read from a map, and a check that stopped at one of them would
+// pass a file whose second service names a group twice.
+func TestEveryServiceIsAskedAboutItsOwnEntries(t *testing.T) {
+	const dup = "    group_add: [16, 16]\n"
+	const plain = "    group_add: [20]\n"
+	for _, tc := range []struct{ name, a, b, want string }{
+		{"the first service by name", dup, plain, `service "a": group_add items at 0 and 1 are equal`},
+		{"the last service by name", plain, dup, `service "z": group_add items at 0 and 1 are equal`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "compose.yaml")
+			body := "name: demo\nservices:\n  a:\n    image: alpine:3.20\n" + tc.a +
+				"  z:\n    image: alpine:3.20\n" + tc.b
+			if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := compose.LoadFiles([]string{path}, nil)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("want %q in:\n%v", tc.want, err)
+			}
+		})
+	}
+}
+
+// The positions are that service's own, counted from its own list: the
+// entries a file wrote, not the ones the merge left beside them.
+func TestThePositionsAreTheFilesOwn(t *testing.T) {
+	// The later file writes three entries and repeats the last two; the
+	// earlier file's two entries are no part of the count.
+	_, err := loadTwo(t, "    group_add: [40, 41]\n", "    group_add: [20, 16, 16]\n")
+	if err == nil || !strings.Contains(err.Error(), "group_add items at 1 and 2 are equal") {
+		t.Errorf("want the positions counted in the file that wrote them, got:\n%v", err)
 	}
 }

@@ -6,7 +6,7 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//')
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: build test wired hooks real-conformance cover sieve install snapshot changelog changelog-preview
+.PHONY: build test test-shipped wired hooks real-conformance cover sieve install snapshot changelog changelog-preview
 
 build: ## build the opossum binary with the version stamped in
 	go build -ldflags "$(LDFLAGS)" -o opossum ./cmd/opossum
@@ -49,6 +49,24 @@ build: ## build the opossum binary with the version stamped in
 test: wired ## run the full test suite (the regression gate)
 	go run ./cmd/noleftovers go test $$(go list ./... | grep -v '/cmd/busy$$') -race -cover -count=1
 	go run ./cmd/noleftovers go test ./cmd/busy -race -cover -count=1
+
+# The gate for a copy of this repository that carries the product and not the
+# workshop: the packages the released binary links, and nothing else. Asked
+# of the compiler rather than listed here, so that a package added to the
+# binary is tested without anyone remembering to add it. The recipe is the
+# whole claim and is pinned as one line, because a grep narrowed by a
+# character tests a fraction of the binary and still prints `ok` for each
+# package it did run.
+#
+# What is left out is this repository's tooling — the checks that read
+# CONTRIBUTING.md, the changelog fragments and the notes from real-runtime
+# review. A published copy has none of those three: the release that writes
+# it folds the fragments into a version's section, and the contributor
+# guidance and the review notes live where the work happens. (The release
+# config is published, so it is not one of them.) Running those checks there
+# asks whether files that were never meant to be shipped are in order.
+test-shipped: wired ## run the tests of the packages the released binary links
+	go run ./cmd/noleftovers go test $$(go list -deps ./cmd/opossum | grep '^github.com/suruseas/opossum') -race -cover -count=1
 
 # Opt-in: measures, against the real `container` runtime, the facts the socket
 # guidance stands on. Not part of the gate — the daily gate is the fake's — and

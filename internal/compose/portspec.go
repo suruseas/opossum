@@ -57,7 +57,14 @@ func normalizePortSpec(spec string) string {
 	}
 	s = strings.Join(parts, ":")
 	if proto != "" {
-		s += "/" + proto
+		// The protocol is read without regard to case, and written back in
+		// lower case — where docker compose reads it, in the parser for this
+		// short form (measured on v5.5.1: `8080/TCP` comes back as
+		// `protocol: tcp`, and a long-form `protocol: TCP` does not, so a
+		// file writing one of each keeps two entries there). Reading it here
+		// rather than where two entries are compared is what keeps the two
+		// forms answering as they do there.
+		s += "/" + strings.ToLower(proto)
 	}
 	return s
 }

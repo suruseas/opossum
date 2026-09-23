@@ -8,9 +8,12 @@ package orchestrator_test
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/suruseas/opossum/internal/compose"
 	"github.com/suruseas/opossum/internal/orchestrator"
 )
 
@@ -72,12 +75,15 @@ func TestEntriesThatReachTheRuntimeAsOneGroupAreCountedOnce(t *testing.T) {
 		{"two spellings of one group past the largest gid", `[0x80000000, "02147483648"]`,
 			`adds the group "0x80000000" (group_add), which reads as the group 2147483648 and is past 2147483647, the largest gid the docker engine takes — write the group's number`},
 
-		// What opossum can read is what it folds by: a number past what an
-		// integer holds is left as the spelling, so two of those are two
-		// groups here although `--gid` would read them alike. Both are
-		// refused for being past the largest gid a step later.
+		// The reading folds them however large the number is: `--gid` reads
+		// these two alike, so they are one group, and the refusal is about
+		// that group being past the largest gid rather than about there
+		// being two. They used to be counted as two — the reading was an
+		// integer's — and the file was told to keep one of two groups it had
+		// written once. (TestFoldingDoesNotTurnOnHowManyDigits holds the
+		// boundary that put there.)
 		{"two spellings past what an integer holds", `["18446744073709551615", "018446744073709551615"]`,
-			`adds 2 groups (group_add: "18446744073709551615", "018446744073709551615"); container 1.4.1's --gid takes one, and a second replaces the first — keep the one the process needs`},
+			`adds the group "18446744073709551615" (group_add), which is past 2147483647, the largest gid the docker engine takes — write the group's number`},
 
 		// One spelling handed over two ways is two groups, and the list would
 		// otherwise quote it twice with nothing to tell the two apart: each
@@ -193,6 +199,137 @@ func TestASpellingTheRuntimeCannotReadIsNotFolded(t *testing.T) {
 		t.Fatal("want a refusal")
 	}
 	if want := `adds 2 groups (group_add: "0x10", "16")`; !strings.Contains(err.Error(), want) {
+		t.Errorf("want %q in:\n%v", want, err)
+	}
+}
+
+// The shape that only reaches this check once a second file is read: two
+// spellings of one group settle into the one spelling in the merge, so what
+// arrives here is the same characters twice over. It used to be refused as
+// the file was read — which stopped `down` as well — and is now left to this
+// check, which asks for the group to be listed once and lets the project come
+// down. Held here because the load no longer refuses it: nothing else would
+// notice if this check stopped answering for it.
+func TestOneGroupInTwoSpellingsIsRefusedHereAfterAMerge(t *testing.T) {
+	rt, _ := fakeShim(t)
+	dir := t.TempDir()
+	base := filepath.Join(dir, "compose.yaml")
+	overlay := filepath.Join(dir, "over.yaml")
+	if err := os.WriteFile(base, []byte("name: demo\nservices:\n  app:\n    image: alpine:3.20\n    group_add: [0x10, \"16\"]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The second file says nothing about `group_add`: what changes is that
+	// there is a merge at all.
+	if err := os.WriteFile(overlay, []byte("services:\n  app:\n    environment:\n      X: \"1\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, err := compose.LoadFiles([]string{base, overlay}, nil)
+	if err != nil {
+		t.Fatalf("want the files read, got %v", err)
+	}
+	err = orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true)
+	if err == nil {
+		t.Fatal("want a refusal")
+	}
+	want := `names one group twice (group_add: "16", "16" — both the group 16); one --gid is handed over, and opossum does not choose which of them to hand it — list the group once`
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("want %q in:\n%v", want, err)
+	}
+}
+
+// Whether two entries are one group does not turn on how many digits the
+// number has. The reading folds them — a `+` and leading zeros are no part of
+// the number — and reading it by parsing an integer put a boundary in the
+// middle of that: the largest integer and the one after it are the same pair
+// of spellings, and only the first was folded. A file that wrote one group
+// once was then told it had named two and to keep one, and keeping one left
+// it refused all the same for a group past the largest gid.
+//
+// docker compose has no answer to hold this against: it refuses such a file
+// where the YAML is read (`expected type 'string', got unsigned integer`,
+// measured on v5.5.1), so the pair never reaches its own repeat check.
+func TestFoldingDoesNotTurnOnHowManyDigits(t *testing.T) {
+	for _, tc := range []struct{ name, list, want string }{
+		// The largest integer, and the same pair one larger: the second used
+		// to be counted as two groups.
+		{"the largest integer", `[9223372036854775807, "+9223372036854775807"]`,
+			`adds the group "9223372036854775807" (group_add), which is past 2147483647`},
+		{"one past the largest integer", `[9223372036854775808, "+9223372036854775808"]`,
+			`adds the group "9223372036854775808" (group_add), which is past 2147483647`},
+		{"the largest a uint64 holds", `[18446744073709551615, "+18446744073709551615"]`,
+			`adds the group "18446744073709551615" (group_add), which is past 2147483647`},
+		// Leading zeros are no part of the number either, at any size.
+		{"leading zeros past the largest integer", `["018446744073709551615", "18446744073709551615"]`,
+			`adds the group "018446744073709551615" (group_add), which reads as the group 18446744073709551615 and is past 2147483647`},
+		// Well inside an integer, where the two readings always agreed.
+		{"a group an integer holds easily", `[2147483648, "+2147483648"]`,
+			`adds the group "2147483648" (group_add), which is past 2147483647`},
+		// Two groups are still two, however large: the readings differ.
+		{"two groups past the largest integer", `[18446744073709551615, 18446744073709551614]`,
+			`adds 2 groups (group_add: "18446744073709551615", "18446744073709551614")`},
+		// A spelling `--gid` cannot read as a number has no reading to fold
+		// by, so it stands for itself. Dropping a leading zero from one
+		// would make `"0x10"` and `"x10"` the same entry, and they are two
+		// spellings the runtime refuses separately.
+		{"two spellings neither of which is a number", `["0x10", "x10"]`,
+			`adds 2 groups (group_add: "0x10", "x10")`},
+		// The group 0, whose spellings are all zeros and a sign: dropping
+		// them leaves nothing, and the reading has to be the number 0 rather
+		// than nothing at all. With nothing, these entries fold under a key
+		// `--gid` would not take, and the file is told neither that it names
+		// one group twice nor which group that is — it starts instead, with
+		// no group at all.
+		{"the group 0 written two ways", `[0, "00"]`,
+			`names one group twice (group_add: "0", "00" — both the group 0); one --gid is handed over`},
+		{"the group 0 with a sign", `["0", "+0"]`,
+			`names one group twice (group_add: "0", "+0" — both the group 0); one --gid is handed over`},
+		{"the group 0 written three ways", `[0, "+0", "000"]`,
+			`names one group 3 times (group_add: "0", "+0", "000" — all the group 0); one --gid is handed over`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt, _ := fakeShim(t)
+			p, err := loadProject(t, "services:\n  app:\n    image: alpine:3.20\n    group_add: "+tc.list+"\n")
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true)
+			if err == nil {
+				t.Fatal("want a refusal")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("want %q in:\n%v", tc.want, err)
+			}
+		})
+	}
+}
+
+// The reading folds the same way when a second file is read beside the first.
+// The merge writes the tree back out, so an unquoted number arrives in its
+// decimal — which is the reading — while a quoted one is the characters the
+// file wrote; both reach this check, and both fold by what `--gid` reads.
+func TestFoldingDoesNotTurnOnHowManyDigitsAfterAMerge(t *testing.T) {
+	rt, _ := fakeShim(t)
+	dir := t.TempDir()
+	base := filepath.Join(dir, "compose.yaml")
+	overlay := filepath.Join(dir, "over.yaml")
+	if err := os.WriteFile(base, []byte("name: demo\nservices:\n  app:\n    image: alpine:3.20\n    group_add: [18446744073709551615, \"+18446744073709551615\"]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The second file says nothing about `group_add`: what changes is that
+	// there is a merge at all.
+	if err := os.WriteFile(overlay, []byte("services:\n  app:\n    environment:\n      X: \"1\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, err := compose.LoadFiles([]string{base, overlay}, nil)
+	if err != nil {
+		t.Fatalf("want the files read, got %v", err)
+	}
+	err = orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true)
+	if err == nil {
+		t.Fatal("want a refusal")
+	}
+	want := `adds the group "18446744073709551615" (group_add), which is past 2147483647`
+	if !strings.Contains(err.Error(), want) {
 		t.Errorf("want %q in:\n%v", want, err)
 	}
 }
