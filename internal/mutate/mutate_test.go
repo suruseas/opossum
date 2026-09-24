@@ -1341,6 +1341,11 @@ func TestTheTallyIsWordForWordWhatWeMeanToSay(t *testing.T) {
 		"",
 		"**4 mutations: 2 caught, 1 SURVIVED, 1 did not compile.**",
 		"",
+		// After the totals, so that keeping the last lines of a long
+		// report keeps the names of what went wrong as well as the counts.
+		"Went the wrong way:",
+		"- the wait is gone (SURVIVED)",
+		"",
 		"| test | mutations it caught |",
 		"|---|---|",
 		`| TestWire\|Cut | 2 |`,

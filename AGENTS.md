@@ -282,6 +282,28 @@ list; codes are add-only and never change meaning.
   refusal, but the same code arrives on a `→` line under a failed start when the port is
   held by something the host probe cannot see — the runtime's own DNS on 53, say. Same
   port, same fix, whichever moment it is caught at.
+  An entry is passed over a port its own container holds: `up` recreates that container,
+  so the port is free before the new one binds. A port held by another container of this
+  project is passed over only when that container is recreated earlier in the startup
+  order and its service's own entries no longer publish it — a container that keeps
+  publishing a port takes it straight back. Otherwise it is refused: a container
+  recreated after the entry, a service a profile leaves out or this command was not
+  asked to start, a stopped container, one holding that number on the other protocol,
+  another project's container. The first of those is refused whatever the asking
+  service is doing. The rest are ports this run cannot say who holds, and there one
+  case is passed over as it always was — an entry of a service whose own container is
+  running. The probe cannot tell an occupant from an address this machine will not
+  assign, and a re-up has been given the benefit of the doubt there for as long as the
+  check has existed; that is about the probe, not about whose port it is.
+  The refusal names the holder only where this run can speak for it — a service it
+  starts, whose container is running, holding that published port. A stopped container,
+  one outside this run, and another project's are refused without a name. Where there is
+  a name, what to do depends on whether that holder gives the port up. One whose own
+  entries no longer publish it is holding it only until this run recreates it, so taking
+  the project down and starting it again places both. One whose entries publish that
+  number takes it straight back however often the project is restarted, and there a line
+  has to change — which is the answer wherever in the order that holder sits, not only
+  ahead of the entry.
 - **`[OPSM-412]` … `this image has no build for Apple silicon (arm64)`** → decoded from a
   failed start under `up` (`does not support required platforms`, or `Error: platform linux/arm64` — 1.2.2 uses both, see `testdata/real-cli-output.md`); a one-off `run` reports
   the runtime's own wording instead. Add `platform: linux/amd64` to the
@@ -384,9 +406,49 @@ list; codes are add-only and never change meaning.
   worth saying whether or not it could be written down.
 - **`[OPSM-206]` … `opossum published it on <port> instead`** → the compose file gave
   only a container port (`ports: ["3000"]`), so the host port is opossum's to choose;
-  the mirrored port was taken, so a free one was used. docker compose does the same.
+  the mirrored port was not available, so a free one was used. docker compose does the
+  same. The notice says which of six reasons made it unavailable: something is listening
+  on it; another service's line names it; another line of the same service names it;
+  another service publishes a range of container ports opossum mirrors onto it; the same
+  service publishes such a range; or this run had already given it to another entry. Only
+  the first is a question about the machine — the other five are about the compose file
+  and this run, and a reader sent to `lsof` for one of those may find nothing there and
+  conclude opossum is wrong. The two range reasons point at the range rather than at a
+  number, because a line that names container ports does not name a host port anywhere.
   `opossum ps` shows the port actually published; write `"<host>:<container>"` in the
   compose file to pin one. An explicit mapping is never moved (that's `OPSM-201`).
+- **`[OPSM-212]` … `so opossum left the entry on <port>`** →
+  the same situation as `OPSM-206`, except that no free port could be used. opossum asks
+  the system for a free port, and the system answers about listeners — a line that fixes a
+  port has nothing listening on it until that service starts — so the two can disagree. The
+  ports opossum will not use include the ones this run has just handed to other entries, and
+  the ones a running container of the project holds, not only the ones written in the file.
+  When the answer is one of those, opossum steps past them and asks the system whether the
+  number it picked can be bound, so a range of any width costs one extra question; running
+  off the last host port asks the system to choose again, since its answers are ephemeral
+  ports and one near the end of that range has little above it. The number of tries is
+  bounded, and the notice says how many were tried rather than naming a reason — a walk can
+  step over a line of the file and then meet a listener, so the two come mixed. opossum then
+  leaves the entry on its mirrored port and says
+  why that port was unavailable, naming the service whose line took it when the file names
+  one (a port this run itself handed to another entry has no line to point at). The run
+  usually fails after this: whatever holds the mirrored port holds it still, so either the
+  pre-flight refuses it (`OPSM-201`) or the runtime does. It starts only when the thing
+  holding the port is a service this command does not start. Write a host port in the
+  compose file to choose one yourself.
+- **`[OPSM-213]` … `two entries publish host port <port>/<proto>`** → two `ports` entries
+  of the services this command starts publish the same host port where only one of them
+  can be. Both lines are named, because which one to change is the user's choice. Two
+  entries of ONE service collide whatever addresses they name (container 1.4.1 refuses
+  publish specs of one container that overlap). Two entries of DIFFERENT services collide
+  only when the address is the same — `127.0.0.1:8080:80` beside `8080:81`, or beside
+  `192.168.1.5:8080:81`, starts both (container 1.4.1), though docker compose v5.5.1
+  refuses the first of those pairs. The two wildcards are two addresses: `0.0.0.0:8080:80`
+  gets an IPv4 listener and `[::]:8080:81` an IPv6 one, and both start (container 1.4.1). A different protocol is a different port (`8080/tcp` and
+  `8080/udp` are published side by side), and `08080` is the same port as `8080`. A
+  service that runs to completion before its dependent starts is not counted, and neither
+  is a service this command does not start. Until this check existed the pair reached the
+  runtime, which failed at bind or refused the specs and named no line of the file.
 - **`[OPSM-207]` … `network <n> exists with IPv4 subnet <a>, and the compose file now declares <b>`** →
   the project network was created earlier with another subnet (or with none, so
   the runtime chose one) and `ipam.config` now declares a different one. opossum
@@ -514,12 +576,14 @@ Every `[OPSM-NNN]` opossum can emit (add-only; grouped 1xx storage / 2xx network
 - `OPSM-203` — an internal network: no internet egress, and no name resolution for a container attached to it first.
 - `OPSM-204` — a service mounts `docker.sock`, which does not answer for the containers here.
 - `OPSM-205` — a network declared `external: true` doesn't exist (pre-flight; create it or drop `external`).
-- `OPSM-206` — a container-only port's mirrored host port was taken; opossum published on a free port.
+- `OPSM-206` — a container-only port's mirrored host port was not available; opossum published on a free port and says why.
 - `OPSM-207` — the project network exists with a subnet other than the one `ipam` now declares (`down` and `up` to recreate it).
 - `OPSM-208` — another `up`/`down`/`destroy` for the project is still running (wait, then retry).
 - `OPSM-209` — a service's name may not be reachable by other services: upper case gets no DNS answer, or another address when spelled like a top-level domain (`Web`), and `.` gets none from a musl image (alpine) and an internet address when one exists (rename it in lower case if a peer reaches it by name).
 - `OPSM-210` — a volume declared `external: true` doesn't exist (pre-flight; create it or drop `external`).
 - `OPSM-211` — (`up`; a `run` for the dependencies it starts and for its one-off, named `<service>-run` where a peer would look that name up and called the one-off of its service where it is the side that cannot reach) a service on two or more networks answers by name with its address on the network it is attached to first, so a peer that shares only a later one cannot reach it by name (attach the shared network first — a list attaches in the order written, a mapping and merged networks in name order — or have the peer use the address).
+- `OPSM-212` — a container-only port could not be moved: a bounded number of host ports outside the ones this compose file publishes were tried and none could be bound.
+- `OPSM-213` — two entries of this run publish the same host port on one address (or two entries of one service, whatever addresses).
 - `OPSM-401` — a dependency's container exited before becoming healthy (logs embedded).
 - `OPSM-402` — orphan containers left by services no longer in the compose.
 - `OPSM-403` — a `service_healthy` dependency defines no healthcheck (not waited on).

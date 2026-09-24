@@ -401,19 +401,43 @@ func TestUpSkipsOwnRunningContainerPort(t *testing.T) {
 	// A re-up must not flag its OWN already-running container's published port as a
 	// conflict: up will delete and recreate that container, freeing the port. The
 	// port stays bound here, but because inspect reports the container as running
-	// and owned by this project, checkHostPorts skips it and up proceeds — the
-	// distinction that keeps a plain re-up from failing on ports it already holds.
+	// and publishing that port, checkHostPorts passes the entry over and up
+	// proceeds — the distinction that keeps a plain re-up from failing on ports it
+	// already holds.
+	//
+	// It ups TWICE, and the first one is what makes this a re-up: only a container
+	// this fixture has run reports the ports it was run with. Asked about a name it
+	// never ran, the fixture answers one fixed port, and then "the port this
+	// container holds" is a number nobody published — the entry is passed over for
+	// another reason entirely, and the distinction this test is named for is not
+	// the one being exercised.
+	// The port is taken AFTER the first up, not before it. Before it, the first
+	// up would be the one walking past a port something else is holding, and it
+	// gets through that on a different rule — one the fixture only offers
+	// because it answers for a container it has not run, which the contract
+	// calls a known-wrong answer. Leaning on it here would tie this test to a
+	// defect somebody is going to fix.
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer l.Close()
 	port := l.Addr().(*net.TCPAddr).Port
+	l.Close()
 	rt, _ := fakeShim(t)
 	setShimEnv(rt, "INSPECT_PROJECT=demo") // web's container is running (shim default) and ours
 	p := project("demo", map[string]*compose.Service{
 		"web": {Image: "web:latest", Ports: []string{fmt.Sprintf("127.0.0.1:%d:80", port)}},
 	})
+	if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true); err != nil {
+		t.Fatalf("the first up, which makes the container this test is about, failed: %v", err)
+	}
+	// Now the port is held, the way the container that just published it would
+	// hold it: the re-up has to see it as its own.
+	held, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Skipf("the port the first up published (%d) was taken by something else: %v", port, err)
+	}
+	defer held.Close()
 	if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true); err != nil {
 		t.Errorf("re-up must skip its own running container's published port, got %v", err)
 	}

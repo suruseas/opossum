@@ -81,6 +81,94 @@ var contract = []struct {
 		{argv: []string{"delete", "--force", "NAME"}},
 		{argv: []string{"inspect", "NAME"}, rc: 1, has: "container not found: NAME"},
 	}},
+	// A published port comes back as the run wrote it: the host port, the
+	// container port, the protocol, and the address — kept as the address it
+	// names rather than folded to the wildcard. A range is ONE entry at its low
+	// port carrying a `count`, and a single port carries `count` 1 (measured on
+	// container 1.4.1).
+	//
+	// Asked here because a fake that answers one fixed mapping for every
+	// container passes every test that only needs a container to exist, and
+	// quietly turns "which port does THIS one hold" into a constant — a
+	// question opossum asks whenever a host port moves between services.
+	{"a container publishes the ports its run was given", nil, []step{
+		{argv: []string{"run", "-d", "--name", "NAME", "-p", "47080:80", "alpine"}},
+		{argv: []string{"inspect", "NAME"}, has: `"hostPort":47080`},
+		{argv: []string{"inspect", "NAME"}, has: `"containerPort":80,"count"`},
+		{argv: []string{"inspect", "NAME"}, has: `"count":1`},
+		// The defaults, spelled out: a spec that names no address is on the
+		// wildcard, and one that names no protocol is tcp.
+		{argv: []string{"inspect", "NAME"}, has: `"hostAddress":"0.0.0.0"`},
+		{argv: []string{"inspect", "NAME"}, has: `"proto":"tcp"`},
+		// And nothing else. A fixture that answered its historical fixed
+		// mapping BESIDE what the run published would pass every `has` above
+		// while giving this container a port nobody asked for.
+		{argv: []string{"inspect", "NAME"}, lacks: `8080`},
+		{argv: []string{"delete", "--force", "NAME"}},
+		// Two entries are two answers, in the order the run gave them (measured
+		// on container 1.4.1: the long and short spellings of the flag are not
+		// told apart, and the order is the order of the arguments — including
+		// when the arguments are not in port order).
+		//
+		// Three of them, and not in port order either way round: with two
+		// entries there are only two arrangements, so "the order the run gave"
+		// and "sorted by port" agree on one of them whichever way the fixture
+		// is written — a fake that sorted descending passed a two-entry row
+		// written descending. Three in an order that is neither ascending nor
+		// descending is the smallest fixture that tells the two apart.
+		{argv: []string{"run", "-d", "--name", "NAME", "-p", "47087:87", "-p", "47086:86", "-p", "47088:88", "alpine"}},
+		{argv: []string{"inspect", "NAME"}, has: `"hostPort":47086`},
+		{argv: []string{"inspect", "NAME"}, has: `"hostPort":47087`},
+		{argv: []string{"inspect", "NAME"}, has: `"hostPort":47088`},
+		// And in that order: said as the seams between them, naming both sides
+		// of each, because `has` on the numbers alone passes whichever way they
+		// are arranged.
+		{argv: []string{"inspect", "NAME"}, has: `"hostPort":47087,"proto":"tcp"},{"containerPort":86`},
+		{argv: []string{"inspect", "NAME"}, has: `"hostPort":47086,"proto":"tcp"},{"containerPort":88`},
+		{argv: []string{"delete", "--force", "NAME"}},
+		// The long spelling of the same flag is the same flag. On a port no
+		// other row uses: a correct fixture overwrites what it recorded on
+		// every run, but a `delete` does not clear it, so a fixture that both
+		// ignores this flag AND stops overwriting can answer this row from the
+		// earlier row's leftovers — and the row passes without the flag ever
+		// being read. A number of its own makes the row stand on itself.
+		{argv: []string{"run", "-d", "--name", "NAME", "--publish", "47090:90", "alpine"}},
+		{argv: []string{"inspect", "NAME"}, has: `"hostPort":47090`},
+		{argv: []string{"delete", "--force", "NAME"}},
+		// A protocol is settled in lower case, as the runtime settles it.
+		{argv: []string{"run", "-d", "--name", "NAME", "-p", "47089:89/UDP", "alpine"}},
+		{argv: []string{"inspect", "NAME"}, has: `"proto":"udp"`},
+		{argv: []string{"delete", "--force", "NAME"}},
+		// A run with no `-p` publishes nothing, and says so with an empty list —
+		// not with some port of its own.
+		{argv: []string{"run", "-d", "--name", "NAME", "alpine"}},
+		{argv: []string{"inspect", "NAME"}, has: `"publishedPorts":[]`},
+		{argv: []string{"delete", "--force", "NAME"}},
+		{argv: []string{"run", "-d", "--name", "NAME", "-p", "127.0.0.1:47081:81/udp", "alpine"}},
+		{argv: []string{"inspect", "NAME"}, has: `"hostAddress":"127.0.0.1"`},
+		{argv: []string{"inspect", "NAME"}, has: `"proto":"udp"`},
+		{argv: []string{"delete", "--force", "NAME"}},
+		{argv: []string{"run", "-d", "--name", "NAME", "-p", "47082-47084:82-84", "alpine"}},
+		{argv: []string{"inspect", "NAME"}, has: `"count":3`},
+		// The ports are the low end and nothing else — said with what follows
+		// the number, because `"hostPort":47082` alone is a prefix of
+		// `"hostPort":47082-47084` and would pass a fixture that never folded
+		// the range at all.
+		{argv: []string{"inspect", "NAME"}, has: `"hostPort":47082,"proto"`},
+		{argv: []string{"inspect", "NAME"}, has: `{"containerPort":82,"count"`},
+		// And the range is not carried across as written.
+		{argv: []string{"inspect", "NAME"}, lacks: `47082-`},
+		{argv: []string{"inspect", "NAME"}, lacks: `82-84`},
+		// Nor are the other ports of the range entries of their own.
+		{argv: []string{"inspect", "NAME"}, lacks: `"hostPort":47083`},
+		{argv: []string{"inspect", "NAME"}, lacks: `"hostPort":47084`},
+		{argv: []string{"inspect", "NAME"}, lacks: `"containerPort":83`},
+		{argv: []string{"inspect", "NAME"}, lacks: `"containerPort":84`},
+		{argv: []string{"delete", "--force", "NAME"}},
+		{argv: []string{"run", "-d", "--name", "NAME", "-p", "[::1]:47085:85", "alpine"}},
+		{argv: []string{"inspect", "NAME"}, has: `"hostAddress":"::1"`},
+		{argv: []string{"delete", "--force", "NAME"}},
+	}},
 	// The project label is what the run gave the container, as `-l` (the
 	// spelling opossum passes) or `--label`; a run without one leaves none
 	// (1.4.1: `configuration.labels`, testdata/real-cli-output.md).

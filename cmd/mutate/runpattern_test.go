@@ -144,7 +144,7 @@ func TestTheSurvivorSummarySpeaksForWhatTheSweepRan(t *testing.T) {
 		{"a named row alone, from a sweep that ran whole", []mutate.Result{wholeRun}, "mutate: 1 of 1 mutations survived — the defects they introduce are invisible to the suite"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := survivorSummary(1, tc.results); got != tc.want {
+			if got := wrongSummary(mutate.Wrong(tc.results), tc.results); got != tc.want {
 				t.Errorf("got %q, want %q", got, tc.want)
 			}
 		})

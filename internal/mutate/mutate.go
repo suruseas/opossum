@@ -48,6 +48,18 @@ type Mutation struct {
 	From string `json:"from"`
 	// To is what replaces it.
 	To string `json:"to"`
+	// Control marks a mutation written so that the answer does not change —
+	// a comment, a rewrite of the same condition. It is the row that says
+	// what the other rows' green means: when a control is caught, the
+	// mutations were not applied the way the author thought, or a test is
+	// reading something other than the code. When it survives, the sweep
+	// worked.
+	//
+	// It is scored the other way round from the rest, and left out of their
+	// count. Written without this, a control reads as a hole — the same word
+	// and the same failing exit status as a defect nothing caught — and the
+	// denominator says one more mutation than the sweep was measuring.
+	Control bool `json:"control"`
 	// Packages are the ones to build and test. Narrow is better — a whole-suite
 	// run makes it easy to credit someone else's failing test to your mutation.
 	Packages []string `json:"packages"`
@@ -306,6 +318,69 @@ type Result struct {
 // here: none of them names a test.
 func namesItsKillers(o Outcome) bool { return o == Caught }
 
+// outcomeWord is how a row's outcome is printed. A control's words are the
+// other way round: it is meant to survive, so "SURVIVED" — the word this
+// report uses for a defect nothing caught — would say the opposite of what
+// happened.
+func outcomeWord(r Result) string {
+	if !r.Mutation.Control || !measured(r.Outcome) {
+		// A control that never ran is named the way any row that never ran
+		// is named: what it would have shown is not known, and "the answer
+		// changed" would claim it is.
+		return r.Outcome.String()
+	}
+	if r.Outcome == Survived {
+		return "control ok"
+	}
+	return "CONTROL CAUGHT"
+}
+
+// ControlsAndRest splits the results into the controls and the mutations
+// the sweep is measuring, so that a count of one never includes the other.
+func ControlsAndRest(rs []Result) (controls, rest []Result) {
+	for _, r := range rs {
+		if r.Mutation.Control {
+			controls = append(controls, r)
+			continue
+		}
+		rest = append(rest, r)
+	}
+	return controls, rest
+}
+
+// Wrong reports the results that did not go the way their kind is meant to:
+// a mutation nothing caught, and a control something did. This is what an
+// exit status is decided from — counting a control's survival as a failure
+// made a sweep whose every row went right report one.
+func Wrong(rs []Result) []Result {
+	var out []Result
+	for _, r := range rs {
+		if !measured(r.Outcome) {
+			// A mutation that would not build, or one whose named tests
+			// never ran to a result, measured nothing at all. "The answer
+			// changed" and "nothing was asked" are the two things this
+			// tool exists to keep apart, and a row that never ran belongs
+			// to the second — for a control as much as for a defect. Those
+			// rows leave here untouched and reach the exit status that says
+			// so.
+			continue
+		}
+		if r.Mutation.Control == (r.Outcome == Survived) {
+			// A control that survived, or a mutation that was caught:
+			// both are what that row was written for.
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// measured is whether a row's outcome came from a test run that finished.
+// Caught and Survived did; Broken and Inconclusive are the tool's two names
+// for "nothing was asked", and reading either as an answer is the mistake
+// the package doc calls the loudest lie it could tell.
+func measured(o Outcome) bool { return o == Caught || o == Survived }
+
 // Report renders the results as a markdown table, ready to paste into a pull
 // request. A mutation that survived says so in the table rather than being left
 // out, because that row is the reason to run this at all.
@@ -327,6 +402,16 @@ func Report(rs []Result) string {
 		// report disagreeing, in the function whose comment says they cannot.
 		killers := "n/a (an outcome this table has no name for)"
 		switch {
+		case r.Mutation.Control && measured(r.Outcome):
+			// Scored the other way round: a control is meant to survive.
+			// Printing it in the same words as a defect nothing caught
+			// would leave the reader to remember which row was which.
+			if r.Outcome == Survived {
+				killers = "the answer did not change, as a control should"
+			} else {
+				killers = "**the answer changed, so the sweep is not measuring what it says** — " +
+					cell(strings.Join(r.Killers, ", "))
+			}
 		case namesItsKillers(r.Outcome):
 			killers = cell(strings.Join(r.Killers, ", "))
 		case r.Outcome == Survived:
@@ -361,7 +446,7 @@ func Report(rs []Result) string {
 		case r.Outcome == Inconclusive:
 			killers = "n/a (measured nothing: " + cell(r.Detail) + ")"
 		}
-		b.WriteString(fmt.Sprintf("| %s | %s | %s |\n", cell(r.Mutation.Name), r.Outcome, killers))
+		b.WriteString(fmt.Sprintf("| %s | %s | %s |\n", cell(r.Mutation.Name), outcomeWord(r), killers))
 	}
 	return b.String()
 }
@@ -382,6 +467,11 @@ func Tally(rs []Result) string {
 	if len(rs) == 0 {
 		return ""
 	}
+	// Controls are counted apart from the rest. "8 mutations: 7 caught, 1
+	// SURVIVED" read as a sweep with one hole when the survivor was the
+	// control doing its job — and it put the denominator one above what the
+	// sweep was measuring, so a perfect run could not reach full marks.
+	controls, rs := ControlsAndRest(rs)
 	byOutcome := map[Outcome]int{}
 	order := []Outcome{}
 	perTest := map[string]int{}
@@ -410,6 +500,47 @@ func Tally(rs []Result) string {
 		noun = "mutation"
 	}
 	fmt.Fprintf(&b, "\n**%d %s: %s.**\n", len(rs), noun, strings.Join(parts, ", "))
+	if len(controls) > 0 {
+		ok, unmeasured := 0, 0
+		for _, c := range controls {
+			switch {
+			case !measured(c.Outcome):
+				// Said with the rest of the rows that measured nothing,
+				// not here: a control that would not build has not vouched
+				// for anything, and has not failed to either.
+				unmeasured++
+			case c.Outcome == Survived:
+				ok++
+			}
+		}
+		if unmeasured == len(controls) {
+			fmt.Fprintf(&b, "\n%d control(s) measured nothing, so nothing here is vouched for.\n", unmeasured)
+			controls = nil
+		}
+		cn := "controls"
+		if len(controls) == 1 {
+			cn = "control"
+		}
+		if len(controls) == 0 {
+			// Every control measured nothing; already said.
+		} else if ok == len(controls)-unmeasured {
+			fmt.Fprintf(&b, "\n%d %s: all as expected — the answer did not change, so the "+
+				"sweep was measuring what it says.\n", len(controls), cn)
+		} else {
+			fmt.Fprintf(&b, "\n**%d of %d %s changed the answer.** A sweep whose control is "+
+				"caught has not measured the mutations beside it: the edits are reaching "+
+				"something other than what the rows describe.\n", len(controls)-unmeasured-ok, len(controls)-unmeasured, cn)
+		}
+	}
+	// The survivors again, at the end. The table above is long enough that a
+	// reader who takes the last lines of the output — or pastes them into a
+	// pull request — keeps the totals and loses which rows they are about.
+	if survivors := Wrong(append(append([]Result{}, controls...), rs...)); len(survivors) > 0 {
+		b.WriteString("\nWent the wrong way:\n")
+		for _, r := range survivors {
+			fmt.Fprintf(&b, "- %s (%s)\n", cell(r.Mutation.Name), outcomeWord(r))
+		}
+	}
 	if len(perTest) == 0 {
 		return b.String()
 	}

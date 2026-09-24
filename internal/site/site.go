@@ -205,7 +205,7 @@ func rewriteTarget(srcDir, target string) string {
 	// Images have to be served, not linked to a page about themselves.
 	if ext := strings.ToLower(path.Ext(repoPath)); ext == ".png" || ext == ".jpg" ||
 		ext == ".jpeg" || ext == ".gif" || ext == ".webp" || ext == ".svg" {
-		return RepoURL + "/raw/main/" + repoPath + frag
+		return RawURL(repoPath) + frag
 	}
 	return RepoURL + "/blob/main/" + repoPath + frag
 }
@@ -344,6 +344,68 @@ const headCustomHTML = `<meta name="google-site-verification" content="SOXvRzYu5
 <link rel="apple-touch-icon" href="{{ '/assets/apple-touch-icon.png' | relative_url }}">
 `
 
+// RawURL is where a repository file is linked from llms.txt: the Markdown
+// itself, not the page GitHub wraps around it. An agent following a `blob`
+// link reads GitHub's interface — its navigation, its buttons, the file's
+// text somewhere inside — and has to find the document in it.
+func RawURL(repoPath string) string { return RepoURL + "/raw/main/" + repoPath }
+
+// llmsTXT is the entry point for an agent that arrives at the site, in the
+// shape llmstxt.org describes: the name as an H1, a one-line summary as a
+// block quote, then sections of links.
+//
+// The list is built from the same `Pages` the site publishes, so a document
+// added there appears here without anyone remembering to add it — the failure
+// this avoids is a page that exists on the site and not in the index an agent
+// reads. Titles and descriptions come from each document, for the same
+// reason: written out here they would say what the pages used to say.
+//
+// The links are raw Markdown rather than the site's own HTML. An agent that
+// wanted the rendered page could fetch it, but every one of these documents
+// is Markdown in the repository, and that is what it is easiest to read.
+func llmsTXT(root string) (string, error) {
+	read := func(repoPath string) (title, desc string, err error) {
+		md, err := os.ReadFile(filepath.Join(root, repoPath))
+		if err != nil {
+			return "", "", err
+		}
+		return Title(string(md)), Description(string(md)), nil
+	}
+	var b strings.Builder
+	readmeTitle, readmeDesc, err := read("README.md")
+	if err != nil {
+		return "", err
+	}
+	if readmeTitle == "" || readmeDesc == "" {
+		return "", fmt.Errorf("README.md has no title or no opening paragraph, and llms.txt is both")
+	}
+	fmt.Fprintf(&b, "# %s\n\n> %s\n\n", readmeTitle, readmeDesc)
+	// AGENTS.md first and on its own: it is the one document written for an
+	// agent rather than a person, and an agent that reads only the first
+	// link should read that one.
+	agentsTitle, agentsDesc, err := read("AGENTS.md")
+	if err != nil {
+		return "", err
+	}
+	if agentsTitle == "" || agentsDesc == "" {
+		return "", fmt.Errorf("AGENTS.md has no title or no opening paragraph, and llms.txt links it as the first thing to read")
+	}
+	fmt.Fprintf(&b, "## For agents\n\n- [%s](%s): %s\n\n", agentsTitle, RawURL("AGENTS.md"), agentsDesc)
+	fmt.Fprintf(&b, "## Documentation\n\n- [%s](%s): %s\n", readmeTitle, RawURL("README.md"), readmeDesc)
+	for _, page := range Pages {
+		repoPath := "docs/" + page + ".md"
+		title, desc, err := read(repoPath)
+		if err != nil {
+			return "", err
+		}
+		if title == "" || desc == "" {
+			return "", fmt.Errorf("%s has no title or no opening paragraph, so llms.txt cannot say what it is", repoPath)
+		}
+		fmt.Fprintf(&b, "- [%s](%s): %s\n", title, RawURL(repoPath), desc)
+	}
+	return b.String(), nil
+}
+
 // Build writes the whole site into out, reading from the repository at root.
 //
 // out is emptied first, so a page deleted from Pages does not linger on the site.
@@ -398,6 +460,14 @@ func Build(root, out string) error {
 		if err := os.WriteFile(filepath.Join(out, "assets", name), icon, 0o644); err != nil {
 			return err
 		}
+	}
+	// No front matter, so Jekyll copies it through as it is written here.
+	llms, err := llmsTXT(root)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(out, "llms.txt"), []byte(llms), 0o644); err != nil {
+		return err
 	}
 	return os.WriteFile(filepath.Join(out, "_config.yml"), []byte(configYAML), 0o644)
 }

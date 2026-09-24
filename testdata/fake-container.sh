@@ -14,6 +14,35 @@
 # three.
 echo "container $*" >> "${FAKE_LOG:-/dev/null}"
 
+# publishedJSON turns the `-p` specs a run was given into the objects the real
+# `container inspect` answers with. A range comes back as ONE object holding the
+# low port and a `count`, which is what the runtime does (measured on 1.4.1) —
+# spelling it out here so a reader of these ports sees the same shape either way.
+publishedJSON() {
+  printf '%s\n' "$1" | tr ' ' '\n' | awk '
+    $0 == "" { next }
+    {
+      spec = $0; proto = "tcp"
+      i = index(spec, "/")
+      if (i > 0) { proto = tolower(substr(spec, i + 1)); spec = substr(spec, 1, i - 1) }
+      n = split(spec, f, ":")
+      cport = f[n]; hport = (n >= 2) ? f[n - 1] : f[n]
+      addr = "0.0.0.0"
+      if (n >= 3) { addr = f[1]; for (j = 2; j <= n - 2; j++) addr = addr ":" f[j] }
+      gsub(/^\[|\]$/, "", addr)
+      count = 1
+      if ((k = index(hport, "-")) > 0) {
+        lo = substr(hport, 1, k - 1) + 0; hi = substr(hport, k + 1) + 0
+        count = hi - lo + 1; hport = lo
+      }
+      if ((k = index(cport, "-")) > 0) cport = substr(cport, 1, k - 1)
+      if (out != "") out = out ","
+      out = out "{\"containerPort\":" cport + 0 ",\"count\":" count ",\"hostAddress\":\"" addr "\",\"hostPort\":" hport + 0 ",\"proto\":\"" proto "\"}"
+    }
+    END { print out }
+  '
+}
+
 # marker KIND NAME: the file that records NAME as gone/stopped, or empty when
 # nothing is being remembered.
 marker() {
@@ -184,10 +213,18 @@ case "$1" in
     # Running a name makes it there and running again (see stop/delete), with
     # the project label this run gave it (none for a run without one), given
     # as `-l` (the spelling opossum passes) or `--label`.
-    proj= prev=
+    proj= pub= prev=
     for a in "$@"; do
       if [ "$prev" = -l ] || [ "$prev" = --label ]; then
         case "$a" in opossum.project=*) proj=${a#opossum.project=} ;; esac
+      fi
+      # The published ports this run asked for, remembered so that `inspect`
+      # can answer with them. Without this the fixture answers the same ports
+      # for every container, and a caller asking "which ports does THIS one
+      # hold" gets a number nobody published — so a check that reads them is
+      # measured against a constant rather than against what it was told.
+      if [ "$prev" = -p ] || [ "$prev" = --publish ]; then
+        pub="$pub $a"
       fi
       prev=$a
     done
@@ -197,6 +234,7 @@ case "$1" in
         m=$(marker gone "$a"); if [ -n "$m" ]; then rm -f "$m"; fi
         m=$(marker stopped "$a"); if [ -n "$m" ]; then rm -f "$m"; fi
         m=$(marker project "$a"); if [ -n "$m" ]; then printf '%s' "$proj" > "$m"; fi
+        m=$(marker ports "$a"); if [ -n "$m" ]; then printf '%s' "$pub" > "$m"; fi
       fi
       prev=$a
     done
@@ -318,8 +356,22 @@ case "$1" in
     done
     labels=
     if [ -n "$proj" ]; then labels="\"opossum.project\":\"$proj\""; fi
-    sed -e "s/\"state\":\"STATE\"/\"state\":\"$state\"/" -e "s/\"labels\":{LABELS}/\"labels\":{$labels}/" <<'JSON'
-[{"status":{"state":"STATE","networks":[{"network":"demo-net","ipv4Address":"192.168.64.10/24","ipv6Address":"fdee:0:0:0::10/64","ipv4Gateway":"192.168.64.1"}]},"configuration":{"labels":{LABELS},"networks":[{"network":"demo-net-configured"}],"publishedPorts":[{"containerPort":8080,"hostAddress":"0.0.0.0","hostPort":8080,"proto":"tcp"}]}}]
+    # The ports this container was run with, if this fixture ran it. A name it
+    # never ran keeps the one fixed entry below, which is what every name
+    # answered before: tests that only need "a container exists" are unchanged,
+    # and a test that runs one and then asks what it publishes now gets its own
+    # answer.
+    published='{"containerPort":8080,"hostAddress":"0.0.0.0","hostPort":8080,"proto":"tcp"}'
+    # A name this fixture ran answers with what that run published — nothing at
+    # all when the run had no `-p`, which is what the real CLI answers. A name it
+    # never ran keeps the one fixed entry above.
+    pm=$(marker ports "$2")
+    if [ -n "$pm" ] && [ -e "$pm" ]; then
+      published=$(publishedJSON "$(cat "$pm")")
+    fi
+    sed -e "s/\"state\":\"STATE\"/\"state\":\"$state\"/" -e "s/\"labels\":{LABELS}/\"labels\":{$labels}/" \
+        -e "s|\"publishedPorts\":\[PUBLISHED\]|\"publishedPorts\":[$published]|" <<'JSON'
+[{"status":{"state":"STATE","networks":[{"network":"demo-net","ipv4Address":"192.168.64.10/24","ipv6Address":"fdee:0:0:0::10/64","ipv4Gateway":"192.168.64.1"}]},"configuration":{"labels":{LABELS},"networks":[{"network":"demo-net-configured"}],"publishedPorts":[PUBLISHED]}}]
 JSON
     ;;
   stats)

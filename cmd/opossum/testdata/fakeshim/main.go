@@ -81,6 +81,69 @@ func main() {
 		}
 		return filepath.Join(stopDir, "project-"+hex.EncodeToString([]byte(name)))
 	}
+	// Where a run's published ports are remembered, so a later inspect can
+	// answer what THIS container holds. Without it every container answers one
+	// fixed mapping, and a question about whose port a number is has the same
+	// answer for all of them.
+	portsPath := func(name string) string {
+		if stopDir == "" {
+			return ""
+		}
+		return filepath.Join(stopDir, "ports-"+hex.EncodeToString([]byte(name)))
+	}
+	// publishedPorts renders what a run recorded, in the shape the real CLI
+	// answers: the address as the address it names (bare, where a compose file
+	// writes it bracketed), and a range as ONE entry at its low port with a
+	// count. A single port carries a count of 1 (measured on container 1.4.1).
+	publishedPorts := func(name string) string {
+		fixed := `{"containerPort":80,"count":1,"hostAddress":"0.0.0.0","hostPort":8080,"proto":"tcp"}`
+		p := portsPath(name)
+		if p == "" {
+			return fixed
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return fixed // never run here
+		}
+		// Run without a `-p`: nothing published, and the real CLI answers with
+		// an empty list.
+		if len(strings.TrimSpace(string(b))) == 0 {
+			return ""
+		}
+		var out []string
+		for _, spec := range strings.Split(strings.TrimSpace(string(b)), ",") {
+			proto := "tcp"
+			if i := strings.LastIndex(spec, "/"); i >= 0 {
+				proto, spec = strings.ToLower(spec[i+1:]), spec[:i] // as the runtime settles it
+			}
+			parts := strings.Split(spec, ":")
+			if len(parts) < 2 {
+				continue
+			}
+			host, container := parts[len(parts)-2], parts[len(parts)-1]
+			addr := "0.0.0.0"
+			if len(parts) > 2 {
+				addr = strings.Trim(strings.Join(parts[:len(parts)-2], ":"), "[]")
+			}
+			count := 1
+			if lo, hi, ok := strings.Cut(host, "-"); ok {
+				l, errLo := strconv.Atoi(lo)
+				h, errHi := strconv.Atoi(hi)
+				if errLo == nil && errHi == nil && h >= l {
+					count, host = h-l+1, lo
+				}
+			}
+			if c, _, ok := strings.Cut(container, "-"); ok {
+				container = c
+			}
+			out = append(out, fmt.Sprintf(`{"containerPort":%s,"count":%d,"hostAddress":%q,"hostPort":%s,"proto":"%s"}`,
+				container, count, addr, host, proto))
+		}
+		if len(out) == 0 {
+			return fixed
+		}
+		return strings.Join(out, ",")
+	}
 	// stoppedForStats reports whether inspect would call the container
 	// stopped, by the same knobs: $INSPECT_STATE for every container,
 	// $INSPECT_STOPPED by name, and a `stop` that took.
@@ -196,11 +259,15 @@ func main() {
 		// gave it (none for a run without one), for a later inspect. `-l` is the
 		// spelling opossum passes; `--label` is the long one.
 		var runProject string
+		var runPorts []string
 		for i, a := range args {
 			if i > 0 && (args[i-1] == "-l" || args[i-1] == "--label") {
 				if v, ok := strings.CutPrefix(a, "opossum.project="); ok {
 					runProject = v
 				}
+			}
+			if i > 0 && (args[i-1] == "-p" || args[i-1] == "--publish") {
+				runPorts = append(runPorts, a)
 			}
 		}
 		for i, a := range args {
@@ -213,6 +280,9 @@ func main() {
 				}
 				if p := projectPath(a); p != "" {
 					_ = os.WriteFile(p, []byte(runProject), 0o644)
+				}
+				if p := portsPath(a); p != "" {
+					_ = os.WriteFile(p, []byte(strings.Join(runPorts, ",")), 0o644)
 				}
 			}
 		}
@@ -506,7 +576,8 @@ func main() {
 		if state == "" {
 			state = "running"
 		}
-		fmt.Printf(`[{"status":{"state":"%s","networks":[{"ipv4Address":"192.168.66.9/24"}]},"configuration":{"labels":{%s},"networks":[{"network":"demo-net-configured"}],"publishedPorts":[{"containerPort":80,"hostAddress":"0.0.0.0","hostPort":8080,"proto":"tcp"}]}}]`+"\n", state, labels)
+		fmt.Printf(`[{"status":{"state":"%s","networks":[{"ipv4Address":"192.168.66.9/24"}]},"configuration":{"labels":{%s},"networks":[{"network":"demo-net-configured"}],"publishedPorts":[%s]}}]`+"\n",
+			state, labels, publishedPorts(arg(1)))
 	case "stats":
 		// `stats --no-stream --format json <names…>` returns a guest-view JSON array.
 		jsonForm := false

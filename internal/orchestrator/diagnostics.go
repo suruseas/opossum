@@ -46,12 +46,14 @@ const (
 	codeSymlinkedSocket         diagCode = "OPSM-109" // a bind source is a symlink to a socket, which the runtime refuses to mount
 	codePGVersionedLayout       diagCode = "OPSM-110" // Postgres 18+ wants the mount one level above the old data directory
 	codeDataDirNotThisMount     diagCode = "OPSM-111" // the cluster does not land in a mounted data directory, and the overlay left it alone
-	codeHostPortRemapped        diagCode = "OPSM-206" // a container-only port's mirrored host port was taken, so opossum picked a free one
+	codeHostPortRemapped        diagCode = "OPSM-206" // a container-only port's mirrored host port was not available, so opossum picked a free one and said why
 	codeNetworkSubnetChanged    diagCode = "OPSM-207" // the project network exists with a subnet other than the one `ipam` now declares
 	codeProjectBusy             diagCode = "OPSM-208" // another opossum command holds the project's lock (an `up` or `down` is under way)
 	codeServiceNameUnresolvable diagCode = "OPSM-209" // a service's name can't be looked up by its peers (upper case or ".")
 	codeExternalVolumeAbsent    diagCode = "OPSM-210" // a volume declared external: true doesn't exist
 	codeSecondNetworkName       diagCode = "OPSM-211" // a service on two networks answers by name with its first network's address only
+	codeHostPortNotPlaced       diagCode = "OPSM-212" // a container-only port's mirrored host port was not available and no free host port clear of the file's own was found
+	codeHostPortTwice           diagCode = "OPSM-213" // two entries of this run publish the same host port
 	codeDepNotRunning           diagCode = "OPSM-401" // a dependency's container exited before becoming healthy
 	codeOrphans                 diagCode = "OPSM-402" // containers left by services no longer in the compose
 	codeDepNoHealth             diagCode = "OPSM-403" // a service_healthy dependency defines no healthcheck
@@ -82,6 +84,7 @@ var allDiagCodes = []diagCode{
 	codeDataDirNotThisMount,
 	codeHostPortInUse, codeDNSDomainAbsent, codeInternalEgress, codeDockerSocket, codeExternalNetAbsent, codeHostPortRemapped,
 	codeNetworkSubnetChanged, codeProjectBusy, codeServiceNameUnresolvable, codeExternalVolumeAbsent, codeSecondNetworkName,
+	codeHostPortNotPlaced, codeHostPortTwice,
 	codeDepNotRunning, codeOrphans, codeDepNoHealth,
 	codeIgnoredTopField, codeIgnoredField, codeRuntimeAbsent, codeRuntimeStopped, codeRuntimeAutoStart, codeServiceExited, codeSupervisorStarted, codeSupervisorAction, codeImageNoArm64, codeOptionalDependency,
 	codeSupervisorLogTrimmed, codeSupervisorLogUncapped,

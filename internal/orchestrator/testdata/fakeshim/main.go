@@ -552,7 +552,7 @@ func run(args []string) int {
 			if cname != "" {
 				var pub []string
 				for i, a := range args {
-					if i > 0 && args[i-1] == "-p" {
+					if i > 0 && (args[i-1] == "-p" || args[i-1] == "--publish") {
 						pub = append(pub, a)
 					}
 				}
@@ -1025,28 +1025,63 @@ func stoppedPath(dir, name string) string {
 func publishedPorts(name string) string {
 	dir := os.Getenv("STATE_DIR")
 	if dir == "" || name == "" {
-		return `{"containerPort":8080,"hostAddress":"0.0.0.0","hostPort":8080,"proto":"tcp"}`
+		return `{"containerPort":8080,"count":1,"hostAddress":"0.0.0.0","hostPort":8080,"proto":"tcp"}`
 	}
 	b, err := os.ReadFile(filepath.Join(dir, name+".ports"))
-	if err != nil || len(strings.TrimSpace(string(b))) == 0 {
-		return `{"containerPort":8080,"hostAddress":"0.0.0.0","hostPort":8080,"proto":"tcp"}`
+	if err != nil {
+		// Never run here: the historical fixed mapping, which is the same
+		// answer this fixture has always given a name it has not seen. (That
+		// it answers at all for such a name is the known-wrong item the
+		// contract's doc names; it is not this.)
+		return `{"containerPort":8080,"count":1,"hostAddress":"0.0.0.0","hostPort":8080,"proto":"tcp"}`
+	}
+	// Run without a `-p`: nothing is published, and the real CLI answers with an
+	// empty list. Answering one port here would give every container that
+	// publishes nothing a port somebody could be asking about.
+	if len(strings.TrimSpace(string(b))) == 0 {
+		return ""
 	}
 	var out []string
 	for _, spec := range strings.Split(strings.TrimSpace(string(b)), ",") {
 		proto := "tcp"
 		if i := strings.LastIndex(spec, "/"); i >= 0 {
-			proto, spec = spec[i+1:], spec[:i]
+			// Settled in lower case, as the runtime settles it: `80:80/UDP` and
+			// `80:80/udp` are one published port there.
+			proto, spec = strings.ToLower(spec[i+1:]), spec[:i]
 		}
 		parts := strings.Split(spec, ":")
 		if len(parts) < 2 {
 			continue
 		}
 		host, container := parts[len(parts)-2], parts[len(parts)-1]
-		out = append(out, fmt.Sprintf(`{"containerPort":%s,"hostAddress":"0.0.0.0","hostPort":%s,"proto":"%s"}`,
-			container, host, proto))
+		// The address the run named, kept as an address. Folding it to the
+		// wildcard makes two containers on the same number look alike, which
+		// is the whole question when one of them is holding a port another
+		// entry asks for. Brackets come off: the real CLI answers the address
+		// bare (`::1`), where a compose file writes it bracketed.
+		addr := "0.0.0.0"
+		if len(parts) > 2 {
+			addr = strings.Trim(strings.Join(parts[:len(parts)-2], ":"), "[]")
+		}
+		// A range is one entry at its low port carrying a count, which is what
+		// the real CLI answers — so a reader that wants the ports a container
+		// holds cannot get them by reading hostPort alone.
+		count := 1
+		if lo, hi, ok := strings.Cut(host, "-"); ok {
+			l, errLo := strconv.Atoi(lo)
+			h, errHi := strconv.Atoi(hi)
+			if errLo == nil && errHi == nil && h >= l {
+				count, host = h-l+1, lo
+			}
+		}
+		if c, _, ok := strings.Cut(container, "-"); ok {
+			container = c
+		}
+		out = append(out, fmt.Sprintf(`{"containerPort":%s,"count":%d,"hostAddress":%q,"hostPort":%s,"proto":"%s"}`,
+			container, count, addr, host, proto))
 	}
 	if len(out) == 0 {
-		return `{"containerPort":8080,"hostAddress":"0.0.0.0","hostPort":8080,"proto":"tcp"}`
+		return `{"containerPort":8080,"count":1,"hostAddress":"0.0.0.0","hostPort":8080,"proto":"tcp"}`
 	}
 	return strings.Join(out, ",")
 }

@@ -155,6 +155,22 @@ func run(args []string, stdout, stderr io.Writer, sigs <-chan os.Signal, exit fu
 	// commit should be today's first line of output, not the last.
 	baseSHA := ""
 	if *baseline != "" {
+		// The comparison does not know about controls: it would count them
+		// among the mutations on both sides, and a control the change
+		// starts catching would be listed as the change's own doing. A
+		// report that reads that way is worse than no report, so the two
+		// are refused together until the comparison learns the difference
+		// (see the entry for the sweep's own reporting in the backlog).
+		for _, m := range ms {
+			if m.Control {
+				fmt.Fprintln(stderr, "mutate: -baseline does not yet read controls: the "+
+					"comparison would count \""+m.Name+"\" among the mutations on both "+
+					"sides, and a control this change starts catching would be listed as "+
+					"the change's own doing. Run the sweep without -baseline, or take the "+
+					"controls out of the spec.")
+				return exitFailed
+			}
+		}
 		baseSHA, err = gitOut(cwd, "rev-parse", "--verify", *baseline+"^{commit}")
 		if err != nil {
 			fmt.Fprintln(stderr, "mutate: -baseline "+*baseline+": "+err.Error())
@@ -272,7 +288,13 @@ func run(args []string, stdout, stderr io.Writer, sigs <-chan os.Signal, exit fu
 	// The table and the counts go out together. Quoting the table into a pull
 	// request and then writing the totals by hand is how a body ends up with a
 	// total beside a breakdown that adds to something else.
-	fmt.Fprint(stdout, mutate.Report(results)+mutate.Tally(results))
+	//
+	// The tree comes first. A sweep says what it found; what it does not say,
+	// unless it is written here, is what it looked at — and a worktree left on
+	// yesterday's commit, or one with edits in it, gives the same table as the
+	// right one. Neither the reader nor the author can tell them apart
+	// afterwards, so the answer is kept beside the question.
+	fmt.Fprint(stdout, treeLine(cwd)+mutate.Report(results)+mutate.Tally(results))
 	if sweepErr != nil {
 		fmt.Fprintln(stderr, "mutate: "+sweepErr.Error())
 		return exitFailed
@@ -292,18 +314,29 @@ func run(args []string, stdout, stderr io.Writer, sigs <-chan os.Signal, exit fu
 		fmt.Fprint(stdout, cmp)
 		runCleanup()
 	}
-	if n := count(results, mutate.Survived); n > 0 {
-		fmt.Fprintln(stderr, survivorSummary(n, results))
+	if wrong := mutate.Wrong(results); len(wrong) > 0 {
+		fmt.Fprintln(stderr, wrongSummary(wrong, results))
 		return exitSurvivor
 	}
 	// A mutation that would not build, a run that died without naming anyone,
 	// or a run in which a named test did not run to a result, measured
 	// nothing. Reporting that as "all caught" would be the same lie in a quieter
 	// place: the table says so, and the exit status has to agree with the table.
-	if n := count(results, mutate.Broken) + count(results, mutate.Inconclusive); n > 0 {
+	// Counted over the mutations, with the controls apart — the same split
+	// the table and the tally use. A denominator that quietly includes the
+	// controls is the disagreement between stdout and stderr this change
+	// exists to remove.
+	controls, rest := mutate.ControlsAndRest(results)
+	if n := count(rest, mutate.Broken) + count(rest, mutate.Inconclusive); n > 0 {
 		fmt.Fprintf(stderr, "mutate: %d of %d mutations measured nothing (they did not build, their run "+
 			"ended without naming a failing test, or a test they name did not run to a result) — "+
-			"that is not the same as being caught\n", n, len(results))
+			"that is not the same as being caught\n", n, len(rest))
+		return exitFailed
+	}
+	if n := count(controls, mutate.Broken) + count(controls, mutate.Inconclusive); n > 0 {
+		fmt.Fprintf(stderr, "mutate: %d of %d controls measured nothing, so the rows beside them are "+
+			"not vouched for — a control that did not build has neither confirmed the sweep nor "+
+			"failed to\n", n, len(controls))
 		return exitFailed
 	}
 	return exitAllCaught
@@ -318,15 +351,53 @@ func baselineNote(ms []mutate.Mutation) string {
 	return "mutate: with -baseline, run names are not used — both trees run their packages whole, so the comparison is between the same tests"
 }
 
-// survivorSummary is the closing line for a sweep with survivors. It speaks
-// for the tests the sweep ran when those were only the named ones, and for
-// the suite otherwise — the same decision the table's survivor rows make.
-func survivorSummary(n int, results []mutate.Result) string {
+// treeLine says which tree the sweep measured: the commit the working tree
+// is on, and whether anything in it is uncommitted. Written before the
+// table, because it is the one part of the output that cannot be worked out
+// from the rest.
+//
+// Best effort: a sweep is still worth reading in a directory git cannot
+// answer for, so a failure here says so rather than stopping the run.
+func treeLine(cwd string) string {
+	head, err := gitOut(cwd, "rev-parse", "--short", "HEAD")
+	if err != nil {
+		return "Measured a tree git could not identify (" + err.Error() + ").\n\n"
+	}
+	state := "clean"
+	if out, err := gitOut(cwd, "status", "--porcelain"); err != nil {
+		state = "with changes git could not read"
+	} else if strings.TrimSpace(out) != "" {
+		// The count, not the files: which ones matter is the author's to
+		// know, and how many is what makes "clean" a claim rather than a
+		// hope.
+		state = fmt.Sprintf("with %d uncommitted path(s)", len(strings.Split(strings.TrimSpace(out), "\n")))
+	}
+	return fmt.Sprintf("Measured %s, %s.\n\n", head, state)
+}
+
+// wrongSummary says what went the wrong way, counting controls apart from
+// the mutations they vouch for. A control that survives is the sweep
+// working; counting it among the survivors said the opposite, and put the
+// denominator one above what was being measured — a sweep with every row
+// right could not report full marks.
+func wrongSummary(wrong, results []mutate.Result) string {
 	reach := "the suite"
 	if mutate.Narrowed(results) {
 		reach = "the tests the sweep ran"
 	}
-	return fmt.Sprintf("mutate: %d of %d mutations survived — the defects they introduce are invisible to %s", n, len(results), reach)
+	controls, rest := mutate.ControlsAndRest(results)
+	wrongControls, wrongRest := mutate.ControlsAndRest(wrong)
+	var parts []string
+	if len(wrongRest) > 0 {
+		parts = append(parts, fmt.Sprintf("%d of %d mutations survived — the defects they "+
+			"introduce are invisible to %s", len(wrongRest), len(rest), reach))
+	}
+	if len(wrongControls) > 0 {
+		parts = append(parts, fmt.Sprintf("%d of %d controls changed the answer — the edits "+
+			"are reaching something other than what the rows describe, so the outcomes "+
+			"beside them mean nothing", len(wrongControls), len(controls)))
+	}
+	return "mutate: " + strings.Join(parts, "; ")
 }
 
 // compareAgainst runs the same sweep against ref's tree, in a worktree of its

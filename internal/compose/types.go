@@ -656,6 +656,57 @@ func itemReadsKey(field, key string, fields map[string]yaml.Node) bool {
 	return false
 }
 
+// checkedBlocks are option blocks opossum reads nothing in, and whose keys
+// docker compose checks all the same. They are named among the ignored
+// fields whole — `volumes entry 1.bind` — because nothing under them is
+// acted on, and that is what someone who wrote one needs to know. What was
+// missing is the other half: `bind: {subpath: sub}` is a key docker compose
+// refuses (`services.app.volumes.0.bind additional properties 'subpath' not
+// allowed`), and it went through here.
+//
+// `volume:` and `tmpfs:` are not on this list. opossum reads keys in both,
+// so they take the other path (itemReadsKey), where their unread keys are
+// named one at a time rather than the block being named whole.
+//
+// Which keys belong in a block is not written out here: the compose
+// specification's schema carries them, and specKeys already reads the
+// mount blocks from it. A list written here would be a second copy to keep
+// in step — `bind` gained `recursive` at some point, and a hand-written
+// list is where that arrives late.
+var checkedBlocks = map[string]bool{"volumes.bind": true}
+
+// refuseUnknownIn refuses a key in a block that docker compose does not take
+// there. The first such key in sorted order, where docker compose names
+// every one of them; that is how the other blocks here read, and one name is
+// enough to find the line.
+//
+// nil when every key belongs — and nil when the value is not a mapping,
+// which is not a check passed but one nobody makes: `bind: foo` and
+// `bind: [a]` load here and are listed among the ignored fields, where
+// docker compose refuses them (`… .bind must be a mapping`). The long-form
+// decoder has no field for `bind`, so nothing reads its shape. Left as it
+// was (see the entry for `volumes` in docs/compatibility.md).
+func refuseUnknownIn(block yaml.Node, specPath, prefix string) error {
+	b := unalias(&block)
+	if b.Kind != yaml.MappingNode {
+		return nil
+	}
+	var fields map[string]yaml.Node
+	if b.Decode(&fields) != nil {
+		return nil
+	}
+	// Sorted, so the key named does not depend on the order a map happened
+	// to be walked in: the same file has to produce the same refusal every
+	// time it is read. (`x-` needs no skip here — specKnows takes an `x-`
+	// key anywhere, which is the same answer.)
+	for _, k := range sortedKeys(fields) {
+		if !specKnows(specPath, k) {
+			return unknownKeyErr(prefix, k)
+		}
+	}
+	return nil
+}
+
 // ignoredItemKeys names the keys opossum does not read in a list's
 // mapping items (`<field> entry N.<key>`), or, for `depends_on` written
 // as a mapping, in each dependency's mapping (`depends_on.<name>.<key>`).
@@ -690,6 +741,19 @@ func ignoredItemKeys(field string, n *yaml.Node) ([]string, error) {
 				if !specKnows(specPath, key) {
 					refused = unknownKeyErr(prefix, key)
 					return
+				}
+				// A block opossum reads nothing in, whose contents docker
+				// compose still checks. Listing it whole says the right
+				// thing — nothing under it is acted on — but saying that
+				// about a block was also all that happened to it, so a key
+				// docker compose refuses went through. Both now: the block
+				// is listed, and a key that does not belong in it is
+				// refused where docker compose refuses it.
+				if checkedBlocks[field+"."+key] {
+					if err := refuseUnknownIn(fields[key], specPath+"."+key, prefix+"."+key); err != nil {
+						refused = err
+						return
+					}
 				}
 				out = append(out, prefix+"."+key)
 				continue

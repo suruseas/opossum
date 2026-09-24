@@ -35,11 +35,16 @@ func TestHostPortBinding(t *testing.T) {
 }
 
 func TestAirPlayHint(t *testing.T) {
-	if !strings.Contains(airPlayHint("5000"), "AirPlay") || !strings.Contains(airPlayHint("7000"), "AirPlay") {
+	if !strings.Contains(airPlayHint(5000), "AirPlay") || !strings.Contains(airPlayHint(7000), "AirPlay") {
 		t.Error("ports 5000/7000 should carry the AirPlay hint")
 	}
-	if airPlayHint("8080") != "" {
+	if airPlayHint(8080) != "" {
 		t.Error("other ports should carry no hint")
+	}
+	// A host port that could not be read as a number reaches this as 0, which
+	// is no port at all and carries no hint.
+	if airPlayHint(0) != "" {
+		t.Error("a port that is not a number should carry no hint")
 	}
 }
 
