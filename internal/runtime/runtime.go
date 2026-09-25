@@ -1709,6 +1709,7 @@ type inspectResult struct {
 		Labels         map[string]string `json:"labels"`
 		PublishedPorts []struct {
 			ContainerPort int    `json:"containerPort"`
+			Count         int    `json:"count"`
 			HostAddress   string `json:"hostAddress"`
 			HostPort      int    `json:"hostPort"`
 			Proto         string `json:"proto"`
@@ -1790,11 +1791,45 @@ func (r *Runtime) List() []ContainerSummary {
 }
 
 // PortMapping is one published-port entry from `container inspect`.
+//
+// Count is how many consecutive ports the entry covers: a published range comes
+// back as ONE entry holding the first port of the span and a count of its width
+// (measured on container 1.4.1 — `-p 47010-47012:80-82` answers one entry with
+// hostPort 47010 and count 3). A single port has a count of 1, and an answer
+// that names no count at all is read as one port, since that is what it was
+// before the field existed.
 type PortMapping struct {
 	HostAddress   string
 	HostPort      int
 	ContainerPort int
 	Proto         string
+	Count         int
+}
+
+// Span returns the host and container ports this entry covers, in order. A
+// caller asking "which ports does this container hold" has to walk it: reading
+// HostPort alone answers the first of them, and for a range that is one port out
+// of however many the container is really holding.
+func (p PortMapping) Span() []PortMapping {
+	n := p.Count
+	if n < 1 {
+		n = 1
+	}
+	// No further than the last host port there is. The runtime cannot answer a
+	// span that runs off the end, but this reads whatever the answer says, and
+	// a count of two billion would otherwise be asked for as memory before
+	// anything looked at it.
+	if last := 65535 - p.HostPort + 1; n > last {
+		n = last
+		if n < 1 {
+			n = 1
+		}
+	}
+	out := make([]PortMapping, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, PortMapping{p.HostAddress, p.HostPort + i, p.ContainerPort + i, p.Proto, 1})
+	}
+	return out
 }
 
 // ContainerInfo is the subset of `container inspect` opossum surfaces. Exists is
@@ -1847,7 +1882,7 @@ func (r *Runtime) Inspect(name string) ContainerInfo {
 		}
 	}
 	for _, p := range res.Configuration.PublishedPorts {
-		info.Ports = append(info.Ports, PortMapping{p.HostAddress, p.HostPort, p.ContainerPort, p.Proto})
+		info.Ports = append(info.Ports, PortMapping{p.HostAddress, p.HostPort, p.ContainerPort, p.Proto, p.Count})
 	}
 	return info
 }

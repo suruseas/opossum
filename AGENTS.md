@@ -449,6 +449,7 @@ list; codes are add-only and never change meaning.
   service that runs to completion before its dependent starts is not counted, and neither
   is a service this command does not start. Until this check existed the pair reached the
   runtime, which failed at bind or refused the specs and named no line of the file.
+- **`[OPSM-214]` … `service "<svc>" publishes <spec>, and this host will not bind <address>`** → the entry names a host address this machine will not bind, and nothing starts. Asked with port 0, so the answer is about the address alone; the reason the bind gave is passed through, because the same error comes back for an interface that is down. Check that the machine has the address and that its interface is up, or write one it does have; dropping the address publishes on every address, which is a wider door than the file asked for. Both engines refuse such a file — docker compose names the address and the port, Apple `container` returns the same errno four levels down a chain of causes that names neither.
 - **`[OPSM-207]` … `network <n> exists with IPv4 subnet <a>, and the compose file now declares <b>`** →
   the project network was created earlier with another subnet (or with none, so
   the runtime chose one) and `ipam.config` now declares a different one. opossum
@@ -584,6 +585,7 @@ Every `[OPSM-NNN]` opossum can emit (add-only; grouped 1xx storage / 2xx network
 - `OPSM-211` — (`up`; a `run` for the dependencies it starts and for its one-off, named `<service>-run` where a peer would look that name up and called the one-off of its service where it is the side that cannot reach) a service on two or more networks answers by name with its address on the network it is attached to first, so a peer that shares only a later one cannot reach it by name (attach the shared network first — a list attaches in the order written, a mapping and merged networks in name order — or have the peer use the address).
 - `OPSM-212` — a container-only port could not be moved: a bounded number of host ports outside the ones this compose file publishes were tried and none could be bound.
 - `OPSM-213` — two entries of this run publish the same host port on one address (or two entries of one service, whatever addresses).
+- `OPSM-214` — a published entry names a host address this machine will not bind, so nothing starts. Asked before any host port is, with port 0, so that a port somebody holds and an address this host does not have are different messages. A service whose container is already running is left alone.
 - `OPSM-401` — a dependency's container exited before becoming healthy (logs embedded).
 - `OPSM-402` — orphan containers left by services no longer in the compose.
 - `OPSM-403` — a `service_healthy` dependency defines no healthcheck (not waited on).

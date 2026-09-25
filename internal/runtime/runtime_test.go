@@ -1736,3 +1736,89 @@ func TestSeedVolumeArgvWithALongVolumeName(t *testing.T) {
 		t.Errorf("want the stale seed cleared and the seed run as %q, got %q", name, lines)
 	}
 }
+
+// A published range is one entry covering a span, so the ports a container
+// holds are not the ports its entries name.
+//
+// The runtime answers `-p 47010-47012:80-82` with a single entry: hostPort
+// 47010, containerPort 80, count 3 (measured on container 1.4.1). A reader that
+// took hostPort alone would have 47011 and 47012 as somebody else's — and they
+// are the same container's, bound at the same moment.
+func TestAPublishedEntryCoversItsWholeSpan(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   PortMapping
+		want []PortMapping
+	}{
+		{
+			name: "a range walks both sides together",
+			in:   PortMapping{"0.0.0.0", 47010, 80, "tcp", 3},
+			want: []PortMapping{
+				{"0.0.0.0", 47010, 80, "tcp", 1},
+				{"0.0.0.0", 47011, 81, "tcp", 1},
+				{"0.0.0.0", 47012, 82, "tcp", 1},
+			},
+		},
+		{
+			name: "a single port is itself",
+			in:   PortMapping{"127.0.0.1", 47020, 90, "udp", 1},
+			want: []PortMapping{{"127.0.0.1", 47020, 90, "udp", 1}},
+		},
+		{
+			// What an answer from before this field existed looks like. Reading
+			// it as no ports at all would make every such container look like it
+			// holds nothing.
+			name: "no count at all is one port",
+			in:   PortMapping{"0.0.0.0", 47030, 100, "tcp", 0},
+			want: []PortMapping{{"0.0.0.0", 47030, 100, "tcp", 1}},
+		},
+		{
+			// A count that runs off the end stops at the last host port there
+			// is. The runtime cannot publish past it, so an answer that says so
+			// is already wrong; the ports below it are still this container's.
+			name: "a count running off the end stops at the last port",
+			in:   PortMapping{"0.0.0.0", 65534, 80, "tcp", 3},
+			want: []PortMapping{
+				{"0.0.0.0", 65534, 80, "tcp", 1},
+				{"0.0.0.0", 65535, 81, "tcp", 1},
+			},
+		},
+		{
+			// The last host port, counted as itself: one port, not none. The
+			// arithmetic that stops the walk has to leave this one standing.
+			name: "the last port with a count of one is itself",
+			in:   PortMapping{"0.0.0.0", 65535, 80, "tcp", 1},
+			want: []PortMapping{{"0.0.0.0", 65535, 80, "tcp", 1}},
+		},
+		{
+			// A count no run could produce. Walked as written it asks for as
+			// many entries as it says, as memory, before anything reads one of
+			// them — and the real answers this guards against are far larger
+			// than this row needs to be to reach it.
+			name: "a count larger than the port space is cut to it",
+			in:   PortMapping{"0.0.0.0", 65535, 80, "tcp", 70000},
+			want: []PortMapping{{"0.0.0.0", 65535, 80, "tcp", 1}},
+		},
+		{
+			// A host port past the last one there is. Nothing can publish it,
+			// so the count is meaningless, but the entry is still an answer
+			// about one port — and the arithmetic that cuts the walk short
+			// gives a NEGATIVE length here unless it is put back to one.
+			name: "a host port past the end is still one port",
+			in:   PortMapping{"0.0.0.0", 70000, 80, "tcp", 3},
+			want: []PortMapping{{"0.0.0.0", 70000, 80, "tcp", 1}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.in.Span()
+			if len(got) != len(tc.want) {
+				t.Fatalf("Span() gave %d ports, want %d: %v", len(got), len(tc.want), got)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("port %d of the span is %v, want %v", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}

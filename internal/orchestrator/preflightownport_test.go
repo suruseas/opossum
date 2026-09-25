@@ -73,6 +73,9 @@ type fakeContainer struct {
 	proto     string // "" is tcp
 	hostPort  int
 	container int // 0 is 80
+	// count is how wide the published entry is: the runtime answers a range
+	// with ONE entry holding the first port and a count of the span. 0 is 1.
+	count int
 }
 
 // shimFor answers `inspect` for the containers given and with nothing for every
@@ -96,10 +99,14 @@ func shimFor(t *testing.T, cs ...fakeContainer) *runtime.Runtime {
 		if container == 0 {
 			container = 80
 		}
+		count := c.count
+		if count == 0 {
+			count = 1
+		}
 		fmt.Fprintf(&arms, "      %s.demo.opossum) cat <<'J'\n"+
 			`[{"status":{"state":"%s"},"configuration":{"labels":{"opossum.project":"%s"},`+
-			`"publishedPorts":[{"containerPort":%d,"hostAddress":"0.0.0.0","hostPort":%d,"proto":"%s"}]}}]`+
-			"\nJ\n      ;;\n", c.service, state, project, container, c.hostPort, proto)
+			`"publishedPorts":[{"containerPort":%d,"count":%d,"hostAddress":"0.0.0.0","hostPort":%d,"proto":"%s"}]}}]`+
+			"\nJ\n      ;;\n", c.service, state, project, container, count, c.hostPort, proto)
 	}
 	dir := t.TempDir()
 	shim := filepath.Join(dir, "c.sh")
@@ -122,6 +129,9 @@ func TestAHostPortThisRunFreesItselfIsNotAConflict(t *testing.T) {
 		// holderPort shifts the port that container publishes off the one under
 		// test, which is how a row says "running, but holding something else".
 		holderPort int
+		// holderCount is how wide the published entry is, for a row about a
+		// range. 0 is a single port.
+		holderCount int
 		// aPorts is what the holding service's own entries publish: %[1]d is
 		// the held port, %[2]d two above it, %[3]d one below, %[4]d one above
 		// and %[5]d two below. Empty means "some other port", the state a bare
@@ -178,10 +188,23 @@ func TestAHostPortThisRunFreesItselfIsNotAConflict(t *testing.T) {
 		// own entry asks for. Same shape as the ordinary re-up, and it must not
 		// come out differently for being udp.
 		{name: "the container of the very service asking for it, on udp", holder: "z", udp: true, zPorts: "%[1]d:90/udp", order: []string{"a", "z"}},
-		// An address this machine will not assign reads as in use, because the
-		// probe cannot tell the two apart — this is the case the leniency below
-		// is written for, spelled out.
-		{name: "a running service, over an address this machine will not assign", holder: "z", holderPort: -1, zPorts: "[::2]:%[1]d:90", order: []string{"a", "z"}},
+		// An address this machine will not assign is asked about before any port
+		// is — before the walk, not here — and refused there, FOR A SERVICE NOT
+		// ALREADY RUNNING. The rows that say
+		// so live beside that check (refuseaddress_internal_test.go). One used to
+		// sit here, asserting that the run went on: the probe binds the address
+		// and the port together, so an address that cannot be bound read as a
+		// port in use, and the leniency below let it through. The row came out
+		// because the guard it exercised is the same one `a running service, over
+		// a port nothing of ours holds` exercises — not because the path is gone:
+		// the address check leaves a running service alone too, so on this branch
+		// an unbindable address is still one of the things the probe cannot tell
+		// apart.
+		//
+		// The leniency below still stands for a running service over a port
+		// nothing of ours holds, and the address check leaves a running service
+		// alone for the same reason — so a re-up of a project whose address has
+		// gone away since goes on working.
 		// The same number again, written with two leading zeros, and asked of
 		// the set the walk fills rather than the service's own: a is ahead and
 		// has moved off it. A reader that stripped one leading zero and then
@@ -194,6 +217,40 @@ func TestAHostPortThisRunFreesItselfIsNotAConflict(t *testing.T) {
 		// number. Compared as spellings, a service's own port looks like
 		// somebody else's and its own re-up is refused against itself.
 		{name: "the service's own container holds it, written with a leading zero", holder: "z", zPorts: "0%[1]d:90", order: []string{"a", "z"}},
+		// A container that published a RANGE and has moved off it lets go of
+		// every port of that range, not just the one the entry names first.
+		// The entry comes back as one answer covering a span, and the port
+		// under test here is inside it — the middle, so that neither end of
+		// the span is the number being asked about.
+		{name: "a container ahead has let go of a range covering it", holder: "a", holderPort: -1, holderCount: 3, order: []string{"a", "z"}},
+		// The same range, still published by the service that holds it: it
+		// takes every port of the span straight back, the middle one included.
+		{name: "a container ahead still publishes the range covering it", holder: "a", holderPort: -1, holderCount: 3, aPorts: "%[3]d-%[4]d:80-82", order: []string{"a", "z"}, wantRefused: true, wantNamed: true},
+		// The same, at each END of the span. Naming the holder is what changes
+		// here: lose an end and the port has no holder, so the refusal falls
+		// back to "free the port" and sends the reader after a process that is
+		// not there.
+		{name: "a container ahead still publishes the start of the range", holder: "a", holderPort: 0, holderCount: 3, aPorts: "%[3]d-%[4]d:80-82", order: []string{"a", "z"}, wantRefused: true, wantNamed: true},
+		{name: "a container ahead still publishes the end of the range", holder: "a", holderPort: -2, holderCount: 3, aPorts: "%[3]d-%[4]d:80-82", order: []string{"a", "z"}, wantRefused: true, wantNamed: true},
+		// The asking service's OWN container holds the port as part of a range
+		// it published. It is looking at itself, the same as when the entry
+		// names the port directly — and if this were read as somebody else's,
+		// the refusal would name the asking service as its own holder.
+		{name: "the very service asking for it holds it inside a range", holder: "z", holderPort: -1, holderCount: 3, order: []string{"a", "z"}},
+		// Both ENDS of that span, because reading it is what puts a holder on
+		// the port at all: once the span is read, the answer stops being "this
+		// project holds nothing here" and the service has to recognise itself.
+		// A walk that loses either end leaves the port held by a stranger who
+		// turns out to be the asking service, and the run is refused against
+		// its own container. The middle cannot tell: a walk that keeps only
+		// the middle keeps it.
+		{name: "the very service asking for it holds the start of a range", holder: "z", holderPort: 0, holderCount: 3, order: []string{"a", "z"}},
+		{name: "the very service asking for it holds the end of a range", holder: "z", holderPort: -2, holderCount: 3, order: []string{"a", "z"}},
+		// The port under test at each END of the span, not only in the middle:
+		// a walk that stopped one short, or started one late, covers the middle
+		// either way.
+		{name: "a container ahead has let go of a range ending at it", holder: "a", holderPort: -2, holderCount: 3, order: []string{"a", "z"}},
+		{name: "a container ahead has let go of a range starting at it", holder: "a", holderPort: 0, holderCount: 3, order: []string{"a", "z"}},
 		// The ordinary re-up: the service asking for the port is the one whose
 		// container is holding it. It is not looking at a conflict, it is
 		// looking at itself — and this is the case that made skipping a running
@@ -240,7 +297,7 @@ func TestAHostPortThisRunFreesItselfIsNotAConflict(t *testing.T) {
 			if tc.holder != "" {
 				rt = shimFor(t, fakeContainer{
 					service: tc.holder, project: tc.project, state: tc.state,
-					proto: holderProto, hostPort: held + tc.holderPort,
+					proto: holderProto, hostPort: held + tc.holderPort, count: tc.holderCount,
 				})
 			}
 			var out bytes.Buffer
@@ -335,9 +392,15 @@ func TestTheRefusalNamesOurOwnServiceHoldingThePort(t *testing.T) {
 		udp bool
 		// asks is how the asking service writes the port, %d being the number.
 		// Empty is "<port>:90".
-		asks  string
-		order []string
-		want  string
+		asks string
+		// holderSpan says how the RUNNING container answers: how many ports its
+		// one entry covers, and how far below the port under test that entry
+		// begins. 0 and 0 is one port, the port itself — which cannot tell
+		// "the holder is found by walking the span" from "the holder is found
+		// by the number the entry names".
+		holderSpan, holderBelow int
+		order                   []string
+		want                    string
 	}{
 		{
 			name:   "the holder starts after the entry",
@@ -400,6 +463,42 @@ func TestTheRefusalNamesOurOwnServiceHoldingThePort(t *testing.T) {
 			order:  []string{"z", "a"},
 			want:   "held by this project's service \"a\", whose own `ports` entries publish that number too, so it takes it straight back; change one of the two lines",
 		},
+		{
+			// The container answers ONE entry covering three ports, and the
+			// port under test is in the MIDDLE of it, and the file gives `a` a
+			// different port — so nothing but the span says who is holding
+			// this one. Found by the number the entry names, the holder is
+			// nobody and the refusal falls back to "free the port", which
+			// sends the reader after a process that is not there: their own
+			// project is holding it.
+			name:        "the holder covers it in the middle of a range",
+			aPorts:      "%[2]d:80",
+			holderSpan:  3,
+			holderBelow: 1,
+			order:       []string{"z", "a"},
+			want:        `held by this project's service "a", which this run starts after this entry; take the project down and bring it up again to place both`,
+		},
+		{
+			// The LAST port of the container's span. A walk that stops one
+			// short answers the same as no walk at all here, and only here.
+			name:        "the holder covers it at the end of a range",
+			aPorts:      "%[2]d:80",
+			holderSpan:  2,
+			holderBelow: 1,
+			order:       []string{"z", "a"},
+			want:        `held by this project's service "a", which this run starts after this entry; take the project down and bring it up again to place both`,
+		},
+		{
+			// The FIRST port of the container's span — the one the entry names
+			// outright. A walk that starts at the second port loses it, and
+			// every other row here still passes.
+			name:        "the holder covers it at the start of a range",
+			aPorts:      "%[2]d:80",
+			holderSpan:  2,
+			holderBelow: 0,
+			order:       []string{"z", "a"},
+			want:        `held by this project's service "a", which this run starts after this entry; take the project down and bring it up again to place both`,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			held, proto, asks := heldHostPort(t), "tcp", "%d:90"
@@ -413,13 +512,58 @@ func TestTheRefusalNamesOurOwnServiceHoldingThePort(t *testing.T) {
 				"a": {Image: "web:latest", Ports: []string{fmt.Sprintf(tc.aPorts, held, held+1)}},
 				"z": {Image: "web:latest", Ports: []string{fmt.Sprintf(asks, held)}},
 			}}
-			o := New(p, shimFor(t, fakeContainer{service: "a", hostPort: held, proto: proto}), "opossum", &bytes.Buffer{})
+			holder := fakeContainer{service: "a", hostPort: held, proto: proto}
+			if tc.holderSpan > 0 {
+				holder.hostPort = held - tc.holderBelow
+				holder.container = 80 - tc.holderBelow
+				holder.count = tc.holderSpan
+			}
+			o := New(p, shimFor(t, holder), "opossum", &bytes.Buffer{})
 			err := o.checkHostPorts(tc.order)
 			if err == nil {
 				t.Fatalf("checkHostPorts(%v) said nothing; wanted a refusal naming a", tc.order)
 			}
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("the refusal does not say %q:\n%v", tc.want, err)
+			}
+		})
+	}
+}
+
+// Two IPv6 addresses that differ only after the first colon are two addresses. A
+// comparison that cut the text there reads both as "[" and refuses a pair the
+// runtime starts; the pair of 127.0.0.1 against [::1] does not pose that, because
+// those differ at the first character.
+//
+// Asked of refuseDuplicateHostPorts directly rather than through `up`: the pair
+// needs a second IPv6 literal, and no machine assigns one — IPv6 gives loopback
+// ::1/128 alone. Any other literal is refused first by the check that an address
+// can be bound at all. Through `up` the row would be green for that reason
+// instead of this one.
+func TestTwoAddressesThatDifferAfterTheFirstColonAreTwoAddresses(t *testing.T) {
+	port := freePortForSticky(t)
+	for _, tc := range []struct {
+		name       string
+		a, z       string
+		wantRefuse bool
+	}{
+		{"two IPv6 addresses differing after the first colon",
+			fmt.Sprintf("[::1]:%d:80", port), fmt.Sprintf("[::2]:%d:81", port), false},
+		{"the same IPv6 address twice",
+			fmt.Sprintf("[::1]:%d:80", port), fmt.Sprintf("[::1]:%d:81", port), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &compose.Project{Name: "demo", Services: map[string]*compose.Service{
+				"a": {Image: "web:latest", Ports: []string{tc.a}},
+				"z": {Image: "web:latest", Ports: []string{tc.z}},
+			}}
+			var out bytes.Buffer
+			o := New(p, quietShim(t), "opossum", &out)
+			err := o.refuseDuplicateHostPorts([]string{"a", "z"})
+			if refused := err != nil; refused != tc.wantRefuse {
+				t.Errorf("refuseDuplicateHostPorts(%q, %q) = %v, want it %s — the runtime starts two "+
+					"publishes on two addresses and refuses two on one", tc.a, tc.z, err,
+					map[bool]string{true: "refused", false: "accepted"}[tc.wantRefuse])
 			}
 		})
 	}

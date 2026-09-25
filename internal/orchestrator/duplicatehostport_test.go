@@ -90,12 +90,13 @@ func TestAFileThatPublishesOneHostPortTwiceIsRefused(t *testing.T) {
 		// A bare host port and `0.0.0.0` are the same wildcard.
 		{"a bare host port and 0.0.0.0", map[string][]string{
 			"a": {"%[1]d:80"}, "z": {"0.0.0.0:%[1]d:81"}}, nil, true},
-		// Two IPv6 addresses that differ only after the first colon. A
-		// comparison that cut the address there reads both as "[:" and
-		// refuses the pair; the fixture above (127.0.0.1 against [::1])
-		// does not notice, because those differ at the first character.
-		{"two IPv6 addresses that differ after the first colon", map[string][]string{
-			"a": {"[::1]:%[1]d:80"}, "z": {"[::2]:%[1]d:81"}}, nil, false},
+		// Two IPv6 addresses that differ only after the first colon are asked
+		// about one level down instead — see
+		// TestTwoAddressesThatDifferAfterTheFirstColonAreTwoAddresses. The pair
+		// that poses the question needs a second IPv6 address, and this machine
+		// binds only ::1: any other literal is refused before the comparison is
+		// reached, by the check that an address can be bound at all. Asking the
+		// comparison directly is the way to ask it without that in the way.
 		// A dependency gated on health keeps running while its dependent
 		// publishes, so the two do collide. Only a run-to-completion
 		// dependency is out of the way.

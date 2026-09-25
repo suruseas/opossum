@@ -53,10 +53,15 @@ type Orchestrator struct {
 	// compose file has already spoken for, and can say which numbers refuse to
 	// bind — neither of which the machine will produce on demand.
 	holdPort func(network, address string, port int) (int, io.Closer, error)
-	ctx      context.Context // cancelled on Ctrl-C so a partial `up` rolls back
-	profiles map[string]bool // active compose profiles (--profile, or else COMPOSE_PROFILES)
-	runFlags string          // this run's root flags as typed, for a command the output suggests (SetRunFlags)
-	up       upOptions       // per-invocation `up` flags
+	// bindHostAddress answers whether this machine will bind a host address at
+	// all, on a port the system chooses. Separate from holdPort because it asks a
+	// different question — the address, not a port — and a test wanting one of
+	// them answered a certain way should not have to answer both.
+	bindHostAddress func(network, host string) error
+	ctx             context.Context // cancelled on Ctrl-C so a partial `up` rolls back
+	profiles        map[string]bool // active compose profiles (--profile, or else COMPOSE_PROFILES)
+	runFlags        string          // this run's root flags as typed, for a command the output suggests (SetRunFlags)
+	up              upOptions       // per-invocation `up` flags
 	// crashGrace is how long verifyStarted watches a just-started service before
 	// concluding it started. Per-Orchestrator so an eval can set its own.
 	crashGrace time.Duration
@@ -133,7 +138,8 @@ func (o *Orchestrator) removeOrphans(orphans []string) {
 // New builds an Orchestrator writing user-facing output to w.
 func New(p *compose.Project, rt *runtime.Runtime, dnsDomain string, w interface{ Write([]byte) (int, error) }) *Orchestrator {
 	return &Orchestrator{Project: p, DNSDomain: dnsDomain, rt: rt, out: w, sleep: time.Sleep,
-		holdPort: holdHostPort, ctx: context.Background(), crashGrace: graceFromEnv()}
+		holdPort: holdHostPort, bindHostAddress: bindHostAddress,
+		ctx: context.Background(), crashGrace: graceFromEnv()}
 }
 
 // OnSignal sets the cancellation scope for `up`: when ctx is cancelled (e.g. the
@@ -1858,6 +1864,23 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 		}
 	}
 
+	// An address this machine will not bind is asked about before anything else
+	// looks at a port. Every probe past this point binds an address and a port
+	// together, so an address that cannot be bound comes back as "this host port
+	// is in use" — and the walk below acts on that answer: it moves a mirrored
+	// entry to another port on the same absent address, says so with `OPSM-206`
+	// about a port nothing is listening on, and leaves the reader a spec that is
+	// not in their file. Asking first is what keeps those out of the output.
+	//
+	// Before the duplicate check too, which is the other way round from where
+	// this started. A file with both faults hears about the address first now;
+	// either order costs the reader two passes, since the two faults are
+	// independent, so the choice is which one to hear — and the entry that cannot
+	// publish anywhere comes before the pair that cannot both be had.
+	if err := o.refuseUnbindableHostAddresses(order); err != nil {
+		return err
+	}
+
 	// Move any host port opossum picked itself that turns out to be taken, before
 	// the check below decides what counts as a conflict — a container-only port
 	// spec leaves the host side to the engine, so a busy port is opossum's problem
@@ -2541,16 +2564,20 @@ func (o *Orchestrator) remapAutoHostPorts(order []string) {
 	// 3000 free and both take it, and only the second would fail — at bind time,
 	// far from the compose file that caused it. docker compose gives them
 	// different ports, so track what's been handed out here too.
-	// Keyed by the host port and the protocol, and by nothing else. Two
-	// entries on one port are the same claim however their host addresses
-	// are written: a wildcard listener and one bound to 127.0.0.1 overlap,
-	// and the runtime refuses the pair (`host ports for different publish
-	// port specs may not overlap` — a file opossum had assembled itself,
-	// having handed the wildcard out after the address-bound one). The
-	// protocol is part of it because udp and tcp do not overlap: a service
-	// publishing 8080/udp leaves 8080/tcp free, here as on the runtime (a
-	// file naming both host ports starts).
-	claimed := map[string]bool{}
+	// What each claim on a port is: whose line it is, and the address it writes.
+	// Both are needed to answer whether a later entry on that number is asking
+	// for the same thing — see hostPortsCollide. Keyed by the host port and the
+	// protocol, since udp and tcp do not overlap: a service publishing 8080/udp
+	// leaves 8080/tcp free, here as on the runtime (a file naming both starts).
+	// fromFile separates a line the file wrote down from a port this run has
+	// just handed out. Both stop another entry taking the number, but only the
+	// first can be read back to the reader: "service z asks for it in the
+	// compose file" has to name a line that is there.
+	type claimOn struct {
+		service, address string
+		fromFile         bool
+	}
+	claimed := map[string][]claimOn{}
 	claim := func(network, port string) string { return port + "/" + network }
 	// A range occupies every port in it, and there is no one key for that,
 	// so the spans are kept as they were written and asked one by one. A
@@ -2559,41 +2586,37 @@ func (o *Orchestrator) remapAutoHostPorts(order []string) {
 	type span struct {
 		network string
 		lo, hi  int
+		address string
 		src     claimSource
 	}
 	var spans []span
-	// Single ports, by claim key. Only an entry that names its host port is
-	// recorded here — a bare single port is opossum's to move, so it claims
-	// nothing until pass 2 hands it out — which is why this needs no source:
-	// the file named the port.
-	namedBy := map[string]string{}
-	noteFor := func(svcName, spec string, mirrored bool) {
+	noteFor := func(svcName, spec string, mirrored, fromFile bool) {
 		network, lo, hi, ok := hostPortSpan(spec)
 		if !ok {
 			return
 		}
+		address := hostTextOf(spec)
 		if lo == hi {
 			key := claim(network, strconv.Itoa(lo))
-			claimed[key] = true
-			// The smallest name, not the first one walked: the services are
-			// walked in a map's order. The pre-flight refuses a file whose
-			// lines name one host port twice, but the notice is printed
-			// before that refusal — and a range, which the pre-flight does
-			// not read as the ports it holds, reaches this with no refusal
-			// behind it at all. Which of the two the notice reads back must
-			// not depend on the walk.
-			if svcName != "" && (namedBy[key] == "" || svcName < namedBy[key]) {
-				namedBy[key] = svcName
-			}
+			claimed[key] = append(claimed[key], claimOn{svcName, address, fromFile})
 			return
 		}
 		src := claimSource{service: svcName}
+		if !fromFile {
+			// Handed out by the walk, not written down: the notice must not
+			// read it back as a line of the file.
+			src.service = ""
+		}
 		if mirrored {
 			src.mirrored = fmt.Sprintf("%d-%d", lo, hi)
 		}
-		spans = append(spans, span{network, lo, hi, src})
+		spans = append(spans, span{network, lo, hi, address, src})
 	}
-	note := func(spec string) { noteFor("", spec, false) }
+	// note records a port the walk has just handed to a service. The name is
+	// kept even though the notice must not name it: two entries of one service
+	// collide whatever addresses they write, and the second one has to be able
+	// to see the first.
+	note := func(svcName, spec string) { noteFor(svcName, spec, false, false) }
 	// Whether the port is spoken for, and by which service's line in the file
 	// when one spoke for it. The second answer is what lets the notice say why
 	// the port moved: a reader told the port was "taken" and finding nothing
@@ -2603,18 +2626,44 @@ func (o *Orchestrator) remapAutoHostPorts(order []string) {
 	// question are in one form: `note` writes the key from the number it
 	// read, and a port that cannot be read as one was never written into the
 	// set to begin with.
-	taken := func(network, port string) (bool, claimSource) {
+	// askSvc and askAddr are the entry doing the asking: a claim on this number
+	// only answers "taken" when the two of them collide. A line on another
+	// address, in another service, is not asking for the same thing.
+	//
+	// askAddr is the address as the spec WRITES it — what hostTextOf gives —
+	// not the form hostPortBinding builds to probe with. The claims are written
+	// down the same way, and comparing the two forms answers "different
+	// addresses" for every entry, which reads as "nothing collides".
+	taken := func(network, port, askSvc, askAddr string) (bool, claimSource) {
 		n, err := strconv.Atoi(strings.TrimSpace(port))
 		if err != nil {
 			return false, claimSource{}
 		}
 		key := claim(network, strconv.Itoa(n))
-		if claimed[key] {
-			return true, claimSource{service: namedBy[key]}
+		// The claim that actually collides, not the smallest name on the number:
+		// a line on another address does not stop this entry, so naming it
+		// sends the reader to a line that had nothing to do with the move.
+		// Among several that do collide, the smallest name, for the same reason
+		// the set is built that way — the services are walked in a map's order.
+		hitClaim, from := false, ""
+		for _, c := range claimed[key] {
+			if !hostPortsCollide(c.service, c.address, askSvc, askAddr) {
+				continue
+			}
+			hitClaim = true
+			if c.fromFile && (from == "" || c.service < from) {
+				from = c.service
+			}
+		}
+		if hitClaim {
+			return true, claimSource{service: from}
 		}
 		hit, src := false, claimSource{}
 		for _, s := range spans {
 			if s.network != network || n < s.lo || n > s.hi {
+				continue
+			}
+			if !hostPortsCollide(s.src.service, s.address, askSvc, askAddr) {
 				continue
 			}
 			hit = true
@@ -2636,8 +2685,8 @@ func (o *Orchestrator) remapAutoHostPorts(order []string) {
 	// It hands back the claim as well as the answer: a port given up because the
 	// file asks for it is a port that moves, and the reader is told which line
 	// took it.
-	claimedByFile := func(network string, port int) (bool, claimSource) {
-		spoken, src := taken(network, strconv.Itoa(port))
+	claimedByFile := func(network string, port int, askSvc, askAddr string) (bool, claimSource) {
+		spoken, src := taken(network, strconv.Itoa(port), askSvc, askAddr)
 		return spoken && src.service != "", src
 	}
 	// Every entry the file itself put a host port on, before any of the bare
@@ -2667,7 +2716,7 @@ func (o *Orchestrator) remapAutoHostPorts(order []string) {
 		}
 		for _, spec := range svc.Ports {
 			if !svc.AutoHostPort[spec] {
-				noteFor(svcName, spec, false) // an explicit mapping still occupies the port
+				noteFor(svcName, spec, false, true) // an explicit mapping still occupies the port
 				continue
 			}
 			// The entries left out are the ones being decided — except
@@ -2677,7 +2726,7 @@ func (o *Orchestrator) remapAutoHostPorts(order []string) {
 			// single bare port mirroring into one of them would publish a
 			// port twice.
 			if _, lo, hi, ok := hostPortSpan(spec); ok && lo != hi {
-				noteFor(svcName, spec, true)
+				noteFor(svcName, spec, true, true)
 			}
 		}
 	}
@@ -2692,10 +2741,116 @@ func (o *Orchestrator) remapAutoHostPorts(order []string) {
 		// would hand back a port something else may have taken meanwhile, which is
 		// exactly the failure this function exists to prevent.
 		held := map[string]int{} // "<container port>/<proto>" -> host port we published
+		// Whether the answer recorded for a key is on a host port one of this
+		// service's OWN other lines writes down. Two published entries can cover
+		// one container port, and then one of them belongs to the line that
+		// wrote its host port and the other to the bare entry being decided —
+		// see the preference below.
+		heldPinned := map[string]bool{}
+		// The host ports this service's own lines pin down: every entry but the
+		// bare single ports, which are the ones being decided here. A bare RANGE
+		// counts as pinned — it cannot be moved (withHostPort replaces one
+		// number), so it is as good as a host port the file fixed.
+		//
+		// Kept as spans rather than expanded: a published range can be the whole
+		// port space, and this is asked a handful of times per service.
+		type pinnedSpan struct {
+			network string
+			lo, hi  int
+		}
+		var pinned []pinnedSpan
+		for _, spec := range svc.Ports {
+			network, lo, hi, ok := hostPortSpan(spec)
+			if !ok {
+				continue
+			}
+			if svc.AutoHostPort[spec] && lo == hi {
+				continue // a bare single port: what this walk is deciding
+			}
+			pinned = append(pinned, pinnedSpan{network, lo, hi})
+		}
+		pinnedHostPort := func(network string, port int) bool {
+			for _, p := range pinned {
+				if p.network == network && port >= p.lo && port <= p.hi {
+					return true
+				}
+			}
+			return false
+		}
 		if info := o.rt.Inspect(o.containerName(name)); info.Exists &&
 			info.State == "running" && info.Labels[projectLabel] == o.Project.Name {
-			for _, pm := range info.Ports {
-				held[fmt.Sprintf("%d/%s", pm.ContainerPort, pm.Proto)] = pm.HostPort
+			// Every port of the entry, not just the one it names first: a
+			// published range comes back as one entry covering a span, and a
+			// container holding three ports that answers about one of them
+			// would have the other two read as somebody else's.
+			//
+			// The port an entry NAMES wins over one that only falls inside
+			// somebody's span. The runtime takes the same container port twice
+			// (`-p 47161:81 -p 47150-47152:80-82` starts, measured on 1.4.1),
+			// and then two answers cover container port 81: the one published
+			// on 47161 and the range's second port. The first is what that
+			// entry is actually on, and letting the span overwrite it hands the
+			// service a host port its container is not listening on — which
+			// moves the published port, and the config hash with it, on a re-up.
+			//
+			// So no port of a RANGE overwrites an answer already given — its
+			// first port included, since the range can start on the very port
+			// another entry names, and an entry publishing one port writes.
+			// Keyed on the position in the span instead, the answer would depend
+			// on the order the runtime returns the entries in (argument order,
+			// measured on 1.4.1): the same two entries would keep the named port
+			// or lose it depending on how the `ports` list happens to be
+			// written.
+			//
+			// That is the rule between two answers this service's own lines
+			// treat alike. Where ONE of the two is on a host port one of those
+			// lines writes down, the width of the entry it came from does not
+			// come into it — a single or a range either way: that port belongs to
+			// the line that wrote it, so the answer on it is not the bare
+			// entry's, and the other answer is preferred over it. (Which is why
+			// the width rule above is written as an answer being kept rather
+			// than as a range giving way: here a range's port is what gets
+			// kept.)
+			//
+			// Without that, `ports: ["80", "47001:80"]` and
+			// `ports: ["47001:80", "80"]` decide differently, since the order the
+			// runtime lists entries in is the order the file wrote them WHEN THE
+			// CONTAINER WAS CREATED: one leaves the bare entry on the port it is
+			// published on; the other reads the fixed line's port as the bare
+			// entry's, gives it up because the file asks for that port, and tells
+			// the reader the entry was published on a port it was never on.
+			//
+			// A preference, never a reason to record nothing: a lone answer on a
+			// pinned port is still the answer. That is the container holding a
+			// port the file has since fixed, and it does have to move — with
+			// `OPSM-206` naming the line that took it.
+			//
+			// Two answers the lines treat alike — both on ports they write, or
+			// neither — are left to the width rule above. Between two singles it
+			// cannot separate either, the later one wins, since each overwrites.
+			// A row about a line on the other protocol rests on that where
+			// NEITHER is pinned, so that much is held down; where BOTH are, and
+			// between two RANGES either way, nothing holds it down at all.
+			// Which of two real equals the bare entry is on is not a question
+			// this can answer — it is on one of them and nothing here says
+			// which — so no outcome is promised for those.
+			for _, entry := range info.Ports {
+				for _, pm := range entry.Span() {
+					key := fmt.Sprintf("%d/%s", pm.ContainerPort, pm.Proto)
+					pinnedNow := pinnedHostPort(pm.Proto, pm.HostPort)
+					if _, have := held[key]; have {
+						switch {
+						case heldPinned[key] && !pinnedNow:
+							// The better answer: write it over the pinned one.
+						case !heldPinned[key] && pinnedNow:
+							continue
+						case entry.Count > 1:
+							continue
+						}
+					}
+					held[key] = pm.HostPort
+					heldPinned[key] = pinnedNow
+				}
 			}
 		}
 		for i, spec := range svc.Ports {
@@ -2721,23 +2876,23 @@ func (o *Orchestrator) remapAutoHostPorts(order []string) {
 			// the line that took it. Zero when nothing was given up.
 			gaveUp, tookIt := 0, claimSource{}
 			if h, sticky := held[key]; sticky && h != 0 {
-				if claimed, src := claimedByFile(network, h); !claimed {
+				if claimed, src := claimedByFile(network, h, name, hostTextOf(spec)); !claimed {
 					// Keep what we already published, even though it reads as in
 					// use — it is in use by this very container.
 					if newSpec, ok := withHostPort(spec, h); ok {
 						svc.Ports[i] = newSpec
 						delete(svc.AutoHostPort, spec)
 						svc.AutoHostPort[newSpec] = true
-						note(newSpec)
+						note(name, newSpec)
 						continue
 					}
 				} else {
 					gaveUp, tookIt = h, src
 				}
 			}
-			spokenFor, src := taken(network, port)
+			spokenFor, src := taken(network, port, name, hostTextOf(spec))
 			if !spokenFor && !hostPortInUse(network, address) {
-				note(spec) // the mirror is free: keep it, nothing to explain
+				note(name, spec) // the mirror is free: keep it, nothing to explain
 				// Unless the port this service was on has just been given up. The
 				// entry lands on the number the file mirrors, which reads as "no
 				// change" — and for a container that had been published somewhere
@@ -2753,7 +2908,7 @@ func (o *Orchestrator) remapAutoHostPorts(order []string) {
 				continue
 			}
 			free, err := o.freeHostPortClearOf(network, address, func(n int) bool {
-				spoken, _ := taken(network, strconv.Itoa(n))
+				spoken, _ := taken(network, strconv.Itoa(n), name, hostTextOf(spec))
 				return spoken
 			})
 			if err != nil {
@@ -2784,7 +2939,7 @@ func (o *Orchestrator) remapAutoHostPorts(order []string) {
 			svc.Ports[i] = newSpec
 			delete(svc.AutoHostPort, spec)
 			svc.AutoHostPort[newSpec] = true
-			note(newSpec)
+			note(name, newSpec)
 			o.warnf(codeHostPortRemapped, "service %q publishes container port %s, and the compose file "+
 				"doesn't say which host port to use — %s, so opossum published it on %d "+
 				"instead. docker compose picks a free port here too. Run `opossum ps` for the ports actually "+
@@ -2857,10 +3012,14 @@ func withHostPort(spec string, host int) (string, bool) {
 func holdHostPort(network, address string, port int) (int, io.Closer, error) {
 	// Loopback for anything that names an address, as before this walk existed.
 	// Asking the entry's own address would be a better question — a port free on
-	// loopback can be held on another interface — but it is a different question
-	// from the one this change is about: an address the machine does not have
-	// would stop answering at all, and deciding what to do about that comes
-	// first. Left as it was, and filed.
+	// loopback can be held on another interface. What stood in the way was an
+	// address the machine does not have, which would stop answering at all. Most
+	// of those are settled one step earlier now
+	// (refuseUnbindableHostAddresses) — but not all: that check leaves a service
+	// whose container is already running alone, so an address that cannot be
+	// bound still reaches this walk when the file has been edited under a running
+	// container. Changing the question here is the next step and is filed; it has
+	// to answer for that case as well.
 	host := "127.0.0.1"
 	if isWildcardAddr(address) {
 		host = ""
@@ -2975,6 +3134,137 @@ const maxHostPort = 65535
 // fix and so is passed over in silence.
 var errNoClearHostPort = errors.New("no host port could be placed")
 
+// refuseUnbindableHostAddresses fails when an entry names a host address this
+// machine will not bind. Both engines refuse such a file — docker compose with
+// `bind: can't assign requested address` naming the address and the port, and
+// Apple `container` with the same errno four levels down a chain of causes that
+// names neither (measured on 1.4.1 with an address this machine does not have).
+// So the question is not whether to refuse but where: refusing here puts the
+// address and the port in the first line the reader sees.
+//
+// Asked with port 0, so the answer is about the address alone. A busy port and an
+// address that cannot be bound are two different problems, and a probe on the
+// entry's own port would return one error for both.
+//
+// The reason the bind gave is passed through rather than turned into "this
+// machine has no such address": the same errno comes back for an interface that
+// is down, and which of those it is is not something this can tell.
+//
+// Only the services this run starts: a file naming an address for one a profile
+// leaves out still starts today, and turning that into a refusal is a separate
+// decision from this one.
+//
+// A service whose container is already RUNNING is left alone, which is the same
+// leniency the port probe further on extends and for the same reason: a re-up of
+// a project that has not changed publishes nothing new, and an address that has
+// gone away since (a laptop moving between networks, a VPN coming down) would
+// turn every `up` into a refusal — including the ones that would have printed
+// "up to date" and touched nothing.
+//
+// The cost is that a running service whose address is EDITED to one that cannot
+// be bound is left to what happened before this check existed: nothing says
+// which address, the container is replaced, and the replacement fails with the
+// runtime's own error. If the edited entry names no host port AND a different
+// container port than the running container publishes, the walk below also reads
+// the port it mirrors to as in use — of an address nothing can bind — and moves it
+// to another port on that same address, with `OPSM-206` saying so. Both halves are
+// needed: edited to the same container port, the sticky path answers with the port
+// the container is already on and the walk says nothing (measured on 1.4.1, three
+// forms). The gain is that this does not break an `up` that works today.
+//
+// One-shot services ARE asked about, unlike the duplicate check, and the reason
+// does not carry over: two entries collide only if they publish at the same
+// time, which a service that finishes before its dependent starts does not — but
+// it does publish while it runs, and an address it cannot bind stops it then.
+func (o *Orchestrator) refuseUnbindableHostAddresses(order []string) error {
+	bind := o.bindHostAddress
+	if bind == nil { // an Orchestrator built without New; no test reaches this
+		bind = bindHostAddress
+	}
+	// One probe per address, not per entry: a file publishing twenty ports on one
+	// address asks the operating system once. Every probe also steps the port the
+	// system hands out next, which is a number some tests pin down.
+	asked := map[string]error{}
+	for _, name := range order {
+		svc := o.Project.Services[name]
+		if svc == nil {
+			continue
+		}
+		// Whether there is anything here to ask about, before asking the runtime
+		// anything. A service that writes no address is the common case, and the
+		// runtime is a process to start: a `up` of twenty services that name no
+		// address must not cost twenty inspects for a question none of them pose.
+		asks := false
+		for _, spec := range svc.Ports {
+			if _, host, _, _ := hostSide(spec); host != "" {
+				asks = true
+				break
+			}
+		}
+		if !asks {
+			continue
+		}
+		if info := o.rt.Inspect(o.containerName(name)); info.Exists && info.State == "running" &&
+			info.Labels[projectLabel] == o.Project.Name {
+			continue // already up on it, whatever the address answers now
+		}
+		for _, spec := range svc.Ports {
+			// hostSide rather than hostPortBinding: a RANGE has no one host port
+			// to probe, and the question here is not about a port at all. An
+			// address the machine will not bind is one a range cannot publish on
+			// either, and reading it out of hostPortBinding would leave every
+			// range unchecked.
+			//
+			// An empty host covers every case there is nothing to ask about: no
+			// address written, a wildcard spelled out (hostSide folds `0.0.0.0`
+			// and `::` into it), and a spec with no host side at all — hostSide
+			// answers that last one with an empty host too, which is why `ok` is
+			// not read here. A guard on it as well cannot be told apart by any
+			// test, and one that cannot be told apart is one nobody maintains.
+			network, host, port, _ := hostSide(spec)
+			if host == "" {
+				continue
+			}
+			key := network + " " + host
+			if _, done := asked[key]; !done {
+				asked[key] = bind(network, host)
+			}
+			if err := asked[key]; err != nil {
+				ports := "host port " + port // a range is ports, plural
+				if strings.Contains(port, "-") {
+					ports = "host ports " + port
+				}
+				return fmt.Errorf("[%s] service %q publishes %s, and this host will not bind %s:\n"+
+					"  %v\ncheck that the machine has %s and that its interface is up, or write an "+
+					"address it does have. Dropping the address publishes %s on EVERY "+
+					"address, which is a wider door than the file asks for.",
+					codeHostAddressUnbindable, name, spec, host, err, host, ports)
+			}
+		}
+	}
+	return nil
+}
+
+// bindHostAddress reports whether this machine will bind the address at all, by
+// binding it on a port the system chooses. The listener is closed again straight
+// away: the question is about the address, and holding a port here would answer
+// a different one.
+func bindHostAddress(network, host string) error {
+	probe := net.JoinHostPort(host, "0")
+	if strings.HasPrefix(network, "udp") {
+		c, err := net.ListenPacket(network, probe)
+		if err != nil {
+			return err
+		}
+		return c.Close()
+	}
+	l, err := net.Listen(network, probe)
+	if err != nil {
+		return err
+	}
+	return l.Close()
+}
+
 // refuseDuplicateHostPorts fails when two entries this run would start publish
 // the same host port on the same address. The runtime refuses the pair too, but
 // its message is about the specs opossum handed it; the fix is a line in the
@@ -3037,15 +3327,13 @@ func (o *Orchestrator) refuseDuplicateHostPorts(order []string) error {
 			host := hostTextOf(spec)
 			this := entry{name, spec, host}
 			for _, e := range byPort[key] {
+				if !hostPortsCollide(e.service, e.address, name, host) {
+					continue // different addresses in different services: both bind
+				}
 				why := ""
-				switch {
-				case e.service == name:
+				if e.service == name {
 					why = " Two published ports of one service may not overlap, whatever addresses " +
 						"they name."
-				case sameHostAddress(e.address, host):
-					// Nothing to add: one address, two entries.
-				default:
-					continue // different addresses in different services: both bind
 				}
 				return fmt.Errorf("[%s] two entries publish host port %s:\n  - service %q (%s)\n"+
 					"  - service %q (%s)\ngive one of them a different host port.%s",
@@ -3093,8 +3381,10 @@ func (o *Orchestrator) checkHostPorts(order []string) error {
 			continue
 		}
 		running[name] = true
-		for _, pm := range info.Ports {
-			held[name] = append(held[name], heldPort{pm.HostPort, pm.Proto})
+		for _, entry := range info.Ports {
+			for _, pm := range entry.Span() {
+				held[name] = append(held[name], heldPort{pm.HostPort, pm.Proto})
+			}
 		}
 	}
 	// Whether a service's entries publish this host port — what it is taking,
@@ -3180,13 +3470,19 @@ func (o *Orchestrator) checkHostPorts(order []string) error {
 			// the entries answers both.
 			takesItBack := holder != "" && publishes(holder, network, n)
 			// A service whose container is running, over a port none of this
-			// project's containers is holding. The probe cannot tell an occupant
-			// from an address this machine will not assign at all, and a re-up
-			// has been given the benefit of the doubt here for as long as the
-			// check has existed — changing that is a question about the probe,
-			// not about whose port this is. What is new is the other half: when
-			// one of OUR containers is the holder, the question has an answer,
-			// and the ones it answers "not free" are refused below.
+			// project's containers is holding. A re-up has been given the benefit
+			// of the doubt here for as long as the check has existed, and it still
+			// is: what the probe cannot tell apart is an occupant from a port this
+			// machine will not let anyone bind for a reason of its own, and that
+			// is a question about the probe rather than about whose port this is.
+			// An address the machine will not bind at all is asked about on its
+			// own, before the walk (refuseUnbindableHostAddresses) — but that
+			// check leaves a running service alone as well (for a reason of its
+			// own: a re-up that changes nothing publishes nothing new), so on
+			// THIS branch an unbindable address is still one of the things the
+			// probe cannot tell apart. What is new is the other
+			// half: when one of OUR containers is the holder, the question has an
+			// answer, and the ones it answers "not free" are refused below.
 			if running[name] && holder == "" {
 				continue
 			}
@@ -3316,6 +3612,25 @@ func hostTextOf(spec string) string {
 		return parts[0]
 	}
 	return ""
+}
+
+// hostPortsCollide reports whether two published entries on the same host port
+// and protocol are asking for the same thing — whether one of them has to be
+// given a different number.
+//
+// Two entries of ONE service always collide, whatever addresses they name: the
+// runtime refuses a container whose publish specs overlap (`host ports for
+// different publish port specs may not overlap`), and a wildcard overlaps every
+// address. Two entries of DIFFERENT services collide only when they name the
+// same address: 1.4.1 starts `0.0.0.0:N` beside `127.0.0.1:N` when they belong
+// to separate containers (measured), so moving one off N buys nothing.
+//
+// The two questions this answers used to be asked in two places — the refusal
+// that reads the file, and the claim set the remap hands ports out of — and only
+// the first of them looked at the address. A bare entry was then moved off a
+// port nobody was going to take from it.
+func hostPortsCollide(aService, aAddress, bService, bAddress string) bool {
+	return aService == bService || sameHostAddress(aAddress, bAddress)
 }
 
 // sameHostAddress reports whether two spec-written addresses are the one

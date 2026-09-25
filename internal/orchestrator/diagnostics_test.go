@@ -47,7 +47,7 @@ var codesWithRecoveryProse = []diagCode{
 	codeBindDataDirChown, codeHostDeviceMount, codeBindFilePlaceholder, codeVolumeNotSeeded,
 	codeSymlinkedSocket, codePGVersionedLayout, codeDataDirNotThisMount,
 	codeHostPortInUse, codeDNSDomainAbsent, codeInternalEgress, codeDockerSocket,
-	codeExternalNetAbsent, codeHostPortRemapped, codeHostPortNotPlaced, codeHostPortTwice, codeNetworkSubnetChanged, codeProjectBusy, codeExternalVolumeAbsent,
+	codeExternalNetAbsent, codeHostPortRemapped, codeHostPortNotPlaced, codeHostPortTwice, codeHostAddressUnbindable, codeNetworkSubnetChanged, codeProjectBusy, codeExternalVolumeAbsent,
 	codeOrphans,
 	codeDepNotRunning, codeRuntimeAbsent, codeRuntimeStopped, codeRuntimeAutoStart,
 	codeServiceExited, codeSupervisorStarted, codeSupervisorAction,
