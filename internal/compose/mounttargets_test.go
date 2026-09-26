@@ -55,10 +55,11 @@ func TestMountsAtOneTarget(t *testing.T) {
 		// volume there does not refuse the load (docker compose loads it too).
 		{"an undefined volume, then a long-form tmpfs", "    volumes:\n      - nope:/t\n      - {type: tmpfs, target: /t}\n", []string{"/t"}, 0, ""},
 		// An entry with no target written is not at any target: two of them are
-		// both kept, as is one beside an entry at `/` (docker compose refuses
-		// such an entry outright — `empty section between colons`).
-		{"two entries with no target", "    volumes:\n      - \"./a:\"\n      - \"./b:\"\n", nil, 2, "b:"},
-		{"an entry with no target, then a bind at /", "    volumes:\n      - \"./a:\"\n      - ./b:/\n", nil, 2, "b:/"},
+		// both kept, as is one beside an entry at `/`. The bare `:` is the entry
+		// with no target that loads (docker compose accepts it; `./a:` it
+		// refuses, as `empty section between colons`, and so does the loader).
+		{"two entries with no target", "    volumes:\n      - \":\"\n      - \":\"\n", nil, 2, ":"},
+		{"an entry with no target, then a bind at /", "    volumes:\n      - \":\"\n      - ./b:/\n", nil, 2, "b:/"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p, err := Load(writeTemp(t, "name: demo\nservices:\n  web:\n    image: alpine\n"+tc.svc+"volumes:\n  data: {}\n"))

@@ -248,6 +248,11 @@ func main() {
 			fmt.Fprintln(os.Stderr, msg)
 			os.Exit(code)
 		}
+		// A `-p` whose two sides name different numbers of ports is refused next.
+		if msg, refused := publishCountsRefused(args); refused {
+			fmt.Fprintln(os.Stderr, msg)
+			os.Exit(1)
+		}
 		// A volume the runtime would not create is refused after the name, and
 		// before anything is recorded (the real run makes no volume at all).
 		if msg, refused := volumeNameRefused(args); refused {
@@ -828,4 +833,52 @@ func validContainerName(name string) bool {
 		}
 	}
 	return true
+}
+
+// publishCountsRefused answers a `run` with a `-p` whose host side and container
+// side are ranges of different lengths, the way container 1.4.1 does
+// (`Error: publish host and container port counts are not equal: <host>:<container>`,
+// the two sides as written, without the address or the protocol in front of and behind them,
+// exit 1, measured for a host range with one container port, one host port with
+// a container range, and two ranges of different lengths). Nothing is recorded
+// for such a run. A spelling with no range, or two ranges of one length, is not
+// asked about here.
+func publishCountsRefused(args []string) (msg string, refused bool) {
+	for i, a := range args {
+		if i == 0 || (args[i-1] != "-p" && args[i-1] != "--publish") {
+			continue
+		}
+		s := a
+		if j := strings.LastIndex(s, "/"); j >= 0 {
+			s = s[:j] // the protocol
+		}
+		if strings.HasPrefix(s, "[") { // an IPv6 address
+			if j := strings.Index(s, "]"); j >= 0 {
+				s = strings.TrimPrefix(s[j+1:], ":")
+			}
+		}
+		parts := strings.Split(s, ":")
+		if len(parts) < 2 {
+			continue // a bare container port
+		}
+		host, ctr := parts[len(parts)-2], parts[len(parts)-1]
+		if publishCount(host) != publishCount(ctr) {
+			return "Error: publish host and container port counts are not equal: " + host + ":" + ctr, true
+		}
+	}
+	return "", false
+}
+
+// publishCount is how many ports one side of a `-p` names: `80` is one, `80-82` three.
+func publishCount(side string) int {
+	lo, hi, ok := strings.Cut(side, "-")
+	if !ok {
+		return 1
+	}
+	a, errA := strconv.Atoi(lo)
+	b, errB := strconv.Atoi(hi)
+	if errA != nil || errB != nil {
+		return 1
+	}
+	return b - a + 1
 }

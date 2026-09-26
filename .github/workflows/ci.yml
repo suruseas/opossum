@@ -245,7 +245,20 @@ jobs:
           # everything main gained since the branch point — including other PRs'
           # fragments — so the check would pass for a branch that added none.
           changed="$(git diff --name-only "$BASE...$HEAD")"
-          added="$(git diff --name-only --diff-filter=A "$BASE...$HEAD")"
+          # Added OR modified: a change that is only visible to a user once, and is
+          # already in changelog.d/ from an earlier PR, is written by rewriting that
+          # fragment rather than by adding a second one (an unpublished entry says
+          # what a reader upgrading from the last release sees, not how many rounds
+          # the change took). `make changelog` writes CHANGELOG.md and never a
+          # fragment, and the release deletes fragments, so an `M` under changelog.d/
+          # is a person having written one. A deletion is neither, as before. What was
+          # written is not read: a mode change or a one-character edit passes, as an
+          # added fragment with one line in it always did. A rename is neither (git
+          # lists it as `R`): a fragment moved to another type is a new entry, or a
+          # `[skip changelog]`. And a `BASE` older than main leaves another PR's
+          # rewrite in this branch's diff after main is merged in, as another PR's
+          # added fragment always did.
+          added="$(git diff --name-only --diff-filter=AM "$BASE...$HEAD")"
           # The exclusions are the two things a release note cannot be about.
           # `testdata/` by name: the Go toolchain never compiles a directory called
           # that, so nothing under it can reach a user — the fake `container` shims
@@ -265,14 +278,14 @@ jobs:
           if echo "$BODY" | grep -qF '[skip changelog]'; then
             echo "PR body opts out with [skip changelog]."; exit 0
           fi
-          # An ADDED file directly in changelog.d/ — not README.md, not a deletion,
-          # and not a subdirectory (Load ignores those, so the entry would be
-          # silently dropped from the release while every check passed).
+          # An ADDED or REWRITTEN file directly in changelog.d/ — not README.md, not a
+          # deletion, and not a subdirectory (Load ignores those, so the entry would
+          # be silently dropped from the release while every check passed).
           if echo "$added" | grep -qE '^changelog\.d/[^/]+\.md$' \
              && ! [ "$(echo "$added" | grep -E '^changelog\.d/[^/]+\.md$')" = "changelog.d/README.md" ]; then
             echo "Fragment present."; exit 0
           fi
-          echo "This PR changes shipped code but adds no changelog.d/ fragment:"
+          echo "This PR changes shipped code but adds or rewrites no changelog.d/ fragment:"
           echo "$shipped" | sed 's/^/  /'
           echo
           echo "Add changelog.d/<number>-<slug>.<type>.md (see changelog.d/README.md),"

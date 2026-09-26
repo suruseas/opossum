@@ -31,7 +31,6 @@ services:
     entrypoint: ["sh", "-c", "$$0"]
     labels:
       price: "$$100"
-      $$key: plain
     user: "$$U"
     working_dir: /srv/$$app
     volumes:
@@ -78,7 +77,6 @@ services:
 		"shell block: arithmetic and loop var": `i=$$((i+1)); [ $$i -ge 15 ]`,
 		// Fields beyond the well-known five: the escape is of the whole
 		// document, and a field-by-field rewrite would leave these bare.
-		"labels key":    "$$key: plain\n",
 		"user":          "user: $$U\n",
 		"working_dir":   "working_dir: /srv/$$app\n",
 		"volume source": "- ./$$src:/app\n",
@@ -120,4 +118,37 @@ services:
 			t.Errorf("config(config(x)) != config(x):\n--- first\n%s\n--- second\n%s", out, out2)
 		}
 	})
+}
+
+// A key is not interpolated, so `$$` in one is two characters, and config writes
+// each `$` back doubled — `$$$$key` — as docker compose config does (measured on
+// v5.5.1). The printed file, read again, names `$$$$key`: a key is not a fixed
+// point of config there either, which is why the test above holds none.
+func TestConfigWritesAKeyBackEscaped(t *testing.T) {
+	src := "name: esc\nservices:\n  db:\n    image: postgres:16\n    labels:\n      $$key: plain\n      l${SFX}: x\n"
+	path := filepath.Join(t.TempDir(), "compose.yaml")
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SFX", "1")
+	p, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := RenderConfig(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Each want is a whole line, led by the space that ends the indentation, so
+	// one escape too many or too few is not taken for the right one.
+	for name, want := range map[string]string{
+		"a key of only the escape": " $$$$key: plain\n",
+		"a key with a reference":   " l$${SFX}: x\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if !strings.Contains(out, want) {
+				t.Errorf("want %q in:\n%s", want, out)
+			}
+		})
+	}
 }

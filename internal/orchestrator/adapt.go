@@ -1174,7 +1174,7 @@ func renderOverlay(plans []serviceAdaptation) string {
 		sort.Strings(volumes)
 		b.WriteString("\nvolumes:\n")
 		for _, v := range volumes {
-			fmt.Fprintf(&b, "  %s: {}\n", esc(yamlKey(v)))
+			fmt.Fprintf(&b, "  %s: {}\n", yamlKey(v))
 		}
 	}
 	return b.String()
@@ -1218,7 +1218,10 @@ func renderServiceBlocks(plans []serviceAdaptation, inlineVolumes bool) string {
 				b.WriteString("  " + line + "\n")
 			}
 		}
-		fmt.Fprintf(&b, "  %s:\n", esc(yamlKey(g.name)))
+		// A key is not interpolated, so the name is written as it is: doubling a `$`
+		// here would name a different service. The comments above take esc because
+		// a comment is expanded on load.
+		fmt.Fprintf(&b, "  %s:\n", yamlKey(g.name))
 		for _, blk := range g.blocks {
 			fmt.Fprintf(&b, "    %s:\n", blk)
 			for _, e := range g.entries[blk] {
@@ -1247,7 +1250,7 @@ func renderServiceBlocks(plans []serviceAdaptation, inlineVolumes bool) string {
 			sort.Strings(all)
 			b.WriteString("volumes:\n")
 			for _, v := range all {
-				fmt.Fprintf(&b, "  %s: {}\n", esc(yamlKey(v)))
+				fmt.Fprintf(&b, "  %s: {}\n", yamlKey(v))
 			}
 		}
 	}

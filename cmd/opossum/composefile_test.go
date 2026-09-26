@@ -31,6 +31,11 @@ func TestTheComposeFilesAreReadWhereDockerComposeReadsThem(t *testing.T) {
 		want  string
 		// wantErr, when set, is what the refusal has to say instead.
 		wantErr []string
+		// wantNot is what the refusal must not say.
+		wantNot []string
+		// noMain leaves the standard `compose.yaml` out: a directory with no file
+		// to be found, so that what is reported is what stopped the search.
+		noMain bool
 	}{
 		{name: "B1 nothing says: the one that is found", want: "main"},
 		{name: "B2 the shell", shell: map[string]string{"COMPOSE_FILE": "a.yaml"}, want: "a"},
@@ -94,13 +99,41 @@ func TestTheComposeFilesAreReadWhereDockerComposeReadsThem(t *testing.T) {
 		// reads as not set, which is what it did before it was read at all.
 		{name: "set and empty in the shell reads as not set", dotenv: "COMPOSE_FILE=a.yaml\n", shell: map[string]string{"COMPOSE_FILE": ""}, want: "main"},
 		{name: "set and empty in the .env reads as not set", dotenv: "COMPOSE_FILE=\n", want: "main"},
+		// A `.env` that cannot be read is what docker compose reports first (v5.5.1,
+		// measured), before it looks for a file, and whether or not the shell names
+		// one. Here the search for a file said "no compose file found" and never got
+		// to the `.env` — which is the mistake, and the message pointed at the
+		// directory instead.
+		{name: "a broken .env is reported, with COMPOSE_FILE in the shell and no file to be found", noMain: true,
+			dotenv: "GARBAGE LINE\n", shell: map[string]string{"COMPOSE_FILE": "a.yaml"},
+			wantErr: []string{".env"}, wantNot: []string{"no compose file found"}},
+		{name: "a broken .env is reported, with nothing named and no file to be found", noMain: true,
+			dotenv: "GARBAGE LINE\n", wantErr: []string{".env"}, wantNot: []string{"no compose file found"}},
+		// A name the `.env` refuses is read past by the load (a project may be running
+		// on one), and it is still what is reported first when there is no file to
+		// be found: the search has nothing to load, and the `.env` is the mistake.
+		{name: "a variable name the .env refuses is reported, with no file to be found", noMain: true,
+			dotenv: "A/B=1\n", wantErr: []string{".env:1", "unexpected character"}, wantNot: []string{"no compose file found"}},
+		{name: "a variable name with a space is reported, with no file to be found", noMain: true,
+			dotenv: "A B=1\n", wantErr: []string{".env:1", "key cannot contain a space"}, wantNot: []string{"no compose file found"}},
+		// The same for an `--env-file` that is not there (docker compose: `couldn't
+		// find env file`, before it looks for a file).
+		{name: "an --env-file that is not there is reported, with no file to be found", noMain: true,
+			args: []string{"--env-file", "nosuch.env"}, wantErr: []string{"nosuch.env"}, wantNot: []string{"no compose file found"}},
+		// The controls: the same broken `.env` where a file is found was reported
+		// already, and no broken `.env` leaves the refusal that there is no file.
+		{name: "a broken .env is reported where a file is found", dotenv: "GARBAGE LINE\n", wantErr: []string{".env"}, wantNot: []string{"no compose file found"}},
+		{name: "no file to be found is said when the .env is fine", noMain: true, dotenv: "A=1\n",
+			wantErr: []string{"no compose file found"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := filepath.Join(t.TempDir(), "proj")
 			if err := os.MkdirAll(dir, 0o755); err != nil {
 				t.Fatal(err)
 			}
-			write(t, filepath.Join(dir, "compose.yaml"), svc("main"))
+			if !tc.noMain {
+				write(t, filepath.Join(dir, "compose.yaml"), svc("main"))
+			}
 			for _, n := range []string{"a", "b", "c"} {
 				write(t, filepath.Join(dir, n+".yaml"), svc(n))
 			}
@@ -165,6 +198,11 @@ func TestTheComposeFilesAreReadWhereDockerComposeReadsThem(t *testing.T) {
 				for _, want := range tc.wantErr {
 					if !strings.Contains(err.Error()+out, want) {
 						t.Errorf("the refusal should name %q, got: %v\n%s", want, err, out)
+					}
+				}
+				for _, not := range tc.wantNot {
+					if strings.Contains(err.Error()+out, not) {
+						t.Errorf("the refusal should not say %q, got: %v\n%s", not, err, out)
 					}
 				}
 				return

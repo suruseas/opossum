@@ -111,7 +111,7 @@ func takeMergeTags(one interpolated) (interpolated, []mergeTag, error) {
 		}
 	}
 	walk(root, []string{}, true)
-	return interpolated{node: doc, raw: one.raw}, tags, nil
+	return interpolated{node: doc, raw: one.raw, written: one.written}, tags, nil
 }
 
 // writesAKeyTwice reports whether a mapping writes one key twice.

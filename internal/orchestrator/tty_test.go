@@ -140,9 +140,11 @@ func TestRunLeavesTTYToTheTerminal(t *testing.T) {
 // does not have, a host port in use as the runtime reports it), each with and
 // without `tty: true`: the reading has to be the same on both sides. What
 // each shape reads is its own: a dependency run to completion recognises the
-// refused name and reports every other failure as not having completed (the
-// runtime's words having been streamed above), where `up --foreground` names
-// the image and the port — as before `tty` was read, on both shapes.
+// refused name and a missing image (named as `up --foreground` names it: no
+// container was made, so nothing ran to have completed) and reports every other
+// failure as not having completed (the runtime's words having been streamed
+// above), where `up --foreground` also names the port — as before `tty` was
+// read, on both shapes.
 func TestAForegroundRunWithTTYStillReadsItsFailure(t *testing.T) {
 	const nameTaken = "something else now holds the container name"
 	const image = "docker.io/nosuchorg-neko1165/nosuchimage:latest"
@@ -165,7 +167,7 @@ func TestAForegroundRunWithTTYStillReadsItsFailure(t *testing.T) {
 			// rollback; the pre-start delete is the one allowed.
 			[]count{{"stop app.demo.opossum", 0}, {"delete --force app.demo.opossum", 1}}},
 		{"a missing image", []string{"RUN_IMAGE_FETCH_FAIL=" + image, "RUN_IMAGE_FETCH_REASON=404 Not Found. Reason: Unknown", "RUN_IMAGE_FETCH_URL=https://registry-1.docker.io/v2/nosuchorg-neko1165/nosuchimage/manifests/latest"},
-			"check the image name " + `"` + image + `"`, notCompleted, nil},
+			"check the image name " + `"` + image + `"`, "check the image name " + `"` + image + `"`, nil},
 		{"a host port in use", []string{"RUN_FAIL=app.demo.opossum", "RUN_FAIL_STDERR=Error: failed to run container: Address already in use"},
 			"a published host port is already in use", notCompleted, nil},
 	}

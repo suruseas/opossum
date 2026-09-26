@@ -513,12 +513,12 @@ func TestDryRunRefusesItToo(t *testing.T) {
 }
 
 // An entry the file wrote WITHOUT a host port — `<address>::<container port>` — is
-// asked about too, and this is the shape that made the check's position matter.
-// The loader turns it into `<address>:<container port>:<container port>` and marks
-// it as one opossum may move; the walk that moves it probes the address and the
-// port together, reads "in use" of a port nothing is listening on, moves the entry
-// to a second port on that same unbindable address, and says so with `OPSM-206`.
-// Asked before the walk, none of that happens.
+// asked about too. The loader turns it into `<address>:<container port>:<container
+// port>` and marks it as one opossum may move, and the walk that would move it
+// reads "in use" of a port nothing is listening on. That once ended with the
+// entry on a second port of the same unbindable address and `OPSM-206` saying so;
+// the walk now passes over it instead, without a word. Either way the reader
+// never heard which address, which is what asking first adds.
 //
 // The number in the message is the container port the loader mirrored to, not one
 // opossum chose: the file's own `192.0.2.7::80` becomes `192.0.2.7:80:80`. That
@@ -544,6 +544,9 @@ func TestAMirroredEntryIsAskedAboutBeforeItIsMoved(t *testing.T) {
 		t.Errorf("the refusal does not name %q, the entry as the file's own line becomes:\n%v",
 			spec, err)
 	}
+	// Neither the check nor the walk prints `OPSM-206` for this entry now, so this
+	// line states the outcome rather than telling the check's position apart. The
+	// refusal above is what fails if the check goes missing.
 	if strings.Contains(out.String(), string(codeHostPortRemapped)) {
 		t.Errorf("the entry was moved first, and told so:\n%s\nThere is nowhere to move it to: "+
 			"every port on that address is as unbindable as the first", out.String())

@@ -150,10 +150,13 @@ type configService struct {
 }
 
 type configBuild struct {
-	Context    string   `yaml:"context,omitempty"`
-	Dockerfile string   `yaml:"dockerfile,omitempty"`
-	Args       []string `yaml:"args,omitempty"`
-	Target     string   `yaml:"target,omitempty"`
+	Context    string `yaml:"context,omitempty"`
+	Dockerfile string `yaml:"dockerfile,omitempty"`
+	// DockerfileInline is printed as it was written: a literal block in the
+	// output, as docker compose prints it.
+	DockerfileInline string   `yaml:"dockerfile_inline,omitempty"`
+	Args             []string `yaml:"args,omitempty"`
+	Target           string   `yaml:"target,omitempty"`
 }
 
 // configDep prints a dependency as docker compose prints one: the condition,
@@ -221,7 +224,7 @@ func RenderConfig(p *Project) (string, error) {
 			Configs:     configRefs(svc.Configs),
 		}
 		if svc.Build != nil {
-			cs.Build = &configBuild{Context: svc.Build.Context, Dockerfile: svc.Build.Dockerfile, Args: ResolveBareNames(svc.Build.Args, os.LookupEnv, false), Target: svc.Build.Target}
+			cs.Build = &configBuild{Context: svc.Build.Context, Dockerfile: svc.Build.Dockerfile, DockerfileInline: svc.Build.DockerfileInline, Args: ResolveBareNames(svc.Build.Args, os.LookupEnv, false), Target: svc.Build.Target}
 		}
 		if len(svc.DependsOn) > 0 {
 			cs.DependsOn = map[string]configDep{}

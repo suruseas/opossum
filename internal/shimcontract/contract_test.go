@@ -148,6 +148,23 @@ var contract = []struct {
 		{argv: []string{"inspect", "NAME"}, has: `"hostAddress":"127.0.0.1"`},
 		{argv: []string{"inspect", "NAME"}, has: `"proto":"udp"`},
 		{argv: []string{"delete", "--force", "NAME"}},
+		// A `-p` whose two sides name different numbers of ports is refused at the
+		// run, whichever side is the range (container 1.4.1, measured 2026-09-24:
+		// `Error: publish host and container port counts are not equal: <spelling>`,
+		// exit 1) — where docker compose takes some of these (#1254). The next
+		// row is the control: ranges of one length are taken.
+		{argv: []string{"run", "-d", "--name", "NAME", "-p", "47010-47012:80", "alpine"}, rc: 1, has: "publish host and container port counts are not equal: 47010-47012:80"},
+		{argv: []string{"run", "-d", "--name", "NAME", "-p", "47020:80-82", "alpine"}, rc: 1, has: "counts are not equal: 47020:80-82"},
+		{argv: []string{"run", "-d", "--name", "NAME", "-p", "47030-47031:80-83", "alpine"}, rc: 1, has: "counts are not equal: 47030-47031:80-83"},
+		// With an address and a protocol in front and behind, on either family:
+		// the sides are the last two fields, and the number of colons in an
+		// address is not a reason to read them wrong.
+		{argv: []string{"run", "-d", "--name", "NAME", "-p", "127.0.0.1:47010-47012:80/udp", "alpine"}, rc: 1, has: "counts are not equal: 47010-47012:80", lacks: "127.0.0.1"},
+		{argv: []string{"run", "-d", "--name", "NAME", "-p", "127.0.0.1:47010-47012:80/udp", "alpine"}, rc: 1, lacks: "/udp"},
+		{argv: []string{"run", "-d", "--name", "NAME", "-p", "[::1]:47010-47012:80", "alpine"}, rc: 1, has: "counts are not equal: 47010-47012:80", lacks: "[::1]"},
+		{argv: []string{"run", "-d", "--name", "NAME", "-p", "0.0.0.0:47050:80-81", "alpine"}, rc: 1, has: "counts are not equal: 47050:80-81", lacks: "0.0.0.0"},
+		{argv: []string{"run", "-d", "--name", "NAME", "-p", "[::1]:47090-47092:90-92/udp", "alpine"}},
+		{argv: []string{"delete", "--force", "NAME"}},
 		{argv: []string{"run", "-d", "--name", "NAME", "-p", "47082-47084:82-84", "alpine"}},
 		{argv: []string{"inspect", "NAME"}, has: `"count":3`},
 		// The ports are the low end and nothing else — said with what follows

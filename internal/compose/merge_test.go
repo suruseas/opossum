@@ -109,8 +109,8 @@ func TestLoadFilesMergeEnvMixedForm(t *testing.T) {
 }
 
 // A port restated identically in the override collapses to one entry.
-// Volumes are deduped only at merge time (unlike ports, which are re-deduped
-// during load), so this is the sole guard against an override restating a mount
+// Volumes are folded by target at merge time (and again after load), and ports
+// only after load, so this is a guard against an override restating a mount
 // producing a doubled -v.
 func TestLoadFilesDedupsVolumes(t *testing.T) {
 	dir := t.TempDir()

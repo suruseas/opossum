@@ -13,3 +13,7 @@ func (o *Orchestrator) DecodeStartErrorForTest(service string, err error) string
 func RunErrorForTest(err error, stderr string) error {
 	return &runtime.RunError{Err: err, Stderr: stderr}
 }
+
+// RebuildServiceForTest is the rebuild `watch` does for one service: an `up` of
+// that service alone, its dependencies left as they are.
+func (o *Orchestrator) RebuildServiceForTest(name string) error { return o.rebuildService(name) }

@@ -53,6 +53,12 @@
 // would be mixed into the next commit — and `git checkout` is not available as a
 // way out for exactly the same reason.
 //
+// A file edited while its mutation is applied is not put back over: the original
+// was read before the mutation, and writing it back would discard the edit. The
+// sweep stops and says which file and which mutation, and — when the file still
+// holds the mutation's text once and the original's not at all — what to replace
+// with what to take it out by hand; otherwise it says to compare with `git diff`.
+//
 // Before the first mutation is applied, the suite is run once as it stands. A
 // test that is already failing fails again under every mutation, and a failing
 // test is what this reads as "caught" — so one red test would make a whole sweep

@@ -6,6 +6,230 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.37.0] - 2026-09-26
+
+### Added
+
+- `down` no longer leaves a project running because its compose file cannot be
+  read, when you name the project (`-p`, or COMPOSE_PROJECT_NAME in the shell or
+  the `.env`). If the file is refused (by this version, for something an earlier
+  one accepted), gone or named wrongly, or has a syntax error, `down` takes the
+  project down by its label, as docker compose does for `down -p <name>`: every
+  container the runtime holds for it (another project's are spared) and its
+  default network, saying so on stderr. Volumes, images and networks the file
+  declares are left, and `--volumes` and `--rmi` say they were not done. A name
+  the runtime holds nothing for says so. A project worked out from the folder is
+  not taken down that way — the folder's name is a guess when the file is what
+  could not be read — and the refusal names the command to type,
+  `opossum -p <name> down`.
+- `build.dockerfile_inline` is now built. It was read and listed among the ignored
+  fields, and `up` failed looking for a Dockerfile in the context. The text is
+  given to `container build -f -` on its standard input (container 1.4.1), in
+  place of any Dockerfile in the context, as docker compose builds it; `config`
+  shows it, and `dockerfile` written beside it is refused, as docker compose
+  refuses the pair. An image an earlier `up` built from the context's Dockerfile
+  while this key was being ignored is not rebuilt by a plain `up`, which builds
+  only when there is no image: run `up --build` once.
+
+### Fixed
+
+- A Ctrl-C while `up` or `run` is filling a new volume from the image stops and
+  removes the throwaway container and deletes the half-filled volume, and now
+  asks the runtime whether each is gone. When one is still there, or the runtime
+  could not be asked, the message names it and the command that removes it
+  (`container delete --force <name>`, `container volume delete <volume>`),
+  where `run` used to say the fill "was taken back" whatever became of them.
+- A reference in a mapping key is no longer expanded, as in docker compose. Under
+  `environment:` or `labels:`, `E${SFX}: "1"` names a variable or label literally
+  called `E${SFX}` (it used to be `E1`), and `A$$B` as a key stays `A$$B` (it used
+  to be read as `A$B`); the same file gave the container different names here and
+  under docker compose, with the same exit code. Values are expanded as before.
+  `config` prints such a key the way docker compose does (`E$${SFX}`, `A$$$$B`).
+  A service or secret key that holds a reference (`web${SFX}`) is no longer read as
+  the expanded name; docker compose refuses such a file, and this now reads it with
+  the name as written.
+  A reference in a key that itself fails (`${NAME:?msg}` with `NAME` unset, an
+  unterminated `${`) still fails the load, where docker compose reads the key as
+  written.
+- When `up` cannot start a run-to-completion dependency (a
+  `service_completed_successfully` target) because the registry refused the read
+  of its image, it now says so — `check the image name … and that it's
+  reachable` — instead of `exited non-zero — check its output above`, and the
+  rollback line no longer names it as `stopped and removed`: it never ran. One
+  whose previous container this `up` removed to replace it is still named.
+- When `up` fails because the registry would not hand over the image of a
+  service it starts, the rollback line no longer says `Rolled back web — stopped
+  and removed` about a service whose container was never made. Services that
+  were made and then removed are still named, and so is one whose previous
+  container this `up` removed to replace it. When nothing was made, the line now
+  reads ``Nothing this `up` started is left running``.
+- `build.dockerfile` is now read as a path from the build context, an absolute
+  one as it is, the way docker compose reads it. It used to be read from the
+  directory opossum was run in, so `{context: ./sub, dockerfile:
+  Dockerfile.alt}` failed here with `dockerfile does not exist` and builds under
+  docker compose. A file written for the old reading, `context: ./sub` with
+  `dockerfile: sub/Dockerfile.alt`, now fails as it does under docker compose:
+  write the path from the context (`Dockerfile.alt`).
+- On container 1.4.1, a build the runtime refuses because of the image name
+  (`image: Abc/Def:V1`, `image: org/App:v1` — a repository path with upper case is
+  refused, where a tag or a registry host may have it) now says the name is what is
+  refused, not the Dockerfile, and where the name comes from (`image:`, or the
+  project's and the service's names when it is not written); where the repository
+  has upper case it says to write it in lower case. It used to end with the usage
+  text and the advice to build the image with Docker and import it, which no
+  Dockerfile changes the name for.
+- `opossum down` now stops the restart supervisor of a project whose compose file
+  is outside the working directory (`-f sub/x.yaml`, or `COMPOSE_FILE`) after that
+  file has been moved or removed. It looked for the supervisor under the working
+  directory's name, which is not the project's name when the file is elsewhere, so
+  the supervisor was left running and only `-p <name> down` stopped it. The name
+  is now read as the load reads it: from the file's directory (and its `.env`),
+  and for `COMPOSE_FILE` from the working directory's `.env` first. A project
+  named by `name:` inside the file still needs the file.
+- When no compose file is found and the working directory's `.env` (or the
+  `--env-file` given) cannot be read, `opossum` now reports the env file instead
+  of `no compose file found`, as docker compose does: it reads the env file
+  first. This is the case where `COMPOSE_FILE` in the shell names a file in
+  another directory, and the `.env` failing to read had been why that value was
+  dropped and the search for a file came up empty.
+- A variable name in an env file (the project's `.env`, an `--env-file`, or an
+  `env_file` read in the default format) that holds ASCII punctuation docker
+  compose refuses (`/`, `$`, `!`, `@` and the rest outside `_ . - [ ]`), or a
+  control character other than a tab, a vertical tab, a form feed or a carriage
+  return, is now refused naming the file, the line
+  and the character (`unexpected character "/" in variable name`). It used to be
+  accepted and set a variable with that name. The value is not quoted back. Letters
+  past ASCII are still taken; docker compose also refuses symbols and some spaces
+  there, which this does not.
+- A variable name with a space inside it (`A B=1`) in an env file — the project's
+  `.env`, an `--env-file`, or an `env_file` read in the default format — is now
+  refused, naming the file and line, as docker compose refuses it (`key cannot
+  contain a space`). It used to be accepted and set a variable named `A B`. Only
+  the space itself: a tab or a no-break space in a name, and a space before the
+  `=`, are read as they were.
+- An `env_file` entry written as a mapping with no `path` key is now refused for
+  the missing path whatever its other keys hold (`required: []`, `format: {}`).
+  It used to be refused with a YAML type message and a hint about an unset
+  `${...}` variable, which pointed away from the mistake; docker compose asks
+  for the path first.
+- A cycle among `volumes_from` entries behind a profile that is not turned on no
+  longer stops every command. It was refused as the file was read, on every
+  service, so `ps` and `down` failed over a project whose gated corner held one,
+  where docker compose does not read that corner until something enables it. The
+  cycle is now read the way one among `depends_on` is: by the commands that put
+  the services in order, over the services they read, and named in the same
+  words (`dependency cycle detected: [a b] -> a`). One among services that are
+  read still refuses `up`, `ps` and `down`. The commands that do not order the
+  services do not read it, as for a `depends_on` cycle: `config` prints the file
+  (`config --services` refuses), and so do `exec`, `cp`, `port` and, when given
+  service names, `stop`, `kill`, `restart`, `logs`, `pull`, `build` and `stats`,
+  where docker compose refuses them.
+- A `depends_on` entry that writes a key twice (`required: false` and `required:
+  true`) is now refused for the repeated key, as docker compose refuses it, when
+  its `condition` is also of the wrong kind (a list or a mapping). It used to be
+  refused for the `condition`, which docker compose never gets to: it fails at
+  the parse, before it checks what the values are.
+- A label whose value is a number, a boolean or a date, written as a mapping
+  (`labels: {a: 0x10}`), now carries the value docker compose gives it when the
+  file is read on its own: `16` for `0x10`, `1.5` for `1.50`, `true` for `True`.
+  It used to carry the text as written (`0x10`), while the same file read with a
+  second one merged over it carried `16`, so which label a container got depended
+  on how many files were given. A quoted value and the list form (`- a=0x10`) are
+  text and stay as written.
+  A service that wrote such a label on its own is recreated by the next `up`,
+  because the value it carries changed.
+- A service that lists several `group_add` groups beside a `user:` is now told
+  both problems at once. It used to be told to keep the one group the process
+  needs, and after doing that was refused again because `--gid` does nothing next
+  to `--user`. The message names the groups, the `user:` and the way out: drop
+  `group_add`, or drop `user:` and keep one group.
+- A key written twice in the same mapping inside an `x-` extension (`x-foo: {a: 1,
+  a: 2}`, in the file, in a service or in a declaration, at any depth) is now
+  refused when the compose file is loaded, naming both lines, as docker compose
+  refuses it (`mapping key "a" already defined`). A single compose file was the
+  one path that accepted it: an overlay file, an included file and an `extends`
+  target were already refused.
+- The advice at the end of the `OPSM-206` and `OPSM-212` notices ("to pin one,
+  write it in the compose file as ...") now keeps the entry's protocol and
+  address. It used to give `"<host>:3000"` whatever the entry was, so copying it
+  into the file for a `3000/udp` entry published a tcp port instead, and for a
+  `127.0.0.1::3000` entry published on every interface instead of loopback only,
+  with `up` succeeding either way. It now reads `"<host>:3000/udp"` and
+  `"127.0.0.1:<host>:3000"` for those entries.
+- `opossum up` no longer says "host port already in use" (`OPSM-201`) about a
+  port that nothing is listening on. The one real case is a `ports` entry that
+  names an address and a port below 1024 (`127.0.0.1:80:80`): a user who is not
+  root is refused that bind, Apple `container` 1.4.1 refuses the entry too, and
+  the message used to send you to look for a listener that was not there. It is
+  now refused up front as `OPSM-215`, with the reason the bind gave and, for an
+  IPv4 address, the way out: publish a port from 1024 up, or drop the address,
+  which publishes on every address and is a wider door than the file asks for.
+  Any other refused bind that is not a port in use is refused as `OPSM-215` with
+  the bind's own reason. For an entry that leaves the host port to opossum
+  (`127.0.0.1::80`), the port is still moved to a free one on that address, and
+  `OPSM-206` now says the bind was refused instead of calling the port in use.
+- When a `ports` entry names a host address and leaves the host port to opossum
+  (`127.0.0.1::80`, `[::1]::80`) and the port it mirrors is taken, the host port
+  opossum picks instead is now looked for on that address rather than on
+  `127.0.0.1`. A port held on one address can be free on another, so the old
+  search could pass over a port that is free on the entry's address, or hand back
+  one that is in use there. Entries that name no address, or a wildcard (`80`,
+  `0.0.0.0::80`, `[::]::80`), are still looked for on IPv4. An entry whose address
+  this machine will not bind — which gets this far only when the service's
+  container is already running — is no longer reported with `OPSM-206` as moved
+  to a second port of that address; the start fails as before, with the
+  runtime's own error.
+- A short-form mount whose target is empty (`volumes: ["./src:"]`) is now refused
+  when the file is loaded, as docker compose refuses it (`empty section between
+  colons`). It used to be accepted and `up` succeeded, but the runtime took the
+  empty target as an anonymous volume and mounted an empty one at the source's
+  own path, so the host directory never appeared in the container. The message
+  says the target is missing and shows the spelling to write (`./src:/app`). A
+  named volume (`data:`) and an absolute path (`/abs:`) are refused the same way.
+- A service, secret or config name outside letters, digits, `.`, `_` and `-` (a
+  space, a `/`, a `$`, an empty or non-ASCII name) is now refused, as docker
+  compose refuses it (`services additional properties 'web x' not allowed`), and as
+  a volume name already was here. A service's name is refused when the file is
+  read, by every command (`up` already refused it before creating anything). A
+  secret's or a config's name had been carried on into the container's mount
+  path as written; it is now refused by every command except `down`, `destroy`,
+  `stop` and `kill`, which name it on stderr and go on so that a project started
+  under such a name can still be taken down (and `doctor`, which reports). A network key has no such rule in
+  either tool and is still accepted.
+- `up` says `Creating network <name>` only for a network it created. It used to
+  say it before asking the runtime, so an `up` after the first, with the project's
+  network still there, said it was creating the network before it said the service
+  was up to date. A network that cannot be created, or one whose declared
+  subnet no longer matches, is no longer announced as being created before the
+  refusal. A dry run cannot tell a network that is there from one that is not, and
+  says `Creating network` for every network of the project.
+- `up` now refuses a service that takes another service's volumes (`volumes_from`)
+  when that service is not started with it and has no container, as docker compose
+  does (`cannot share volume with service b: container missing`). This happens for
+  a holder behind a profile that is off that the borrower depends on with
+  `required: false`, which leaves the holder out. `up` used to start the borrower
+  with the holder's volumes mounted from a service that was never there. A holder
+  that has a container from an earlier `up` (running or stopped) is shared with, so
+  an `up` without the profile a first one had on, and the rebuild `watch` does of
+  the borrower alone, go through. Turn the holder's profile on, or name it.
+- A long-form mount whose `target` is a number, a boolean or a date
+  (`target: 5`, `target: true`, `target: 2026-09-20`), including one brought in
+  by a `<<` merge or an alias, is now refused when the file is read, as docker
+  compose refuses it (`is missing a mount target`). It used to be read as the text
+  path `5` and passed to the runtime as a mount at that relative path. A target
+  written as text (`"5"`) is the path it says. A project already running on such a
+  mount can be taken down by naming it (`opossum -p <name> down`); `stop`, `kill`,
+  `destroy` and `ps` refuse the file until the target is fixed.
+- A project started on a `.env` whose variable name has a space or punctuation
+  (`A/B=1`) can be taken down again. Since the check for those names, `down`,
+  `destroy`, `stop`, `kill` and `ps` all refused such a project, though an earlier
+  version had read the `.env` without complaint, so a running project could be
+  left with nothing to stop it but the runtime's own commands. `down`, `destroy`,
+  `stop` and `kill` now say so on stderr and go on, as they do for a secret or
+  config name outside the rule; the commands that start or print something still
+  refuse it, and so does `ps`. The same holds for an included project's `.env` and
+  for an `--env-file`.
+
 ## [0.36.0] - 2026-09-25
 
 ### Added
@@ -1972,7 +2196,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.36.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.37.0...HEAD
+[0.37.0]: https://github.com/suruseas/opossum/compare/v0.36.0...v0.37.0
 [0.36.0]: https://github.com/suruseas/opossum/compare/v0.35.0...v0.36.0
 [0.35.0]: https://github.com/suruseas/opossum/compare/v0.34.1...v0.35.0
 [0.34.1]: https://github.com/suruseas/opossum/compare/v0.34.0...v0.34.1

@@ -160,3 +160,35 @@ func TestResourcesBadValueErrors(t *testing.T) {
 		}
 	}
 }
+
+// A CPU count is passed on as written, whatever the machine has. On container
+// 1.4.1 a count above the host's is not refused (`-c 9999` runs, and `inspect`
+// records 9999), where docker compose refuses one above the VM's, so a check
+// added here for a count "too high" would refuse a file the runtime takes. The
+// rows are one count each, at and around the number a host is likely to have,
+// and the same through the deploy form.
+func TestACpuCountIsNotBoundedByTheMachine(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		svc  Service
+		want string
+	}{
+		{"one", Service{CPUs: "1"}, "1"},
+		{"the host's own count", Service{CPUs: "8"}, "8"},
+		{"one more than a host has", Service{CPUs: "9"}, "9"},
+		{"a count no machine has", Service{CPUs: "9999"}, "9999"},
+		{"the same through deploy", Service{Deploy: deployLimits("", "9999")}, "9999"},
+		{"a fraction is a whole CPU", Service{CPUs: "0.0001"}, "1"},
+		{"an exponent", Service{CPUs: "1e3"}, "1000"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, cpu, err := tc.svc.Resources()
+			if err != nil {
+				t.Fatalf("want the count read, got %v", err)
+			}
+			if cpu != tc.want {
+				t.Errorf("-c %q, want %q", cpu, tc.want)
+			}
+		})
+	}
+}

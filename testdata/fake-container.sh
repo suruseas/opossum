@@ -210,6 +210,31 @@ case "$1" in
         *) break ;;
       esac
     done
+    # A `-p` whose two sides name different numbers of ports is refused next,
+    # before anything is recorded (container 1.4.1, testdata/real-cli-output.md:
+    # `Error: publish host and container port counts are not equal: <host>:<container>`
+    # (the two sides as written, without the address or the protocol),
+    # exit 1, for a host range with one container port, the other way round, and
+    # two ranges of different lengths). The sides are the last two `:` fields once
+    # the protocol and an IPv6 address are taken off.
+    prev=
+    for a in "$@"; do
+      if [ "$prev" = -p ] || [ "$prev" = --publish ]; then
+        s=${a%%/*}
+        case "$s" in \[*) s=${s#*]}; s=${s#:} ;; esac
+        case "$s" in
+          *:*)
+            ctr=${s##*:}; rest=${s%:*}; host=${rest##*:}
+            hc=1 cc=1
+            case "$host" in *-*) hc=$(( ${host#*-} - ${host%%-*} + 1 )) ;; esac
+            case "$ctr" in *-*) cc=$(( ${ctr#*-} - ${ctr%%-*} + 1 )) ;; esac
+            if [ "$hc" -ne "$cc" ]; then
+              printf 'Error: publish host and container port counts are not equal: %s:%s\n' "$host" "$ctr" >&2; exit 1
+            fi ;;
+        esac
+      fi
+      prev=$a
+    done
     # Running a name makes it there and running again (see stop/delete), with
     # the project label this run gave it (none for a run without one), given
     # as `-l` (the spelling opossum passes) or `--label`.

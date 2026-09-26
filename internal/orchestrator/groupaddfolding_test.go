@@ -333,3 +333,25 @@ func TestFoldingDoesNotTurnOnHowManyDigitsAfterAMerge(t *testing.T) {
 		t.Errorf("want %q in:\n%v", want, err)
 	}
 }
+
+// Beside a `user:` the folded count and the entries that fold are said in the same
+// sentence as the `user:`, and keeping one group is not offered as the way out —
+// the one kept is then refused for the `user:` (#1204).
+func TestSeveralGroupsBesideAUserAreSaidTogether(t *testing.T) {
+	rt, _ := fakeShim(t)
+	p, err := loadProject(t, "services:\n  app:\n    image: alpine:3.20\n    user: \"1000\"\n    group_add: [0x10, \"16\", 20]\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true)
+	if err == nil {
+		t.Fatal("the file was accepted")
+	}
+	const want = `adds 2 groups (group_add: "0x10", "16", "20" — "0x10" and "16" are both the group 16) beside user: "1000"; container 1.4.1's --gid takes one, a second replaces the first, and it does nothing next to --user`
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("want %q in:\n%v", want, err)
+	}
+	if strings.Contains(err.Error(), "keep the one the process needs —") || strings.HasSuffix(err.Error(), "keep the one the process needs") {
+		t.Errorf("keeping one is offered as the way out, and it does not work beside a user:\n%v", err)
+	}
+}

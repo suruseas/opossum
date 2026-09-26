@@ -35,6 +35,11 @@ func loadEnvOf(t *testing.T, format, body, envText string) (Environment, error) 
 	if err != nil {
 		return nil, err
 	}
+	// A name the project's `.env` refuses is kept by the load for the commands that
+	// start or print something, and is the refusal here as it is for them.
+	if err := proj.CheckDeclaredNames(); err != nil {
+		return nil, err
+	}
 	return proj.Services["web"].ResolvedEnv()
 }
 
@@ -135,13 +140,33 @@ func TestEnvFileFormatRawHandsValuesOverAsWritten(t *testing.T) {
 			file:   "export A=1\nB=2\n",
 			rawErr: `variable "export A" contains whitespace`,
 			dotenv: []string{"A=1", "B=2"}},
-		// The default reading takes a name with a blank inside, and refuses
-		// one that is empty; docker compose does the reverse (#1149). The
-		// default column says what opossum does today.
-		{name: "a blank inside the name",
+		// The default reading refuses a name with a space inside, as docker
+		// compose does (`key cannot contain a space`, v5.5.1), and only the space:
+		// a tab or a no-break space in the name is taken by docker compose, and a
+		// space after the name is the blank before the `=`. An empty name is the
+		// other way round: docker compose takes it, and this refuses it (#1149,
+		// left open: whether the runtime takes a variable with no name is not
+		// measured).
+		{name: "a space inside the name",
 			file:   "A B=1\nB=2\n",
 			rawErr: `variable "A B" contains whitespace`,
-			dotenv: []string{"A B=1", "B=2"}},
+			dotErr: "key cannot contain a space"},
+		{name: "two spaces inside the name",
+			file:   "A  B  =1\n",
+			rawErr: `variable "A  B  " contains whitespace`,
+			dotErr: "key cannot contain a space"},
+		{name: "a space inside the name after export",
+			file:   "export A B=1\n",
+			rawErr: `variable "export A B" contains whitespace`,
+			dotErr: "key cannot contain a space"},
+		{name: "a tab inside the name",
+			file:   "A\tB=1\nB=2\n",
+			rawErr: "contains whitespace",
+			dotenv: []string{"A\tB=1", "B=2"}},
+		{name: "a no-break space inside the name, read by default",
+			file:   "A\u00a0B=1\nB=2\n",
+			raw:    []string{"A\u00a0B=1", "B=2"},
+			dotenv: []string{"A\u00a0B=1", "B=2"}},
 		{name: "a blank after the name",
 			file:   "A =1\nB=2\n",
 			rawErr: `variable "A " contains whitespace`,
@@ -385,11 +410,26 @@ func TestEnvFileFormatThroughAnAliasOrAMergeKey(t *testing.T) {
 		{"the key itself an alias, to raw", "x-k: &k format\n", "{path: app.env, *k : raw}", rawOut, ""},
 		{"the key itself an alias, to null", "x-k: &k format\n", "{path: app.env, *k : null}", nil, "format must be a string"},
 		{"no path and a null format: the path is asked for first", "", "{format: null}", nil, "has no path"},
-		// With a list or a mapping the decode fails before the path is
-		// looked at, in YAML's words; docker compose asks for the path
-		// first (#1153, with `required: []`, which main has read this
-		// way all along).
-		{"no path and a list format: the decode fails first", "", "{format: []}", nil, "cannot unmarshal !!seq into string"},
+		// The path is asked for before the other keys' types, as docker compose
+		// asks for it (v5.5.1, measured 2026-09-26): an entry with no `path` key
+		// is refused for that whatever its other keys hold. With a list or a
+		// mapping the decode used to fail first, in YAML's words with a hint
+		// about a variable that had nothing to do with it (#1153).
+		{"no path and a list format", "", "{format: []}", nil, "env_file entry 1 of 1 has no path"},
+		{"no path and a mapping format", "", "{format: {}}", nil, "env_file entry 1 of 1 has no path"},
+		{"no path and a list required", "", "{required: []}", nil, "env_file entry 1 of 1 has no path"},
+		{"no path and a quoted required that is not a boolean", "", "{required: \"1\"}", nil, "env_file entry 1 of 1 has no path"},
+		// A path that arrives through a merge key is a path.
+		{"a path from a merge, and a raw format", "x-base: &base {path: app.env}\n", "{<<: *base, format: raw}", rawOut, ""},
+		// The control: with the path there, the other keys' types are what is
+		// refused, in the words they always had. The entry differs from the ones
+		// above by the one key, so a check that dropped the path test or moved
+		// after the decode would show in both directions.
+		{"a path and a list format", "", "{path: app.env, format: []}", nil, "cannot unmarshal !!seq into string"},
+		{"a path and a list required", "", "{path: app.env, required: []}", nil, "cannot unmarshal !!seq into bool"},
+		// The key written and empty is the check after the decode's, and is the
+		// same refusal as before.
+		{"an empty path and a list format", "", "{path: \"\", format: []}", nil, "cannot unmarshal !!seq into string"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()

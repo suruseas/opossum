@@ -356,3 +356,85 @@ func TestDestroyKnowsThisDirectorysProjectByItsEnvName(t *testing.T) {
 		})
 	}
 }
+
+// A compose file outside the working directory names its project from its own
+// directory (`-f`: that directory's `.env`, then its name; COMPOSE_FILE: the
+// working directory's `.env` first, then the file's directory's, then its name —
+// measured, and the load reads it that way). `down` stops the restart supervisor
+// before it reads the file, so that a file that has gone or no longer parses does
+// not strand it — and it used to look for the supervisor under the working
+// directory's name, which is not the project's when the file is elsewhere: the
+// supervisor of a project whose file had been moved was left running (#1134).
+func TestDownFindsTheSupervisorOfAFileOutsideTheWorkingDirectory(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// how the file is chosen: by -f, or by COMPOSE_FILE in the environment
+		byFlag bool
+		// envIn is where a COMPOSE_PROJECT_NAME is written, if anywhere: "" for
+		// none (the file's directory names the project), "cwd", "file" or "both".
+		envIn string
+		want  string
+	}{
+		{"-f, named by the file's directory", true, "", "sub"},
+		{"COMPOSE_FILE, named by the file's directory", false, "", "sub"},
+		{"-f, named by the .env beside the file", true, "file", "filenv"},
+		{"COMPOSE_FILE, named by the .env beside the file", false, "file", "filenv"},
+		{"COMPOSE_FILE, named by the working directory's .env, which comes first", false, "cwd", "cwdenv"},
+		// With `-f` the file's directory's `.env` is the only one: the working
+		// directory's is not read, so it does not name the project.
+		{"-f, where the working directory's .env is not read", true, "both", "filenv"},
+		{"COMPOSE_FILE, where both name it and the working directory's comes first", false, "both", "cwdenv"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeShim(t)
+			state := t.TempDir()
+			t.Setenv("XDG_STATE_HOME", state)
+			t.Setenv("OPOSSUM_SELF_BIN", opossumBin)
+			cwd := filepath.Join(t.TempDir(), "workdir")
+			sub := filepath.Join(cwd, "sub")
+			if err := os.MkdirAll(sub, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			file := filepath.Join(sub, "x.yaml")
+			write(t, file, "services:\n  web:\n    image: web\n    restart: always\n")
+			if tc.envIn == "file" || tc.envIn == "both" {
+				write(t, filepath.Join(sub, ".env"), "COMPOSE_PROJECT_NAME=filenv\n")
+			}
+			if tc.envIn == "cwd" || tc.envIn == "both" {
+				write(t, filepath.Join(cwd, ".env"), "COMPOSE_PROJECT_NAME=cwdenv\n")
+			}
+			t.Chdir(cwd)
+			setOrUnset(t, "COMPOSE_PROJECT_NAME", nil)
+			var args []string
+			if tc.byFlag {
+				args = []string{"-f", "sub/x.yaml"}
+				setOrUnset(t, "COMPOSE_FILE", nil)
+			} else {
+				v := "sub/x.yaml"
+				setOrUnset(t, "COMPOSE_FILE", &v)
+			}
+			if _, err := run(t, append(append([]string{}, args...), "up", "--no-build")...); err != nil {
+				t.Fatalf("up: %v", err)
+			}
+			var pid int
+			waitFor(t, "the supervisor, under "+tc.want, func() bool {
+				pid = supervisorPID(t, state, tc.want)
+				return pid != 0
+			})
+			t.Cleanup(func() {
+				if p, err := os.FindProcess(pid); err == nil {
+					_ = p.Signal(syscall.SIGKILL)
+				}
+			})
+			// The file goes, as it does when a project is moved or renamed: the
+			// load then fails, and the supervisor is all `down` can find.
+			if err := os.Remove(file); err != nil {
+				t.Fatal(err)
+			}
+			out, _ := run(t, append(append([]string{}, args...), "down")...)
+			if !strings.Contains(out, "stopped the restart supervisor") {
+				t.Errorf("down should find the supervisor under %q, got:\n%s", tc.want, out)
+			}
+		})
+	}
+}

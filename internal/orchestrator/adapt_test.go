@@ -563,21 +563,23 @@ volumes:
 	}
 }
 
-// A `$` in a SERVICE NAME must be escaped in the emitted key too, not just in
-// comments: unescaped, interpolation eats it on reload and the service key becomes
-// something else, breaking every later command against a file opossum won't rewrite.
-func TestPlanOverlayEscapesServiceNameInKey(t *testing.T) {
-	src := "name: demo\nservices:\n  \"pg$$db\":\n    image: postgres:16\n    volumes:\n      - ./d:/var/lib/postgresql/data\n"
+// The service's key is written into the overlay as it is, and the overlay adds
+// no service of its own. Every character a name may have is in this one — the
+// name is a key the loader reads back, and a key escaped on the way out would
+// be a second service beside it. (A `$` cannot be in a name: docker
+// compose refuses it, and so does the loader.)
+func TestPlanOverlayWritesServiceNameInKeyAsItIs(t *testing.T) {
+	src := "name: demo\nservices:\n  \"Pg.db_1-x\":\n    image: postgres:16\n    volumes:\n      - ./d:/var/lib/postgresql/data\n"
 	body, changes := planFor(t, src)
 	if len(changes) == 0 {
 		t.Fatal("expected the service to be adapted")
 	}
 	keys, err := overlayServiceKeys(t, src, body)
 	if err != nil {
-		t.Fatalf("a $ in a service name must not break the overlay: %v\n%s", err, body)
+		t.Fatalf("the overlay must load beside the file: %v\n%s", err, body)
 	}
-	if !keys["pg$db"] {
-		t.Errorf("the service key must survive interpolation, got keys %v:\n%s", keys, body)
+	if len(keys) != 1 || !keys["Pg.db_1-x"] {
+		t.Errorf("the overlay must add no service of its own, want only Pg.db_1-x, got keys %v:\n%s", keys, body)
 	}
 }
 

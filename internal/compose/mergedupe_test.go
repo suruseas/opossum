@@ -258,3 +258,108 @@ func TestThePositionsAreTheFilesOwn(t *testing.T) {
 		t.Errorf("want the positions counted in the file that wrote them, got:\n%v", err)
 	}
 }
+
+// A `volumes` entry whose mount target cannot be read is not folded with another
+// by its (empty) target: the two are two entries, not one entry that a later file
+// replaced. The bare `:` is the entry docker compose accepts with no target
+// (`./src:` it refuses, v5.5.1); written in both files it stays twice, and a fold
+// that keyed on the empty target would leave one — quietly dropping a mount one of
+// the files wrote (#1212).
+//
+// Held by both folds: the one in the merge step and the one that runs after load
+// each keep such entries, so what this reads is the result of the two, and taking
+// the guard out of either leaves one entry here (checked by taking each out).
+func TestTwoVolumeEntriesWithNoTargetStayTwoAfterTheMerge(t *testing.T) {
+	p, err := loadTwo(t, "    volumes: [\":\"]\n", "    volumes: [\":\", \"./d:/d\"]\n")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	got := p.Services["app"].Volumes
+	notargets := 0
+	for _, v := range got {
+		if v == ":" {
+			notargets++
+		}
+	}
+	if notargets != 2 {
+		t.Errorf("volumes = %q: want the two entries with no target kept, and the mount at /d beside them", got)
+	}
+	if !strings.Contains(strings.Join(got, " "), "d:/d") {
+		t.Errorf("volumes = %q: the entry with a target went missing", got)
+	}
+}
+
+// Two spellings of one published port are one entry however the file or files
+// are laid out, and a port a second file restates is not published twice. The
+// load folds `ports` after the merge, by what an entry normalizes to, and there
+// is no fold for it in the merge itself: the rows say what the answer is, so that
+// neither the fold nor the answer can go without a test noticing.
+func TestPortsAreFoldedWhereverTheyAreWritten(t *testing.T) {
+	for _, tc := range []struct {
+		name, base, over string
+		want             int
+	}{
+		{"the same number in both files", "8080", "8080", 1},
+		{"a number and the same as a string", "8080", `"8080"`, 1},
+		{"bare and host:container", "8080", `"8080:8080"`, 1},
+		{"host:container and bare", `"8080:8080"`, "8080", 1},
+		{"with and without the protocol", "8080", `"8080/tcp"`, 1},
+		{"another protocol is another port", `"8080/udp"`, "8080", 2},
+		{"another address is another port", `"127.0.0.1:8080:8080"`, `"8080:8080"`, 2},
+		{"the same address twice", `"127.0.0.1:8080:8080"`, `"127.0.0.1:8080:8080"`, 1},
+		{"the same range twice", `"8080-8082:8080-8082"`, `"8080-8082:8080-8082"`, 1},
+		{"a range and a port inside it", `"8080-8082"`, "8080", 2},
+		{"a long form and its short form", "{target: 8080, published: 8080}", `"8080:8080"`, 1},
+		{"another port", "8080", "9090", 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			merged, err := loadTwo(t, "    ports: ["+tc.base+"]\n", "    ports: ["+tc.over+"]\n")
+			if err != nil {
+				t.Fatalf("two files: %v", err)
+			}
+			one, err := loadTwo(t, "    ports: ["+tc.base+", "+tc.over+"]\n", "")
+			if err != nil {
+				t.Fatalf("one file: %v", err)
+			}
+			got, alone := merged.Services["app"].Ports, one.Services["app"].Ports
+			if len(got) != tc.want {
+				t.Errorf("two files give %d entries %q, want %d", len(got), got, tc.want)
+			}
+			if strings.Join(got, ",") != strings.Join(alone, ",") {
+				t.Errorf("two files give %q where one file with both gives %q", got, alone)
+			}
+		})
+	}
+}
+
+// The anonymous volume at `/` written twice is one mount, in two files and in
+// one, and by a short and a long form alike. (Its target reads as no path, which
+// is why the merge leaves such an entry alone: see
+// TestTwoVolumeEntriesWithNoTargetStayTwoAfterTheMerge. It is not the only entry
+// that reads that way — `:` is another — so this holds the answer for `/` and
+// nothing wider.)
+func TestAnAnonymousVolumeAtTheRootIsOneMountWhereverItIsWritten(t *testing.T) {
+	for _, tc := range []struct{ name, base, over string }{
+		{"the short form twice", `"/"`, `"/"`},
+		{"a long form over the short form", `"/"`, "{type: volume, target: /}"},
+		{"the short form over a long form", "{type: volume, target: /}", `"/"`},
+		{"the long form twice", "{type: volume, target: /}", "{type: volume, target: /}"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := loadTwo(t, "    volumes: ["+tc.base+"]\n", "    volumes: ["+tc.over+"]\n")
+			if err != nil {
+				t.Fatalf("two files: %v", err)
+			}
+			if got := p.Services["app"].Volumes; len(got) != 1 {
+				t.Errorf("two files: want one mount at /, got %d: %q", len(got), got)
+			}
+			one, err := loadTwo(t, "    volumes: ["+tc.base+", "+tc.over+"]\n", "")
+			if err != nil {
+				t.Fatalf("one file: %v", err)
+			}
+			if got := one.Services["app"].Volumes; len(got) != 1 {
+				t.Errorf("one file: want one mount at /, got %d: %q", len(got), got)
+			}
+		})
+	}
+}

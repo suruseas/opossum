@@ -382,13 +382,23 @@ func asList(v any) any {
 // mapping in the next keep every variable, the later file winning by name).
 var envLikeKeys = map[string]bool{"environment": true, "labels": true, "args": true}
 
-// dedupSeqKeys are list fields where a repeated entry (e.g. an override restating a
-// port, or a `volumes_from` a second file lists again) should collapse to one,
-// as docker compose collapses it. What a file repeats within its own list is
+// dedupSeqKeys are list fields where a repeated entry (e.g. an override restating an
+// exposed port, or a `volumes_from` a second file lists again) should collapse to
+// one, as docker compose collapses it. What a file repeats within its own list is
 // left alone, which is where the two part company (see appendNew). `volumes` is deliberately
 // absent: mergeByTargetKeys handles it with a stricter rule (same mount point, not
 // just same text) that subsumes plain dedup.
-var dedupSeqKeys = map[string]bool{"ports": true, "expose": true, "volumes_from": true, "group_add": true}
+//
+// `ports` is absent too, and not for want of the same rule: it is folded after the
+// load, by what it normalizes to — `3000` and `3000:3000` are one entry there, and a
+// file's own repeats go with them — which takes everything the entry-by-entry fold
+// here would (an entry written the same way twice is the same entry once
+// normalized). Kept here it changed no answer: every ordered pair of twenty
+// spellings (400), laid out as two files and as one file, came out the same with
+// and without it, in `config` and in the ports `up --dry-run` builds; a second
+// review's 3,072 runs over twelve ways of reaching the merge agreed. A second fold that nothing can tell from the
+// first is one that a test would only hold in place.
+var dedupSeqKeys = map[string]bool{"expose": true, "volumes_from": true, "group_add": true}
 
 // mergeByTargetKeys are list fields docker compose merges by *mount point* rather
 // than by whole entry: a later file's mount at a path an earlier file already
@@ -620,7 +630,10 @@ func mergeNetworks(base, over map[string]any, path string) map[string]any {
 // mergeSeqByTarget collapses mount entries that share a target path, keeping the
 // LAST one (the higher-precedence file wins) at the FIRST one's position, so an
 // override swaps a mount in place instead of adding a second mount at the same
-// path. Entries whose target can't be read are left alone.
+// path. Entries whose target can't be read are left alone: the bare `:` is one
+// docker compose accepts with no target, and two of them are two entries, which
+// a fold keyed on the empty target would leave as one, dropping a mount a file
+// wrote (TestTwoVolumeEntriesWithNoTargetStayTwoAfterTheMerge holds this).
 func mergeSeqByTarget(xs []any) []any {
 	pos := map[string]int{} // target -> index in out
 	out := make([]any, 0, len(xs))
@@ -818,7 +831,7 @@ func LoadFilesEnvDir(paths []string, envFiles []string, envDir string) (*Project
 
 	// Expand ${VAR} references before parsing, using the `.env` file in envDir
 	// (or the given --env-file paths) overlaid by the process env.
-	scope, err := loadEnvLayers(envDir, baseDir, envFiles)
+	scope, err := loadEnvLayers(envDir, baseDir, envFiles, true)
 	if err != nil {
 		return nil, err
 	}
@@ -932,6 +945,25 @@ func LoadFilesEnvDir(paths []string, envFiles []string, envDir string) (*Project
 			delete(f.Volumes, name)
 		}
 	}
+	if err := refuseBadNames(mergedName(loaded), "service", keysOf(f.Services)); err != nil {
+		return nil, err
+	}
+	// A secret's and a config's name is refused by the commands that start or
+	// print something (CheckDeclaredNames), and not here: an earlier opossum
+	// passed such a name on as the file's mount path, so a project can be
+	// running on one, and the commands that take it down have to read the file.
+	// A service's is refused here — an earlier opossum refused it before it
+	// created anything, so no project runs on one.
+	nameFault := refuseBadNames(mergedName(loaded), "secret", keysOf(f.Secrets))
+	if nameFault == nil {
+		nameFault = refuseBadNames(mergedName(loaded), "config", keysOf(f.Configs))
+	}
+	// A variable name the project's `.env` (or an `--env-file`) refuses is kept the
+	// same way, for the same reason: an earlier opossum passed it on, and the
+	// commands that take a project down read this file first.
+	if nameFault == nil {
+		nameFault = scope.firstFault()
+	}
 	if len(f.Services) == 0 {
 		return nil, fmt.Errorf("%s defines no services — add a top-level `services:` block with at least one service", mergedName(loaded))
 	}
@@ -964,6 +996,7 @@ func LoadFilesEnvDir(paths []string, envFiles []string, envDir string) (*Project
 		Volumes:     f.Volumes,
 		Networks:    f.Networks,
 		Unsupported: ignoredTopLevel(doc),
+		nameFault:   nameFault,
 	}
 	// `ipam` is read for its subnets; the keys under it opossum reads past
 	// (`driver`, an entry's `gateway`) are named the way the other
@@ -1061,8 +1094,9 @@ func LoadFilesEnvDir(paths []string, envFiles []string, envDir string) (*Project
 			}
 		}
 		// Give bare container ports a host port (Apple's `container` requires one),
-		// then drop duplicates the merge couldn't see because it dedups raw text
-		// (e.g. base "3000" + override "3000:3000" both normalize to "3000:3000").
+		// then drop duplicates once entries are normalized: this is the only fold
+		// `ports` has, in one file and across several (e.g. base "3000" + override
+		// "3000:3000" both normalize to "3000:3000"; the merge does not fold it).
 		if len(svc.Ports) > 0 {
 			// Two entries are the same published port when they name the same
 			// host port, container port and protocol — and a spec that names
@@ -1100,8 +1134,8 @@ func LoadFilesEnvDir(paths []string, envFiles []string, envDir string) (*Project
 				svc.AutoHostPort = auto
 			}
 		}
-		// Collapse mounts sharing a target, for the same reason ports are re-deduped
-		// above: the merge only sees files being combined, so a single file — or one
+		// Collapse mounts sharing a target, which the merge does only for files
+		// being combined: so a single file — or one
 		// whose override doesn't restate `volumes` — never reaches it. docker compose
 		// collapses unconditionally, keeping the last entry.
 		if len(svc.Volumes) > 1 {
@@ -1241,6 +1275,43 @@ func LoadFilesEnvDir(paths []string, envFiles []string, envDir string) (*Project
 // measured on v5.5.0 for every printable ASCII character). Read past, the name
 // went to the runtime as written — `-v demo_a/b:/y`, `-v demo_a,b:/y`.
 var volumeNamePattern = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+
+// refuseBadNames refuses a declared name outside volumeNamePattern, in the
+// first of them in sorted order, so a file with two is refused for the same one
+// every time it is read. docker compose gives a service, a secret and a config
+// the same rule as a volume (`services additional properties 'a b' not allowed`,
+// measured on v5.5.1 for every printable ASCII character, the empty name and
+// non-ASCII letters; a network has none). Read past, the name went on to a
+// container name and a mount path as written.
+func refuseBadNames(file, kind string, names []string) error {
+	sort.Strings(names)
+	for _, name := range names {
+		if !validVolumeName(name) {
+			return fmt.Errorf("%s: %s name %q %s", file, kind, name, volumeNameRule)
+		}
+	}
+	return nil
+}
+
+// CheckDeclaredNames refuses a secret or a config whose name is outside the rule
+// a service's and a volume's are held to (refuseBadNames), the first in sorted
+// order, secrets before configs — and a variable name the project's `.env`, an
+// included project's `.env` or an `--env-file` refuses (the line is read past, and
+// the first is kept here).
+//
+// It is for the commands that start containers or print the project to call, not
+// the loader: an earlier opossum ran such a project, and `down` and `destroy` have
+// to read the file to take it down.
+func (p *Project) CheckDeclaredNames() error { return p.nameFault }
+
+// keysOf is the keys of a map, in no order.
+func keysOf[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
 
 // volumeNameRule is what a refused volume name is told, after the name.
 const volumeNameRule = "can only contain letters, digits, `.`, `_` and `-` (docker compose refuses it as well)"
@@ -1416,8 +1487,9 @@ func ClassifyMount(entry string) (MountKind, string) {
 // changes nothing there either); what a holder borrowed itself is borrowed
 // on (A from B from C brings C's to A); and the holder becomes a dependency
 // — `depends_on: {holder: {condition: service_started}}` — unless one is
-// written. A service that is not there, and a cycle among these entries,
-// are refused in docker compose's words. A named volume borrowed is then
+// written. A service that is not there is refused in docker compose's words;
+// a cycle among these entries is left to the commands that order the services,
+// as one among `depends_on` is (the holder is one). A named volume borrowed is then
 // one two services share, which the runtime attaches to one container at a
 // time — the shared-volume note (OPSM-102) reads the folded mounts and says
 // so. Two entries are not carried, and are refused instead of being mounted
@@ -1432,16 +1504,24 @@ func ClassifyMount(entry string) (MountKind, string) {
 func expandVolumesFrom(services map[string]*Service, names []string) error {
 	const visiting, done = 1, 2
 	state := map[string]int{}
-	var expand func(name string, stack []string) error
-	expand = func(name string, stack []string) error {
+	var expand func(name string) error
+	expand = func(name string) error {
 		svc := services[name]
 		switch state[name] {
 		case done:
 			return nil
 		case visiting:
-			// The cycle alone, from where it comes back to — not the road in
-			// (`b -> c -> b`, not `a -> b -> c -> b`), as docker compose names it.
-			return fmt.Errorf("dependency cycle detected: %s -> %s", strings.Join(stack[slices.Index(stack, name):], " -> "), name)
+			// A cycle is not refused here. The holder is a dependency (below), so
+			// the cycle is one among `depends_on` and is read where they are: by
+			// the commands that put the services in order, over the services they
+			// read — a corner behind a profile that is off is not one of those, as
+			// in docker compose. What is folded on the way round is whatever the walk
+			// had reached, the same every time. A command that reads the cycle
+			// refuses it before it uses the mounts, with one exception that holds
+			// with or without a cycle: a holder behind a profile that is off, whose
+			// dependency is written `required: false`, is not read and is borrowed
+			// from all the same (a known difference, in the `volumes_from` row).
+			return nil
 		}
 		state[name] = visiting
 		svc.OwnVolumes = svc.Volumes
@@ -1480,7 +1560,7 @@ func expandVolumesFrom(services map[string]*Service, names []string) error {
 			if !ok || h == nil {
 				return fmt.Errorf("service %q depends on undefined service %q: invalid compose project", name, holder)
 			}
-			if err := expand(holder, append(stack, name)); err != nil {
+			if err := expand(holder); err != nil {
 				return err
 			}
 			hNoCopy := map[string]bool{} // NoCopy holds targets as mountTarget spells them
@@ -1531,7 +1611,7 @@ func expandVolumesFrom(services map[string]*Service, names []string) error {
 		return nil
 	}
 	for _, name := range names {
-		if err := expand(name, nil); err != nil {
+		if err := expand(name); err != nil {
 			return err
 		}
 	}
@@ -1797,6 +1877,9 @@ func validateOne(path string, one interpolated, earlier map[string]any) error {
 	if err := checkTopLevel(path, documentRoot(doc), earlier, override); err != nil {
 		return err
 	}
+	if err := checkExtensionRepeats(path, one.written); err != nil {
+		return err
+	}
 	if override {
 		doc = withoutNotGiven(doc)
 	} else {
@@ -1835,6 +1918,79 @@ func validateOne(path string, one interpolated, earlier map[string]any) error {
 		}
 	}
 	return nil
+}
+
+// checkExtensionRepeats refuses a key written twice in one mapping inside an
+// `x-` extension, at any depth. docker compose refuses the file wherever a
+// mapping repeats a key (`mapping key "a" already defined at line 2`); the
+// decoder says the same for a block it reads into a typed shape, and never sees
+// an extension, whose contents nobody interprets — so in a single file a repeat
+// there was accepted, where docker compose refuses the file.
+//
+// Asked of the file as written (`written`), not of the document after `${...}`
+// was expanded: docker compose does not expand the keys of a mapping, so
+// `{${A}: 1, ${B}: 2}` is two keys however A and B are set, and reading the
+// expanded text would refuse a file it accepts and name a key the file never
+// wrote. Its line numbers are the ones the reader counts as well. A text that
+// does not parse as written (a `${...}` where a flow mapping needs a plain
+// key) is left to the decode, which reads it after expansion.
+//
+// Only inside an extension: in the blocks that are read into a typed shape the
+// decode has already answered, in its own words, and asking again would say it
+// twice. Keys are the same when their text is: docker compose's decoder does not
+// look at the tag, so `1` and `"1"` are one key, and neither is `<<` left out —
+// `<<` written twice is a repeat there as well. Only what is written in this
+// mapping is compared: a key an alias or a merge brings in is not written twice
+// in it. An alias is followed once, so a block reused by anchor is read where it
+// is written and not again wherever it is pointed at, and a block that contains
+// itself ends.
+func checkExtensionRepeats(path string, written []byte) error {
+	if len(written) == 0 {
+		return nil
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(written, &doc); err != nil {
+		return nil
+	}
+	root := documentRoot(&doc)
+	if root == nil {
+		return nil
+	}
+	seen := map[*yaml.Node]bool{}
+	var walk func(n *yaml.Node, inExtension bool) error
+	walk = func(n *yaml.Node, inExtension bool) error {
+		n = unalias(n)
+		if seen[n] {
+			return nil
+		}
+		seen[n] = true
+		switch n.Kind {
+		case yaml.MappingNode:
+			first := map[string]int{}
+			for i := 0; i+1 < len(n.Content); i += 2 {
+				key := n.Content[i]
+				if key.Kind == yaml.ScalarNode && inExtension {
+					if at, dup := first[key.Value]; dup {
+						return fmt.Errorf("compose file %s sets the same key twice:\n  line %d: mapping key %q already defined at line %d\n  remove one of them",
+							path, key.Line, key.Value, at)
+					}
+					first[key.Value] = key.Line
+				}
+				within := inExtension || key.Kind == yaml.ScalarNode && strings.HasPrefix(key.Value, "x-")
+				if err := walk(n.Content[i+1], within); err != nil {
+					return err
+				}
+			}
+		case yaml.SequenceNode:
+			for _, item := range n.Content {
+				if err := walk(item, inExtension); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	return walk(root, false)
 }
 
 // checkGroupAddRepeats refuses a service that writes the same `group_add`
@@ -2605,9 +2761,16 @@ func loadUnit(path, projectDir string, scope envScope, earlier map[string]any, s
 			// The included project's variables: its directory's `.env` (or
 			// the entry's env_file) at a level under this project's, whose
 			// shell and `.env` win. The built-in stays last, under both.
-			sub, err := loadEnv(subDir, envFiles)
+			sub, err := loadEnvLayers(subDir, "", envFiles, scope.faults != nil)
 			if err != nil {
 				return nil, nil, nil, fmt.Errorf("compose file %s: include: %w", path, err)
+			}
+			if scope.faults != nil && sub.faults != nil {
+				// A name the included project's `.env` refuses is kept with this
+				// project's own — the same commands are to be stopped or let go on —
+				// and what a project it includes in turn refuses goes to the same place.
+				*scope.faults = append(*scope.faults, *sub.faults...)
+				sub.faults = scope.faults
 			}
 			sub.outer = chainLookup(scope.outer, mapLookup(scope.level))
 			sub.builtin = scope.builtin

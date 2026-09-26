@@ -659,6 +659,17 @@ func downCmd() *cobra.Command {
 			}
 			o, err := loadOrchestratorToTakeDown(cmd.OutOrStdout(), cmd.ErrOrStderr())
 			if err != nil {
+				// A file that cannot be read is no reason to leave what it started
+				// running: an earlier opossum may have started this project from a
+				// file the current one refuses.
+				if handled, derr := downByLabel(cmd, err, volumes, rmi); handled {
+					return derr
+				}
+				if name := projectNameWithoutCompose(); name != "" {
+					// Not taken down, since the name is a guess (see downByLabel) — but
+					// the way to say it is not.
+					return fmt.Errorf("%w\n  the project's containers can still be taken down without its file, by naming it: `opossum -p %s down` (the name of the project, if it is not %q, is what its containers' label says: `opossum ls`)", err, name, name)
+				}
 				return err
 			}
 			noteFormerName(o, cmd.ErrOrStderr())
@@ -669,6 +680,71 @@ func downCmd() *cobra.Command {
 	cmd.Flags().StringVar(&rmi, "rmi", "", "also remove images: \"local\" (built services' <project>-<service>:latest) or \"all\" (also the images services name)")
 	cmd.Flags().BoolVar(&removeOrphans, "remove-orphans", false, "also remove containers for services no longer in the compose file")
 	return cmd
+}
+
+// downByLabel takes a project down without its compose file, for a `down` whose
+// file cannot be read: every container the runtime holds for the project (by the
+// label `up` put on it, so another project's are spared) and the project's default
+// network. A volume, an image and a network the file declares are named by the
+// file and are left, and said to be. It is what keeps a project an earlier opossum
+// started from being stranded by a file the current one refuses, whatever it is
+// refused for; docker compose answers `down -p <name>` (with no `-f`) the same
+// way, from the engine's labels (measured on v5.5.1).
+//
+// It goes only for a project the reader NAMED — `-p`, or COMPOSE_PROJECT_NAME in
+// the shell or the `.env` — and never for one worked out from a folder. That name
+// is the folder's unless the file says otherwise, and the file is what could not
+// be read: taking it down would guess, and a wrong guess removes another
+// project's containers. The reader is told the command that names it.
+func downByLabel(cmd *cobra.Command, loadErr error, volumes bool, rmi string) (handled bool, err error) {
+	name := explicitProjectName()
+	if name == "" {
+		return false, nil
+	}
+	stderr := cmd.ErrOrStderr()
+	rt := runtime.New()
+	rt.Verbose = verbose
+	fmt.Fprintf(stderr, "opossum: %s\n  without a compose file to read, this takes down what the runtime holds for project %q "+
+		"by its label: its containers and its default network. Volumes, images and networks the "+
+		"file declares are named by it and are left.\n", orchestrator.OneLine(loadErr.Error()), name)
+	if volumes || rmi != "" {
+		fmt.Fprintln(stderr, "opossum: --volumes and --rmi need the compose file and are not done")
+	}
+	projects, lerr := orchestrator.ListProjects(rt, true)
+	if lerr != nil {
+		return true, lerr
+	}
+	held := false
+	for _, p := range projects {
+		held = held || p.Name == name
+	}
+	if !held {
+		fmt.Fprintf(stderr, "opossum: the runtime holds no container of project %q — nothing to take down "+
+			"(is the name right? `opossum ls` lists the projects it holds)\n", name)
+		return true, nil
+	}
+	o := orchestrator.New(&compose.Project{Name: name, Services: map[string]*compose.Service{}}, rt, dnsDomain, cmd.OutOrStdout())
+	o.SetRunFlags(thisRunFlags())
+	return true, o.Down(false, "", true)
+}
+
+// explicitProjectName is the project's name where the reader gave it: `-p`, then
+// COMPOSE_PROJECT_NAME from the shell or the working directory's `.env` (or the
+// `--env-file`) — and "" when neither does, or when the `.env` cannot be read (a
+// name that was meant is not the folder's).
+func explicitProjectName() string {
+	if projectName != "" {
+		return compose.SanitizeName(projectName)
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	name, err := compose.EnvProjectName(wd, envFiles)
+	if err != nil || name == "" {
+		return ""
+	}
+	return compose.SanitizeName(name)
 }
 
 func imagesCmd() *cobra.Command {
@@ -1599,6 +1675,12 @@ func loadOrchestrator(out io.Writer) (*orchestrator.Orchestrator, error) {
 	if err != nil {
 		return nil, err
 	}
+	// What reading the file refuses in docker compose, for every command: a
+	// secret or a config named outside the rule. The commands that take a
+	// project down do not come here (loadOrchestratorToTakeDown).
+	if err := o.Project.CheckDeclaredNames(); err != nil {
+		return nil, err
+	}
 	enableProfiles(o)
 	// What docker compose refuses for every command — two mounts at one
 	// target in a service no profile gates — is refused here, before any
@@ -1644,6 +1726,19 @@ func loadOrchestratorWith(out io.Writer) (*orchestrator.Orchestrator, error) {
 		// (docker compose auto-merges compose.override.yaml / docker-compose.override.yml).
 		found, err := compose.Discover(".")
 		if err != nil {
+			// A `.env` that cannot be read is what docker compose reports first,
+			// before it looks for a file (measured on v5.5.1). Here the search said
+			// there was no compose file, which sent the reader to the directory when
+			// the mistake was in a file the search never got to read — and, when the
+			// shell names COMPOSE_FILE, the `.env` failing to read is also why that
+			// value was dropped (chooseFiles leaves an unreadable env file to be
+			// reported by whoever reads it, and nobody had).
+			if _, envErr := compose.EnvValue(".", envFiles, "COMPOSE_FILE"); envErr != nil {
+				return nil, envErr
+			}
+			if envErr := compose.EnvNameFault(".", envFiles); envErr != nil {
+				return nil, envErr // read past by EnvValue, and still what is reported first
+			}
 			return nil, err
 		}
 		files = []string{found}
@@ -1700,7 +1795,8 @@ func loadOrchestratorWith(out io.Writer) (*orchestrator.Orchestrator, error) {
 
 // loadOrchestratorToTakeDown is loadOrchestrator for the commands that stop
 // or remove what is running (`down`, `destroy`, `stop`, `kill`): the mounts
-// docker compose refuses are named on stderr and the command goes on. docker
+// docker compose refuses, and a secret or config name it refuses, are named
+// on stderr and the command goes on. docker
 // compose refuses them in these commands too, but it never started such a
 // project; an earlier opossum passed the pair on to the runtime and did, and
 // refusing here would leave that project with no way down but `container
@@ -1714,6 +1810,9 @@ func loadOrchestratorToTakeDown(out, stderr io.Writer) (*orchestrator.Orchestrat
 	// is named here too, rather than going unmentioned because the command
 	// that takes the project down does not refuse.
 	enableProfiles(o)
+	if err := o.Project.CheckDeclaredNames(); err != nil {
+		fmt.Fprintf(stderr, "opossum: %s — `up` refuses this compose file; going on, as an earlier opossum may have started it\n", orchestrator.OneLine(err.Error()))
+	}
 	if err := o.CheckMounts(); err != nil {
 		for _, line := range strings.Split(err.Error(), "\n") {
 			fmt.Fprintf(stderr, "opossum: %s — `up` refuses this compose file; going on, as an earlier opossum may have started it\n", orchestrator.OneLine(line))
@@ -2319,14 +2418,10 @@ func chooseFiles() (chosenFiles, error) {
 // `.env` (or the `--env-file` given), and otherwise the directory name is what
 // `up` used unless the file named the project.
 //
-// It asks about the working directory, where the load asks about the compose
-// file's as well (and, with `-f`, that one alone): with `-f` pointing outside
-// the working directory the two fall back to different directories, and with
-// COMPOSE_FILE — which needs nothing typed — they differ where the name is in
-// the file's directory's `.env` alone, and this one comes to the wrong name:
-// the supervisor of a project whose file has gone is then not found, and `-p
-// <name> down` is the way to it. That was so for `-f` before either variable
-// was read, and is not mended here (#1134).
+// A file `-f` or COMPOSE_FILE names outside the working directory is read as the
+// load reads it (see below), from the paths as written and not looked at, so
+// that a project whose file has gone or been moved is still found. What stays out
+// of reach is a project the file itself names (`name:`), which needs the file.
 func projectNameWithoutCompose() string {
 	if projectName != "" {
 		return compose.SanitizeName(projectName)
@@ -2335,10 +2430,62 @@ func projectNameWithoutCompose() string {
 	if err != nil {
 		return ""
 	}
+	// A file outside the working directory names the project from its own
+	// directory, where the load reads it that way (measured, and see
+	// TestAFileNamedByComposeFileInAnotherDirectory): with `-f`, that directory's
+	// `.env` and then its name; with COMPOSE_FILE, the working directory's `.env`
+	// first, then that directory's, then its name. The files are asked about as
+	// written and not looked at — this runs because the file may be gone.
+	if paths, byFlag := composeFilePaths(); len(paths) > 0 {
+		dir := filepath.Dir(paths[0])
+		if abs, err := filepath.Abs(dir); err == nil {
+			dir = abs
+		}
+		if dir != wd {
+			if !byFlag {
+				if name, err := compose.EnvProjectName(wd, envFiles); err == nil && name != "" {
+					return compose.SanitizeName(name)
+				}
+			}
+			if name, err := compose.EnvProjectName(dir, envFiles); err == nil && name != "" {
+				return compose.SanitizeName(name)
+			}
+			return compose.SanitizeName(filepath.Base(dir))
+		}
+	}
 	// An env file that cannot be read is the load's to report, not this
 	// lookup's: it falls through to the directory.
 	if name, err := compose.EnvProjectName(wd, envFiles); err == nil && name != "" {
 		return compose.SanitizeName(name)
 	}
 	return compose.SanitizeName(filepath.Base(wd))
+}
+
+// composeFilePaths is the compose files `-f` or COMPOSE_FILE name, as written and
+// not looked at, and whether `-f` named them. What chooseFiles decides and then
+// checks in one go, split so that a caller that must not need the files to be
+// there (finding a project's supervisor after its file has gone) can ask which
+// they are. Nothing when neither names any.
+func composeFilePaths() (paths []string, byFlag bool) {
+	if len(composeFiles) != 0 {
+		return composeFiles, true
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return nil, false
+	}
+	value, err := compose.EnvValue(wd, envFiles, "COMPOSE_FILE")
+	if err != nil || value == "" {
+		return nil, false
+	}
+	sep, _ := compose.EnvValue(wd, envFiles, "COMPOSE_PATH_SEPARATOR")
+	if sep == "" {
+		sep = string(os.PathListSeparator)
+	}
+	for _, p := range strings.Split(value, sep) {
+		if p != "" {
+			paths = append(paths, p)
+		}
+	}
+	return paths, false
 }

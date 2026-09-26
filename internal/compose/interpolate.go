@@ -89,6 +89,20 @@ type envScope struct {
 	// shell and any env file can override it — the contract this package and
 	// docs/compatibility.md both state.
 	builtin varLookup
+	// faults, when not nil, is where a variable name a `.env` line refuses is
+	// recorded instead of failing the read: the line is left out and the read goes
+	// on (see parseDotEnv). It is set for the project's own `.env` and not for a
+	// service's `env_file:`, which is read only by the commands that start or print
+	// a service.
+	faults *[]error
+}
+
+// firstFault is the first name a `.env` line refused, or nil.
+func (s envScope) firstFault() error {
+	if s.faults == nil || len(*s.faults) == 0 {
+		return nil
+	}
+	return (*s.faults)[0]
 }
 
 // lookup is the scope as it stands: outer, then this level, then the built-in.
@@ -143,7 +157,10 @@ func EnvProjectName(dir string, envFiles []string) (string, error) {
 // variables: the shell over the `.env` in dir, or over envFiles when given. ""
 // when it is not set, and when it is set and empty.
 func EnvValue(dir string, envFiles []string, name string) (string, error) {
-	scope, err := loadEnv(dir, envFiles)
+	// Soft: a name a `.env` line refuses is left out and not a failure here, since
+	// this only asks for one variable — the commands that take a project down ask
+	// it too, and are not to be stopped by a line they do not read.
+	scope, err := loadEnvLayers(dir, "", envFiles, true)
 	if err != nil {
 		return "", err
 	}
@@ -151,11 +168,23 @@ func EnvValue(dir string, envFiles []string, name string) (string, error) {
 	return v, nil
 }
 
+// EnvNameFault is the first variable name a project's `.env` (or an `--env-file`)
+// refuses — a space or punctuation in one — or nil. EnvValue reads past such a
+// line, and a caller that has no compose file to load, and so no Project to ask,
+// asks here so that the `.env` is what it reports first (as docker compose does).
+func EnvNameFault(dir string, envFiles []string) error {
+	scope, err := loadEnvLayers(dir, "", envFiles, true)
+	if err != nil {
+		return err
+	}
+	return scope.firstFault()
+}
+
 // loadEnv builds the scope used for interpolation: values from a `.env` file in
 // dir (or the given --env-file paths), the process environment, and the built-in.
 // A missing default .env file is not an error.
 func loadEnv(dir string, envFiles []string) (envScope, error) {
-	return loadEnvLayers(dir, "", envFiles)
+	return loadEnvLayers(dir, "", envFiles, false)
 }
 
 // loadEnvLayers is loadEnv with a second `.env` under the first: the one in
@@ -171,7 +200,13 @@ func loadEnv(dir string, envFiles []string) (envScope, error) {
 //   - with an `--env-file` there is one env file and no second place.
 //
 // under is "" (or dir itself) where there is no second place.
-func loadEnvLayers(dir, under string, envFiles []string) (envScope, error) {
+//
+// soft is whether a variable name a `.env` refuses is recorded (envScope.faults)
+// and read past, rather than failing the read. A project's commands that start or
+// print a service refuse it afterwards (Project.CheckDeclaredNames); the ones that
+// take a project down go on, because an earlier opossum passed such a name on and
+// a project may be running on it.
+func loadEnvLayers(dir, under string, envFiles []string, soft bool) (envScope, error) {
 	scope := envScope{
 		outer: func(name string) (string, bool) { return os.LookupEnv(name) },
 		level: map[string]string{},
@@ -186,6 +221,9 @@ func loadEnvLayers(dir, under string, envFiles []string) (envScope, error) {
 		},
 	}
 
+	if soft {
+		scope.faults = &[]error{}
+	}
 	files := envFiles
 	if len(files) == 0 {
 		files = []string{filepath.Join(dir, ".env")}
@@ -209,6 +247,7 @@ func loadEnvLayers(dir, under string, envFiles []string) (envScope, error) {
 	}
 	if file := filepath.Join(under, ".env"); !named && under != "" && under != dir && !isDir(file) {
 		second := scope.inner(nil)
+		second.faults = scope.faults
 		if _, err := parseDotEnv(file, second); err != nil {
 			return envScope{}, err
 		}
@@ -297,6 +336,12 @@ func parseDotEnv(path string, scope envScope) (map[string]string, error) {
 		}
 		raw = strings.TrimPrefix(raw, "export ")
 		key, val, ok := splitEnvLine(raw)
+		// A name this refuses (a space or punctuation) is recorded and its line read
+		// past when the scope asks for that (the project's `.env`), and is the read's
+		// failure otherwise. The line is still walked to its end, so that a quoted
+		// value that spans lines does not leave its second line to be read as one of
+		// its own.
+		var refused error
 		if !ok && strings.Contains(raw, "\ufeff") {
 			// A mark on a line with no separator lands in a name too — the whole
 			// line is the name, and there is nothing to assign. Saying "no `=`"
@@ -313,13 +358,65 @@ func parseDotEnv(path string, scope envScope) (map[string]string, error) {
 			return nil, fmt.Errorf("%s:%d: expected KEY=VALUE, but the line has no `=`", path, i+1)
 		}
 		key = strings.TrimSpace(key)
+		// Only the two rules an earlier opossum did not hold are read past (a space
+		// and the punctuation): a project may have been started on a name they
+		// refuse. An empty name and a mark in a name were refused before, so nothing
+		// was ever started on one.
 		if key == "" {
 			return nil, fmt.Errorf("%s:%d: empty variable name", path, i+1)
 		}
 		if strings.Contains(key, "\ufeff") {
 			return nil, markInNameErr(path, i+1)
 		}
+		switch {
+		case strings.Contains(key, " "):
+			// A space inside the name is refused, as docker compose refuses it
+			// (v5.5.1, measured: `failed to read …: line 1: key cannot contain a
+			// space`). Only the space itself: a tab or a no-break space in a name is
+			// taken by docker compose, and so is a space after the name — that is the
+			// blank before the `=`, dropped above. The name is not quoted back: this is
+			// the line an env file's secrets are on.
+			refused = fmt.Errorf("%s:%d: key cannot contain a space", path, i+1)
+		default:
+			// And the ASCII punctuation and control characters docker compose refuses
+			// in a name (`unexpected character "/" in variable name`, v5.5.1, measured
+			// for every printable ASCII character and every control character): a name
+			// is letters, digits and `_ . - [ ]` and what a reader can see in one. The
+			// characters it takes past ASCII are not asked about here (it takes letters
+			// and a no-break space and refuses symbols and some spaces; measured on a
+			// dozen, not on the whole of Unicode). The name is not quoted back, for the
+			// reason above.
+			if at := strings.IndexFunc(key, badNameChar); at >= 0 {
+				refused = fmt.Errorf("%s:%d: unexpected character %q in variable name", path, i+1, string([]rune(key[at:])[0]))
+			}
+		}
+		if refused != nil {
+			if err := failName(scope, refused); err != nil {
+				return nil, err
+			}
+		}
 		val = strings.TrimSpace(val)
+		if refused != nil {
+			// Read past: the name is recorded and nothing of the line is kept — and a
+			// quoted value that opens here is walked to its closing quote, unexpanded.
+			if len(val) > 1 && (val[0] == '"' || val[0] == '\'') && closingQuote(val, val[0], 1) < 0 {
+				start, closed := i+1, false
+				for i+1 < len(lines) {
+					i++
+					if closingQuote(lines[i], val[0], 0) >= 0 {
+						closed = true
+						break
+					}
+				}
+				if !closed {
+					// Not read past: a quote that never closes takes the rest of the
+					// file, and every line in it, `COMPOSE_PROJECT_NAME` among them,
+					// with it — as it does for a name that is fine.
+					return nil, fmt.Errorf("%s:%d: unterminated quoted value for %q", path, start, key)
+				}
+			}
+			continue
+		}
 
 		// A quoted value whose closing quote isn't on this line spans multiple
 		// lines (e.g. a PEM key): gather following lines verbatim, preserving the
@@ -364,6 +461,17 @@ func parseDotEnv(path string, scope envScope) (map[string]string, error) {
 		scope.level[key] = v
 	}
 	return out, nil
+}
+
+// failName is what a refused variable name comes to: the read's failure, or —
+// where the scope records them (the project's `.env`) — a note kept for later and
+// no failure at all.
+func failName(scope envScope, err error) error {
+	if scope.faults == nil {
+		return err
+	}
+	*scope.faults = append(*scope.faults, err)
+	return nil
 }
 
 // markInNameErr is what a byte-order mark outside the file's first position gets.
@@ -548,6 +656,13 @@ type interpolated struct {
 	// raw is always set: the expanded document. When the text did not parse, the
 	// marks are still in it — on purpose.
 	raw []byte
+	// written is the file as the reader wrote it, before anything was expanded:
+	// what a check about the text itself has to read. docker compose expands values
+	// and not the keys of a mapping, and counts its lines in this text, so a
+	// question about a key written twice is asked of this and not of raw — an
+	// expanded `${A}` would otherwise read as whatever A holds. Nil for a document
+	// no file text stands behind (the merge of several).
+	written []byte
 }
 
 // into decodes the document into v.
@@ -585,7 +700,7 @@ func interpolateDocument(raw []byte, lookup varLookup) (interpolated, error) {
 		return interpolated{}, fmt.Errorf("the compose file contains U+E001, a private-use character this uses to " +
 			"carry expanded values through parsing; remove it (it is not something a compose file needs)")
 	}
-	var vals []string
+	var vals []heldValue
 	out, err := expand(raw, lookup, emptied, &vals)
 	if err != nil {
 		var u unterminatedRef
@@ -597,7 +712,7 @@ func interpolateDocument(raw []byte, lookup varLookup) (interpolated, error) {
 	if !bytes.Contains(out, []byte(emptied)) && len(vals) == 0 {
 		// Nothing expanded to nothing and nothing is held aside, so there is
 		// nothing to repair and the bytes are already what the caller should read.
-		return interpolated{raw: out}, nil
+		return interpolated{raw: out, written: raw}, nil
 	}
 	var doc yaml.Node
 	if err := yaml.Unmarshal(out, &doc); err != nil {
@@ -614,11 +729,11 @@ func interpolateDocument(raw []byte, lookup varLookup) (interpolated, error) {
 		// them (`x${NOPE}y` reads back as `xy`), and the caller would report a file
 		// nobody wrote. Left in, the bytes fail to parse for the caller exactly as
 		// they failed here, which is the truth.
-		return interpolated{raw: out}, nil
+		return interpolated{raw: out, written: raw}, nil
 	}
 	unmark(&doc)
-	restore(&doc, vals)
-	return interpolated{node: &doc, raw: out}, nil
+	restore(&doc, vals, false)
+	return interpolated{node: &doc, raw: out, written: raw}, nil
 }
 
 // restore puts held values back into the scalars whose markers stand for them,
@@ -626,14 +741,22 @@ func interpolateDocument(raw []byte, lookup varLookup) (interpolated, error) {
 // the other's. A scalar that gains a line break stays a scalar: the tree is
 // decoded, not written back out, and a decoded string carries its newlines
 // whole, which is exactly what a post-parse expansion would have produced.
-func restore(n *yaml.Node, vals []string) {
+//
+// A scalar that is a mapping's key gets back what was written in its place, not
+// what the reference resolved to: docker compose expands the values of a
+// mapping and never its keys, so `E${SFX}: 1` under `environment:` names a
+// variable `E${SFX}` there.
+func restore(n *yaml.Node, vals []heldValue, inKey bool) {
 	if n.Kind == yaml.ScalarNode && strings.Contains(n.Value, held) {
 		n.Value = heldMarker.ReplaceAllStringFunc(n.Value, func(m string) string {
 			i, err := strconv.Atoi(strings.Trim(m, held))
 			if err != nil || i < 0 || i >= len(vals) {
 				return m // not one of ours; the document was refused if it held the mark, so this cannot happen
 			}
-			return vals[i]
+			if inKey {
+				return vals[i].written
+			}
+			return vals[i].value
 		})
 		// The parser already resolved the marker as a string and wrote that
 		// tag, so this pin changes nothing for a plain scalar; it is kept so
@@ -641,8 +764,8 @@ func restore(n *yaml.Node, vals []string) {
 		// ${TAG}`) is still the text it is.
 		n.Tag = "!!str"
 	}
-	for _, c := range n.Content {
-		restore(c, vals)
+	for i, c := range n.Content {
+		restore(c, vals, n.Kind == yaml.MappingNode && i%2 == 0)
 	}
 }
 
@@ -697,7 +820,7 @@ func interpolate(raw []byte, lookup varLookup) ([]byte, error) {
 // a number where a string belonged, `[1]` a list, `1.50` the number 1.5,
 // and a line break was structure. A `.env` value passes nil: it is not
 // parsed as YAML, so its text rides as itself.
-func expand(raw []byte, lookup varLookup, emptyAs string, hold *[]string) ([]byte, error) {
+func expand(raw []byte, lookup varLookup, emptyAs string, hold *[]heldValue) ([]byte, error) {
 	var out bytes.Buffer
 	s := string(raw)
 	for i := 0; i < len(s); {
@@ -714,7 +837,13 @@ func expand(raw []byte, lookup varLookup, emptyAs string, hold *[]string) ([]byt
 		}
 		switch next := s[i+1]; {
 		case next == '$': // escape: $$ -> $
-			out.WriteByte('$')
+			if hold != nil {
+				// Set aside like a reference, so that a key it was written in gets `$$`
+				// back and not the `$` a value gets.
+				writeHeld(&out, "$", "$$", hold)
+			} else {
+				out.WriteByte('$')
+			}
 			i += 2
 		case next == '{':
 			// Find the `}` that closes THIS reference, skipping any nested `${…}` so a
@@ -738,7 +867,7 @@ func expand(raw []byte, lookup varLookup, emptyAs string, hold *[]string) ([]byt
 			if err := refuseMark("${"+expr+"}", val, emptyAs, hold); err != nil {
 				return nil, err
 			}
-			writeVal(&out, val, emptyAs, hold)
+			writeVal(&out, val, s[i:i+2+end+1], emptyAs, hold)
 			i += 2 + end + 1
 		case isNameStart(next):
 			j := i + 1
@@ -750,7 +879,7 @@ func expand(raw []byte, lookup varLookup, emptyAs string, hold *[]string) ([]byt
 			if err := refuseMark("$"+name, val, emptyAs, hold); err != nil {
 				return nil, err
 			}
-			writeVal(&out, val, emptyAs, hold)
+			writeVal(&out, val, s[i:j], emptyAs, hold)
 			i = j
 		default: // a lone $ (e.g. before a space) is literal
 			out.WriteByte('$')
@@ -765,7 +894,7 @@ func expand(raw []byte, lookup varLookup, emptyAs string, hold *[]string) ([]byt
 // it through the shell or an env file is the same problem arriving by another
 // road, and letting it through would conflate what somebody set with what
 // expansion produced.
-func refuseMark(name, val, emptyAs string, hold *[]string) error {
+func refuseMark(name, val, emptyAs string, hold *[]heldValue) error {
 	// The reference as it was written — `${V}`, or `${V:-fallback}` — and not what
 	// it resolved to: a variable is where a password or a token lives, and the
 	// reader needs to know which one to go and fix, not what is in it.
@@ -783,16 +912,34 @@ func refuseMark(name, val, emptyAs string, hold *[]string) error {
 // writeVal writes the expanded value: the mark when there is nothing to write,
 // a one-line marker (the value held aside for restore) where the document is
 // being expanded, and the value itself where text that is not YAML is.
-func writeVal(out *bytes.Buffer, val, emptyAs string, hold *[]string) {
+func writeVal(out *bytes.Buffer, val, written, emptyAs string, hold *[]heldValue) {
 	switch {
 	case val == "" && emptyAs != "":
 		out.WriteString(emptyAs)
+		writeHeld(out, val, written, hold)
 	case hold != nil:
-		*hold = append(*hold, val)
-		fmt.Fprintf(out, "%s%d%s", held, len(*hold)-1, held)
+		writeHeld(out, val, written, hold)
 	default:
 		out.WriteString(val)
 	}
+}
+
+// writeHeld sets a value aside, with the text the reader wrote for it, and
+// writes the marker that stands for both.
+func writeHeld(out *bytes.Buffer, val, written string, hold *[]heldValue) {
+	if hold == nil {
+		return
+	}
+	*hold = append(*hold, heldValue{value: val, written: written})
+	fmt.Fprintf(out, "%s%d%s", held, len(*hold)-1, held)
+}
+
+// heldValue is one expansion set aside while the document is parsed. A value
+// takes what the reference resolved to; a key takes what was written, because
+// docker compose expands the values of a mapping and never its keys.
+type heldValue struct {
+	value   string
+	written string
 }
 
 // matchBrace returns the index in s of the `}` that closes a `${` reference whose
@@ -979,4 +1126,25 @@ func countLines(in []byte) int {
 		}
 	}
 	return n
+}
+
+// badNameChar is an ASCII character docker compose refuses in the name of a
+// variable in an env file: the punctuation outside `_ . - [ ]`, and the control
+// characters other than the tab, the vertical tab, the form feed and the
+// carriage return, which it takes (a lone `\r` inside a name is kept: only a
+// `\r\n` at the end of a line is a line ending). A space and a colon are not
+// asked about: the one is refused before this, in docker compose's own words,
+// and the other ends a name before it gets here.
+func badNameChar(r rune) bool {
+	switch {
+	case r >= 0x80:
+		return false
+	case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		return false
+	}
+	switch r {
+	case '_', '.', '-', '[', ']', '\t', '\v', '\f', '\r':
+		return false
+	}
+	return true
 }

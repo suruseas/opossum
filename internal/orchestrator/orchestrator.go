@@ -58,10 +58,15 @@ type Orchestrator struct {
 	// different question — the address, not a port — and a test wanting one of
 	// them answered a certain way should not have to answer both.
 	bindHostAddress func(network, host string) error
-	ctx             context.Context // cancelled on Ctrl-C so a partial `up` rolls back
-	profiles        map[string]bool // active compose profiles (--profile, or else COMPOSE_PROFILES)
-	runFlags        string          // this run's root flags as typed, for a command the output suggests (SetRunFlags)
-	up              upOptions       // per-invocation `up` flags
+	// probeHostPort answers what binding one host port comes back with: nil when
+	// it binds, otherwise the error the bind gave. Overridable because the
+	// answers that matter here — a port this user may not bind — are ones the
+	// machine will not give on demand: a test can be root, and CI's container is.
+	probeHostPort func(network, address string) error
+	ctx           context.Context // cancelled on Ctrl-C so a partial `up` rolls back
+	profiles      map[string]bool // active compose profiles (--profile, or else COMPOSE_PROFILES)
+	runFlags      string          // this run's root flags as typed, for a command the output suggests (SetRunFlags)
+	up            upOptions       // per-invocation `up` flags
 	// crashGrace is how long verifyStarted watches a just-started service before
 	// concluding it started. Per-Orchestrator so an eval can set its own.
 	crashGrace time.Duration
@@ -138,7 +143,7 @@ func (o *Orchestrator) removeOrphans(orphans []string) {
 // New builds an Orchestrator writing user-facing output to w.
 func New(p *compose.Project, rt *runtime.Runtime, dnsDomain string, w interface{ Write([]byte) (int, error) }) *Orchestrator {
 	return &Orchestrator{Project: p, DNSDomain: dnsDomain, rt: rt, out: w, sleep: time.Sleep,
-		holdPort: holdHostPort, bindHostAddress: bindHostAddress,
+		holdPort: holdHostPort, bindHostAddress: bindHostAddress, probeHostPort: bindHostPort,
 		ctx: context.Background(), crashGrace: graceFromEnv()}
 }
 
@@ -705,6 +710,41 @@ func (o *Orchestrator) checkNetworkNames(nets []resolvedNetwork) error {
 	return checkNetworkNameLengths(nets)
 }
 
+// checkVolumesFromHolders refuses a service in the given order that takes another
+// service's volumes (`volumes_from`) when that service is not in the order AND has
+// no container: there is nothing for the volumes to be shared with. docker compose
+// asks the same question of the container, whatever state it is in (measured,
+// v5.5.1: a holder that is running, or stopped, is shared with, and one that was
+// removed is `cannot share volume with service b: container missing`), so a holder
+// an earlier `up` started and this one does not — a rebuild of the borrower alone,
+// or an `up` without the profile a first one had on — is not refused. A holder the
+// file does not define, and a `container:` entry, are refused where the file is
+// read.
+func (o *Orchestrator) checkVolumesFromHolders(order []string) error {
+	started := map[string]bool{}
+	for _, name := range order {
+		started[name] = true
+	}
+	for _, name := range order {
+		svc := o.Project.Services[name]
+		if svc == nil {
+			continue
+		}
+		for _, ref := range svc.VolumesFrom {
+			holder, _, _ := strings.Cut(ref, ":")
+			if _, defined := o.Project.Services[holder]; !defined || started[holder] {
+				continue
+			}
+			if o.rt.Inspect(o.containerName(holder)).Exists {
+				continue
+			}
+			return fmt.Errorf("service %q cannot share volume with service %q: container missing — %q is not started by this run and has no container "+
+				"(a service behind a profile that is off, depended on with `required: false`, is left out); enable its profile, or name it", name, holder, holder)
+		}
+	}
+	return nil
+}
+
 // checkContainerName refuses, before anything is created, a container opossum
 // would create under a name the runtime does not take: longer than 63
 // characters, or not starting with a letter or digit and holding only letters,
@@ -976,6 +1016,14 @@ func (o *Orchestrator) checkGroupAdd(services []string) error {
 				same := ""
 				if len(alike) > 0 {
 					same = " — " + strings.Join(alike, ", ")
+				}
+				// Beside a `user:` keeping one is not enough — the one that is
+				// kept is then refused for the `user:` (`--gid` does nothing next
+				// to `--user`) — so the two are said together and the way out is
+				// one of the two, not a choice among the groups first.
+				if svc.User != "" {
+					return fmt.Errorf("service %q adds %d groups (group_add: %s%s) beside user: %q; container 1.4.1's --gid takes one, a second replaces the first, and it does nothing next to --user — drop group_add (the process then runs without the groups, and a socket or device that needs one refuses it), or drop user: and keep the one group the process needs (the image's own user then runs with it)",
+						svcName, len(order), strings.Join(quoted, ", "), same, svc.User)
 				}
 				return fmt.Errorf("service %q adds %d groups (group_add: %s%s); container 1.4.1's --gid takes one, and a second replaces the first — keep the one the process needs",
 					svcName, len(order), strings.Join(quoted, ", "), same)
@@ -1737,6 +1785,14 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 	if err := o.validateProfileDeps(order, named); err != nil {
 		return err
 	}
+	// A service that borrows another's volumes needs that service started with it:
+	// docker compose refuses one whose holder is left out (`cannot share volume with
+	// service b: container missing`, v5.5.1, measured for a holder behind a profile
+	// that is off and depended on with `required: false`, which drops the dependency
+	// and so the holder from what is started).
+	if err := o.checkVolumesFromHolders(order); err != nil {
+		return err
+	}
 
 	// Fail here if a service's env_file could not be read — before anything is
 	// removed, warned about, built or started. The order is settled by this
@@ -1867,10 +1923,10 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 	// An address this machine will not bind is asked about before anything else
 	// looks at a port. Every probe past this point binds an address and a port
 	// together, so an address that cannot be bound comes back as "this host port
-	// is in use" — and the walk below acts on that answer: it moves a mirrored
-	// entry to another port on the same absent address, says so with `OPSM-206`
-	// about a port nothing is listening on, and leaves the reader a spec that is
-	// not in their file. Asking first is what keeps those out of the output.
+	// is in use" — the pre-flight's `OPSM-201` says that of a port nothing is
+	// listening on, and the walk below passes over a mirrored entry on such an
+	// address without a word. Asking first is what puts the address, and the
+	// reason the bind gave, in the first line the reader sees.
 	//
 	// Before the duplicate check too, which is the other way round from where
 	// this started. A file with both faults hears about the address first now;
@@ -1915,7 +1971,6 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 	// that services on it have no internet egress and can't resolve peers by name.
 	var createdNets []string
 	for _, rn := range o.managedNetworks(order) {
-		o.logf("Creating network %s\n", rn.name)
 		created, nerr := o.ensureNetwork(rn)
 		var changed *subnetChangedError
 		if errors.As(nerr, &changed) {
@@ -1931,7 +1986,11 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 			return fmt.Errorf("couldn't create network %q for the project: %w\n"+
 				"  check the runtime is healthy (`opossum doctor`); if a stale network with that name exists, remove it with `container network delete %s`", rn.name, nerr, rn.name)
 		}
+		// Said once it is known: the runtime answers "already exists" for a
+		// network an earlier `up` made, and a line saying it was being created
+		// then would be about a network that was not.
 		if created {
+			o.logf("Creating network %s\n", rn.name)
 			createdNets = append(createdNets, rn.name)
 		}
 		if rn.internal {
@@ -2014,6 +2073,11 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 				}
 				line := strings.Join(parts, "; ")
 				o.logf("%s\n", strings.ToUpper(line[:1])+line[1:])
+			} else {
+				// Every attempt this call made came to nothing, so there was nothing to
+				// tear down and nothing to name — and the reader still wants to know
+				// that nothing was left behind.
+				o.logf("Nothing this `up` started is left running\n")
 			}
 		}
 		// Ask what is still running rather than reasoning about it. A service left
@@ -2206,7 +2270,12 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 		}
 
 		// Replace any stale container left by a previous run of THIS project (the
-		// pre-flight above already ruled out foreign owners).
+		// pre-flight above already ruled out foreign owners). Whether there was one
+		// is asked first: a container this up removes is one the rollback can honestly
+		// report as removed, even when the run that was to replace it never made a
+		// new one. A runtime that would not say is treated as one that had it.
+		before := o.rt.Inspect(cname)
+		replaced := before.Exists || before.Unknown
 		o.rt.Delete(cname)
 
 		// Track before running so rollback also removes a container whose run
@@ -2234,12 +2303,23 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 					started, createdSvc = disownLast(started, createdSvc, cname, name)
 					return nameTakenError(name, cname, "a run-to-completion dependency has to be run by this `up` to know it completed")
 				}
+				// The registry would not hand the image over: nothing ran, so there
+				// is no exit to check the output of, and no container to have
+				// removed (unless this up removed the one that was there — see the
+				// same case below).
+				fetch := o.imageFetchFailure(name, err)
+				if fetch != nil && !replaced {
+					delete(createdSvc, name)
+				}
 				if !o.requiredToComplete(name) {
 					// Every service that waits for this one to complete does
 					// so with `required: false`: docker compose (v5.5.1,
 					// measured) says so and goes on to start them.
 					o.warnf(codeOptionalDependency, "optional dependency %q didn't complete successfully: %v\n", name, err)
 					continue
+				}
+				if fetch != nil {
+					return fetch
 				}
 				return fmt.Errorf("service %q did not complete successfully: %w\n"+
 					"  it's a run-to-completion dependency (a service_completed_successfully target) that exited non-zero — check its output above, or run it directly with `opossum run %s`", name, err, name)
@@ -2274,7 +2354,22 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 				}
 				return nameTakenError(name, cname, "it is not the one this compose file describes (different configuration, or not running)")
 			}
-			return o.decodeStartError(name, err)
+			decoded := o.decodeStartError(name, err)
+			// The registry would not hand the image over, and imageFetchFailed has
+			// just asked the runtime whether a container of this name exists: it does
+			// not. The name went on the rollback list before the run, in case the run
+			// made a container before failing, so it comes off here — otherwise the
+			// rollback reports "stopped and removed" for a container that was never
+			// made.
+			//
+			// Unless this up had just removed one that was there: an image that was
+			// changed to one the registry does not have is a container replaced by
+			// nothing, and "stopped and removed" is what became of the old one.
+			var fetch *imageFetchError
+			if errors.As(decoded, &fetch) && !replaced {
+				delete(createdSvc, name)
+			}
+			return decoded
 		}
 		// The runtime echoes the container's DNS name (e.g. web.demo.opossum),
 		// which is for container-to-container resolution — not a URL the host can
@@ -2526,10 +2621,13 @@ type claimSource struct {
 // line would not find the number they were given.
 //
 // spokenFor is false only when nothing in this project claimed the port, which
-// leaves the listener the pre-flight probe found.
-func whyUnavailable(spokenFor bool, src claimSource, service, port string) string {
+// leaves what the bind said: a listener, or a refusal for another reason —
+// bindErr tells which, and is what the reader is given in the second case.
+func whyUnavailable(spokenFor bool, src claimSource, service, port string, bindErr error) string {
 	switch {
-	case !spokenFor: // hostPortInUse said so: something is listening
+	case !spokenFor && !hostPortTaken(bindErr): // the bind refused for a reason other than a listener
+		return fmt.Sprintf("this machine will not let opossum bind host port %s (%v)", port, bindErr)
+	case !spokenFor: // the bind said the port is in use: something is listening
 		return fmt.Sprintf("host port %s is in use", port)
 	case src.service == "":
 		return fmt.Sprintf("host port %s has already gone to another entry in this project", port)
@@ -2891,7 +2989,8 @@ func (o *Orchestrator) remapAutoHostPorts(order []string) {
 				}
 			}
 			spokenFor, src := taken(network, port, name, hostTextOf(spec))
-			if !spokenFor && !hostPortInUse(network, address) {
+			bindErr := o.askHostPort(network, address)
+			if !spokenFor && bindErr == nil {
 				note(name, spec) // the mirror is free: keep it, nothing to explain
 				// Unless the port this service was on has just been given up. The
 				// entry lands on the number the file mirrors, which reads as "no
@@ -2901,9 +3000,9 @@ func (o *Orchestrator) remapAutoHostPorts(order []string) {
 				if gaveUp != 0 {
 					o.warnf(codeHostPortRemapped, "service %q was published on host port %d, and %s, so "+
 						"opossum published it on %s instead. Run `opossum ps` for the ports actually in "+
-						"use; to pin one, write it in the compose file as \"<host>:%d\".\n",
-						name, gaveUp, whyUnavailable(true, tookIt, name, strconv.Itoa(gaveUp)),
-						port, specContainerPort(spec))
+						"use; to pin one, write it in the compose file as \"%s\".\n",
+						name, gaveUp, whyUnavailable(true, tookIt, name, strconv.Itoa(gaveUp), nil),
+						port, pinSpelling(spec))
 				}
 				continue
 			}
@@ -2923,13 +3022,13 @@ func (o *Orchestrator) remapAutoHostPorts(order []string) {
 				// about the file.
 				o.warnf(codeHostPortNotPlaced, "service %q publishes container port %s, and the compose "+
 					"file doesn't say which host port to use — %s, and %s, so it left the "+
-					"entry on %s. Write a host port in the compose file as \"<host>:%d\" to choose one "+
+					"entry on %s. Write a host port in the compose file as \"%s\" to choose one "+
 					"yourself.\n",
 					// `port` twice is not a typo: an entry that reaches here is one
 					// the file wrote as a container port alone, so the host side
 					// opossum mirrored and the container side are the same number.
-					name, port, whyUnavailable(spokenFor, src, name, port), empty, port,
-					specContainerPort(spec))
+					name, port, whyUnavailable(spokenFor, src, name, port, bindErr), empty, port,
+					pinSpelling(spec))
 				continue
 			}
 			newSpec, ok := withHostPort(spec, free)
@@ -2943,8 +3042,8 @@ func (o *Orchestrator) remapAutoHostPorts(order []string) {
 			o.warnf(codeHostPortRemapped, "service %q publishes container port %s, and the compose file "+
 				"doesn't say which host port to use — %s, so opossum published it on %d "+
 				"instead. docker compose picks a free port here too. Run `opossum ps` for the ports actually "+
-				"in use; to pin one, write it in the compose file as \"<host>:%d\".\n",
-				name, port, whyUnavailable(spokenFor, src, name, port), free, specContainerPort(spec))
+				"in use; to pin one, write it in the compose file as \"%s\".\n",
+				name, port, whyUnavailable(spokenFor, src, name, port, bindErr), free, pinSpelling(spec))
 		}
 	}
 }
@@ -2969,6 +3068,28 @@ func specContainerPort(spec string) int {
 // withHostPort rewrites a normalized spec's host port, keeping any host IP and
 // protocol suffix. ok is false for a spec it can't rewrite safely (a range).
 func withHostPort(spec string, host int) (string, bool) {
+	return respellHostPort(spec, strconv.Itoa(host))
+}
+
+// pinSpelling is what to write in the compose file to choose the host port of
+// an entry oneself: the spec with its host port left as `<host>`, and everything
+// else — the address, the container port, the protocol — as the entry has it. A
+// reader copies this, and the entry they get has to be the one they had; a
+// spelling that drops the protocol turns a udp entry into a tcp one, and one
+// that drops the address widens a loopback entry to every interface, in both
+// cases with `up` succeeding.
+func pinSpelling(spec string) string {
+	if s, ok := respellHostPort(spec, "<host>"); ok {
+		return s
+	}
+	// A range has no one spelling, and none of the callers can hand one over: they
+	// have all put a fixed host port through hostPortBinding, which refuses it.
+	return fmt.Sprintf("<host>:%d", specContainerPort(spec))
+}
+
+// respellHostPort is the one place a normalized spec has its host side replaced
+// by text: the host port that was picked, or the placeholder shown to a reader.
+func respellHostPort(spec, host string) (string, bool) {
 	s, proto := spec, ""
 	if i := strings.LastIndexByte(s, '/'); i >= 0 {
 		proto, s = s[i:], s[:i]
@@ -2987,7 +3108,7 @@ func withHostPort(spec string, host int) (string, bool) {
 	if j >= 0 {
 		prefix = rest[:j+1] // keep "ip:"
 	}
-	return fmt.Sprintf("%s%d:%s%s", prefix, host, container, proto), true
+	return fmt.Sprintf("%s%s:%s%s", prefix, host, container, proto), true
 }
 
 // holdHostPort binds one host port and hands back the socket still open. port 0
@@ -2998,7 +3119,7 @@ func withHostPort(spec string, host int) (string, bool) {
 //
 // "Can be bound" is not "nothing is listening": Go sets SO_REUSEADDR, so a
 // wildcard bind succeeds while something holds the same port on one address,
-// and the other way round (measured). It is the same answer `hostPortInUse`
+// and the other way round (measured). It is the same answer `askHostPort`
 // gives, and the same one the runtime will get when it publishes.
 //
 // There is a window between the close and the container binding it, the same one
@@ -3010,20 +3131,41 @@ func withHostPort(spec string, host int) (string, bool) {
 // can be held on another interface, and a wildcard publish would then fail at
 // bind.
 func holdHostPort(network, address string, port int) (int, io.Closer, error) {
-	// Loopback for anything that names an address, as before this walk existed.
-	// Asking the entry's own address would be a better question — a port free on
-	// loopback can be held on another interface. What stood in the way was an
-	// address the machine does not have, which would stop answering at all. Most
-	// of those are settled one step earlier now
-	// (refuseUnbindableHostAddresses) — but not all: that check leaves a service
-	// whose container is already running alone, so an address that cannot be
-	// bound still reaches this walk when the file has been edited under a running
-	// container. Changing the question here is the next step and is filed; it has
-	// to answer for that case as well.
-	host := "127.0.0.1"
+	// The entry's own address, which is where the runtime will publish it and so
+	// the only address whose answer is about this entry: a port free on loopback
+	// can be held on another interface, and the walk would then hand out a number
+	// the publish cannot have. It is the address `askHostPort` already asks
+	// about, so the two questions the walk puts — is the mirrored port free, and
+	// is this candidate free — are now about the same thing.
+	//
+	// An address this machine will not bind answers with an error rather than
+	// about somewhere else. A file naming one is refused before the walk, except
+	// for a service whose container is already running, which is the one way such
+	// an entry gets this far; the walk passes over that error without printing it,
+	// so the entry is left where the file wrote it instead of being moved to a
+	// second port it cannot have either.
+	//
+	// The family comes from the address: Go reads it off the literal, so "tcp"
+	// binds IPv6 for `[::1]` while "tcp4" with that address is refused outright.
+	// Hence the "4" below stays inside the wildcard branch.
+	host := "127.0.0.1" // an address that is not a host and a port: bind the narrowest
+	if written, _, err := net.SplitHostPort(address); err == nil {
+		host = written
+	}
 	if isWildcardAddr(address) {
+		// Emptied for what it says rather than for what it does: with the family
+		// fixed below, "tcp4" binds `[::]` and `0.0.0.0` to the same socket as no
+		// host at all (measured), so a mutation putting the file's own spelling
+		// back here changes nothing. The wildcard is not one of the addresses
+		// this walk chooses between.
+		//
+		// IPv4 is where a bare or `0.0.0.0` entry is published. `[::]` is
+		// published as an IPv6 listener (measured, and written down beside
+		// refuseDuplicateHostPorts) and is probed here all the same: this
+		// question is narrower than the runtime for that one spelling, which is
+		// as it was before and is filed rather than answered here.
 		host = ""
-		network += "4" // wildcards are published on IPv4 (see probeNetworks)
+		network += "4" // bare and `0.0.0.0` publish on IPv4 (see probeNetworks)
 	}
 	probe := net.JoinHostPort(host, strconv.Itoa(port))
 	if strings.HasPrefix(network, "udp") {
@@ -3164,13 +3306,12 @@ var errNoClearHostPort = errors.New("no host port could be placed")
 // The cost is that a running service whose address is EDITED to one that cannot
 // be bound is left to what happened before this check existed: nothing says
 // which address, the container is replaced, and the replacement fails with the
-// runtime's own error. If the edited entry names no host port AND a different
-// container port than the running container publishes, the walk below also reads
-// the port it mirrors to as in use — of an address nothing can bind — and moves it
-// to another port on that same address, with `OPSM-206` saying so. Both halves are
-// needed: edited to the same container port, the sticky path answers with the port
-// the container is already on and the walk says nothing (measured on 1.4.1, three
-// forms). The gain is that this does not break an `up` that works today.
+// runtime's own error. The walk below adds nothing to that, in either shape the
+// edit can take (measured on 1.4.1): edited to the same container port, the
+// sticky path answers with the port the container is already on; edited to a
+// different one, the walk reads the port it mirrors to as in use, finds no port
+// on that address to move it to, and passes over it. The gain is that this does
+// not break an `up` that works today.
 //
 // One-shot services ARE asked about, unlike the duplicate check, and the reason
 // does not carry over: two entries collide only if they publish at the same
@@ -3345,9 +3486,11 @@ func (o *Orchestrator) refuseDuplicateHostPorts(order []string) error {
 	return nil
 }
 
-// checkHostPorts fails if any service's published host port is already in use,
-// with a clearer message (and a macOS AirPlay hint) than the runtime's raw
-// "Address already in use" that appears mid-startup after a partial rollback.
+// checkHostPorts fails if any service's published host port is already in use
+// (`OPSM-201`), or if the bind refuses it for a reason other than a listener
+// (`OPSM-215`), with a clearer message (and a macOS AirPlay hint for a port in
+// use) than the runtime's raw error that appears mid-startup after a partial
+// rollback.
 func (o *Orchestrator) checkHostPorts(order []string) error {
 	if err := o.refuseDuplicateHostPorts(order); err != nil {
 		return err
@@ -3420,7 +3563,7 @@ func (o *Orchestrator) checkHostPorts(order []string) error {
 		return ""
 	}
 	seen := map[string]bool{}
-	var conflicts []string
+	var conflicts, refused []string
 	// Host ports this run has released by the time it reaches an entry. Grown
 	// as the walk goes rather than gathered first, and that is the whole point:
 	// `up` recreates in this order, so a container still ahead of the entry
@@ -3455,7 +3598,30 @@ func (o *Orchestrator) checkHostPorts(order []string) error {
 			if numeric {
 				key = strconv.Itoa(n) + "/" + network
 			}
-			if !hostPortInUse(network, address) || mine[key] || freed[key] {
+			bindErr := o.askHostPort(network, address)
+			if bindErr == nil {
+				continue
+			}
+			if !hostPortTaken(bindErr) {
+				// Not somebody else's listener, so nothing below applies: there is no
+				// holder to name, no port to free, and no AirPlay to blame. Nor does
+				// the set of ports this run lets go of (`mine`, `freed`) say anything
+				// here: those are answers to "who holds it", and this bind did not
+				// say a holder. The runtime refuses this entry too — it binds the
+				// same address and port (measured for a port below 1024) — so the
+				// only thing left to choose is what the reader is told, and the
+				// runtime's own message reaches them after the network and the
+				// services ahead of this one exist. A service whose container is
+				// running is left alone, as it is below: a re-up that changes nothing
+				// publishes nothing new. That includes one whose port a container of
+				// this project holds, which the holder's answer would have refused
+				// as "in use" — a reason this bind did not give.
+				if !running[name] {
+					refused = append(refused, unbindableEntry(port, address, network, name, n, numeric, bindErr))
+				}
+				continue
+			}
+			if mine[key] || freed[key] {
 				continue
 			}
 			holder := ""
@@ -3472,17 +3638,11 @@ func (o *Orchestrator) checkHostPorts(order []string) error {
 			// A service whose container is running, over a port none of this
 			// project's containers is holding. A re-up has been given the benefit
 			// of the doubt here for as long as the check has existed, and it still
-			// is: what the probe cannot tell apart is an occupant from a port this
-			// machine will not let anyone bind for a reason of its own, and that
-			// is a question about the probe rather than about whose port this is.
-			// An address the machine will not bind at all is asked about on its
-			// own, before the walk (refuseUnbindableHostAddresses) — but that
-			// check leaves a running service alone as well (for a reason of its
-			// own: a re-up that changes nothing publishes nothing new), so on
-			// THIS branch an unbindable address is still one of the things the
-			// probe cannot tell apart. What is new is the other
-			// half: when one of OUR containers is the holder, the question has an
+			// is. When one of OUR containers is the holder, the question has an
 			// answer, and the ones it answers "not free" are refused below.
+			// What the bind refused for another reason (an address this machine
+			// will not bind, a port that takes root) never reaches this line: it is
+			// worded above, and left alone for a running service there too.
 			if running[name] && holder == "" {
 				continue
 			}
@@ -3497,11 +3657,43 @@ func (o *Orchestrator) checkHostPorts(order []string) error {
 			}
 		}
 	}
+	var problems []string
 	if len(conflicts) > 0 {
-		return fmt.Errorf("[%s] host port already in use:\n  - %s\nfree the port or remap it in the compose file, then retry",
-			codeHostPortInUse, strings.Join(conflicts, "\n  - "))
+		problems = append(problems, fmt.Sprintf("[%s] host port already in use:\n  - %s\nfree the port or remap it in the compose file, then retry",
+			codeHostPortInUse, strings.Join(conflicts, "\n  - ")))
+	}
+	if len(refused) > 0 {
+		problems = append(problems, fmt.Sprintf("[%s] this host will not bind a published host port:\n  - %s",
+			codeHostPortNotBindable, strings.Join(refused, "\n  - ")))
+	}
+	if len(problems) > 0 {
+		return errors.New(strings.Join(problems, "\n"))
 	}
 	return nil
+}
+
+// unbindableEntry words one entry whose host port the bind refused for a reason
+// other than a listener. The reason is the bind's own, passed through: the same
+// refusal has more than one cause, and which is not something this can tell.
+//
+// The advice is for the one refusal it is true of, and for the entries it is
+// true of. A port below 1024 on a specific address takes root, where the same port on every address does not
+// (measured on macOS, Apple `container` 1.4.1, uid 501); the way out that keeps
+// the door as narrow as the file asked for is a port from 1024 up, and dropping
+// the address is the wider one.
+func unbindableEntry(port, address, network, service string, n int, numeric bool, bindErr error) string {
+	s := fmt.Sprintf("%s/%s (service %q): %v", port, network, service, bindErr)
+	if !hostPortDenied(bindErr) || !numeric || n >= 1024 || isWildcardAddr(address) {
+		return s // the advice is about a specific address: a wildcard is not what takes root
+	}
+	s += " — binding a port below 1024 on a specific address takes root; publish a port from 1024 up"
+	// Dropping the address is offered for an IPv4 one only. A bare entry publishes
+	// on IPv4 (see probeNetworks), so for `[::1]` it would be a move to another
+	// family as well as a wider door, and that has not been measured.
+	if host, _, err := net.SplitHostPort(address); err == nil && !strings.Contains(host, ":") {
+		s += ", or drop the address to publish on every address, which is a wider door than the file asks for"
+	}
+	return s
 }
 
 // hostPortNumber reads a host port as the number it is. The spelling reaches
@@ -3683,28 +3875,53 @@ func hostPortSpan(spec string) (network string, lo, hi int, ok bool) {
 	return network, lo, hi, true
 }
 
-// hostPortInUse reports whether the host address can't be bound (already taken).
+// askHostPort asks whether a host port can be bound and returns what the bind
+// said: nil when it can, otherwise the error, unread. What the error means is
+// the caller's to decide (see hostPortTaken), because "in use" is one of several
+// things a bind can refuse for, and the reader is told a different thing for each.
+//
 // A wildcard probe must name the address family. Asking for "tcp" on a wildcard
 // address gets a dual-stack IPv6 socket, and on macOS that binds happily
 // alongside an existing IPv4-only listener — so the port reads as free while
 // something is very much using it. That is the case the check most needs to
 // catch: the daemons that squat ports (AirPlay's receiver on 5000/7000 among
 // them) listen on IPv4.
-func hostPortInUse(network, address string) bool {
+func (o *Orchestrator) askHostPort(network, address string) error {
+	probe := o.probeHostPort
+	if probe == nil { // an Orchestrator built without New; no test reaches this
+		probe = bindHostPort
+	}
 	for _, n := range probeNetworks(network, address) {
-		if portBusy(n, address) {
-			return true
+		if err := probe(n, address); err != nil {
+			return err
 		}
 	}
-	return false
+	return nil
+}
+
+// hostPortTaken reports whether a bind error says somebody else holds the port:
+// EADDRINUSE, and nothing else. Every other refusal is about this user or this
+// address rather than about the port, and telling the reader "in use" for one of
+// them sends them to look for a listener that is not there.
+func hostPortTaken(err error) bool {
+	return errors.Is(err, syscall.EADDRINUSE)
+}
+
+// hostPortDenied reports whether a bind error is the machine refusing this user:
+// EACCES, or EPERM where a sandbox says it that way.
+func hostPortDenied(err error) bool {
+	return errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EPERM)
 }
 
 // probeNetworks picks the families to test. A wildcard is probed as IPv4 only,
-// because that is what Apple `container` publishes on: an IPv4 probe already
-// fails against a dual-stack listener, so adding an IPv6 probe would detect
-// nothing extra — it would only report a conflict for an IPv6-only listener,
-// which the runtime happily binds alongside. Reporting that would turn a project
-// that starts fine into a refusal. An address that names a host carries its own
+// because that is what Apple `container` publishes a bare or `0.0.0.0` entry on:
+// an IPv4 probe already fails against a dual-stack listener, so adding an IPv6
+// probe would detect nothing extra — it would only report a conflict for an
+// IPv6-only listener, which the runtime happily binds alongside. Reporting that
+// would turn a project that starts fine into a refusal. `[::]` is probed the same
+// way although the runtime publishes it as an IPv6 listener (measured on 1.4.1),
+// which makes this narrower than the runtime for that one spelling; that is filed
+// rather than answered here. An address that names a host carries its own
 // family, so it is probed once, as given.
 func probeNetworks(network, address string) []string {
 	if !isWildcardAddr(address) {
@@ -3716,25 +3933,24 @@ func probeNetworks(network, address string) []string {
 	return []string{"tcp4"}
 }
 
-// portBusy reports whether binding address on network fails. Any bind error
-// counts as "in use": the probe can't tell EADDRINUSE from a rarer refusal, and
-// erring toward "taken" turns a would-be silent startup failure into the clearer
-// pre-flight message.
-func portBusy(network, address string) bool {
+// bindHostPort binds address on network and lets go again, and returns the error
+// the bind gave. The listener is closed straight away: the question is whether
+// the port can be had, not to keep it.
+func bindHostPort(network, address string) error {
 	if strings.HasPrefix(network, "udp") {
 		c, err := net.ListenPacket(network, address)
 		if err != nil {
-			return true
+			return err
 		}
-		c.Close()
-		return false
+		c.Close() // a port that bound is free: what closing it says is not an answer about the port
+		return nil
 	}
 	l, err := net.Listen(network, address)
 	if err != nil {
-		return true
+		return err
 	}
 	l.Close()
-	return false
+	return nil
 }
 
 // isWildcardAddr reports whether an address names no specific host, in any of the
@@ -4707,13 +4923,41 @@ func (o *Orchestrator) decodeStartError(name string, err error) error {
 	// registry that refuses is not about a name anyone typed, and `opossum
 	// build` is where the answer is. (measured: nothing in the five shapes
 	// comes from a built image — they are all a run of an image by name.)
-	if svc := o.Project.Services[name]; svc != nil && svc.Build == nil && o.imageFetchFailed(name, err) {
-		// svc.Image is what the run asked the registry for: this is a service
-		// that builds nothing, so its image is the one `image:` names.
-		return fmt.Errorf("starting service %q: %w\n  %s", name, err, imageUnreachable(svc.Image))
+	if fetch := o.imageFetchFailure(name, err); fetch != nil {
+		return fetch
 	}
 	return startFailed(name, err)
 }
+
+// imageFetchFailure is the answer for a run of a service that builds nothing and
+// whose image the registry would not hand over, or nil when the run failed for
+// any other reason. A run to completion and a long-running service fail this way
+// alike, so both ask it.
+func (o *Orchestrator) imageFetchFailure(name string, err error) *imageFetchError {
+	svc := o.Project.Services[name]
+	if svc == nil || svc.Build != nil || !o.imageFetchFailed(name, err) {
+		return nil
+	}
+	// svc.Image is what the run asked the registry for: this is a service
+	// that builds nothing, so its image is the one `image:` names.
+	return &imageFetchError{service: name, err: err, advice: imageUnreachable(svc.Image)}
+}
+
+// imageFetchError is a start that failed because the registry would not hand the
+// image over. It is its own type because the caller has one thing to learn from
+// it that the text does not carry: no container was made for this service, so it
+// is not one the rollback stopped and removed.
+type imageFetchError struct {
+	service string
+	err     error
+	advice  string
+}
+
+func (e *imageFetchError) Error() string {
+	return fmt.Sprintf("starting service %q: %v\n  %s", e.service, e.err, e.advice)
+}
+
+func (e *imageFetchError) Unwrap() error { return e.err }
 
 // runErrorHint decodes a failed `container run` (its captured stderr) into an
 // actionable hint for a known Apple-`container` gotcha the pre-flight can't catch:
@@ -6330,7 +6574,6 @@ func (o *Orchestrator) Import(services ...string) error {
 // buildFailed wraps a build error with a pointer to the Docker-import fallback,
 // so a builder that can't handle a Dockerfile (or is misbehaving) isn't a dead
 // end.
-//
 // Not over a registry that refused an image the Dockerfile names: that is not
 // the builder failing to cope, and Docker is refused the same image (measured
 // with nothing logged in and the image not held locally: `docker build` over
@@ -6340,8 +6583,12 @@ func (o *Orchestrator) Import(services ...string) error {
 // does not say so: a login is better answered by the runtime logging in
 // ("registry auth" there), and docs/compatibility.md names both cases where the
 // way round itself is described.
+//
+// Nor over a name the runtime refuses to tag the image with (`invalid reference`,
+// #1121): the name is what is refused, whoever builds the Dockerfile, and the hint
+// says so.
 func buildFailed(service string, err error) error {
-	if errors.Is(err, runtime.ErrBuildImageRefused) {
+	if errors.Is(err, runtime.ErrBuildImageRefused) || errors.Is(err, runtime.ErrBuildInvalidReference) {
 		return fmt.Errorf("building service %q: %w", service, err)
 	}
 	return fmt.Errorf("building service %q: %w\n"+
@@ -6646,6 +6893,12 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 	}
 	if err := o.seedVolumes(service, svc, image); err != nil {
 		if o.interrupted() != nil {
+			// Said as it is: taken back when everything is gone, and when
+			// something is not, what is left and how to remove it.
+			var left *seedInterruptedError
+			if errors.As(err, &left) {
+				return runInterrupted("the fill of a new volume for " + service + " was cut short, and " + strings.Join(left.left, "; "))
+			}
 			return runInterrupted("the fill of a new volume for " + service + " was taken back")
 		}
 		return err
@@ -7105,10 +7358,25 @@ func (o *Orchestrator) buildOptions(tag string, b *compose.Build, redo string) r
 		ctx = "."
 	}
 	resolved := o.resolvePath(ctx)
+	// `dockerfile` is a path from the build context, an absolute one taken as it
+	// is (docker compose v5.5.1, measured: `{context: ./sub, dockerfile:
+	// Dockerfile.alt}` builds and `dockerfile: sub/Dockerfile.alt` does not).
+	// `container build -f` reads a relative path from where opossum runs, so it is
+	// joined onto the context here: the one place that assembles a build, which
+	// `up`, `build` and a one-off's dependencies all come through.
+	dockerfile := b.Dockerfile
+	if dockerfile != "" && !filepath.IsAbs(dockerfile) {
+		dockerfile = filepath.Join(resolved, dockerfile)
+	}
 	return runtime.BuildOptions{
 		Tag:        tag,
 		Context:    resolved,
-		Dockerfile: b.Dockerfile,
+		Dockerfile: dockerfile,
+		// Written in the compose file: built in place of any Dockerfile in the
+		// context, as docker compose builds it (measured: the inline one wins over
+		// a Dockerfile that is there). Never set with `dockerfile` — the load
+		// refuses the pair.
+		DockerfileInline: b.DockerfileInline,
 		// A bare `NAME` takes the shell's value here, and is left out when
 		// the shell has none: Apple's builder does not read the shell itself
 		// (`container build --build-arg A` gives the Dockerfile an empty A,
@@ -7402,8 +7670,7 @@ func (o *Orchestrator) seedVolumes(svcName string, svc *compose.Service, image s
 			// fresh volume, which is the opposite of what it asks for.
 			if err := o.rt.PrepareVolume(m.Volume, image); err != nil {
 				if ierr := o.interrupted(); ierr != nil {
-					o.takeBackSeed(m.Volume)
-					return ierr
+					return o.tookBackSeed(m.Volume, ierr)
 				}
 				o.warnf(codeVolumeNotSeeded, "couldn't prepare the new volume %q with %s: %v\n"+
 					"         nothing was copied into it (the compose file asked for that), but it also\n"+
@@ -7417,8 +7684,7 @@ func (o *Orchestrator) seedVolumes(svcName string, svc *compose.Service, image s
 		}
 		if err := o.rt.SeedVolume(m.Volume, image, m.Target); err != nil {
 			if ierr := o.interrupted(); ierr != nil {
-				o.takeBackSeed(m.Volume)
-				return ierr
+				return o.tookBackSeed(m.Volume, ierr)
 			}
 			// The volume mounts empty, which looks exactly like a service that lost its
 			// data — and nothing later can tell the two apart, so this is the only
@@ -7459,12 +7725,59 @@ func runInterrupted(what string) error {
 // project out — someone removing that lock takes this guarantee with it. A
 // one-off `run` seeds outside that lock and relies on the namespace and the
 // shortness of the window alone.
-func (o *Orchestrator) takeBackSeed(volume string) {
+//
+// What became of each is asked of the runtime afterwards, since `stop` and
+// `delete` report nothing that says the thing is gone (the same reading `run`'s
+// cleanup takes): what is still there, or could not be looked at, is returned as
+// a sentence with the command that removes it, and nothing is returned when
+// everything is gone. The container is deleted before the volume, since a volume
+// still attached to a container is one `volume delete` cannot remove, and each is
+// asked about whatever became of the other: a container left standing is
+// reported beside a volume that was left because of it.
+func (o *Orchestrator) takeBackSeed(volume string) []string {
 	o.rt.Ctx = context.Background()
 	name := runtime.SeedContainerName(volume)
 	o.rt.Stop(name)
 	o.rt.Delete(name)
 	o.rt.DeleteVolume(volume)
+	var left []string
+	switch info := o.rt.Inspect(name); {
+	case info.Unknown:
+		left = append(left, fmt.Sprintf("the runtime could not be asked whether the container %s that was filling the volume %s is gone (`container ls -a` shows it, `container delete --force %s` removes it)", name, volume, name))
+	case info.Exists:
+		left = append(left, fmt.Sprintf("the container %s that was filling the volume %s is still there (`container delete --force %s` removes it)", name, volume, name))
+	}
+	switch exists, known := o.rt.VolumeListed(volume); {
+	case !known:
+		left = append(left, fmt.Sprintf("the runtime could not be asked whether the half-filled volume %s is gone (`container volume ls` shows it, `container volume delete %s` removes it)", volume, volume))
+	case exists:
+		left = append(left, fmt.Sprintf("the half-filled volume %s is still there (`container volume delete %s` removes it)", volume, volume))
+	}
+	return left
+}
+
+// seedInterruptedError is a seeding cut short by Ctrl-C whose take-back left
+// something behind. It carries what, so the caller that words the verdict — `run`
+// says its own — can say it instead of claiming the fill was taken back.
+type seedInterruptedError struct {
+	err  error
+	left []string
+}
+
+func (e *seedInterruptedError) Error() string {
+	return e.err.Error() + " — " + strings.Join(e.left, "; ")
+}
+
+func (e *seedInterruptedError) Unwrap() error { return e.err }
+
+// tookBackSeed takes a seed's leftovers back and gives the interruption the
+// caller returns: as it was when nothing is left, and carrying what is when
+// something is.
+func (o *Orchestrator) tookBackSeed(volume string, interrupted error) error {
+	if left := o.takeBackSeed(volume); len(left) > 0 {
+		return &seedInterruptedError{err: interrupted, left: left}
+	}
+	return interrupted
 }
 
 // isHostPath is the loader's reading of a mount source (compose.IsHostPath):

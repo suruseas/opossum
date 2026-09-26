@@ -146,6 +146,11 @@ func TestMain(m *testing.M) {
 	leaked, lookedPath := leakedProcesses(opossumBin)
 	if len(leaked) > 0 {
 		fmt.Fprint(os.Stderr, "\n"+leakReport(opossumBin, leaked))
+		// Who they are, as far as `ps` says: the parent, how long each has been
+		// running and its whole command line, which is what points at the test that
+		// started it (a supervisor's `-p` and `--watch-service`, a shell around a
+		// script, a `logs --follow`).
+		fmt.Fprint(os.Stderr, describeProcesses(leaked))
 		for _, pid := range leaked {
 			reported[pid] = true
 		}
@@ -179,6 +184,27 @@ func TestMain(m *testing.M) {
 
 	os.RemoveAll(d)
 	os.Exit(code)
+}
+
+// describeProcesses says what `ps` knows about each pid: the parent, the time it
+// has been running, and its command line — the lines a leak report is followed by.
+// Best effort: a process that has gone by the time it is asked about is said to
+// have gone (it was on its way out, which is itself worth knowing), and no `ps` is
+// no lines at all, not a failure.
+func describeProcesses(pids []int) string {
+	if _, err := exec.LookPath("ps"); err != nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, pid := range pids {
+		out, err := exec.Command("ps", "-o", "pid=,ppid=,etime=,args=", "-p", strconv.Itoa(pid)).Output()
+		if err != nil || strings.TrimSpace(string(out)) == "" {
+			fmt.Fprintf(&b, "  %d had gone by the time it was looked at\n", pid)
+			continue
+		}
+		fmt.Fprintf(&b, "  pid ppid etime args: %s\n", strings.TrimSpace(string(out)))
+	}
+	return b.String()
 }
 
 // leakReport is what the suite says when something outlived it. The command in
@@ -1019,7 +1045,9 @@ func TestTheTableAndTheFailureGoToDifferentPlaces(t *testing.T) {
 // flattening that keeps a project from ending a line early does not reach them.
 // A service name with a newline in it used to split its own row: the column
 // being filled was lost, the rest started at column zero where opossum's own
-// sentences start, and every row below it stopped lining up.
+// sentences start, and every row below it stopped lining up. A service name can
+// no longer carry one (the loader refuses a name outside letters, digits, `.`,
+// `_` and `-`), and the image reference, which can, is what this holds.
 func TestATableIsOneRowPerService(t *testing.T) {
 	fakeShim(t)
 	// A tab and a carriage return as well as a newline: a tab is read as the
@@ -1027,10 +1055,9 @@ func TestATableIsOneRowPerService(t *testing.T) {
 	// own, and a carriage return moves the cursor back over the row already
 	// printed. Flattening a newline alone leaves both.
 	forged := `[opossum note] service \"payroll\": opossum\tdeleted\ryour database`
-	// The image reference too, not only the service name. The first cell is the
-	// one a check on line beginnings sees; the cells after it are where a column
-	// can be taken quietly.
-	compose := writeCompose(t, "name: demo\nservices:\n  \"web\\n"+forged+"\":\n    image: \"web:latest\\n"+forged+"\"\n")
+	// The image reference is the cell after the first, where a column can be
+	// taken quietly.
+	compose := writeCompose(t, "name: demo\nservices:\n  web:\n    image: \"web:latest\\n"+forged+"\"\n")
 	for _, cmd := range []string{"ps", "images"} {
 		t.Run(cmd, func(t *testing.T) {
 			out, err := run(t, "-f", compose, cmd)
@@ -1044,7 +1071,7 @@ func TestATableIsOneRowPerService(t *testing.T) {
 			}
 			for _, line := range body {
 				if strings.HasPrefix(line, "[opossum note]") {
-					t.Errorf("a service name started a line of its own:\n%s", out)
+					t.Errorf("an image reference started a line of its own:\n%s", out)
 				}
 			}
 			// The row has as many columns as the header. A tab inside a cell
@@ -5638,6 +5665,26 @@ func groupMembers(t *testing.T, pgid int) []int {
 // []int gives `kill [321 654]`: bash refuses the argument, zsh tries to glob it.
 // A report nobody can act on is the same as no report, and this one is only read
 // when something has already gone wrong.
+func TestTheLeakedProcessesAreNamedByWhatTheyAreRunning(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "opossum-describe-probe")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nsleep 60 &\nwait\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := startProbe(t, bin)
+	got := describeProcesses([]int{cmd.Process.Pid})
+	// The command line is what tells one leak from another, so it has to be in it,
+	// and the pid and the parent (this test) before it.
+	for _, want := range []string{strconv.Itoa(cmd.Process.Pid), strconv.Itoa(os.Getpid()), bin} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the description does not carry %q:\n%s", want, got)
+		}
+	}
+	// A pid that is not there is said to be gone, not dropped and not a failure.
+	if gone := describeProcesses([]int{1 << 22}); !strings.Contains(gone, "had gone") {
+		t.Errorf("a pid with no process is not reported as gone:\n%q", gone)
+	}
+}
+
 func TestTheLeakReportOffersACommandAShellWillTake(t *testing.T) {
 	// Held whole. Its sibling report is pinned this way because a list of things
 	// the sentence must not say only ever catches the wordings someone already

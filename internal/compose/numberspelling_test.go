@@ -142,9 +142,9 @@ func TestAGroupTooLargeForAnIntegerStaysAsWritten(t *testing.T) {
 	}
 }
 
-// Nothing else in the file is read differently: a label keeps the spelling it
-// had, and an environment value keeps the decimal it already had (this
-// changes `group_add` alone).
+// Nothing else in the file moves with it: an environment value keeps the
+// decimal it already had, and a label takes the same reading (see
+// labelnumbers_test.go).
 func TestReadingTheGroupDoesNotChangeTheRestOfTheFile(t *testing.T) {
 	dir := t.TempDir()
 	one := filepath.Join(dir, "compose.yaml")
@@ -157,8 +157,8 @@ func TestReadingTheGroupDoesNotChangeTheRestOfTheFile(t *testing.T) {
 	if got := strings.Join(svc.GroupAdd, ","); got != "16" {
 		t.Errorf("group_add = %q, want 16", got)
 	}
-	if got := labelValue(t, svc.Labels, "a"); got != "0x10" {
-		t.Errorf("label a = %q, want 0x10 (untouched)", got)
+	if got := labelValue(t, svc.Labels, "a"); got != "16" {
+		t.Errorf("label a = %q, want 16", got)
 	}
 	// `environment` reads its value into a string itself, in decimal, as it
 	// did before this change.

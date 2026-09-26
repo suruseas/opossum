@@ -30,7 +30,7 @@ func TestTheDataDirectoryMoveIsWordForWord(t *testing.T) {
 	body, changes := planFor(t, `
 name: demo
 services:
-  ca$$he:
+  ca.he:
     image: mysql:8
     volumes:
       - ./my$$data:/var/lib/mysql
@@ -40,17 +40,17 @@ services:
 	}
 	// On the screen. The order is what the sentence is for: which service, what
 	// moved, where from, where to.
-	// The service name and the host path both carry a `$`, so that the escaping
-	// is visible on two of the values rather than one. The summary goes on a
-	// terminal and keeps them as written; the overlay is a compose file and
-	// doubles them, or the next reader of that file gets a variable expansion
-	// where a name should be.
+	// The host path carries a `$`, so that the escaping is visible on one of the
+	// values. The summary goes on a terminal and keeps it as written; the overlay
+	// is a compose file and doubles it, or the next reader of that file gets a
+	// variable expansion where a path should be. (A service name cannot carry
+	// one: docker compose refuses it, and so does the loader.)
 	//
 	// Not every esc() in this block is reached from here: the container path is
 	// fixed (it has to be a data directory the adaptation recognises), and the
 	// NOTE line further down and the generated volumes entry take values this
 	// fixture does not put a `$` into. Those are still unguarded — see #559.
-	want := `service "ca$he": data directory /var/lib/mysql moved from the host path ./my$data to a named volume "ca-he-data"`
+	want := `service "ca.he": data directory /var/lib/mysql moved from the host path ./my$data to a named volume "ca-he-data"`
 	if changes[0].Summary != want {
 		t.Errorf("summary =\n %q\nwant\n %q", changes[0].Summary, want)
 	}
@@ -58,7 +58,7 @@ services:
 	// And in the overlay, which the reader keeps. Written the other way round
 	// this says the volume is being replaced by the host path — the opposite of
 	// what happened, in a file that stays behind after the run that made it.
-	wantComment := `  # [opossum --from-docker-compose] service "ca$$he": /var/lib/mysql now uses the named volume "ca-he-data" instead of the host path "./my$$data".`
+	wantComment := `  # [opossum --from-docker-compose] service "ca.he": /var/lib/mysql now uses the named volume "ca-he-data" instead of the host path "./my$$data".`
 	// Once, and as a whole line. Picking the last line that mentions the volume
 	// would pass for an overlay that said it twice, or said it somewhere the
 	// reader does not look.

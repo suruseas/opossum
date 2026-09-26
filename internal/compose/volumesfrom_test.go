@@ -52,9 +52,6 @@ func TestVolumesFromMountsTheNamedServicesVolumes(t *testing.T) {
 		{"service:holder is not a spelling",
 			"  holder:\n    image: a\n  user:\n    image: a\n    volumes_from: ['service:holder']\n",
 			nil, nil, `depends on undefined service "service"`},
-		{"a cycle",
-			"  a:\n    image: a\n    volumes_from: [b]\n  b:\n    image: a\n    volumes_from: [a]\n",
-			nil, nil, "dependency cycle detected: a -> b -> a"},
 		{"a holder's anonymous volume is not carried",
 			"  holder:\n    image: a\n    volumes: [/data]\n  user:\n    image: a\n    volumes_from: [holder]\n",
 			nil, nil, "anonymous volume at /data"},
@@ -73,12 +70,6 @@ func TestVolumesFromMountsTheNamedServicesVolumes(t *testing.T) {
 		{"the same service twice",
 			"  holder:\n    image: a\n  user:\n    image: a\n    volumes_from: [holder, holder]\n",
 			nil, nil, "volumes_from items at 0 and 1 are equal"},
-		{"a cycle entered from outside is named from where it comes back to",
-			"  a:\n    image: a\n    volumes_from: [b]\n  b:\n    image: a\n    volumes_from: [c]\n  c:\n    image: a\n    volumes_from: [b]\n",
-			nil, nil, "dependency cycle detected: b -> c -> b"},
-		{"a service naming itself",
-			"  user:\n    image: a\n    volumes_from: [user]\n",
-			nil, nil, "dependency cycle detected: user -> user"},
 		{"the suffix and a written dependency together: the dependency is kept",
 			"  holder:\n    image: a\n    volumes: [./h:/shared]\n    healthcheck: {test: [CMD, \"true\"]}\n  user:\n    image: a\n    depends_on:\n      holder: {condition: service_healthy}\n    volumes_from: ['holder:ro']\n",
 			[]string{"./h:/shared"}, []Dependency{{"holder", ConditionHealthy, false}}, ""},
@@ -237,9 +228,6 @@ func TestVolumesFromKnownDifferences(t *testing.T) {
 		{"a cycle a volumes_from entry closes with a depends_on is not read at the load",
 			"  a:\n    image: a\n    volumes_from: [b]\n  b:\n    image: a\n    depends_on: [a]\n",
 			"", "config rc 1: dependency cycle detected: a -> b -> a"},
-		{"a cycle behind a profile that is off is read",
-			"  main:\n    image: a\n  a:\n    image: a\n    profiles: [extra]\n    volumes_from: [b]\n  b:\n    image: a\n    profiles: [extra]\n    volumes_from: [a]\n",
-			"dependency cycle detected: a -> b -> a", "config, ps, down rc 0 (the corner is not read)"},
 		{"an anonymous volume behind a profile that is off is read",
 			"  main:\n    image: a\n  holder:\n    image: a\n    profiles: [extra]\n    volumes: [/data]\n  user:\n    image: a\n    profiles: [extra]\n    volumes_from: [holder]\n",
 			"anonymous volume at /data", "config rc 0"},
@@ -263,6 +251,56 @@ func TestVolumesFromKnownDifferences(t *testing.T) {
 			}
 			if err == nil || !strings.Contains(err.Error(), tc.err) {
 				t.Fatalf("want a refusal saying %q (docker compose: %s), got %v", tc.err, tc.docker, err)
+			}
+		})
+	}
+}
+
+// A cycle among `volumes_from` entries is read where a cycle among `depends_on`
+// is: by the commands that put the services in order, over the services they
+// read. docker compose reads the two as one graph (v5.5.1, measured
+// 2026-09-26), so a corner behind a profile that is off is not read, and one
+// among the services being read refuses. It was once refused as the file was
+// read, on every service, which stopped every command over a project whose
+// gated corner held one — `ps` and `down` included.
+func TestAVolumesFromCycleIsReadWhereTheServicesAreOrdered(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		read       []string // the services a command that reads only these would read
+		err        string   // the order over them says this; "" for no cycle among them
+	}{
+		{"two services",
+			"  a:\n    image: a\n    volumes_from: [b]\n  b:\n    image: a\n    volumes_from: [a]\n",
+			nil, "dependency cycle detected: [a b] -> a"},
+		{"entered from outside: the road in is named too",
+			"  a:\n    image: a\n    volumes_from: [b]\n  b:\n    image: a\n    volumes_from: [c]\n  c:\n    image: a\n    volumes_from: [b]\n",
+			nil, "dependency cycle detected: [a b c] -> b"},
+		{"a service naming itself",
+			"  user:\n    image: a\n    volumes_from: [user]\n",
+			nil, "dependency cycle detected: [user] -> user"},
+		{"one edge of each kind",
+			"  a:\n    image: a\n    volumes_from: [b]\n  b:\n    image: a\n    depends_on: [a]\n",
+			nil, "dependency cycle detected: [a b] -> a"},
+		// The two sides of the same file: read as a whole it is a cycle, and read
+		// without the services that close it, it is not.
+		{"read with the services that close it",
+			"  main:\n    image: a\n  a:\n    image: a\n    profiles: [extra]\n    volumes_from: [b]\n  b:\n    image: a\n    profiles: [extra]\n    volumes_from: [a]\n",
+			[]string{"a", "b", "main"}, "dependency cycle detected: [a b] -> a"},
+		{"read without them",
+			"  main:\n    image: a\n  a:\n    image: a\n    profiles: [extra]\n    volumes_from: [b]\n  b:\n    image: a\n    profiles: [extra]\n    volumes_from: [a]\n",
+			[]string{"main"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := Load(writeTemp(t, "services:\n"+tc.body))
+			if err != nil {
+				t.Fatalf("want the load to go ahead, the cycle is read where the services are ordered, got %v", err)
+			}
+			_, err = p.StartupOrderReading(tc.read)
+			switch {
+			case tc.err == "" && err != nil:
+				t.Errorf("want no cycle among the services read, got %v", err)
+			case tc.err != "" && (err == nil || !strings.Contains(err.Error(), tc.err)):
+				t.Errorf("want %q, got %v", tc.err, err)
 			}
 		})
 	}

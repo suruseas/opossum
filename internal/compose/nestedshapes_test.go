@@ -19,6 +19,12 @@ func TestANestedFieldOfTheWrongShapeIsRefused(t *testing.T) {
 		{"build as a number", "services:\n  web:\n    build: 42\n", "build must be a string or a mapping, got a number"},
 		{"build.context as a number", "services:\n  web:\n    build:\n      context: 42\n", "build.context must be a string, got a number — write a path, as in `.`"},
 		{"build.dockerfile as a boolean", "services:\n  web:\n    build:\n      context: .\n      dockerfile: true\n", "build.dockerfile must be a string, got true/false"},
+		// Read now, so its shape is asked: docker compose refuses a number there
+		// (`build.dockerfile_inline must be a string`, v5.5.1), and a number was
+		// built as a Dockerfile of the text "123". A mapping or a list is refused by
+		// the decode in its own words, as it is for `dockerfile` and `context`.
+		{"build.dockerfile_inline as a number", "services:\n  web:\n    build:\n      context: .\n      dockerfile_inline: 123\n", "build.dockerfile_inline must be a string, got a number"},
+
 		{"build.context bare", "services:\n  web:\n    build:\n      context:\n", "build.context must be a string, got nothing"},
 		{"deploy.resources bare", "services:\n  web:\n    image: alpine\n    deploy:\n      resources:\n", "deploy.resources must be a mapping, got nothing"},
 		{"deploy.resources.limits bare", "services:\n  web:\n    image: alpine\n    deploy:\n      resources:\n        limits:\n", "deploy.resources.limits must be a mapping, got nothing"},

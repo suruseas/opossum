@@ -29,7 +29,7 @@ import (
 // fails on anything else. `$0` and the positional parameters are refused outright:
 // they are not names, and what they hold differs between here and a runner. `PATH`
 // is supplied, and points at the stand-in `git`, which models three calls —
-// `diff --name-only [--diff-filter=A] BASE...HEAD` and `log --format=%B BASE..HEAD`
+// `diff --name-only [--diff-filter=AM] BASE...HEAD` and `log --format=%B BASE..HEAD`
 // — and shouts at every other, with one exception: a revision range it does not
 // recognise gets an empty answer rather than a shout, because that is what git
 // answers for `A...A` or for the two the other way round (a single revision is
@@ -120,7 +120,7 @@ func TestTheChangelogGateAsksForANoteAboutEverythingThatShips(t *testing.T) {
 
 	// The ways out, and the things that look like a way out and are not. One file
 	// at a time says nothing about a rule that reads the size of the change, or
-	// one that takes a modified fragment for an added one, so the shapes are
+	// one that takes a deleted fragment for a written one, so the shapes are
 	// spelled out here.
 	ship := files[0]
 	var many []string
@@ -145,9 +145,18 @@ func TestTheChangelogGateAsksForANoteAboutEverythingThatShips(t *testing.T) {
 		{name: "the PR body opts out", changed: []string{ship}, body: "no note needed [skip changelog]", wantPass: true},
 		// The body has to carry the token, not merely the subject.
 		{name: "the body only talks about the changelog", changed: []string{ship}, body: "I updated the changelog earlier"},
-		// An existing fragment edited is not a fragment added: the release note
-		// for this change still does not exist.
-		{name: "a fragment is edited, not added", changed: []string{ship, "changelog.d/999-x.fixed.md"}},
+		// An existing fragment rewritten IS the release note for this change when the
+		// entry it holds was never published: a change that a reader sees once is
+		// written by rewriting the fragment an earlier PR of the same change left,
+		// and asking for a second one would announce it twice. The stand-in's answer
+		// to the gate's `--diff-filter=AM` carries it, as git's does.
+		{name: "a fragment is rewritten", changed: []string{ship, "changelog.d/999-x.fixed.md"},
+			added: []string{"changelog.d/999-x.fixed.md"}, wantPass: true},
+		// A fragment deleted is neither added nor rewritten: the release note for
+		// this change still does not exist. git lists it among the changes and not
+		// among the added-or-modified, so the answer here is the same.
+		{name: "a fragment is deleted", changed: []string{ship, "changelog.d/999-x.fixed.md"}},
+
 		// The README is not an entry, and a subdirectory is not read by the
 		// assembler — an entry there is dropped from the release in silence.
 		{name: "only the fragments' README is added", changed: []string{ship, "changelog.d/README.md"},
@@ -530,7 +539,7 @@ func TestTheStandInGitAnswersOnlyWhatItModels(t *testing.T) {
 		{name: "…with an option after the range", args: []string{"log", "--format=%B", "BASE_SHA..HEAD_SHA", "--no-merges"}, code: 3},
 		{name: "…for a single revision", args: []string{"log", "--format=%B", "HEAD_SHA"}, code: 3},
 		{name: "…without the format", args: []string{"log", "BASE_SHA..HEAD_SHA"}, code: 3},
-		{name: "…and the added-only form", args: []string{"diff", "--name-only", "--diff-filter=A", "BASE_SHA...HEAD_SHA"}, want: "b.go\n"},
+		{name: "…and the added-or-modified form", args: []string{"diff", "--name-only", "--diff-filter=AM", "BASE_SHA...HEAD_SHA"}, want: "b.go\n"},
 		// git's A...B is merge-base(A,B)..B, so the order carries the meaning: the
 		// same revision twice, or the two the other way round, is an empty diff.
 		{name: "the same revision twice", args: []string{"diff", "--name-only", "BASE_SHA...BASE_SHA"}, want: ""},
@@ -544,7 +553,12 @@ func TestTheStandInGitAnswersOnlyWhatItModels(t *testing.T) {
 		{name: "a patch instead of names", args: []string{"diff", "BASE_SHA...HEAD_SHA"}, code: 3},
 		{name: "a pathspec", args: []string{"diff", "--name-only", "BASE_SHA...HEAD_SHA", "--", "."}, code: 3},
 		{name: "a global option", args: []string{"-C", "/repo", "diff", "--name-only", "BASE_SHA...HEAD_SHA"}, code: 3},
-		{name: "another filter", args: []string{"diff", "--name-only", "--diff-filter=AM", "BASE_SHA...HEAD_SHA"}, code: 3},
+		// The added-only filter is the one the gate used to ask for, and the one
+		// that cannot see a fragment rewritten in place: asking for it again has to
+		// be loud, so the guard is on what the script asks and not only on what the
+		// stand-in answers.
+		{name: "the added-only filter", args: []string{"diff", "--name-only", "--diff-filter=A", "BASE_SHA...HEAD_SHA"}, code: 3},
+		{name: "another filter", args: []string{"diff", "--name-only", "--diff-filter=M", "BASE_SHA...HEAD_SHA"}, code: 3},
 		{name: "two ranges", args: []string{"diff", "--name-only", "BASE_SHA...HEAD_SHA", "X...Y"}, code: 3},
 		{name: "no range at all", args: []string{"diff", "--name-only"}, code: 3},
 		{name: "another subcommand", args: []string{"rev-parse", "HEAD"}, code: 3},
@@ -884,7 +898,7 @@ var runnerNames = []string{
 	"GITHUB_WORKSPACE", "RUNNER_OS", "GITHUB_RUN_ID",
 }
 
-// fakeGit answers `diff --name-only [--diff-filter=A] BASE_SHA...HEAD_SHA` and
+// fakeGit answers `diff --name-only [--diff-filter=AM] BASE_SHA...HEAD_SHA` and
 // `log --format=%B BASE_SHA..HEAD_SHA`, and shouts at everything else.
 //
 // Shouting is the point. A stand-in that quietly returns nothing for a call it
@@ -921,8 +935,8 @@ range=""
 for a in "$@"; do
   case "$a" in
     --name-only) names=yes ;;
-    --diff-filter=A) filter=yes ;;
-    --diff-filter=*) say "only --diff-filter=A is modelled, got $a" ;;
+    --diff-filter=AM) filter=yes ;;
+    --diff-filter=*) say "only --diff-filter=AM is modelled, got $a" ;;
     --) say "a pathspec narrows the diff, and this stand-in does not model one" ;;
     -*) say "unmodelled option: $a" ;;
     *...*) [ -z "$range" ] || say "more than one revision range: $*" ; range="$a" ;;

@@ -118,6 +118,26 @@ func shimFor(t *testing.T, cs ...fakeContainer) *runtime.Runtime {
 	return &runtime.Runtime{Bin: shim}
 }
 
+// freeBelow is the port just under held that nothing is listening on. The rows
+// read "some other port" for the entry a service has been moved off, and it has
+// to be a free one: the OS hands out numbers in sequence, so the number under
+// the one a row holds is the one a listener of another test, in another package
+// running at the same time, has most likely just been given. Taking it as it
+// came read as "in use" and refused a row that wants none (seen once on the
+// runner: 42957 held, 42956 taken by someone else).
+func freeBelow(t *testing.T, held int) int {
+	t.Helper()
+	for p := held - 1; p > held-64 && p > 1024; p-- {
+		l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", p))
+		if err == nil {
+			l.Close()
+			return p
+		}
+	}
+	t.Fatalf("no free port in the 63 under %d", held)
+	return 0
+}
+
 func TestAHostPortThisRunFreesItselfIsNotAConflict(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -281,7 +301,7 @@ func TestAHostPortThisRunFreesItselfIsNotAConflict(t *testing.T) {
 			if holderProto == "" {
 				holderProto = proto
 			}
-			aPorts := fmt.Sprintf("%d:80", held-1)
+			aPorts := fmt.Sprintf("%d:80", freeBelow(t, held))
 			if tc.aPorts != "" {
 				aPorts = fmt.Sprintf(tc.aPorts, held, held+2, held-1, held+1, held-2)
 			}
@@ -566,5 +586,29 @@ func TestTwoAddressesThatDifferAfterTheFirstColonAreTwoAddresses(t *testing.T) {
 					map[bool]string{true: "refused", false: "accepted"}[tc.wantRefuse])
 			}
 		})
+	}
+}
+
+// The helper above, against the case it exists for: the number under held is
+// taken by someone else, and the answer is a free one further down.
+func TestFreeBelowSkipsAPortSomeoneIsHolding(t *testing.T) {
+	holder, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Close()
+	taken := holder.Addr().(*net.TCPAddr).Port
+	held := taken + 1
+	got := freeBelow(t, held)
+	if got == taken {
+		t.Fatalf("freeBelow(%d) = %d, which is held", held, got)
+	}
+	l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", got))
+	if err != nil {
+		t.Fatalf("freeBelow(%d) = %d, which cannot be bound: %v", held, got, err)
+	}
+	l.Close()
+	if got >= held {
+		t.Errorf("freeBelow(%d) = %d, want a port under it", held, got)
 	}
 }

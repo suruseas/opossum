@@ -49,6 +49,14 @@ func TestDependsOnRequired(t *testing.T) {
 		{"the condition is a list", "      cache: {condition: [service_started]}\n", false, "depends_on.cache.condition must be a string, got a list"},
 		{"the condition is a mapping", "      cache: {condition: {a: b}}\n", false, "depends_on.cache.condition must be a string, got a mapping"},
 		{"the condition is a list beside required: false", "      cache: {condition: [service_started], required: false}\n", false, "depends_on.cache.condition must be a string"},
+		// A key written twice is what docker compose says first: it is the parse
+		// that fails, before anything is checked (v5.5.1, measured, 3 of 3), so the
+		// same pair reads as a repeat and not as a condition of the wrong kind
+		// (#1163). The condition alone, in the same kinds, is still the kind.
+		{"required twice beside a mapping condition", "      cache: {condition: {a: b}, required: false, required: true}\n", false, `mapping key "required" already defined`},
+		{"required twice beside a list condition", "      cache: {condition: [x], required: false, required: true}\n", false, `mapping key "required" already defined`},
+		{"the condition twice, each a list", "      cache: {condition: [x], condition: [y]}\n", false, `mapping key "condition" already defined`},
+		{"required twice beside a valid condition", "      cache: {condition: service_started, required: false, required: true}\n", false, `mapping key "required" already defined`},
 		// The false side of the YAML 1.1 words, which YAML 1.2 hands over as
 		// strings: docker compose reads each as false.
 		{"required: no", "      cache: {condition: service_started, required: no}\n", true, ""},

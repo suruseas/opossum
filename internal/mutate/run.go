@@ -66,7 +66,16 @@ type Runner struct {
 	pending  bool
 	pendPath string
 	pendOrig []byte
-	aborted  bool
+	// pendMut is what the mutation wrote, and pendMutation says which mutation:
+	// the file is put back only if it still holds the first, and what is said
+	// about it when it does not comes from the second.
+	pendMut      []byte
+	pendMutation Mutation
+	// pendWritten is whether that write went through. A write that failed partway
+	// leaves the file however it left it (truncated, say), and that is the
+	// mutation's damage and not somebody's edit.
+	pendWritten bool
+	aborted     bool
 	// restoredOnCancel records that the sweep itself put the in-flight file
 	// back after Ctx was cancelled — the interrupt handler cancels first and
 	// asks second, and the toolchain it killed can hand the sweep the lock
@@ -332,7 +341,7 @@ func (r *Runner) RestorePending() (restored bool, err error) {
 		// tried and could not, that is the answer — the file is still mutated.
 		return r.restoredOnCancel, r.restoreErrOnCancel
 	}
-	err = r.restoreLocked(r.pendPath, r.pendOrig)
+	err = r.restorePendingLocked()
 	r.pending = false
 	return true, err
 }
@@ -351,7 +360,7 @@ func (r *Runner) cancelled() bool { return r.Ctx != nil && r.Ctx.Err() != nil }
 
 // armAndWrite registers the restore and writes the mutation as one step, so no
 // interrupt can see one without the other.
-func (r *Runner) armAndWrite(path string, original, mutated []byte) error {
+func (r *Runner) armAndWrite(path string, original, mutated []byte, m Mutation) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.aborted {
@@ -362,7 +371,12 @@ func (r *Runner) armAndWrite(path string, original, mutated []byte) error {
 	// the file already destroyed. Registering afterwards would mean the one case
 	// where the file is definitely damaged is the one case nothing puts it back.
 	r.pending, r.pendPath, r.pendOrig = true, path, original
-	return r.Write(path, mutated)
+	r.pendMut, r.pendMutation, r.pendWritten = mutated, m, false
+	if err := r.Write(path, mutated); err != nil {
+		return err
+	}
+	r.pendWritten = true
+	return nil
 }
 
 // prepare checks a mutation and works out what it would write, without writing
@@ -401,7 +415,7 @@ func (r *Runner) one(m Mutation) (res Result, err error) {
 		return Result{}, err
 	}
 
-	werr := r.armAndWrite(m.File, original, mutated)
+	werr := r.armAndWrite(m.File, original, mutated, m)
 	defer func() {
 		if rerr := r.disarmAndRestore(); rerr != nil {
 			err = errors.Join(err, rerr)
@@ -725,7 +739,7 @@ func (r *Runner) disarmAndRestore() error {
 	if !r.pending {
 		return nil // a signal handler got there first
 	}
-	err := r.restoreLocked(r.pendPath, r.pendOrig)
+	err := r.restorePendingLocked()
 	r.pending = false
 	if r.cancelled() {
 		if err == nil {
@@ -735,6 +749,38 @@ func (r *Runner) disarmAndRestore() error {
 		}
 	}
 	return err
+}
+
+// restorePendingLocked puts the in-flight file back — unless it is no longer
+// what the mutation wrote. The original was read before the mutation, so writing
+// it back over a file somebody edited while the mutation was applied throws the
+// edit away: the restore succeeds, the exit status is 0 and the report is
+// normal, and the change the author made is simply not in the tree (#1253). Such
+// a file is left exactly as it is, and what is left is said: which file and which
+// mutation, and — only when the file allows it — how to take the mutation out by
+// hand. A file that already holds the original (somebody put it back by hand, or
+// the write of the mutation was cut short and left it whole) is not an edit.
+//
+// Nothing here keeps another process from writing between the read and the write:
+// the lock is this process's own.
+func (r *Runner) restorePendingLocked() error {
+	now, err := r.Read(r.pendPath)
+	if r.pendWritten && err == nil && !bytes.Equal(now, r.pendMut) && !bytes.Equal(now, r.pendOrig) {
+		m := r.pendMutation
+		how := fmt.Sprintf("it may or may not still hold the mutation, which replaced %q with %q — "+
+			"compare the file with `git diff` before committing", m.From, m.To)
+		// The instruction is given only where it is true: the replacement text is
+		// there once and the original text is not (a `to` of nothing, or one that
+		// appears twice, or a file that no longer holds the mutation at all, has no
+		// such place).
+		if m.To != "" && bytes.Count(now, []byte(m.To)) == 1 && bytes.Count(now, []byte(m.From)) == 0 {
+			how = fmt.Sprintf("it holds your change and the mutation: take the mutation out by "+
+				"replacing %q with %q", m.To, m.From)
+		}
+		return fmt.Errorf("%s was changed while the mutation %q was applied, so it was NOT put back — "+
+			"doing that would throw the change away; %s (the sweep stopped here)", r.pendPath, m.Name, how)
+	}
+	return r.restoreLocked(r.pendPath, r.pendOrig)
 }
 
 // restoreLocked writes the original bytes back and reads them again to confirm.

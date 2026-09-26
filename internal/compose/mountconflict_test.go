@@ -56,11 +56,11 @@ func TestMountConflictsAreRecordedAsDockerComposeRefusesThem(t *testing.T) {
 		{"a bind and a long-form tmpfs among volumes collapse", "volumes: [\"./bdir:/t\", {type: tmpfs, target: /t}]", nil},
 		{"tmpfs and a bind at another target", "tmpfs: [/t]\n    volumes: [\"./bdir:/u\"]", nil},
 		{"a service with no mounts", "command: [sleep, \"1\"]", nil},
-		// No target is nothing to compare: an empty tmpfs entry beside a bind
-		// written with an empty target (docker compose refuses the bind's
-		// spelling itself, `invalid spec: ./a:: empty section between colons`;
-		// what opossum says about either is not this check's to decide).
-		{"an empty tmpfs target beside a bind with an empty target", "tmpfs: [\"\"]\n    volumes: [\"./a:\"]", nil},
+		// No target is nothing to compare: an empty tmpfs entry beside a mount
+		// written with an empty target. The mount is the bare `:`, the one such
+		// entry that loads — a bind such as `./a:` is refused when the file is
+		// read, as docker compose refuses it (`empty section between colons`).
+		{"an empty tmpfs target beside a mount with an empty target", "tmpfs: [\"\"]\n    volumes: [\":\"]", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()

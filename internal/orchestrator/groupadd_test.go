@@ -32,6 +32,11 @@ func TestGroupAddReachesTheRuntimeOrIsRefusedFirst(t *testing.T) {
 		{"the largest gid the engine takes", []string{"2147483647"}, "", "2147483647", ""},
 		{"two groups", []string{"2000", "3000"}, "", "", `service "app" adds 2 groups (group_add: "2000", "3000"); container 1.4.1's --gid takes one, and a second replaces the first — keep the one the process needs`},
 		{"two groups, one empty", []string{"", "3000"}, "", "", `adds 2 groups (group_add: "", "3000")`},
+		// A `user:` beside several groups: keeping one is not enough, so the way out
+		// is said once, for both (#1204). Without a `user:` the wording is the one
+		// above.
+		{"two groups beside a user", []string{"2000", "3000"}, "1000", "", `service "app" adds 2 groups (group_add: "2000", "3000") beside user: "1000"; container 1.4.1's --gid takes one, a second replaces the first, and it does nothing next to --user — drop group_add (the process then runs without the groups, and a socket or device that needs one refuses it), or drop user: and keep the one group the process needs`},
+		{"two groups beside a user with a gid", []string{"2000", "3000"}, "1000:1000", "", `beside user: "1000:1000"; container 1.4.1's --gid takes one, a second replaces the first, and it does nothing next to --user`},
 		{"a group by name", []string{"wheel"}, "", "", `service "app" adds the group "wheel" (group_add); container 1.4.1's --gid takes a number, where docker compose resolves a name in the image — write the group's number`},
 		{"an empty group", []string{""}, "", "", `service "app" adds an empty group (group_add: [""]); the docker engine refuses it too (` + "`unable to find group`" + `) — write the group's number, or drop the entry`},
 		{"a negative number", []string{"-1"}, "", "", `service "app" adds the group "-1" (group_add); a gid is not negative — the docker engine refuses it too`},

@@ -55,6 +55,7 @@ const (
 	codeHostPortNotPlaced       diagCode = "OPSM-212" // a container-only port's mirrored host port was not available and no free host port clear of the file's own was found
 	codeHostPortTwice           diagCode = "OPSM-213" // two entries of this run publish the same host port
 	codeHostAddressUnbindable   diagCode = "OPSM-214" // a published entry names a host address this machine will not bind
+	codeHostPortNotBindable     diagCode = "OPSM-215" // a published host port was refused for a reason other than a listener (a port below 1024 on a specific address takes root)
 	codeDepNotRunning           diagCode = "OPSM-401" // a dependency's container exited before becoming healthy
 	codeOrphans                 diagCode = "OPSM-402" // containers left by services no longer in the compose
 	codeDepNoHealth             diagCode = "OPSM-403" // a service_healthy dependency defines no healthcheck
@@ -85,7 +86,7 @@ var allDiagCodes = []diagCode{
 	codeDataDirNotThisMount,
 	codeHostPortInUse, codeDNSDomainAbsent, codeInternalEgress, codeDockerSocket, codeExternalNetAbsent, codeHostPortRemapped,
 	codeNetworkSubnetChanged, codeProjectBusy, codeServiceNameUnresolvable, codeExternalVolumeAbsent, codeSecondNetworkName,
-	codeHostPortNotPlaced, codeHostPortTwice, codeHostAddressUnbindable,
+	codeHostPortNotPlaced, codeHostPortTwice, codeHostAddressUnbindable, codeHostPortNotBindable,
 	codeDepNotRunning, codeOrphans, codeDepNoHealth,
 	codeIgnoredTopField, codeIgnoredField, codeRuntimeAbsent, codeRuntimeStopped, codeRuntimeAutoStart, codeServiceExited, codeSupervisorStarted, codeSupervisorAction, codeImageNoArm64, codeOptionalDependency,
 	codeSupervisorLogTrimmed, codeSupervisorLogUncapped,

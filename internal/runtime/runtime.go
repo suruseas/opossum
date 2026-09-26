@@ -319,13 +319,24 @@ func (r *Runtime) stream(args ...string) error {
 // (exec, stats) keep their real terminal fds and get no spinner. The spinner is
 // a no-op unless stderr is a terminal, so piped/redirected output is unchanged.
 func (r *Runtime) streamHeartbeat(label string, tee io.Writer, args ...string) error {
+	return r.streamHeartbeatFrom(label, nil, tee, args...)
+}
+
+// streamHeartbeatFrom is streamHeartbeat with something to read on standard
+// input in place of the terminal's, for a command that is given its input (a
+// Dockerfile written in the compose file). nil is the terminal's.
+func (r *Runtime) streamHeartbeatFrom(label string, stdin io.Reader, tee io.Writer, args ...string) error {
 	if r.recordIfDryRun(args) {
 		return nil
 	}
 	r.trace(args)
 	cmd := r.newCmd(r.baseCtx(), args...)
 	cmd.WaitDelay = 2 * time.Second
-	cmd.Stdin = os.Stdin
+	if stdin != nil {
+		cmd.Stdin = stdin
+	} else {
+		cmd.Stdin = os.Stdin
+	}
 	out, errw := r.stdoutW(), io.Writer(os.Stderr)
 	if tee != nil {
 		// Feed a copy of the output to tee (a build-error detector) without
@@ -1038,8 +1049,13 @@ type BuildOptions struct {
 	Tag        string
 	Context    string
 	Dockerfile string
-	Args       []string
-	Target     string // --target: multi-stage build stage
+	// DockerfileInline is a Dockerfile given as text, built in place of a file:
+	// `container build -f -` reads it from standard input (measured on 1.4.1:
+	// `printf 'FROM alpine:3.20\n…' | container build -t x -f - .` makes an image).
+	// Not set together with Dockerfile.
+	DockerfileInline string
+	Args             []string
+	Target           string // --target: multi-stage build stage
 	// Labels are `key=value` pairs put on the built image (`-l`). An image keeps
 	// them (measured on 1.4.1: `image inspect` answers with them), so they say
 	// afterwards which build made an image — a name alone does not, now that a
@@ -1065,7 +1081,12 @@ func (r *Runtime) Build(o BuildOptions) error {
 	for _, l := range o.Labels {
 		args = append(args, "-l", l)
 	}
-	if o.Dockerfile != "" {
+	var stdin io.Reader
+	switch {
+	case o.DockerfileInline != "":
+		args = append(args, "-f", "-")
+		stdin = strings.NewReader(o.DockerfileInline)
+	case o.Dockerfile != "":
 		args = append(args, "-f", o.Dockerfile)
 	}
 	if o.Target != "" {
@@ -1082,7 +1103,7 @@ func (r *Runtime) Build(o BuildOptions) error {
 	// Tee the output through a detector so an opaque builder failure (corrupted
 	// cache, resource exhaustion) becomes an actionable hint.
 	det := &buildErrorDetector{}
-	err := r.streamHeartbeat("building", det, args...)
+	err := r.streamHeartbeatFrom("building", stdin, det, args...)
 	if err != nil {
 		// Read once: the hint and what the caller is told are then about the
 		// same failure, whatever arrives on the streams afterwards.
@@ -1093,10 +1114,16 @@ func (r *Runtime) Build(o BuildOptions) error {
 				h = additionalContextHint(name)
 			}
 		}
+		if failure == failedInvalidReference {
+			h = invalidReferenceHint(det.invalidName(), o.Redo)
+		}
 		if h != "" {
 			err = fmt.Errorf("%w\n%s", err, h)
 			if failure == failedImageRefused {
 				err = &buildImageRefused{err}
+			}
+			if failure == failedInvalidReference {
+				err = &buildInvalidReference{err}
 			}
 			return err
 		}

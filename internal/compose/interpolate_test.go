@@ -1882,10 +1882,13 @@ func TestAnEnvFileErrorNamesThePlaceNotTheContents(t *testing.T) {
 		{"a line with no separator", secret + "\n", "expected KEY=VALUE"},
 		{"a quoted value that never closes", "K=\"" + secret + "\n", "unterminated quoted value"},
 		{"no name in front of the separator", "=" + secret + "\n", "empty variable name"},
+		// A token pasted with a word before it is a name with a space in it, and
+		// the refusal must not read the name back.
+		{"a space inside the name", secret + " and more=1\n", "key cannot contain a space"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := writeProject(t, "services:\n  app:\n    image: app\n", tc.dotenv)
-			_, err := Load(p)
+			err := loadRefusal(p)
 			if err == nil {
 				t.Fatal("the env file was accepted")
 			}
@@ -2433,4 +2436,16 @@ func TestAPositionFromInsideADefaultIsNotReadAgainstTheFile(t *testing.T) {
 	if !strings.Contains(err.Error(), "line 4") {
 		t.Errorf("want the line the outer reference is on, got: %v", err)
 	}
+}
+
+// loadRefusal is what reading a project says against its variables' names: the
+// load's own failure, or — for a name in the project's `.env` that a project may
+// have been started on — the note the load keeps for the commands that start or
+// print something (Project.CheckDeclaredNames).
+func loadRefusal(path string) error {
+	p, err := Load(path)
+	if err != nil {
+		return err
+	}
+	return p.CheckDeclaredNames()
 }

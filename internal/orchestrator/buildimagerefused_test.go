@@ -115,3 +115,43 @@ func TestARefusedImageIsNotAnsweredWithTheDockerWayRound(t *testing.T) {
 		}
 	}
 }
+
+// A name the runtime refuses to tag the image with is told as the name, over every
+// command that builds, and not with the way round a builder that cannot cope: no
+// Dockerfile changes the name (#1121).
+func TestARefusedImageNameIsNotAnsweredWithTheDockerWayRound(t *testing.T) {
+	const refusal = "Error: invalid reference Abc/Def:V1\nUsage: container build [<options>] [<context-dir>]\n  See 'container build --help' for more information."
+	commands := []struct {
+		name, redo string
+		run        func(o *orchestrator.Orchestrator) error
+	}{
+		{"up", "opossum up", func(o *orchestrator.Orchestrator) error {
+			o.SetUpOptions(false, true, false, false, false)
+			return o.Up(true)
+		}},
+		{"run", "opossum run", func(o *orchestrator.Orchestrator) error {
+			return o.RunOneOff("web", []string{"true"}, orchestrator.RunOneOffOptions{Rm: true})
+		}},
+		{"build", "opossum build", func(o *orchestrator.Orchestrator) error { return o.Build(nil) }},
+	}
+	for _, cmd := range commands {
+		t.Run(cmd.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			rt, _ := fakeShim(t)
+			setShimEnv(rt, "BUILD_FAIL=1", "BUILD_FAIL_STDERR="+refusal)
+			err := cmd.run(orchestrator.New(buildableProject(), rt, "opossum", &bytes.Buffer{}))
+			if err == nil {
+				t.Fatal("the build is refused, so the command must fail")
+			}
+			got := err.Error()
+			for _, want := range []string{`building service "web"`, "the image name `Abc/Def:V1`", "not the Dockerfile", "then run `" + cmd.redo + "` again"} {
+				if !strings.Contains(got, want) {
+					t.Errorf("the error does not say %q:\n%s", want, got)
+				}
+			}
+			if strings.Contains(got, importAdvice) {
+				t.Errorf("a refused name was answered with the way round a builder that cannot cope:\n%s", got)
+			}
+		})
+	}
+}

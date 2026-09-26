@@ -190,21 +190,29 @@ services:
 // not). The table is the command tree itself, so a command added later is a
 // row here the day it appears — every round of review this file came from
 // turned on a command that had been left out of a hand-written list.
+//
+// And the cycle is drawn three ways, because docker compose reads `depends_on`
+// and `volumes_from` as one graph: by `depends_on` alone, by `volumes_from`
+// alone, and by one of each. A `volumes_from` entry was once refused as the
+// file was read, on every service, so a cycle of those behind a profile that
+// was off stopped every command — and the two rows that took a `volumes_from`
+// edge were the ones that said so.
 func TestEveryCommandReadsTheProjectTheSameWay(t *testing.T) {
-	const body = `
-name: demo
-services:
-  web:
-    image: alpine:3.20
-  other:
-    image: alpine:3.20
-    profiles: [g]
-    depends_on: [zed]
-  zed:
-    image: alpine:3.20
-    profiles: [g]
-    depends_on: [other]
-`
+	for _, edges := range []struct{ name, other, zed string }{
+		{"depends_on both ways", "    depends_on: [zed]\n", "    depends_on: [other]\n"},
+		{"volumes_from both ways", "    volumes_from: [zed]\n", "    volumes_from: [other]\n"},
+		{"one of each", "    volumes_from: [zed]\n", "    depends_on: [other]\n"},
+	} {
+		t.Run(edges.name, func(t *testing.T) {
+			everyCommandReadsTheProject(t, "\nname: demo\nservices:\n  web:\n    image: alpine:3.20\n"+
+				"  other:\n    image: alpine:3.20\n    profiles: [g]\n"+edges.other+
+				"  zed:\n    image: alpine:3.20\n    profiles: [g]\n"+edges.zed)
+		})
+	}
+}
+
+func everyCommandReadsTheProject(t *testing.T, body string) {
+	t.Helper()
 	// What each command needs beyond its name to get as far as reading the
 	// file. A command missing from here is a failure, not a skip.
 	args := map[string][]string{

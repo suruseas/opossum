@@ -1844,7 +1844,7 @@ func TestTheStillMutatedWarningIsForAFileThatChanged(t *testing.T) {
 			if string(b) == "call()" {
 				return refused
 			}
-			f.set(p, "call()x") // a mutation that adds to what was there
+			f.set(p, string(b)) // a mutation that adds to what was there: see the To below
 			return nil
 		}, false, "call()x", true},
 		{"the restore is refused and the file cannot be read", func(f *fakeRunner, p string, b []byte) error {
@@ -1874,7 +1874,12 @@ func TestTheStillMutatedWarningIsForAFileThatChanged(t *testing.T) {
 				}
 				return read(p)
 			}
-			_, err := f.Sweep([]Mutation{mut()})
+			m := mut()
+			if strings.Contains(tc.name, "still holding the original") {
+				m.To = "call()x" // adds to the text it replaces, so the file still holds the original
+				f.testOut["call()x"] = passJSON
+			}
+			_, err := f.Sweep([]Mutation{m})
 			if err == nil {
 				t.Fatal("a refused write must be reported")
 			}
@@ -1889,4 +1894,174 @@ func TestTheStillMutatedWarningIsForAFileThatChanged(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A file somebody edits while a mutation is applied is not put back over. The
+// original was read before the mutation, so writing it back throws the edit away
+// — with a restore that succeeded, an exit status of 0 and a normal report, and
+// the author finding out by chance that the change they made is not in the tree
+// (#1253). The three things that have to hold, one row each: the sweep stops, the
+// file keeps what it holds, and what happened is said with the way to take the
+// mutation out by hand.
+func TestAnEditDuringASweepIsNotThrownAway(t *testing.T) {
+	const edited = "noop()\n// an edit made while the mutation was applied\n"
+	run := func(t *testing.T, second bool) (*fakeRunner, error, int) {
+		t.Helper()
+		f := newFake(t, map[string]string{"x.go": "call()"})
+		f.testOut["noop()"] = passJSON
+		runs := 0
+		f.Runner.Go = func(args ...string) (string, string, error) {
+			if args[0] == "test" {
+				runs++
+				if runs == 2 { // the first run is the baseline: this is the mutation's
+					f.set("x.go", edited)
+				}
+			}
+			return passJSON, "", nil
+		}
+		ms := []Mutation{mut()}
+		if second {
+			other := mut()
+			other.Name = "the second one"
+			other.From, other.To = "call()", "gone()"
+			ms = append(ms, other)
+		}
+		_, err := f.Sweep(ms)
+		return f, err, runs
+	}
+	t.Run("the sweep stops", func(t *testing.T) {
+		_, err, runs := run(t, true)
+		if err == nil {
+			t.Fatal("a file changed under the sweep came back with no error")
+		}
+		if runs != 2 {
+			t.Errorf("the sweep went on to run the second mutation (%d test runs, want the baseline and one)", runs)
+		}
+	})
+	t.Run("the file keeps what it holds", func(t *testing.T) {
+		f, _, _ := run(t, false)
+		if got := mustGet(t, f, "x.go"); got != edited {
+			t.Errorf("x.go is %q, want the edit left as it was: %q", got, edited)
+		}
+	})
+	t.Run("what happened is said", func(t *testing.T) {
+		_, err, _ := run(t, false)
+		if err == nil {
+			t.Fatal("no error")
+		}
+		for _, want := range []string{"x.go", `"the wire is cut"`, "NOT put back", `replacing "noop()" with "call()"`} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("the error does not say %q:\n%v", want, err)
+			}
+		}
+	})
+	// The same file, met by the interrupt handler instead of the sweep's own
+	// restore: it too leaves the edit, and says so.
+	t.Run("an interrupt leaves it too", func(t *testing.T) {
+		f := newFake(t, map[string]string{"x.go": "call()"})
+		runs := 0
+		var restored bool
+		var rerr error
+		f.Runner.Go = func(args ...string) (string, string, error) {
+			if args[0] == "test" {
+				runs++
+				if runs == 2 {
+					f.set("x.go", edited)
+					restored, rerr = f.RestorePending()
+				}
+			}
+			return passJSON, "", nil
+		}
+		_, _ = f.Sweep([]Mutation{mut()})
+		if !restored || rerr == nil || !strings.Contains(rerr.Error(), "NOT put back") {
+			t.Errorf("RestorePending = (%v, %v), want it in flight and the edit named", restored, rerr)
+		}
+		if got := mustGet(t, f, "x.go"); got != edited {
+			t.Errorf("an interrupt threw the edit away: %q", got)
+		}
+	})
+	// The instruction to take the mutation out is given where it is true and not
+	// elsewhere: a change that carries no mutation (an editor saving a buffer from
+	// before it, a checkout that swapped the file), a mutation that replaced
+	// something with nothing, and one whose text turns up twice have no place to
+	// replace, and a reader who followed the words anyway would edit a line that
+	// has nothing to do with it.
+	for _, tc := range []struct {
+		name       string
+		from, to   string
+		file       string // the file when the edit lands
+		instructed bool
+	}{
+		{"an edit that carries the mutation once", "call()", "noop()", "noop()\n// edit\n", true},
+		{"an edit with no mutation in it", "call()", "noop()", "call()\n// a buffer saved from before the mutation\n", false},
+		{"a mutation that replaced something with nothing", "call()", "", "\n// edit\n", false},
+		{"a replacement text that turns up twice", "call()", "noop()", "noop()\nnoop()\n", false},
+		// Once, but with the original text beside it: putting the original back
+		// would leave it twice.
+		{"the replacement once and the original text as well", "call()", "noop()", "noop()\ncall()\n", false},
+	} {
+		t.Run("the way back: "+tc.name, func(t *testing.T) {
+			f := newFake(t, map[string]string{"x.go": "call()"})
+			f.testOut[strings.Replace("call()", tc.from, tc.to, 1)] = passJSON
+			m := mut()
+			m.From, m.To = tc.from, tc.to
+			runs := 0
+			f.Runner.Go = func(args ...string) (string, string, error) {
+				if args[0] == "test" {
+					runs++
+					if runs == 2 {
+						f.set("x.go", tc.file)
+					}
+				}
+				return passJSON, "", nil
+			}
+			_, err := f.Sweep([]Mutation{m})
+			if err == nil || !strings.Contains(err.Error(), "NOT put back") {
+				t.Fatalf("want the edit left and named, got %v", err)
+			}
+			said := strings.Contains(err.Error(), "take the mutation out by replacing")
+			if said != tc.instructed {
+				t.Errorf("instruction given = %v, want %v:\n%v", said, tc.instructed, err)
+			}
+			if !tc.instructed && !strings.Contains(err.Error(), "git diff") {
+				t.Errorf("without an instruction it should say where to look:\n%v", err)
+			}
+			if got := mustGet(t, f, "x.go"); got != tc.file {
+				t.Errorf("x.go is %q, want the edit left as it was", got)
+			}
+		})
+	}
+	// Put back by hand, mid-run, is not an edit: the file is the original already,
+	// and the sweep goes on to the end.
+	t.Run("a file somebody put back by hand is not an edit", func(t *testing.T) {
+		f := newFake(t, map[string]string{"x.go": "call()"})
+		f.testOut["noop()"] = passJSON
+		runs := 0
+		f.Runner.Go = func(args ...string) (string, string, error) {
+			if args[0] == "test" {
+				runs++
+				if runs == 2 {
+					f.set("x.go", "call()")
+				}
+			}
+			return passJSON, "", nil
+		}
+		if _, err := f.Sweep([]Mutation{mut()}); err != nil {
+			t.Fatalf("Sweep: %v", err)
+		}
+		if got := mustGet(t, f, "x.go"); got != "call()" {
+			t.Errorf("x.go is %q", got)
+		}
+	})
+	// The control: nothing edited, and the file goes back as it always did.
+	t.Run("an untouched file is restored", func(t *testing.T) {
+		f := newFake(t, map[string]string{"x.go": "call()"})
+		f.testOut["noop()"] = passJSON
+		if _, err := f.Sweep([]Mutation{mut()}); err != nil {
+			t.Fatalf("Sweep: %v", err)
+		}
+		if got := mustGet(t, f, "x.go"); got != "call()" {
+			t.Errorf("x.go is %q, want the original", got)
+		}
+	})
 }

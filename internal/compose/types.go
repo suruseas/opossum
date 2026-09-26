@@ -42,6 +42,10 @@ type Project struct {
 	Volumes     map[string]VolumeDecl  // top-level volume declarations; only `external` is acted on (#64)
 	Networks    map[string]NetworkDecl // top-level network declarations; opossum acts on `internal`/`external`/`name`
 
+	// nameFault is the refusal of a secret or config name outside the rule
+	// (CheckDeclaredNames); nil when there is none.
+	nameFault error
+
 	// Unsupported holds top-level compose keys opossum doesn't act on (e.g.
 	// networks, volumes), collected so it can warn rather than silently ignore.
 	Unsupported []string
@@ -466,6 +470,7 @@ var nestedShapes = map[string][]nestedShape{
 	"build": {
 		{[]string{"context"}, "string", "a path, as in `.`", false},
 		{[]string{"dockerfile"}, "string", "a file name, as in `Dockerfile`", false},
+		{[]string{"dockerfile_inline"}, "string", "the text of a Dockerfile", false},
 		{[]string{"target"}, "string", "a stage name", false},
 		{[]string{"args"}, "mapping or list", "the variables, as in `{A: 1}` or `[A=1]`", false},
 	},
@@ -611,7 +616,7 @@ var watchRuleKeys = map[string]bool{"action": true, "path": true, "target": true
 // refuses it outright). A mapping listed here as a key's value is walked
 // in turn.
 var nestedKnownKeys = map[string][]string{
-	"build":                   {"context", "dockerfile", "args", "target"},
+	"build":                   {"context", "dockerfile", "dockerfile_inline", "args", "target"},
 	"healthcheck":             {"test", "interval", "timeout", "start_period", "retries", "disable"},
 	"develop":                 {"watch"},
 	"deploy":                  {"resources"},
@@ -1385,6 +1390,17 @@ func shortMountFields(entry string, i, n int) error {
 		return fmt.Errorf("volumes entry %d of %d: %q has too many colons — a short mount is SOURCE:TARGET or SOURCE:TARGET:MODE (docker compose refuses it as well); for a path with `:` in it, use the long form", i+1, n, entry)
 	case len(fields) == 3 && fields[1] == "":
 		return fmt.Errorf("volumes entry %d of %d: %q has nothing between its colons — a short mount is SOURCE:TARGET or SOURCE:TARGET:MODE", i+1, n, entry)
+	// A source with nothing after its colon is not a bind of that source: the
+	// runtime takes the empty target as an anonymous volume and mounts it at the
+	// source's own path, so `./src:` runs, and the host directory is nowhere in
+	// the container. docker compose refuses it (`empty section between colons`,
+	// measured on v5.5.1 for a path, an absolute path and a volume name alike).
+	// The bare `:` is the one entry docker accepts, and it is left alone. So is
+	// what docker reads differently for a one-letter source (a Windows drive),
+	// which this function does not follow: `x:` is refused here where docker
+	// compose takes it, for the reason it is refused at every other length.
+	case len(fields) == 2 && fields[0] != "" && fields[1] == "":
+		return fmt.Errorf("volumes entry %d of %d: %q has no target after its colon — a short mount is SOURCE:TARGET, so write the path in the container (`%s/app`)", i+1, n, entry, entry)
 	case len(fields) == 3 && strings.Contains(fields[2], "/") && !strings.HasPrefix(fields[1], "/"):
 		return fmt.Errorf("volumes entry %d of %d: in %q the third field %q is the mode (such as `ro`), not a path — the target is %q; write SOURCE:TARGET with the target starting with `/`", i+1, n, entry, fields[2], fields[1])
 	case len(fields) == 3 && strings.Contains(fields[2], "/"):
@@ -1649,6 +1665,17 @@ func (v *Volumes) UnmarshalYAML(value *yaml.Node) error {
 			if err := readQuotedBools(vol, "nocopy"); err != nil {
 				return fmt.Errorf("volumes entry %d of %d: volume.%w", i+1, len(value.Content), err)
 			}
+		}
+		// A target written as a number, a boolean or a date is refused, as docker
+		// compose refuses it (`is missing a mount target`, v5.5.1, measured for 5,
+		// 1.5, 0, -1, true and 2026-09-20): decoded into a string it read as the path
+		// `5`, a relative path the runtime took as a mount.
+		// (What Decode reads: through an alias and through a `<<` merge, where the
+		// key is not written in the entry itself.)
+		if t, ok := resolvedMappingValue(item, "target"); ok && t.Kind == yaml.ScalarNode &&
+			(t.ShortTag() == "!!int" || t.ShortTag() == "!!float" || t.ShortTag() == "!!bool" || t.ShortTag() == "!!timestamp") {
+			return fmt.Errorf("volumes entry %d of %d: target %s is not a path — docker compose reads a number, a boolean or a date there as a mount with no target; "+
+				"write the path in the container as text, as in `target: /app`", i+1, len(value.Content), t.Value)
 		}
 		var lf struct {
 			Type string `yaml:"type"`
@@ -2730,10 +2757,14 @@ func (s *SecretRefs) UnmarshalYAML(value *yaml.Node) error {
 
 // Build describes how to build an image for a service.
 type Build struct {
-	Context    string      `yaml:"context"`
-	Dockerfile string      `yaml:"dockerfile"`
-	Args       Environment `yaml:"args"`
-	Target     string      `yaml:"target"` // multi-stage build target (#75)
+	Context    string `yaml:"context"`
+	Dockerfile string `yaml:"dockerfile"`
+	// DockerfileInline is a Dockerfile written in the compose file, built in place
+	// of the one in the context. It is handed to the builder on its standard input.
+	// Empty is not written: docker compose builds the context's Dockerfile then.
+	DockerfileInline string      `yaml:"dockerfile_inline"`
+	Args             Environment `yaml:"args"`
+	Target           string      `yaml:"target"` // multi-stage build target (#75)
 	// AdditionalContexts are the names of the build's contexts beyond the
 	// main one (`additional_contexts: {lib: ../lib}`). `container build`
 	// takes one context directory, so they are not passed — the key stays
@@ -2818,6 +2849,13 @@ func (b *Build) UnmarshalYAML(value *yaml.Node) error {
 		msg = strings.Replace(msg, "for environment, got", "for build.args, got", 1)
 		msg = strings.Replace(msg, "environment variable ", "build.args variable ", 1)
 		return errors.New(msg)
+	}
+	// docker compose refuses the pair when the project is loaded (v5.5.1, measured:
+	// `declares mutualy exclusive dockerfile and dockerfile_inline`), and so does
+	// this: the two name a Dockerfile each, and which one wins is not something the
+	// file says.
+	if r.Dockerfile != "" && r.DockerfileInline != "" {
+		return errors.New("build.dockerfile and build.dockerfile_inline are mutually exclusive — write one of them (docker compose refuses the pair as well)")
 	}
 	*b = Build(r)
 	return nil
@@ -2911,6 +2949,16 @@ func (e *EnvFiles) UnmarshalYAML(value *yaml.Node) error {
 			}
 			if err := bareKeysIn(fmt.Sprintf("env_file entry %d of %d", i+1, len(value.Content)), item, "path"); err != nil {
 				return err
+			}
+			// The path is asked for before anything else about the entry: docker
+			// compose (v5.5.1, measured) says `path attribute … is missing` for an
+			// entry with no `path` key whatever its other keys hold, and judges
+			// their types only once the path is there. Left to the decode below, a
+			// `required: []` or a `format: {}` failed first, in YAML's words with a
+			// hint about a variable, when what the writer left out was the path.
+			// The key being there and empty (`path: ""`) is the next check's.
+			if _, has := resolvedMappingValue(item, "path"); !has {
+				return fmt.Errorf("env_file entry %d of %d has no path — write the file, as in `path: ./app.env`", i+1, len(value.Content))
 			}
 			if err := readQuotedBools(item, "required"); err != nil {
 				return fmt.Errorf("env_file entry %d of %d: %w", i+1, len(value.Content), err)
@@ -3613,10 +3661,24 @@ func (l *Labels) UnmarshalYAML(value *yaml.Node) error {
 		sort.Strings(keys)
 		out := make(Labels, 0, len(keys))
 		for _, k := range keys {
-			v := unalias(ptr(m[k]))
-			val := v.Value
-			if v.Tag == "!!null" {
-				val = ""
+			// The value is read as YAML reads it and written as its text, the way an
+			// environment value is: `0x10` is 16 and `1.50` is 1.5, as docker compose
+			// prints them, and it is the reading a second file merged over this one
+			// gives (which writes the tree out and reads it back). The text as
+			// written was what a single file gave, so one file and two disagreed.
+			n := unalias(ptr(m[k]))
+			var decoded interface{}
+			if err := n.Decode(&decoded); err != nil {
+				return err
+			}
+			var val string
+			if decoded != nil {
+				val = fmt.Sprintf("%v", decoded)
+			}
+			// docker compose keeps the sign of `-0` (its reading is a float's); an
+			// integer's is not signed, so the one spelling is put back by hand.
+			if n.Value == "-0" {
+				val = "-0"
 			}
 			out = append(out, k+"="+val)
 		}
@@ -3683,6 +3745,16 @@ func (d *DependsOn) UnmarshalYAML(value *yaml.Node) error {
 				return fmt.Errorf("depends_on.%s must be a mapping, got %s — write `%s: {condition: service_started}`, or list the name under depends_on", name, kindName(e.Kind), name)
 			}
 			if err := bareKeysIn("depends_on."+name, &d, "condition"); err != nil {
+				return err
+			}
+			// A key written twice is said before anything about the entry's values:
+			// docker compose fails at the parse (`mapping key "required" already
+			// defined`, measured, 3 of 3), so a `condition` of the wrong kind
+			// beside it is never reached there. bareKeysIn drops the decode's
+			// complaint (it answers a different question), so it is asked again
+			// here and only this complaint is kept.
+			var written map[string]yaml.Node
+			if err := d.Decode(&written); err != nil && strings.Contains(err.Error(), "already defined at line") {
 				return err
 			}
 			// `required` is written beside a `condition`, or not at all: docker

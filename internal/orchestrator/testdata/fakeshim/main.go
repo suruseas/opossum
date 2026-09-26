@@ -10,7 +10,7 @@
 // RUN_IMAGE_FETCH_FAIL, RUN_IMAGE_FETCH_REASON, RUN_IMAGE_FETCH_URL, RUN_IMAGE_FETCH_TRUNCATED,
 // RUN_FAIL_STDERR,
 // RUN_HANG, RUN_DIE_SIGNAL, RUN_EXISTS[_WORDING|_HASH], RUN_EXISTS_ANY, HEALTH_*,
-// VOLUME_*, LS_*,
+// VOLUME_* (VOLUME_DELETE_STICKY, VOLUME_LS_FAIL_FROM among them), LS_*,
 // IMAGE_ABSENT, INSPECT_HANG_WHILE, INSPECT_ANSWERED, INSPECT_GATE,
 // LOGS_EMPTY[_AFTER], LOGS_FAIL_N, LOGS_DRIP[_AFTER], LOGS_SLEEP, LOGS_SELF_INT,
 // LOGS_TEXT, STOP_THEN_SLEEP_MS, START_THEN_SLEEP_MS, SLOW_ONLY),
@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -354,7 +355,9 @@ func run(args []string) int {
 				fmt.Fprintf(os.Stderr, "Error: invalid network name: %s\n", name)
 				return 1
 			}
-			if os.Getenv("NET_EXISTS") != "" {
+			// $NET_EXISTS is "1" for every network, or a comma-separated list of the
+			// names that are already there.
+			if ex := os.Getenv("NET_EXISTS"); ex == "1" || (ex != "" && slices.Contains(strings.Split(ex, ","), name)) {
 				fmt.Fprintf(os.Stderr, "Error: network %s already exists\n", name)
 				return 1
 			}
@@ -372,6 +375,20 @@ func run(args []string) int {
 		}
 
 	case "build":
+		// `-f -` takes the Dockerfile from standard input. It is read whole and put
+		// in the log on a line of its own (quoted, so it stays one line), which is
+		// what a test that asks what the builder was given reads.
+		for i, a := range args {
+			if a == "-f" && i+1 < len(args) && args[i+1] == "-" {
+				text, _ := io.ReadAll(os.Stdin)
+				if logPath := os.Getenv("FAKE_LOG"); logPath != "" {
+					if f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+						fmt.Fprintf(f, "build-stdin %s\n", strconv.Quote(string(text)))
+						f.Close()
+					}
+				}
+			}
+		}
 		// $BUILD_HANG holds the build until this process is killed (a Ctrl-C
 		// mid-build); $BUILD_FAIL fails it the way the builder does.
 		if os.Getenv("BUILD_HANG") != "" {
@@ -400,6 +417,11 @@ func run(args []string) int {
 		if msg, code, refused := containerNameRefused(args); refused {
 			fmt.Fprintln(os.Stderr, msg)
 			return code
+		}
+		// A `-p` whose two sides name different numbers of ports is refused next.
+		if msg, refused := publishCountsRefused(args); refused {
+			fmt.Fprintln(os.Stderr, msg)
+			return 1
 		}
 		// A run of $RUN_EXISTS is refused the way container 1.4.1 refuses a name
 		// that is taken (the same sentence whether the holder runs or is stopped),
@@ -719,6 +741,25 @@ func run(args []string) int {
 		}
 		switch arg(1) {
 		case "ls":
+			// $VOLUME_LS_FAIL_FROM=N fails the Nth `volume ls` and every one after:
+			// the runtime answered the first questions and stopped answering — what a
+			// take-back asks after the fill it took back began.
+			if from := os.Getenv("VOLUME_LS_FAIL_FROM"); from != "" {
+				if n, err := strconv.Atoi(from); err == nil {
+					if dir := os.Getenv("STATE_DIR"); dir != "" {
+						path := filepath.Join(dir, "volume-ls-count")
+						seen := 0
+						if b, err := os.ReadFile(path); err == nil {
+							seen, _ = strconv.Atoi(strings.TrimSpace(string(b)))
+						}
+						seen++
+						_ = os.WriteFile(path, []byte(strconv.Itoa(seen)), 0o644)
+						if seen >= n {
+							return 1
+						}
+					}
+				}
+			}
 			// $VOLUME_LS_TABLE is the whole table the real CLI prints — a NAME /
 			// TYPE / DRIVER / OPTIONS header and one row per volume — for a test
 			// that reads more than the name (the driver). The volumes opossum has
@@ -772,6 +813,14 @@ func run(args []string) int {
 			if dir := os.Getenv("STATE_DIR"); dir != "" {
 				var absent []string
 				for _, v := range args[2:] {
+					// $VOLUME_DELETE_STICKY names volumes whose delete reports success and
+					// leaves them listed. That is not what the real CLI does with a volume
+					// still attached to a container (`volume delete` fails, in use), so a
+					// test with it is asking about the leftover being reported, not about
+					// how the runtime refuses.
+					if slices.Contains(strings.Fields(os.Getenv("VOLUME_DELETE_STICKY")), v) {
+						continue
+					}
 					if _, err := os.Stat(goneVolumePath(dir, v)); err == nil {
 						absent = append(absent, `"`+v+`"`)
 						continue
@@ -1285,4 +1334,52 @@ func validContainerName(name string) bool {
 func slowHere(name string) bool {
 	only := os.Getenv("SLOW_ONLY")
 	return only == "" || only == name
+}
+
+// publishCountsRefused answers a `run` with a `-p` whose host side and container
+// side are ranges of different lengths, the way container 1.4.1 does
+// (`Error: publish host and container port counts are not equal: <host>:<container>`,
+// the two sides as written, without the address or the protocol in front of and behind them,
+// exit 1, measured for a host range with one container port, one host port with
+// a container range, and two ranges of different lengths). Nothing is recorded
+// for such a run. A spelling with no range, or two ranges of one length, is not
+// asked about here.
+func publishCountsRefused(args []string) (msg string, refused bool) {
+	for i, a := range args {
+		if i == 0 || (args[i-1] != "-p" && args[i-1] != "--publish") {
+			continue
+		}
+		s := a
+		if j := strings.LastIndex(s, "/"); j >= 0 {
+			s = s[:j] // the protocol
+		}
+		if strings.HasPrefix(s, "[") { // an IPv6 address
+			if j := strings.Index(s, "]"); j >= 0 {
+				s = strings.TrimPrefix(s[j+1:], ":")
+			}
+		}
+		parts := strings.Split(s, ":")
+		if len(parts) < 2 {
+			continue // a bare container port
+		}
+		host, ctr := parts[len(parts)-2], parts[len(parts)-1]
+		if publishCount(host) != publishCount(ctr) {
+			return "Error: publish host and container port counts are not equal: " + host + ":" + ctr, true
+		}
+	}
+	return "", false
+}
+
+// publishCount is how many ports one side of a `-p` names: `80` is one, `80-82` three.
+func publishCount(side string) int {
+	lo, hi, ok := strings.Cut(side, "-")
+	if !ok {
+		return 1
+	}
+	a, errA := strconv.Atoi(lo)
+	b, errB := strconv.Atoi(hi)
+	if errA != nil || errB != nil {
+		return 1
+	}
+	return b - a + 1
 }

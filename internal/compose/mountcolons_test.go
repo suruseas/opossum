@@ -35,6 +35,18 @@ func TestAShortMountIsReadAsSourceTargetMode(t *testing.T) {
 		{"./d:/y:/z", `volumes entry 1 of 1: in "./d:/y:/z" the third field "/z" is the mode (such as ` + "`ro`" + `), not a path — the target is "/y"; remove the third field`},
 		{"hh:xx:a/b", `volumes entry 1 of 1: in "hh:xx:a/b" the third field "a/b" is the mode (such as ` + "`ro`" + `), not a path — the target is "xx"; write SOURCE:TARGET with the target starting with`},
 		{"hh::/y", `volumes entry 1 of 1: "hh::/y" has nothing between its colons — a short mount is SOURCE:TARGET or SOURCE:TARGET:MODE`},
+		// An empty target: docker compose refuses each of these
+		// (`empty section between colons`, v5.5.1), and the runtime would take
+		// them and mount an empty anonymous volume where the source's own path
+		// is, so the host directory never appears in the container.
+		{"./src:", `volumes entry 1 of 1: "./src:" has no target after its colon — a short mount is SOURCE:TARGET, so write the path in the container (` + "`./src:/app`" + `)`},
+		{"/abs:", `volumes entry 1 of 1: "/abs:" has no target after its colon`},
+		{"hh:", `volumes entry 1 of 1: "hh:" has no target after its colon — a short mount is SOURCE:TARGET, so write the path in the container (` + "`hh:/app`" + `)`},
+		// The bare `:` is the one entry docker accepts, so it loads; and an empty
+		// source is a difference already written down in docs/compatibility.md,
+		// which this does not change.
+		{":", ""},
+		{":/y", ""},
 	} {
 		t.Run(tc.entry, func(t *testing.T) {
 			_, err := Load(writeTemp(t, "services:\n  web:\n    image: alpine\n    volumes:\n      - "+strconv.Quote(tc.entry)+"\n"+decl))

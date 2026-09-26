@@ -100,6 +100,28 @@ func TestAHostPortTheFileFixedIsTakenEvenWhenThatServiceIsNotStarted(t *testing.
 	}
 }
 
+// distinctFreePorts returns n free host ports, no two the same: the listeners are
+// all held until the last is chosen, then let go together.
+func distinctFreePorts(t *testing.T, n int) []int {
+	t.Helper()
+	var held []net.Listener
+	defer func() {
+		for _, l := range held {
+			l.Close()
+		}
+	}()
+	ports := make([]int, 0, n)
+	for len(ports) < n {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		held = append(held, l)
+		ports = append(ports, l.Addr().(*net.TCPAddr).Port)
+	}
+	return ports
+}
+
 // The set is built by walking a map, whose order differs from run to run.
 // Building a set is order-free — but only as long as nothing in the walk
 // depends on the order, and this walk sits next to one that does (the pass
@@ -111,7 +133,14 @@ func TestAHostPortTheFileFixedIsTakenEvenWhenThatServiceIsNotStarted(t *testing.
 // service would keep the mirror on every reading and look steady. So z
 // fixes the port, and the mirror must move on all twenty.
 func TestTheSetIsTheSameWhateverOrderTheServicesAreWalkedIn(t *testing.T) {
-	port := freePort(t)
+	// Four numbers held at once until all are chosen, so that no two are the same:
+	// the claim's and the three others'. Asked one by one — listen, read, close —
+	// a later ask can be handed the number an earlier one was, and two entries then
+	// publish one host port and `up` refuses the file (`OPSM-213`) for a reason that
+	// is the test's and not the walk's. Seen on CI, twice in an hour.
+	ports := distinctFreePorts(t, 4)
+	port := ports[0]
+	others := ports[1:]
 	mirror := fmt.Sprintf("%[1]d:%[1]d", port)
 	for i := 0; i < 20; i++ {
 		services := map[string]*compose.Service{
@@ -122,9 +151,9 @@ func TestTheSetIsTheSameWhateverOrderTheServicesAreWalkedIn(t *testing.T) {
 			"z": {Image: "web:latest", Ports: []string{fmt.Sprintf("%d:80", port)}},
 		}
 		// Enough other services that a map walk has somewhere to differ.
-		for _, name := range []string{"m", "q", "w"} {
+		for j, name := range []string{"m", "q", "w"} {
 			services[name] = &compose.Service{Image: "web:latest",
-				Ports: []string{fmt.Sprintf("%d:80", freePort(t))}}
+				Ports: []string{fmt.Sprintf("%d:80", others[j])}}
 		}
 		rt, log := fakeShim(t)
 		var out bytes.Buffer

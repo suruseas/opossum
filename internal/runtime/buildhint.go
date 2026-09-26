@@ -26,6 +26,9 @@ type buildErrorDetector struct {
 	// refusedLine is the runtime's line for the refused request, whose URL
 	// names the image the build asked for.
 	refusedLine string
+	// invalidReference is the name the runtime refused to tag the build with
+	// (`Error: invalid reference <name>`), or "".
+	invalidReference string
 }
 
 // maxHeldLine bounds how much of one line is kept. The runtime's refusal is a
@@ -46,6 +49,33 @@ type buildImageRefused struct{ err error }
 func (e *buildImageRefused) Error() string        { return e.err.Error() }
 func (e *buildImageRefused) Unwrap() error        { return e.err }
 func (e *buildImageRefused) Is(target error) bool { return target == ErrBuildImageRefused }
+
+// ErrBuildInvalidReference is what a failed Build reports, through errors.Is, when
+// the runtime refused the name it was asked to tag the image with: the failure is
+// the name, and no Dockerfile — built by Docker or by the runtime — changes it.
+var ErrBuildInvalidReference = errors.New("the runtime refused the image name the build was to be tagged with")
+
+// buildInvalidReference marks a build error as ErrBuildInvalidReference.
+type buildInvalidReference struct{ err error }
+
+func (e *buildInvalidReference) Error() string        { return e.err.Error() }
+func (e *buildInvalidReference) Unwrap() error        { return e.err }
+func (e *buildInvalidReference) Is(target error) bool { return target == ErrBuildInvalidReference }
+
+// invalidReferenceName is the name in the runtime's line for a tag it refuses —
+// `Error: invalid reference Abc/Def:V1`, the first line of what `container
+// build -t` writes (measured on 1.4.1, testdata/error-wordings/build-invalid-
+// reference-141.txt) — or "". Read from the line's first byte for the reason
+// isImageRefusedLine is: a build step can print the same words, behind its own
+// prefix. The name is one token: a line with more after it is not this one.
+func invalidReferenceName(line string) string {
+	const prefix = "Error: invalid reference "
+	name, ok := strings.CutPrefix(line, prefix)
+	if !ok || name == "" || strings.ContainsAny(name, " \t\r\"") {
+		return ""
+	}
+	return name
+}
 
 // Signatures Apple's `container` builder emits when its cache is in a bad state
 // (typically after a build was interrupted), when it runs out of resources or the
@@ -149,6 +179,11 @@ func (d *buildErrorDetector) endLine() {
 		d.imageRefused = true
 		d.refusedLine = string(d.line)
 	}
+	if !d.longLine {
+		if name := invalidReferenceName(string(d.line)); name != "" {
+			d.invalidReference = name
+		}
+	}
 	d.line, d.longLine = d.line[:0], false
 }
 
@@ -222,6 +257,56 @@ func hintFor(failure buildFailure, redo string) string {
 			"and that it's reachable (registry auth / network), " + again
 	}
 	return ""
+}
+
+// invalidName is the name the runtime refused to tag the build with, or "".
+func (d *buildErrorDetector) invalidName() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.invalidReference
+}
+
+// invalidReferenceHint is the guidance for a name the runtime refused to tag a
+// build with. The Dockerfile is not what is wrong, and the way round a builder
+// that cannot cope with one (build with Docker, import) is not offered: the
+// name is what is refused. What is claimed of the runtime is what was measured
+// on container 1.4.1: a repository path with upper case (`Abc/Def:V1`,
+// `org/App:v1`) is refused and a tag with upper case is not, and a name with
+// none is refused too when it is malformed (`org/app:`, `org//app`,
+// `org/app:v1!`) — so upper case is named as the cause only where the name has it
+// in its repository, and where it has not the hint says the name is refused and no
+// more. Where the name comes from is `image:`, or the project's and the service's
+// names when `image:` is not written.
+func invalidReferenceHint(name, redo string) string {
+	again := "then rerun the opossum command that failed."
+	if redo != "" {
+		again = "then run `" + redo + "` again."
+	}
+	cause := "check the name — it is made from `image:` in the compose file, or from the project's and the service's names when `image:` is not written — "
+	if repo := referenceRepository(name); repo != strings.ToLower(repo) {
+		cause = "the runtime refuses a repository path with upper case (a tag may have it), so write the name in lower case — " +
+			"it is `image:` in the compose file, or the project's and the service's names when `image:` is not written — "
+	}
+	return "hint: the runtime will not tag this build with the image name `" + name + "` (`invalid reference`) — the name is what is refused, not the Dockerfile. " +
+		cause + again
+}
+
+// referenceRepository is the repository path of an image reference: what stands
+// after a registry host and before the digest and the tag. A first component with
+// a `.` or a `:` in it is a host, and the runtime takes upper case in one
+// (`LOCALHOST:5001/org/app`, `registry.Example.com/org/app`, measured on 1.4.1);
+// one without is part of the path (`Abc/def`, `LOCALHOST/org/app` are refused). A
+// colon in the last component is the tag's.
+func referenceRepository(name string) string {
+	name, _, _ = strings.Cut(name, "@")
+	if first, rest, ok := strings.Cut(name, "/"); ok && strings.ContainsAny(first, ".:") {
+		name = rest
+	}
+	slash := strings.LastIndex(name, "/")
+	if colon := strings.LastIndex(name, ":"); colon > slash {
+		return name[:colon]
+	}
+	return name
 }
 
 // refusedContext is the additional context whose name the refused request
@@ -301,6 +386,7 @@ const (
 	failedResources
 	failedCache
 	failedImageRefused
+	failedInvalidReference
 )
 
 // diagnosed says which failure answers, and is the one place the order is
@@ -325,6 +411,10 @@ func (d *buildErrorDetector) diagnosed() buildFailure {
 		return failedCache
 	case d.imageRefused:
 		return failedImageRefused
+	case d.invalidReference != "":
+		// Last, as a refused image is: the refusal comes before anything is built, so
+		// none of the failures above can be beside it.
+		return failedInvalidReference
 	}
 	return noKnownFailure
 }

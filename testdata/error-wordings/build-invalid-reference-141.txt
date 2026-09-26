@@ -1,0 +1,27 @@
+$ container --version
+container CLI version 1.4.1
+
+# Taken 2026-09-26 by asking the runtime directly (a two-line Dockerfile,
+# `FROM scratch` and a COPY). The tag is refused before anything is built, so
+# nothing but the runtime's own words is on stderr, the usage text after them;
+# stdout is 0 bytes and the exit code is 64 (a usage error), not 1.
+#
+# The first line is the one that names the image: `Error: invalid reference <the
+# name as given>`. The lines after it are `container build`'s usage, which says
+# nothing about a name.
+
+# -t Abc/Def:V1
+$ container build -t Abc/Def:V1 .
+--- exit code: 64
+--- stderr (last 3 lines) ---
+Error: invalid reference Abc/Def:V1
+Usage: container build [<options>] [<context-dir>]
+  See 'container build --help' for more information.
+
+# -t org/App:v1
+$ container build -t org/App:v1 .
+--- exit code: 64
+--- stderr (last 3 lines) ---
+Error: invalid reference org/App:v1
+Usage: container build [<options>] [<context-dir>]
+  See 'container build --help' for more information.

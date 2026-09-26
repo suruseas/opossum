@@ -408,15 +408,19 @@ list; codes are add-only and never change meaning.
   only a container port (`ports: ["3000"]`), so the host port is opossum's to choose;
   the mirrored port was not available, so a free one was used. docker compose does the
   same. The notice says which of six reasons made it unavailable: something is listening
-  on it; another service's line names it; another line of the same service names it;
-  another service publishes a range of container ports opossum mirrors onto it; the same
-  service publishes such a range; or this run had already given it to another entry. Only
+  on it — the question is put to the host address the entry names, or to IPv4 where that
+  address is a wildcard or absent; another service's line names it; another line of the
+  same service names it; another service publishes a range of container ports opossum
+  mirrors onto it; the same service publishes such a range; or this run had already
+  given it to another entry. Only
   the first is a question about the machine — the other five are about the compose file
   and this run, and a reader sent to `lsof` for one of those may find nothing there and
   conclude opossum is wrong. The two range reasons point at the range rather than at a
   number, because a line that names container ports does not name a host port anywhere.
   `opossum ps` shows the port actually published; write `"<host>:<container>"` in the
-  compose file to pin one. An explicit mapping is never moved (that's `OPSM-201`).
+  compose file to pin one — the notice spells it with the entry's own address and
+  protocol (`"127.0.0.1:<host>:3000"`, `"<host>:3000/udp"`), which the pinned entry has
+  to keep. An explicit mapping is never moved (that's `OPSM-201`).
 - **`[OPSM-212]` … `so opossum left the entry on <port>`** →
   the same situation as `OPSM-206`, except that no free port could be used. opossum asks
   the system for a free port, and the system answers about listeners — a line that fixes a
@@ -450,6 +454,7 @@ list; codes are add-only and never change meaning.
   is a service this command does not start. Until this check existed the pair reached the
   runtime, which failed at bind or refused the specs and named no line of the file.
 - **`[OPSM-214]` … `service "<svc>" publishes <spec>, and this host will not bind <address>`** → the entry names a host address this machine will not bind, and nothing starts. Asked with port 0, so the answer is about the address alone; the reason the bind gave is passed through, because the same error comes back for an interface that is down. Check that the machine has the address and that its interface is up, or write one it does have; dropping the address publishes on every address, which is a wider door than the file asked for. Both engines refuse such a file — docker compose names the address and the port, Apple `container` returns the same errno four levels down a chain of causes that names neither.
+- **`[OPSM-215]` … `this host will not bind a published host port: <port>/<proto> (service "<svc>"): <the bind's own error>`** → the bind of an entry's host port was refused, and the reason is not that something is listening on it: The pre-flight says `OPSM-201` only when the bind returns `EADDRINUSE`. The runtime refuses the same entry too (measured on Apple `container` 1.4.1, macOS 26, uid 501: `127.0.0.1:80` and `127.0.0.1:1023` do not start, `80:80` on every address does), so this is a choice of what the reader is told, and of when: before the network and the services ahead of it exist. For a permission refusal on a port below 1024 on a specific address the message adds the way out — a port from 1024 up and, for an IPv4 address, dropping the address, which publishes on every address and is a wider door than the file asks for (a wildcard entry gets neither: it is not what takes root). A service whose container is already running is left alone, whoever holds its port; a stopped one is refused even for a port another service is about to let go of, since that changes who holds the port and not who may bind it. A container-only entry (`127.0.0.1::80`) is not refused: it is moved to a free port on its address as before, and `OPSM-206` names the bind's reason instead of "in use".
 - **`[OPSM-207]` … `network <n> exists with IPv4 subnet <a>, and the compose file now declares <b>`** →
   the project network was created earlier with another subnet (or with none, so
   the runtime chose one) and `ipam.config` now declares a different one. opossum
@@ -586,6 +591,7 @@ Every `[OPSM-NNN]` opossum can emit (add-only; grouped 1xx storage / 2xx network
 - `OPSM-212` — a container-only port could not be moved: a bounded number of host ports outside the ones this compose file publishes were tried and none could be bound.
 - `OPSM-213` — two entries of this run publish the same host port on one address (or two entries of one service, whatever addresses).
 - `OPSM-214` — a published entry names a host address this machine will not bind, so nothing starts. Asked before any host port is, with port 0, so that a port somebody holds and an address this host does not have are different messages. A service whose container is already running is left alone.
+- `OPSM-215` — a published host port was refused by the bind for a reason other than a listener (a port below 1024 on a specific address takes root for a plain user), so the entry is refused up front and the reason is the bind's own. The pre-flight keeps `OPSM-201` for `EADDRINUSE` alone.
 - `OPSM-401` — a dependency's container exited before becoming healthy (logs embedded).
 - `OPSM-402` — orphan containers left by services no longer in the compose.
 - `OPSM-403` — a `service_healthy` dependency defines no healthcheck (not waited on).
