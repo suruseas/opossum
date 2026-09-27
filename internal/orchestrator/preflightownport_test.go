@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/suruseas/opossum/internal/compose"
@@ -301,18 +302,10 @@ func TestAHostPortThisRunFreesItselfIsNotAConflict(t *testing.T) {
 			if holderProto == "" {
 				holderProto = proto
 			}
-			aPorts := fmt.Sprintf("%d:80", freeBelow(t, held))
-			if tc.aPorts != "" {
-				aPorts = fmt.Sprintf(tc.aPorts, held, held+2, held-1, held+1, held-2)
-			}
 			zPorts := fmt.Sprintf("%d:90", held)
 			if tc.zPorts != "" {
 				zPorts = fmt.Sprintf(tc.zPorts, held)
 			}
-			p := &compose.Project{Name: "demo", Services: map[string]*compose.Service{
-				"a": {Image: "web:latest", Ports: []string{aPorts}},
-				"z": {Image: "web:latest", Ports: []string{zPorts}},
-			}}
 			rt := quietShim(t)
 			if tc.holder != "" {
 				rt = shimFor(t, fakeContainer{
@@ -320,9 +313,44 @@ func TestAHostPortThisRunFreesItselfIsNotAConflict(t *testing.T) {
 					proto: holderProto, hostPort: held + tc.holderPort, count: tc.holderCount,
 				})
 			}
-			var out bytes.Buffer
-			o := New(p, rt, "opossum", &out)
-			err := o.checkHostPorts(tc.order)
+			// aPorts, when the row leaves it to freeBelow, names a port
+			// verified free and then closed — real, and briefly open to
+			// whichever `net.Listen(":0")` elsewhere in this run asks next.
+			// checkHostPorts re-binds it for real (this row exercises that
+			// path, not a stub), so a genuinely free choice can, rarely, lose
+			// that race and come back taken by something outside this test
+			// (issue #1372: seen once on the runner, the row misnaming the
+			// holder as this row's own fixture — it is nobody's; confirmed,
+			// not just read from the traceback — TestAStaleBindOnAsOwnPortIsThe1372Failure
+			// reproduces the exact wording with a's real bind check alone
+			// forced busy). A row that spells its own aPorts asks for `held`
+			// itself, kept open by heldHostPort for the whole subtest, so
+			// there is nothing to race there and one attempt is enough.
+			var aPorts string
+			var err error
+			attempts := 1
+			if tc.aPorts == "" {
+				attempts = 3
+			}
+			for attempt := 1; attempt <= attempts; attempt++ {
+				aPorts = fmt.Sprintf("%d:80", freeBelow(t, held))
+				if tc.aPorts != "" {
+					aPorts = fmt.Sprintf(tc.aPorts, held, held+2, held-1, held+1, held-2)
+				}
+				p := &compose.Project{Name: "demo", Services: map[string]*compose.Service{
+					"a": {Image: "web:latest", Ports: []string{aPorts}},
+					"z": {Image: "web:latest", Ports: []string{zPorts}},
+				}}
+				var out bytes.Buffer
+				o := New(p, rt, "opossum", &out)
+				err = o.checkHostPorts(tc.order)
+				if refused := err != nil; refused == tc.wantRefused {
+					break
+				}
+				if attempt < attempts {
+					t.Logf("attempt %d: checkHostPorts(%v) err = %v, wanted refused = %v (retrying: a's freeBelow port may have raced someone else's listener) ", attempt, tc.order, err, tc.wantRefused)
+				}
+			}
 			if refused := err != nil; refused != tc.wantRefused {
 				t.Fatalf("checkHostPorts(%v) err = %v; wanted refused = %v. %d is held by %s, "+
 					"and a publishes %q.", tc.order, err, tc.wantRefused, held,
@@ -610,5 +638,34 @@ func TestFreeBelowSkipsAPortSomeoneIsHolding(t *testing.T) {
 	l.Close()
 	if got >= held {
 		t.Errorf("freeBelow(%d) = %d, want a port under it", held, got)
+	}
+}
+
+// TestAStaleBindOnAsOwnPortIsThe1372Failure confirms, deterministically, what
+// the retry above is a mitigation for: `a`'s own real bind check (askHostPort)
+// finding its freeBelow-chosen port busy — for any reason outside this test,
+// not a conflict with z's declared range at all — produces exactly the wording
+// CI showed (issue #1372, run 36293839890). z's own port is untouched: only a's
+// bind is forced to fail, with `probeHostPort` stubbed (as bindanswer_internal_test.go's
+// other rows already do) rather than racing a real socket. That the fixture's
+// span for z happens to cover the number is what makes the message name z as
+// the holder — a coincidence of the numbers freeBelow and the range both sit
+// near `held`, not a bug in how the range is read.
+func TestAStaleBindOnAsOwnPortIsThe1372Failure(t *testing.T) {
+	held := 39611
+	rt := shimFor(t, fakeContainer{service: "z", hostPort: held - 2, count: 3}) // z's range: held-2..held
+	p := &compose.Project{Name: "demo", Services: map[string]*compose.Service{
+		"a": {Image: "web:latest", Ports: []string{"39610:80"}}, // held-1: freeBelow's usual first pick
+		"z": {Image: "web:latest", Ports: []string{"39611:90"}}, // held: z's own default entry
+	}}
+	var out bytes.Buffer
+	o := New(p, rt, "opossum", &out)
+	probe := &bindAnswers{by: map[string]error{}}
+	probe.by["tcp4 :39610"] = refusedBind(t, "tcp4", ":39610", syscall.EADDRINUSE) // a's port alone, forced busy
+	o.probeHostPort = probe.probe
+	err := o.checkHostPorts([]string{"a", "z"})
+	want := `39610/tcp (service "a") — held by this project's service "z", which this run starts after this entry`
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("got %v\nwant it to hold %q — the exact CI wording", err, want)
 	}
 }

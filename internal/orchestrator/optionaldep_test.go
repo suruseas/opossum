@@ -264,28 +264,33 @@ func TestAnOptionalDependencyNotHealthyLeavesTheOthersWaitedFor(t *testing.T) {
 	}
 }
 
-// Whether a run-to-completion failure is passed over is decided by every
-// dependent in the file that needs the completion: a required one keeps the
-// failure fatal, gated or not — the same set completedTargets reads when it
-// decides what runs to completion. Known difference, kept on purpose: docker
-// compose v5.5.1 (measured 2026-09-19) reads only the dependents it starts,
-// so `admin`, gated and requiring `migrate`, does not keep `web` from
-// starting there. One that waits with another condition does not count.
-func TestACompletionFailureIsJudgedByEveryDependentInTheFile(t *testing.T) {
+// Whether a run-to-completion failure is passed over is decided by the
+// dependents this `up` starts, as docker compose v5.5.1 decides it (measured
+// 2026-09-27, `up -d` of a file where `migrate` exits 3): `admin`, gated behind
+// a profile that is not active and requiring `migrate`, does not keep `web`
+// (which waits with `required: false`) from starting — rc 0, the failure noted;
+// with the profile on, or `admin` named, it does (rc 1). A required dependent
+// that is started counts, and one that waits with another condition, or for
+// another service, does not.
+func TestACompletionFailureIsJudgedByTheDependentsThatAreStarted(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		other   *compose.Service
+		enable  []string // the profiles the command turns on
+		named   []string // the services `up` is asked for
 		webRuns bool
 	}{
-		{"a gated required dependent counts (docker compose: not read)", &compose.Service{Image: "admin:1", Profiles: []string{"tools"}, DependsOn: compose.DependsOn{{Name: "migrate", Condition: compose.ConditionCompleted}}}, false},
-		{"a gated optional dependent does not count", &compose.Service{Image: "admin:1", Profiles: []string{"tools"}, DependsOn: compose.DependsOn{{Name: "migrate", Condition: compose.ConditionCompleted, Optional: true}}}, true},
-		{"an active required dependent counts", &compose.Service{Image: "admin:1", DependsOn: compose.DependsOn{{Name: "migrate", Condition: compose.ConditionCompleted}}}, false},
-		{"a dependent waiting for a start only does not count", &compose.Service{Image: "admin:1", DependsOn: compose.DependsOn{{Name: "migrate", Condition: compose.ConditionStarted}}}, true},
+		{"a gated required dependent that is not started does not count", &compose.Service{Image: "admin:1", Profiles: []string{"tools"}, DependsOn: compose.DependsOn{{Name: "migrate", Condition: compose.ConditionCompleted}}}, nil, nil, true},
+		{"a gated required dependent whose profile is on counts", &compose.Service{Image: "admin:1", Profiles: []string{"tools"}, DependsOn: compose.DependsOn{{Name: "migrate", Condition: compose.ConditionCompleted}}}, []string{"tools"}, nil, false},
+		{"a gated required dependent that is named counts", &compose.Service{Image: "admin:1", Profiles: []string{"tools"}, DependsOn: compose.DependsOn{{Name: "migrate", Condition: compose.ConditionCompleted}}}, nil, []string{"admin"}, false},
+		{"a gated optional dependent does not count", &compose.Service{Image: "admin:1", Profiles: []string{"tools"}, DependsOn: compose.DependsOn{{Name: "migrate", Condition: compose.ConditionCompleted, Optional: true}}}, nil, nil, true},
+		{"an active required dependent counts", &compose.Service{Image: "admin:1", DependsOn: compose.DependsOn{{Name: "migrate", Condition: compose.ConditionCompleted}}}, nil, nil, false},
+		{"a dependent waiting for a start only does not count", &compose.Service{Image: "admin:1", DependsOn: compose.DependsOn{{Name: "migrate", Condition: compose.ConditionStarted}}}, nil, nil, true},
 		// Judged by name: a required completion of another service (`seed`,
 		// which completes) says nothing about `migrate`. Without the name in
 		// the judgment, any required completion in the file made every
 		// failure fatal (a mutation the rows above did not see).
-		{"a required completion of another service does not count", &compose.Service{Image: "admin:1", DependsOn: compose.DependsOn{{Name: "seed", Condition: compose.ConditionCompleted}}}, true},
+		{"a required completion of another service does not count", &compose.Service{Image: "admin:1", DependsOn: compose.DependsOn{{Name: "seed", Condition: compose.ConditionCompleted}}}, nil, nil, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rt, log := fakeShim(t)
@@ -297,7 +302,8 @@ func TestACompletionFailureIsJudgedByEveryDependentInTheFile(t *testing.T) {
 				"admin":   tc.other,
 			})
 			o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
-			err := o.Up(true)
+			o.EnableProfiles(tc.enable)
+			err := o.Up(true, tc.named...)
 			if (err == nil) != tc.webRuns {
 				t.Fatalf("up: %v, want to go ahead %v", err, tc.webRuns)
 			}
@@ -305,6 +311,74 @@ func TestACompletionFailureIsJudgedByEveryDependentInTheFile(t *testing.T) {
 				t.Errorf("web ran: %v, want %v", got, tc.webRuns)
 			}
 		})
+	}
+}
+
+// The failure of a run-to-completion target that nothing this `up` starts waits
+// for is passed over, and said so in words that do not call the dependent
+// optional: `up migrate`, where `admin` (gated, required) is the only dependent
+// (docker compose v5.5.1: rc 0, `migrate` exits 3 and stays there, measured
+// 2026-09-27), and a plain `up` where the only dependent is behind a profile.
+func TestACompletionFailureNothingStartedWaitsForIsSaidSo(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		gated bool // the dependent is behind a profile that is not on
+		named []string
+	}{
+		{"the target is named, and the dependent is gated", true, []string{"migrate"}},
+		{"nothing is named, and the dependent is gated", true, nil},
+		// The dependent is active and required, and this `up` does not start it:
+		// docker compose v5.5.1 (measured 2026-09-27, `up -d migrate`) goes on, rc 0.
+		// Kept apart from the rows above so that "not started" and "behind a
+		// profile" are not one axis (a judgment by which services are active would
+		// pass the rows above and fail this one).
+		{"the target is named, and the dependent is active", false, []string{"migrate"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt, _ := fakeShim(t)
+			setShimEnv(rt, "RUN_FAIL=migrate.demo.opossum")
+			admin := &compose.Service{Image: "admin:1", DependsOn: compose.DependsOn{{Name: "migrate", Condition: compose.ConditionCompleted}}}
+			if tc.gated {
+				admin.Profiles = []string{"tools"}
+			}
+			p := project("demo", map[string]*compose.Service{
+				"migrate": {Image: "migrate:1"},
+				"admin":   admin,
+			})
+			var out bytes.Buffer
+			if err := orchestrator.New(p, rt, "opossum", &out).Up(true, tc.named...); err != nil {
+				t.Fatalf("up: %v, want it to go ahead (docker compose does)", err)
+			}
+			if !strings.Contains(out.String(), "nothing this command starts waits for it") {
+				t.Errorf("the failure should be noted as one nothing waits for, got:\n%s", out.String())
+			}
+			if strings.Contains(out.String(), "optional dependency") {
+				t.Errorf("no dependent is optional here, and the note calls it so:\n%s", out.String())
+			}
+		})
+	}
+}
+
+// What a `run` tells the Up that starts its dependencies (the service it is
+// starting them for waits on them) does not outlast the run: the next `up` of the
+// same Orchestrator judges by what it starts alone.
+func TestARunOneOffDoesNotLeaveItsServiceWaitingForTheNextUp(t *testing.T) {
+	rt, _ := fakeShim(t)
+	setShimEnv(rt, "RUN_FAIL=migrate.demo.opossum")
+	p := project("demo", map[string]*compose.Service{
+		"migrate": {Image: "migrate:1"},
+		"web":     {Image: "web:latest", DependsOn: compose.DependsOn{{Name: "migrate", Condition: compose.ConditionCompleted}}},
+	})
+	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
+	// `web` requires `migrate`, which fails: the run is refused (its one-off is a
+	// dependent of the dependencies it starts).
+	if err := o.RunOneOff("web", []string{"true"}, orchestrator.RunOneOffOptions{}); err == nil {
+		t.Fatal("run web: want it refused")
+	}
+	// That was the run's own doing: an up that starts `migrate` alone has no
+	// dependent that waits (`web` is not among what it starts).
+	if err := o.Up(true, "migrate"); err != nil {
+		t.Fatalf("up migrate after the run: %v, want it to go ahead (nothing it starts waits for migrate)", err)
 	}
 }
 

@@ -139,12 +139,15 @@ func TestRunLeavesTTYToTheTerminal(t *testing.T) {
 // `up --foreground`) by three failures (a refused name, an image the registry
 // does not have, a host port in use as the runtime reports it), each with and
 // without `tty: true`: the reading has to be the same on both sides. What
-// each shape reads is its own: a dependency run to completion recognises the
-// refused name and a missing image (named as `up --foreground` names it: no
-// container was made, so nothing ran to have completed) and reports every other
-// failure as not having completed (the runtime's words having been streamed
-// above), where `up --foreground` also names the port — as before `tty` was
-// read, on both shapes.
+// each shape reads is its own only where the runtime made a container: a
+// dependency run to completion recognises the refused name and a missing image
+// (named as `up --foreground` names it: no container was made, so nothing ran
+// to have completed), and gives the runtime's other diagnoses when no container
+// was made (a port it cannot bind, an image with no arm64 build, a volume it
+// will not attach — measured on 1.4.1, all leave nothing listed); a run that
+// made a container is not diagnosed, and a dependency reads as having not
+// completed where a foreground service reads as a failed start
+// (foregrounddiagnosis_test.go holds those).
 func TestAForegroundRunWithTTYStillReadsItsFailure(t *testing.T) {
 	const nameTaken = "something else now holds the container name"
 	const image = "docker.io/nosuchorg-neko1165/nosuchimage:latest"
@@ -168,8 +171,11 @@ func TestAForegroundRunWithTTYStillReadsItsFailure(t *testing.T) {
 			[]count{{"stop app.demo.opossum", 0}, {"delete --force app.demo.opossum", 1}}},
 		{"a missing image", []string{"RUN_IMAGE_FETCH_FAIL=" + image, "RUN_IMAGE_FETCH_REASON=404 Not Found. Reason: Unknown", "RUN_IMAGE_FETCH_URL=https://registry-1.docker.io/v2/nosuchorg-neko1165/nosuchimage/manifests/latest"},
 			"check the image name " + `"` + image + `"`, "check the image name " + `"` + image + `"`, nil},
-		{"a host port in use", []string{"RUN_FAIL=app.demo.opossum", "RUN_FAIL_STDERR=Error: failed to run container: Address already in use"},
-			"a published host port is already in use", notCompleted, nil},
+		// The runtime refuses the run and makes no container (measured on 1.4.1: a
+		// port it cannot bind leaves nothing listed), so the diagnosis is given in
+		// either shape.
+		{"a host port in use", []string{"RUN_FAIL=app.demo.opossum", "RUN_FAIL_MAKES_NOTHING=1", "RUN_FAIL_STDERR=Error: failed to run container: Address already in use"},
+			"a published host port is already in use", "a published host port is already in use", nil},
 	}
 	for _, shape := range []struct {
 		name       string

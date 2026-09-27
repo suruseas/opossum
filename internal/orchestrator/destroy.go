@@ -139,7 +139,7 @@ func (o *Orchestrator) DestroyPlanFor(keepOverlay, keepImages, keepLocal bool) (
 	p.Containers = append(p.Containers, o.orphans()...)
 	sort.Strings(p.Containers)
 
-	for _, net := range append([]string{o.networkName()}, o.declaredNetworks()...) {
+	for _, net := range o.projectNetworks() {
 		if o.rt.NetworkExists(net) {
 			p.Networks = append(p.Networks, net)
 		}
@@ -297,23 +297,79 @@ func (o *Orchestrator) strandedVolumes(planned []string) []string {
 	return out
 }
 
-// declaredNetworks names the networks this project declared and therefore owns,
-// each once and in name order. External ones are declared but belong to
-// whoever created them. Keys folding to one name (a declaration no service
-// joins is not refused for that), to the default network's, or to nothing
-// name no network of their own.
+// declaredNetworks names the networks this project declared and therefore owns
+// by their name, each once and in name order: `<project>-<key>` for a key that
+// carries no `name:`, and — for one that does — the `<project>-<key>` an earlier
+// version made of it before `name:` was read, which is opossum's own name and
+// nobody else's. External ones are declared but belong to whoever created
+// them. Keys folding to one name (a declaration no service joins is not refused
+// for that), to the default network's, or to nothing name no network of their
+// own. The networks a `name:` gives are not here: a name of the file's own is
+// no proof of whose network it is (see namedNetworks).
 func (o *Orchestrator) declaredNetworks() []string {
 	seen := map[string]bool{o.networkName(): true}
 	var out []string
 	for key, decl := range o.Project.Networks {
-		name := o.declaredNetworkName(key)
-		if decl.External || compose.NetworkRuntimeKey(key) == "" || seen[name] {
+		fold := compose.NetworkRuntimeKey(key)
+		name := o.Project.Name + "-" + fold
+		if decl.External || fold == "" || seen[name] {
 			continue
 		}
 		seen[name] = true
 		out = append(out, name)
 	}
 	sort.Strings(out)
+	return out
+}
+
+// namedNetworks names the networks this project carries a `name:` for, that
+// exist and are this project's: made by an `up` of it, which puts its label on
+// them. One that is there without the label — made by hand, by another tool, by
+// another project — is not: docker compose does not remove those either
+// (measured, v5.5.1: an `up` uses a network of that name that is already there,
+// and a `down` leaves it), and a network no `up` here has made could be
+// anything. A network the runtime does not answer for is left, as one that is not
+// ours.
+func (o *Orchestrator) namedNetworks() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, decl := range o.Project.Networks {
+		name, named := decl.NetworkOwnName()
+		if !named || seen[name] {
+			continue
+		}
+		seen[name] = true
+		if o.networkIsOurs(name) {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// networkIsOurs reports whether the network of that name carries this project's
+// label: it was made by an `up` of this project. A network the runtime does not
+// answer for is not.
+func (o *Orchestrator) networkIsOurs(name string) bool {
+	labels, ok := o.rt.NetworkLabels(name)
+	return ok && labels[projectLabel] == o.Project.Name
+}
+
+// projectNetworks is every network `down` and `destroy` remove for this
+// project, each once: the default one first, then the ones named by their key
+// and the ones carrying a `name:` that this project made, each group in name
+// order.
+func (o *Orchestrator) projectNetworks() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, group := range [][]string{{o.networkName()}, o.declaredNetworks(), o.namedNetworks()} {
+		for _, name := range group {
+			if !seen[name] {
+				seen[name] = true
+				out = append(out, name)
+			}
+		}
+	}
 	return out
 }
 

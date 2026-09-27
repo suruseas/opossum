@@ -51,8 +51,9 @@ func TestARepeatedKeyInsideAnExtensionIsRefused(t *testing.T) {
 		// An alias reuses a whole block; the keys it carries are written once.
 		{"an anchor and its alias", "x-base: &base\n  a: 1\nx-copy: *base\n" + svc, nil},
 		// The other place a key is written twice, which was already refused: not
-		// an extension, and the reason the check has to be about extensions and not
-		// about the file's shape as a whole.
+		// an extension, and refused by the decode in its own words — the check
+		// for the rest of the file (repeatedkeys_test.go) runs after the decode
+		// has passed, so this is not said twice.
 		{"a repeated key outside an extension", "services:\n  web:\n    image: alpine\n    image: busybox\n", []string{"same key twice", `mapping key "image" already defined`, "unmarshal errors"}},
 		// A second file: each file is read on its own, and a repeat inside an
 		// extension in the overlay is the overlay's mistake.
@@ -129,10 +130,10 @@ func TestAReferenceWrittenAsAKeyIsNotExpandedBeforeItIsCounted(t *testing.T) {
 }
 
 // A block that contains itself — `x-a: &a {b: *a}` — is refused by docker compose
-// as a cycle, and is read here as it always was. What this holds is that the check
-// ends: it walks aliases, and an alias that reaches its own block would walk
-// forever. Whether the file loads is not the question, so neither answer is
-// asserted.
+// as a cycle, and here too (repeatedkeys_test.go holds the refusal). What this
+// holds is that the check ends: it walks aliases, and an alias that reaches its own
+// block would walk forever. Whether the file loads is not the question here, so
+// neither answer is asserted.
 func TestTheCheckEndsOnABlockThatContainsItself(t *testing.T) {
 	done := make(chan struct{})
 	go func() {

@@ -1,0 +1,8465 @@
+[
+{
+"key": "annotations",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.annotations must be a mapping"
+},
+{
+"key": "annotations",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.annotations must be a mapping"
+},
+{
+"key": "annotations",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.annotations must be a mapping"
+},
+{
+"key": "annotations",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.annotations must be a mapping"
+},
+{
+"key": "annotations",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": "services.web.annotations.[0]: unexpected type int"
+},
+{
+"key": "annotations",
+"form": "map",
+"value": "{a: 1}",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "annotations",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.annotations must be a mapping"
+},
+{
+"key": "annotations",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.annotations must be a mapping"
+},
+{
+"key": "annotations",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.annotations must be a mapping"
+},
+{
+"key": "annotations",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.annotations must be a mapping"
+},
+{
+"key": "annotations",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.annotations must be a mapping"
+},
+{
+"key": "annotations",
+"form": "listS",
+"value": "[a, b]",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "annotations",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "attach",
+"form": "str",
+"value": "\"x\"",
+"docker": "other",
+"msg": "decoding failed due to the following error(s):"
+},
+{
+"key": "attach",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.attach must be a boolean or string"
+},
+{
+"key": "attach",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.attach must be a boolean or string"
+},
+{
+"key": "attach",
+"form": "bool",
+"value": "true",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "attach",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.attach must be a boolean or string"
+},
+{
+"key": "attach",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.attach must be a boolean or string"
+},
+{
+"key": "attach",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.attach must be a boolean or string"
+},
+{
+"key": "attach",
+"form": "sint",
+"value": "\"7\"",
+"docker": "other",
+"msg": "decoding failed due to the following error(s):"
+},
+{
+"key": "attach",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "attach",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "other",
+"msg": "decoding failed due to the following error(s):"
+},
+{
+"key": "attach",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "other",
+"msg": "decoding failed due to the following error(s):"
+},
+{
+"key": "attach",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.attach must be a boolean or string"
+},
+{
+"key": "attach",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.attach must be a boolean or string"
+},
+{
+"key": "blkio_config",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.blkio_config must be a mapping"
+},
+{
+"key": "blkio_config",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.blkio_config must be a mapping"
+},
+{
+"key": "blkio_config",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.blkio_config must be a mapping"
+},
+{
+"key": "blkio_config",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.blkio_config must be a mapping"
+},
+{
+"key": "blkio_config",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.blkio_config must be a mapping"
+},
+{
+"key": "blkio_config",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.blkio_config additional properties 'a' not allowed"
+},
+{
+"key": "blkio_config",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.blkio_config must be a mapping"
+},
+{
+"key": "blkio_config",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.blkio_config must be a mapping"
+},
+{
+"key": "blkio_config",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.blkio_config must be a mapping"
+},
+{
+"key": "blkio_config",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.blkio_config must be a mapping"
+},
+{
+"key": "blkio_config",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.blkio_config must be a mapping"
+},
+{
+"key": "blkio_config",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.blkio_config must be a mapping"
+},
+{
+"key": "blkio_config",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.blkio_config additional properties 'a' not allowed"
+},
+{
+"key": "build",
+"form": "str",
+"value": "\"x\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "build",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.build must be a string"
+},
+{
+"key": "build",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.build must be a string"
+},
+{
+"key": "build",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.build must be a string"
+},
+{
+"key": "build",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.build must be a string"
+},
+{
+"key": "build",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.build additional properties 'a' not allowed"
+},
+{
+"key": "build",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.build must be a string"
+},
+{
+"key": "build",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "build",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "build",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "build",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "build",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.build must be a string"
+},
+{
+"key": "build",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.build additional properties 'a' not allowed"
+},
+{
+"key": "cap_add",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.cap_add must be a array"
+},
+{
+"key": "cap_add",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.cap_add must be a array"
+},
+{
+"key": "cap_add",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.cap_add must be a array"
+},
+{
+"key": "cap_add",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.cap_add must be a array"
+},
+{
+"key": "cap_add",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": "services.web.cap_add.[0]: unexpected type int"
+},
+{
+"key": "cap_add",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.cap_add must be a array"
+},
+{
+"key": "cap_add",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.cap_add must be a array"
+},
+{
+"key": "cap_add",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.cap_add must be a array"
+},
+{
+"key": "cap_add",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.cap_add must be a array"
+},
+{
+"key": "cap_add",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.cap_add must be a array"
+},
+{
+"key": "cap_add",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.cap_add must be a array"
+},
+{
+"key": "cap_add",
+"form": "listS",
+"value": "[a, b]",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "cap_add",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.cap_add must be a array"
+},
+{
+"key": "cap_drop",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.cap_drop must be a array"
+},
+{
+"key": "cap_drop",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.cap_drop must be a array"
+},
+{
+"key": "cap_drop",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.cap_drop must be a array"
+},
+{
+"key": "cap_drop",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.cap_drop must be a array"
+},
+{
+"key": "cap_drop",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": "services.web.cap_drop.[0]: unexpected type int"
+},
+{
+"key": "cap_drop",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.cap_drop must be a array"
+},
+{
+"key": "cap_drop",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.cap_drop must be a array"
+},
+{
+"key": "cap_drop",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.cap_drop must be a array"
+},
+{
+"key": "cap_drop",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.cap_drop must be a array"
+},
+{
+"key": "cap_drop",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.cap_drop must be a array"
+},
+{
+"key": "cap_drop",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.cap_drop must be a array"
+},
+{
+"key": "cap_drop",
+"form": "listS",
+"value": "[a, b]",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "cap_drop",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.cap_drop must be a array"
+},
+{
+"key": "cgroup",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.cgroup value must be one of 'host', 'private'"
+},
+{
+"key": "cgroup",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.cgroup must be a string"
+},
+{
+"key": "cgroup",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.cgroup must be a string"
+},
+{
+"key": "cgroup",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.cgroup must be a string"
+},
+{
+"key": "cgroup",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.cgroup must be a string"
+},
+{
+"key": "cgroup",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.cgroup must be a string"
+},
+{
+"key": "cgroup",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.cgroup must be a string"
+},
+{
+"key": "cgroup",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.cgroup value must be one of 'host', 'private'"
+},
+{
+"key": "cgroup",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.cgroup value must be one of 'host', 'private'"
+},
+{
+"key": "cgroup",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.cgroup value must be one of 'host', 'private'"
+},
+{
+"key": "cgroup",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.cgroup value must be one of 'host', 'private'"
+},
+{
+"key": "cgroup",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.cgroup must be a string"
+},
+{
+"key": "cgroup",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.cgroup must be a string"
+},
+{
+"key": "cgroup_parent",
+"form": "str",
+"value": "\"x\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "cgroup_parent",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.cgroup_parent must be a string"
+},
+{
+"key": "cgroup_parent",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.cgroup_parent must be a string"
+},
+{
+"key": "cgroup_parent",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.cgroup_parent must be a string"
+},
+{
+"key": "cgroup_parent",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.cgroup_parent must be a string"
+},
+{
+"key": "cgroup_parent",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.cgroup_parent must be a string"
+},
+{
+"key": "cgroup_parent",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.cgroup_parent must be a string"
+},
+{
+"key": "cgroup_parent",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "cgroup_parent",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "cgroup_parent",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "cgroup_parent",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "cgroup_parent",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.cgroup_parent must be a string"
+},
+{
+"key": "cgroup_parent",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.cgroup_parent must be a string"
+},
+{
+"key": "command",
+"form": "str",
+"value": "\"x\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "command",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.command must be a null"
+},
+{
+"key": "command",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.command must be a null"
+},
+{
+"key": "command",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.command must be a null"
+},
+{
+"key": "command",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.command.0 must be a string"
+},
+{
+"key": "command",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.command must be a null"
+},
+{
+"key": "command",
+"form": "null",
+"value": "null",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "command",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "command",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "command",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "command",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "command",
+"form": "listS",
+"value": "[a, b]",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "command",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.command must be a null"
+},
+{
+"key": "configs",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.configs must be a array"
+},
+{
+"key": "configs",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.configs must be a array"
+},
+{
+"key": "configs",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.configs must be a array"
+},
+{
+"key": "configs",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.configs must be a array"
+},
+{
+"key": "configs",
+"form": "list",
+"value": "[1, 2]",
+"docker": "other",
+"msg": "services.web.configs.[0]: unsupported expose value %!s(int=1)"
+},
+{
+"key": "configs",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.configs must be a array"
+},
+{
+"key": "configs",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.configs must be a array"
+},
+{
+"key": "configs",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.configs must be a array"
+},
+{
+"key": "configs",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.configs must be a array"
+},
+{
+"key": "configs",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.configs must be a array"
+},
+{
+"key": "configs",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.configs must be a array"
+},
+{
+"key": "configs",
+"form": "listS",
+"value": "[a, b]",
+"docker": "other",
+"msg": "service \"web\" refers to undefined config a: invalid compose project"
+},
+{
+"key": "configs",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.configs must be a array"
+},
+{
+"key": "container_name",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.container_name 'x' does not match pattern '[a-zA-Z0-9][a-zA-Z0-9_.-]+'"
+},
+{
+"key": "container_name",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.container_name must be a string"
+},
+{
+"key": "container_name",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.container_name must be a string"
+},
+{
+"key": "container_name",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.container_name must be a string"
+},
+{
+"key": "container_name",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.container_name must be a string"
+},
+{
+"key": "container_name",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.container_name must be a string"
+},
+{
+"key": "container_name",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.container_name must be a string"
+},
+{
+"key": "container_name",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.container_name '7' does not match pattern '[a-zA-Z0-9][a-zA-Z0-9_.-]+'"
+},
+{
+"key": "container_name",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "container_name",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "container_name",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "container_name",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.container_name must be a string"
+},
+{
+"key": "container_name",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.container_name must be a string"
+},
+{
+"key": "cpu_count",
+"form": "str",
+"value": "\"x\"",
+"docker": "other",
+"msg": "error while interpolating services.web.cpu_count: failed to cast to expected type: strconv.ParseInt:"
+},
+{
+"key": "cpu_count",
+"form": "int",
+"value": "7",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "cpu_count",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.cpu_count must be a string"
+},
+{
+"key": "cpu_count",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.cpu_count must be a string"
+},
+{
+"key": "cpu_count",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.cpu_count must be a string"
+},
+{
+"key": "cpu_count",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.cpu_count must be a string"
+},
+{
+"key": "cpu_count",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.cpu_count must be a string"
+},
+{
+"key": "cpu_count",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "cpu_count",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "other",
+"msg": "error while interpolating services.web.cpu_count: failed to cast to expected type: strconv.ParseInt:"
+},
+{
+"key": "cpu_count",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "other",
+"msg": "error while interpolating services.web.cpu_count: failed to cast to expected type: strconv.ParseInt:"
+},
+{
+"key": "cpu_count",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "other",
+"msg": "error while interpolating services.web.cpu_count: failed to cast to expected type: strconv.ParseInt:"
+},
+{
+"key": "cpu_count",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.cpu_count must be a string"
+},
+{
+"key": "cpu_count",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.cpu_count must be a string"
+},
+{
+"key": "cpu_percent",
+"form": "str",
+"value": "\"x\"",
+"docker": "other",
+"msg": "error while interpolating services.web.cpu_percent: failed to cast to expected type: strconv.ParseFl"
+},
+{
+"key": "cpu_percent",
+"form": "int",
+"value": "7",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "cpu_percent",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.cpu_percent must be a string"
+},
+{
+"key": "cpu_percent",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.cpu_percent must be a string"
+},
+{
+"key": "cpu_percent",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.cpu_percent must be a string"
+},
+{
+"key": "cpu_percent",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.cpu_percent must be a string"
+},
+{
+"key": "cpu_percent",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.cpu_percent must be a string"
+},
+{
+"key": "cpu_percent",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "cpu_percent",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "other",
+"msg": "error while interpolating services.web.cpu_percent: failed to cast to expected type: strconv.ParseFl"
+},
+{
+"key": "cpu_percent",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.cpu_percent must be a string"
+},
+{
+"key": "cpu_percent",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "other",
+"msg": "error while interpolating services.web.cpu_percent: failed to cast to expected type: strconv.ParseFl"
+},
+{
+"key": "cpu_percent",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.cpu_percent must be a string"
+},
+{
+"key": "cpu_percent",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.cpu_percent must be a string"
+},
+{
+"key": "cpu_period",
+"form": "str",
+"value": "\"x\"",
+"docker": "other",
+"msg": "error while interpolating services.web.cpu_period: failed to cast to expected type: strconv.ParseInt"
+},
+{
+"key": "cpu_period",
+"form": "int",
+"value": "7",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "cpu_period",
+"form": "float",
+"value": "1.5",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "cpu_period",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.cpu_period must be a number or string"
+},
+{
+"key": "cpu_period",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.cpu_period must be a number or string"
+},
+{
+"key": "cpu_period",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.cpu_period must be a number or string"
+},
+{
+"key": "cpu_period",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.cpu_period must be a number or string"
+},
+{
+"key": "cpu_period",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "cpu_period",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "other",
+"msg": "error while interpolating services.web.cpu_period: failed to cast to expected type: strconv.ParseInt"
+},
+{
+"key": "cpu_period",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "other",
+"msg": "error while interpolating services.web.cpu_period: failed to cast to expected type: strconv.ParseInt"
+},
+{
+"key": "cpu_period",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "other",
+"msg": "error while interpolating services.web.cpu_period: failed to cast to expected type: strconv.ParseInt"
+},
+{
+"key": "cpu_period",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.cpu_period must be a number or string"
+},
+{
+"key": "cpu_period",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.cpu_period must be a number or string"
+},
+{
+"key": "cpu_quota",
+"form": "str",
+"value": "\"x\"",
+"docker": "other",
+"msg": "error while interpolating services.web.cpu_quota: failed to cast to expected type: strconv.ParseInt:"
+},
+{
+"key": "cpu_quota",
+"form": "int",
+"value": "7",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "cpu_quota",
+"form": "float",
+"value": "1.5",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "cpu_quota",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.cpu_quota must be a number or string"
+},
+{
+"key": "cpu_quota",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.cpu_quota must be a number or string"
+},
+{
+"key": "cpu_quota",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.cpu_quota must be a number or string"
+},
+{
+"key": "cpu_quota",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.cpu_quota must be a number or string"
+},
+{
+"key": "cpu_quota",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "cpu_quota",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "other",
+"msg": "error while interpolating services.web.cpu_quota: failed to cast to expected type: strconv.ParseInt:"
+},
+{
+"key": "cpu_quota",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "other",
+"msg": "error while interpolating services.web.cpu_quota: failed to cast to expected type: strconv.ParseInt:"
+},
+{
+"key": "cpu_quota",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "other",
+"msg": "error while interpolating services.web.cpu_quota: failed to cast to expected type: strconv.ParseInt:"
+},
+{
+"key": "cpu_quota",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.cpu_quota must be a number or string"
+},
+{
+"key": "cpu_quota",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.cpu_quota must be a number or string"
+},
+{
+"key": "cpu_rt_period",
+"form": "str",
+"value": "\"x\"",
+"docker": "other",
+"msg": "error while interpolating services.web.cpu_rt_period: failed to cast to expected type: strconv.Parse"
+},
+{
+"key": "cpu_rt_period",
+"form": "int",
+"value": "7",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "cpu_rt_period",
+"form": "float",
+"value": "1.5",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "cpu_rt_period",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.cpu_rt_period must be a number or string"
+},
+{
+"key": "cpu_rt_period",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.cpu_rt_period must be a number or string"
+},
+{
+"key": "cpu_rt_period",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.cpu_rt_period must be a number or string"
+},
+{
+"key": "cpu_rt_period",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.cpu_rt_period must be a number or string"
+},
+{
+"key": "cpu_rt_period",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "cpu_rt_period",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "other",
+"msg": "error while interpolating services.web.cpu_rt_period: failed to cast to expected type: strconv.Parse"
+},
+{
+"key": "cpu_rt_period",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "other",
+"msg": "error while interpolating services.web.cpu_rt_period: failed to cast to expected type: strconv.Parse"
+},
+{
+"key": "cpu_rt_period",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "other",
+"msg": "error while interpolating services.web.cpu_rt_period: failed to cast to expected type: strconv.Parse"
+},
+{
+"key": "cpu_rt_period",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.cpu_rt_period must be a number or string"
+},
+{
+"key": "cpu_rt_period",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.cpu_rt_period must be a number or string"
+},
+{
+"key": "cpu_rt_runtime",
+"form": "str",
+"value": "\"x\"",
+"docker": "other",
+"msg": "error while interpolating services.web.cpu_rt_runtime: failed to cast to expected type: strconv.Pars"
+},
+{
+"key": "cpu_rt_runtime",
+"form": "int",
+"value": "7",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "cpu_rt_runtime",
+"form": "float",
+"value": "1.5",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "cpu_rt_runtime",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.cpu_rt_runtime must be a number or string"
+},
+{
+"key": "cpu_rt_runtime",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.cpu_rt_runtime must be a number or string"
+},
+{
+"key": "cpu_rt_runtime",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.cpu_rt_runtime must be a number or string"
+},
+{
+"key": "cpu_rt_runtime",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.cpu_rt_runtime must be a number or string"
+},
+{
+"key": "cpu_rt_runtime",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "cpu_rt_runtime",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "other",
+"msg": "error while interpolating services.web.cpu_rt_runtime: failed to cast to expected type: strconv.Pars"
+},
+{
+"key": "cpu_rt_runtime",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "other",
+"msg": "error while interpolating services.web.cpu_rt_runtime: failed to cast to expected type: strconv.Pars"
+},
+{
+"key": "cpu_rt_runtime",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "other",
+"msg": "error while interpolating services.web.cpu_rt_runtime: failed to cast to expected type: strconv.Pars"
+},
+{
+"key": "cpu_rt_runtime",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.cpu_rt_runtime must be a number or string"
+},
+{
+"key": "cpu_rt_runtime",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.cpu_rt_runtime must be a number or string"
+},
+{
+"key": "cpu_shares",
+"form": "str",
+"value": "\"x\"",
+"docker": "other",
+"msg": "error while interpolating services.web.cpu_shares: failed to cast to expected type: strconv.ParseInt"
+},
+{
+"key": "cpu_shares",
+"form": "int",
+"value": "7",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "cpu_shares",
+"form": "float",
+"value": "1.5",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "cpu_shares",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.cpu_shares must be a number or string"
+},
+{
+"key": "cpu_shares",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.cpu_shares must be a number or string"
+},
+{
+"key": "cpu_shares",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.cpu_shares must be a number or string"
+},
+{
+"key": "cpu_shares",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.cpu_shares must be a number or string"
+},
+{
+"key": "cpu_shares",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "cpu_shares",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "other",
+"msg": "error while interpolating services.web.cpu_shares: failed to cast to expected type: strconv.ParseInt"
+},
+{
+"key": "cpu_shares",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "other",
+"msg": "error while interpolating services.web.cpu_shares: failed to cast to expected type: strconv.ParseInt"
+},
+{
+"key": "cpu_shares",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "other",
+"msg": "error while interpolating services.web.cpu_shares: failed to cast to expected type: strconv.ParseInt"
+},
+{
+"key": "cpu_shares",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.cpu_shares must be a number or string"
+},
+{
+"key": "cpu_shares",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.cpu_shares must be a number or string"
+},
+{
+"key": "cpus",
+"form": "str",
+"value": "\"x\"",
+"docker": "other",
+"msg": "error while interpolating services.web.cpus: failed to cast to expected type: strconv.ParseFloat: pa"
+},
+{
+"key": "cpus",
+"form": "int",
+"value": "7",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "cpus",
+"form": "float",
+"value": "1.5",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "cpus",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.cpus must be a number or string"
+},
+{
+"key": "cpus",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.cpus must be a number or string"
+},
+{
+"key": "cpus",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.cpus must be a number or string"
+},
+{
+"key": "cpus",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.cpus must be a number or string"
+},
+{
+"key": "cpus",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "cpus",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "other",
+"msg": "error while interpolating services.web.cpus: failed to cast to expected type: strconv.ParseFloat: pa"
+},
+{
+"key": "cpus",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "cpus",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "other",
+"msg": "error while interpolating services.web.cpus: failed to cast to expected type: strconv.ParseFloat: pa"
+},
+{
+"key": "cpus",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.cpus must be a number or string"
+},
+{
+"key": "cpus",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.cpus must be a number or string"
+},
+{
+"key": "cpuset",
+"form": "str",
+"value": "\"x\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "cpuset",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.cpuset must be a string"
+},
+{
+"key": "cpuset",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.cpuset must be a string"
+},
+{
+"key": "cpuset",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.cpuset must be a string"
+},
+{
+"key": "cpuset",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.cpuset must be a string"
+},
+{
+"key": "cpuset",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.cpuset must be a string"
+},
+{
+"key": "cpuset",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.cpuset must be a string"
+},
+{
+"key": "cpuset",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "cpuset",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "cpuset",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "cpuset",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "cpuset",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.cpuset must be a string"
+},
+{
+"key": "cpuset",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.cpuset must be a string"
+},
+{
+"key": "credential_spec",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.credential_spec must be a mapping"
+},
+{
+"key": "credential_spec",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.credential_spec must be a mapping"
+},
+{
+"key": "credential_spec",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.credential_spec must be a mapping"
+},
+{
+"key": "credential_spec",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.credential_spec must be a mapping"
+},
+{
+"key": "credential_spec",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.credential_spec must be a mapping"
+},
+{
+"key": "credential_spec",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.credential_spec additional properties 'a' not allowed"
+},
+{
+"key": "credential_spec",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.credential_spec must be a mapping"
+},
+{
+"key": "credential_spec",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.credential_spec must be a mapping"
+},
+{
+"key": "credential_spec",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.credential_spec must be a mapping"
+},
+{
+"key": "credential_spec",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.credential_spec must be a mapping"
+},
+{
+"key": "credential_spec",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.credential_spec must be a mapping"
+},
+{
+"key": "credential_spec",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.credential_spec must be a mapping"
+},
+{
+"key": "credential_spec",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.credential_spec additional properties 'a' not allowed"
+},
+{
+"key": "depends_on",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.depends_on must be a array"
+},
+{
+"key": "depends_on",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.depends_on must be a array"
+},
+{
+"key": "depends_on",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.depends_on must be a array"
+},
+{
+"key": "depends_on",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.depends_on must be a array"
+},
+{
+"key": "depends_on",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.depends_on.0 must be a string"
+},
+{
+"key": "depends_on",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.depends_on.a must be a mapping"
+},
+{
+"key": "depends_on",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.depends_on must be a array"
+},
+{
+"key": "depends_on",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.depends_on must be a array"
+},
+{
+"key": "depends_on",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.depends_on must be a array"
+},
+{
+"key": "depends_on",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.depends_on must be a array"
+},
+{
+"key": "depends_on",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.depends_on must be a array"
+},
+{
+"key": "depends_on",
+"form": "listS",
+"value": "[a, b]",
+"docker": "other",
+"msg": "service \"web\" depends on undefined service \"b\": invalid compose project"
+},
+{
+"key": "depends_on",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.depends_on.a must be a mapping"
+},
+{
+"key": "deploy",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.deploy must be a mapping or null"
+},
+{
+"key": "deploy",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.deploy must be a mapping or null"
+},
+{
+"key": "deploy",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.deploy must be a mapping or null"
+},
+{
+"key": "deploy",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.deploy must be a mapping or null"
+},
+{
+"key": "deploy",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.deploy must be a mapping or null"
+},
+{
+"key": "deploy",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.deploy additional properties 'a' not allowed"
+},
+{
+"key": "deploy",
+"form": "null",
+"value": "null",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "deploy",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.deploy must be a mapping or null"
+},
+{
+"key": "deploy",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.deploy must be a mapping or null"
+},
+{
+"key": "deploy",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.deploy must be a mapping or null"
+},
+{
+"key": "deploy",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.deploy must be a mapping or null"
+},
+{
+"key": "deploy",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.deploy must be a mapping or null"
+},
+{
+"key": "deploy",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.deploy additional properties 'a' not allowed"
+},
+{
+"key": "develop",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.develop must be a mapping or null"
+},
+{
+"key": "develop",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.develop must be a mapping or null"
+},
+{
+"key": "develop",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.develop must be a mapping or null"
+},
+{
+"key": "develop",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.develop must be a mapping or null"
+},
+{
+"key": "develop",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.develop must be a mapping or null"
+},
+{
+"key": "develop",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.develop additional properties 'a' not allowed"
+},
+{
+"key": "develop",
+"form": "null",
+"value": "null",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "develop",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.develop must be a mapping or null"
+},
+{
+"key": "develop",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.develop must be a mapping or null"
+},
+{
+"key": "develop",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.develop must be a mapping or null"
+},
+{
+"key": "develop",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.develop must be a mapping or null"
+},
+{
+"key": "develop",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.develop must be a mapping or null"
+},
+{
+"key": "develop",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.develop additional properties 'a' not allowed"
+},
+{
+"key": "device_cgroup_rules",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.device_cgroup_rules must be a array"
+},
+{
+"key": "device_cgroup_rules",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.device_cgroup_rules must be a array"
+},
+{
+"key": "device_cgroup_rules",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.device_cgroup_rules must be a array"
+},
+{
+"key": "device_cgroup_rules",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.device_cgroup_rules must be a array"
+},
+{
+"key": "device_cgroup_rules",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.device_cgroup_rules.0 must be a string"
+},
+{
+"key": "device_cgroup_rules",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.device_cgroup_rules must be a array"
+},
+{
+"key": "device_cgroup_rules",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.device_cgroup_rules must be a array"
+},
+{
+"key": "device_cgroup_rules",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.device_cgroup_rules must be a array"
+},
+{
+"key": "device_cgroup_rules",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.device_cgroup_rules must be a array"
+},
+{
+"key": "device_cgroup_rules",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.device_cgroup_rules must be a array"
+},
+{
+"key": "device_cgroup_rules",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.device_cgroup_rules must be a array"
+},
+{
+"key": "device_cgroup_rules",
+"form": "listS",
+"value": "[a, b]",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "device_cgroup_rules",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.device_cgroup_rules must be a array"
+},
+{
+"key": "devices",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.devices must be a array"
+},
+{
+"key": "devices",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.devices must be a array"
+},
+{
+"key": "devices",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.devices must be a array"
+},
+{
+"key": "devices",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.devices must be a array"
+},
+{
+"key": "devices",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.devices.0 must be a string"
+},
+{
+"key": "devices",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.devices must be a array"
+},
+{
+"key": "devices",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.devices must be a array"
+},
+{
+"key": "devices",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.devices must be a array"
+},
+{
+"key": "devices",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.devices must be a array"
+},
+{
+"key": "devices",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.devices must be a array"
+},
+{
+"key": "devices",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.devices must be a array"
+},
+{
+"key": "devices",
+"form": "listS",
+"value": "[a, b]",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "devices",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.devices must be a array"
+},
+{
+"key": "dns",
+"form": "str",
+"value": "\"x\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "dns",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.dns must be a string"
+},
+{
+"key": "dns",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.dns must be a string"
+},
+{
+"key": "dns",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.dns must be a string"
+},
+{
+"key": "dns",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": "services.web.dns.[0]: unexpected type int"
+},
+{
+"key": "dns",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.dns must be a string"
+},
+{
+"key": "dns",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.dns must be a string"
+},
+{
+"key": "dns",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "dns",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "dns",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "dns",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "dns",
+"form": "listS",
+"value": "[a, b]",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "dns",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.dns must be a string"
+},
+{
+"key": "dns_opt",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.dns_opt must be a array"
+},
+{
+"key": "dns_opt",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.dns_opt must be a array"
+},
+{
+"key": "dns_opt",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.dns_opt must be a array"
+},
+{
+"key": "dns_opt",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.dns_opt must be a array"
+},
+{
+"key": "dns_opt",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": "services.web.dns_opt.[0]: unexpected type int"
+},
+{
+"key": "dns_opt",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.dns_opt must be a array"
+},
+{
+"key": "dns_opt",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.dns_opt must be a array"
+},
+{
+"key": "dns_opt",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.dns_opt must be a array"
+},
+{
+"key": "dns_opt",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.dns_opt must be a array"
+},
+{
+"key": "dns_opt",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.dns_opt must be a array"
+},
+{
+"key": "dns_opt",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.dns_opt must be a array"
+},
+{
+"key": "dns_opt",
+"form": "listS",
+"value": "[a, b]",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "dns_opt",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.dns_opt must be a array"
+},
+{
+"key": "dns_search",
+"form": "str",
+"value": "\"x\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "dns_search",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.dns_search must be a string"
+},
+{
+"key": "dns_search",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.dns_search must be a string"
+},
+{
+"key": "dns_search",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.dns_search must be a string"
+},
+{
+"key": "dns_search",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": "services.web.dns_search.[0]: unexpected type int"
+},
+{
+"key": "dns_search",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.dns_search must be a string"
+},
+{
+"key": "dns_search",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.dns_search must be a string"
+},
+{
+"key": "dns_search",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "dns_search",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "dns_search",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "dns_search",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "dns_search",
+"form": "listS",
+"value": "[a, b]",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "dns_search",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.dns_search must be a string"
+},
+{
+"key": "domainname",
+"form": "str",
+"value": "\"x\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "domainname",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.domainname must be a string"
+},
+{
+"key": "domainname",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.domainname must be a string"
+},
+{
+"key": "domainname",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.domainname must be a string"
+},
+{
+"key": "domainname",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.domainname must be a string"
+},
+{
+"key": "domainname",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.domainname must be a string"
+},
+{
+"key": "domainname",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.domainname must be a string"
+},
+{
+"key": "domainname",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "domainname",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "domainname",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "domainname",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "domainname",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.domainname must be a string"
+},
+{
+"key": "domainname",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.domainname must be a string"
+},
+{
+"key": "entrypoint",
+"form": "str",
+"value": "\"x\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "entrypoint",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.entrypoint must be a null"
+},
+{
+"key": "entrypoint",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.entrypoint must be a null"
+},
+{
+"key": "entrypoint",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.entrypoint must be a null"
+},
+{
+"key": "entrypoint",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.entrypoint.0 must be a string"
+},
+{
+"key": "entrypoint",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.entrypoint must be a null"
+},
+{
+"key": "entrypoint",
+"form": "null",
+"value": "null",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "entrypoint",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "entrypoint",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "entrypoint",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "entrypoint",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "entrypoint",
+"form": "listS",
+"value": "[a, b]",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "entrypoint",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.entrypoint must be a null"
+},
+{
+"key": "env_file",
+"form": "str",
+"value": "\"x\"",
+"docker": "other",
+"msg": "env file <dir>/x not found: stat <dir>/x"
+},
+{
+"key": "env_file",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.env_file must be a string"
+},
+{
+"key": "env_file",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.env_file must be a string"
+},
+{
+"key": "env_file",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.env_file must be a string"
+},
+{
+"key": "env_file",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.env_file.0 must be a string"
+},
+{
+"key": "env_file",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.env_file must be a string"
+},
+{
+"key": "env_file",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.env_file must be a string"
+},
+{
+"key": "env_file",
+"form": "sint",
+"value": "\"7\"",
+"docker": "other",
+"msg": "env file <dir>/7 not found: stat <dir>/7"
+},
+{
+"key": "env_file",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "other",
+"msg": "env file <dir>/true not found: stat <path>"
+},
+{
+"key": "env_file",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "other",
+"msg": "env file <dir>/1.5 not found: stat <path>"
+},
+{
+"key": "env_file",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "other",
+"msg": "env file <dir>/abc not found: stat <path>"
+},
+{
+"key": "env_file",
+"form": "listS",
+"value": "[a, b]",
+"docker": "other",
+"msg": "env file <dir>/a not found: stat <dir>/a"
+},
+{
+"key": "env_file",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.env_file must be a string"
+},
+{
+"key": "environment",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.environment must be a mapping"
+},
+{
+"key": "environment",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.environment must be a mapping"
+},
+{
+"key": "environment",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.environment must be a mapping"
+},
+{
+"key": "environment",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.environment must be a mapping"
+},
+{
+"key": "environment",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": "services.web.environment.[0]: unexpected type int"
+},
+{
+"key": "environment",
+"form": "map",
+"value": "{a: 1}",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "environment",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.environment must be a mapping"
+},
+{
+"key": "environment",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.environment must be a mapping"
+},
+{
+"key": "environment",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.environment must be a mapping"
+},
+{
+"key": "environment",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.environment must be a mapping"
+},
+{
+"key": "environment",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.environment must be a mapping"
+},
+{
+"key": "environment",
+"form": "listS",
+"value": "[a, b]",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "environment",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "expose",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.expose must be a array"
+},
+{
+"key": "expose",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.expose must be a array"
+},
+{
+"key": "expose",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.expose must be a array"
+},
+{
+"key": "expose",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.expose must be a array"
+},
+{
+"key": "expose",
+"form": "list",
+"value": "[1, 2]",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "expose",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.expose must be a array"
+},
+{
+"key": "expose",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.expose must be a array"
+},
+{
+"key": "expose",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.expose must be a array"
+},
+{
+"key": "expose",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.expose must be a array"
+},
+{
+"key": "expose",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.expose must be a array"
+},
+{
+"key": "expose",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.expose must be a array"
+},
+{
+"key": "expose",
+"form": "listS",
+"value": "[a, b]",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "expose",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.expose must be a array"
+},
+{
+"key": "extends",
+"form": "str",
+"value": "\"x\"",
+"docker": "other",
+"msg": ": service \"x\" not found"
+},
+{
+"key": "extends",
+"form": "int",
+"value": "7",
+"docker": "other",
+"msg": ": service \"\" not found"
+},
+{
+"key": "extends",
+"form": "float",
+"value": "1.5",
+"docker": "other",
+"msg": ": service \"\" not found"
+},
+{
+"key": "extends",
+"form": "bool",
+"value": "true",
+"docker": "other",
+"msg": ": service \"\" not found"
+},
+{
+"key": "extends",
+"form": "list",
+"value": "[1, 2]",
+"docker": "other",
+"msg": ": service \"\" not found"
+},
+{
+"key": "extends",
+"form": "map",
+"value": "{a: 1}",
+"docker": "other",
+"msg": "extends.web.service is required"
+},
+{
+"key": "extends",
+"form": "null",
+"value": "null",
+"docker": "other",
+"msg": ": service \"\" not found"
+},
+{
+"key": "extends",
+"form": "sint",
+"value": "\"7\"",
+"docker": "other",
+"msg": ": service \"7\" not found"
+},
+{
+"key": "extends",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "other",
+"msg": ": service \"true\" not found"
+},
+{
+"key": "extends",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "other",
+"msg": ": service \"1.5\" not found"
+},
+{
+"key": "extends",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "other",
+"msg": ": service \"abc\" not found"
+},
+{
+"key": "extends",
+"form": "listS",
+"value": "[a, b]",
+"docker": "other",
+"msg": ": service \"\" not found"
+},
+{
+"key": "extends",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "other",
+"msg": "extends.web.service is required"
+},
+{
+"key": "external_links",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.external_links must be a array"
+},
+{
+"key": "external_links",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.external_links must be a array"
+},
+{
+"key": "external_links",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.external_links must be a array"
+},
+{
+"key": "external_links",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.external_links must be a array"
+},
+{
+"key": "external_links",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.external_links.0 must be a string"
+},
+{
+"key": "external_links",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.external_links must be a array"
+},
+{
+"key": "external_links",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.external_links must be a array"
+},
+{
+"key": "external_links",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.external_links must be a array"
+},
+{
+"key": "external_links",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.external_links must be a array"
+},
+{
+"key": "external_links",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.external_links must be a array"
+},
+{
+"key": "external_links",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.external_links must be a array"
+},
+{
+"key": "external_links",
+"form": "listS",
+"value": "[a, b]",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "external_links",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.external_links must be a array"
+},
+{
+"key": "extra_hosts",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.extra_hosts must be a mapping"
+},
+{
+"key": "extra_hosts",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.extra_hosts must be a mapping"
+},
+{
+"key": "extra_hosts",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.extra_hosts must be a mapping"
+},
+{
+"key": "extra_hosts",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.extra_hosts must be a mapping"
+},
+{
+"key": "extra_hosts",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.extra_hosts.0 must be a string"
+},
+{
+"key": "extra_hosts",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.extra_hosts.a must be a string"
+},
+{
+"key": "extra_hosts",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.extra_hosts must be a mapping"
+},
+{
+"key": "extra_hosts",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.extra_hosts must be a mapping"
+},
+{
+"key": "extra_hosts",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.extra_hosts must be a mapping"
+},
+{
+"key": "extra_hosts",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.extra_hosts must be a mapping"
+},
+{
+"key": "extra_hosts",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.extra_hosts must be a mapping"
+},
+{
+"key": "extra_hosts",
+"form": "listS",
+"value": "[a, b]",
+"docker": "other",
+"msg": "decoding failed due to the following error(s):"
+},
+{
+"key": "extra_hosts",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "gpus",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.gpus value must be 'all'"
+},
+{
+"key": "gpus",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.gpus must be a string"
+},
+{
+"key": "gpus",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.gpus must be a string"
+},
+{
+"key": "gpus",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.gpus must be a string"
+},
+{
+"key": "gpus",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.gpus.0 must be a mapping"
+},
+{
+"key": "gpus",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.gpus must be a string"
+},
+{
+"key": "gpus",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.gpus must be a string"
+},
+{
+"key": "gpus",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.gpus value must be 'all'"
+},
+{
+"key": "gpus",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.gpus value must be 'all'"
+},
+{
+"key": "gpus",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.gpus value must be 'all'"
+},
+{
+"key": "gpus",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.gpus value must be 'all'"
+},
+{
+"key": "gpus",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.gpus.0 must be a mapping"
+},
+{
+"key": "gpus",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.gpus must be a string"
+},
+{
+"key": "group_add",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.group_add must be a array"
+},
+{
+"key": "group_add",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.group_add must be a array"
+},
+{
+"key": "group_add",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.group_add must be a array"
+},
+{
+"key": "group_add",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.group_add must be a array"
+},
+{
+"key": "group_add",
+"form": "list",
+"value": "[1, 2]",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "group_add",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.group_add must be a array"
+},
+{
+"key": "group_add",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.group_add must be a array"
+},
+{
+"key": "group_add",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.group_add must be a array"
+},
+{
+"key": "group_add",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.group_add must be a array"
+},
+{
+"key": "group_add",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.group_add must be a array"
+},
+{
+"key": "group_add",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.group_add must be a array"
+},
+{
+"key": "group_add",
+"form": "listS",
+"value": "[a, b]",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "group_add",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.group_add must be a array"
+},
+{
+"key": "healthcheck",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.healthcheck must be a mapping"
+},
+{
+"key": "healthcheck",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.healthcheck must be a mapping"
+},
+{
+"key": "healthcheck",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.healthcheck must be a mapping"
+},
+{
+"key": "healthcheck",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.healthcheck must be a mapping"
+},
+{
+"key": "healthcheck",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.healthcheck must be a mapping"
+},
+{
+"key": "healthcheck",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.healthcheck additional properties 'a' not allowed"
+},
+{
+"key": "healthcheck",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.healthcheck must be a mapping"
+},
+{
+"key": "healthcheck",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.healthcheck must be a mapping"
+},
+{
+"key": "healthcheck",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.healthcheck must be a mapping"
+},
+{
+"key": "healthcheck",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.healthcheck must be a mapping"
+},
+{
+"key": "healthcheck",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.healthcheck must be a mapping"
+},
+{
+"key": "healthcheck",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.healthcheck must be a mapping"
+},
+{
+"key": "healthcheck",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.healthcheck additional properties 'a' not allowed"
+},
+{
+"key": "hostname",
+"form": "str",
+"value": "\"x\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "hostname",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.hostname must be a string"
+},
+{
+"key": "hostname",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.hostname must be a string"
+},
+{
+"key": "hostname",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.hostname must be a string"
+},
+{
+"key": "hostname",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.hostname must be a string"
+},
+{
+"key": "hostname",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.hostname must be a string"
+},
+{
+"key": "hostname",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.hostname must be a string"
+},
+{
+"key": "hostname",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "hostname",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "hostname",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "hostname",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "hostname",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.hostname must be a string"
+},
+{
+"key": "hostname",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.hostname must be a string"
+},
+{
+"key": "image",
+"form": "str",
+"value": "\"x\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "image",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.image must be a string"
+},
+{
+"key": "image",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.image must be a string"
+},
+{
+"key": "image",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.image must be a string"
+},
+{
+"key": "image",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.image must be a string"
+},
+{
+"key": "image",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.image must be a string"
+},
+{
+"key": "image",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.image must be a string"
+},
+{
+"key": "image",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "image",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "image",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "image",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "image",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.image must be a string"
+},
+{
+"key": "image",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.image must be a string"
+},
+{
+"key": "init",
+"form": "str",
+"value": "\"x\"",
+"docker": "other",
+"msg": "error while interpolating services.web.init: failed to cast to expected type: invalid boolean: x"
+},
+{
+"key": "init",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.init must be a boolean or string"
+},
+{
+"key": "init",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.init must be a boolean or string"
+},
+{
+"key": "init",
+"form": "bool",
+"value": "true",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "init",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.init must be a boolean or string"
+},
+{
+"key": "init",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.init must be a boolean or string"
+},
+{
+"key": "init",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.init must be a boolean or string"
+},
+{
+"key": "init",
+"form": "sint",
+"value": "\"7\"",
+"docker": "other",
+"msg": "error while interpolating services.web.init: failed to cast to expected type: invalid boolean: 7"
+},
+{
+"key": "init",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "init",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "other",
+"msg": "error while interpolating services.web.init: failed to cast to expected type: invalid boolean: 1.5"
+},
+{
+"key": "init",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "other",
+"msg": "error while interpolating services.web.init: failed to cast to expected type: invalid boolean: abc"
+},
+{
+"key": "init",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.init must be a boolean or string"
+},
+{
+"key": "init",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.init must be a boolean or string"
+},
+{
+"key": "ipc",
+"form": "str",
+"value": "\"x\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "ipc",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.ipc must be a string"
+},
+{
+"key": "ipc",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.ipc must be a string"
+},
+{
+"key": "ipc",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.ipc must be a string"
+},
+{
+"key": "ipc",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.ipc must be a string"
+},
+{
+"key": "ipc",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.ipc must be a string"
+},
+{
+"key": "ipc",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.ipc must be a string"
+},
+{
+"key": "ipc",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "ipc",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "ipc",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "ipc",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "ipc",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.ipc must be a string"
+},
+{
+"key": "ipc",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.ipc must be a string"
+},
+{
+"key": "isolation",
+"form": "str",
+"value": "\"x\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "isolation",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.isolation must be a string"
+},
+{
+"key": "isolation",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.isolation must be a string"
+},
+{
+"key": "isolation",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.isolation must be a string"
+},
+{
+"key": "isolation",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.isolation must be a string"
+},
+{
+"key": "isolation",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.isolation must be a string"
+},
+{
+"key": "isolation",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.isolation must be a string"
+},
+{
+"key": "isolation",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "isolation",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "isolation",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "isolation",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "isolation",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.isolation must be a string"
+},
+{
+"key": "isolation",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.isolation must be a string"
+},
+{
+"key": "label_file",
+"form": "str",
+"value": "\"x\"",
+"docker": "other",
+"msg": "label file <dir>/x not found: stat <path>"
+},
+{
+"key": "label_file",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.label_file must be a string"
+},
+{
+"key": "label_file",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.label_file must be a string"
+},
+{
+"key": "label_file",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.label_file must be a string"
+},
+{
+"key": "label_file",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.label_file.0 must be a string"
+},
+{
+"key": "label_file",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.label_file must be a string"
+},
+{
+"key": "label_file",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.label_file must be a string"
+},
+{
+"key": "label_file",
+"form": "sint",
+"value": "\"7\"",
+"docker": "other",
+"msg": "label file <dir>/7 not found: stat <path>"
+},
+{
+"key": "label_file",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "other",
+"msg": "label file <dir>/true not found: stat <path>"
+},
+{
+"key": "label_file",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "other",
+"msg": "label file <dir>/1.5 not found: stat <path>"
+},
+{
+"key": "label_file",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "other",
+"msg": "label file <dir>/abc not found: stat <path>"
+},
+{
+"key": "label_file",
+"form": "listS",
+"value": "[a, b]",
+"docker": "other",
+"msg": "label file <dir>/a not found: stat <path>"
+},
+{
+"key": "label_file",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.label_file must be a string"
+},
+{
+"key": "labels",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.labels must be a mapping"
+},
+{
+"key": "labels",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.labels must be a mapping"
+},
+{
+"key": "labels",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.labels must be a mapping"
+},
+{
+"key": "labels",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.labels must be a mapping"
+},
+{
+"key": "labels",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": "services.web.labels.[0]: unexpected type int"
+},
+{
+"key": "labels",
+"form": "map",
+"value": "{a: 1}",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "labels",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.labels must be a mapping"
+},
+{
+"key": "labels",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.labels must be a mapping"
+},
+{
+"key": "labels",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.labels must be a mapping"
+},
+{
+"key": "labels",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.labels must be a mapping"
+},
+{
+"key": "labels",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.labels must be a mapping"
+},
+{
+"key": "labels",
+"form": "listS",
+"value": "[a, b]",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "labels",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "links",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.links must be a array"
+},
+{
+"key": "links",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.links must be a array"
+},
+{
+"key": "links",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.links must be a array"
+},
+{
+"key": "links",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.links must be a array"
+},
+{
+"key": "links",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": "services.web.links.[0]: unexpected type int"
+},
+{
+"key": "links",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.links must be a array"
+},
+{
+"key": "links",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.links must be a array"
+},
+{
+"key": "links",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.links must be a array"
+},
+{
+"key": "links",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.links must be a array"
+},
+{
+"key": "links",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.links must be a array"
+},
+{
+"key": "links",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.links must be a array"
+},
+{
+"key": "links",
+"form": "listS",
+"value": "[a, b]",
+"docker": "other",
+"msg": "service \"web\" depends on undefined service \"b\": invalid compose project"
+},
+{
+"key": "links",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.links must be a array"
+},
+{
+"key": "logging",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.logging must be a mapping"
+},
+{
+"key": "logging",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.logging must be a mapping"
+},
+{
+"key": "logging",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.logging must be a mapping"
+},
+{
+"key": "logging",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.logging must be a mapping"
+},
+{
+"key": "logging",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.logging must be a mapping"
+},
+{
+"key": "logging",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.logging additional properties 'a' not allowed"
+},
+{
+"key": "logging",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.logging must be a mapping"
+},
+{
+"key": "logging",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.logging must be a mapping"
+},
+{
+"key": "logging",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.logging must be a mapping"
+},
+{
+"key": "logging",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.logging must be a mapping"
+},
+{
+"key": "logging",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.logging must be a mapping"
+},
+{
+"key": "logging",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.logging must be a mapping"
+},
+{
+"key": "logging",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.logging additional properties 'a' not allowed"
+},
+{
+"key": "mac_address",
+"form": "str",
+"value": "\"x\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "mac_address",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.mac_address must be a string"
+},
+{
+"key": "mac_address",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.mac_address must be a string"
+},
+{
+"key": "mac_address",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.mac_address must be a string"
+},
+{
+"key": "mac_address",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.mac_address must be a string"
+},
+{
+"key": "mac_address",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.mac_address must be a string"
+},
+{
+"key": "mac_address",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.mac_address must be a string"
+},
+{
+"key": "mac_address",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "mac_address",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "mac_address",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "mac_address",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "mac_address",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.mac_address must be a string"
+},
+{
+"key": "mac_address",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.mac_address must be a string"
+},
+{
+"key": "mem_limit",
+"form": "str",
+"value": "\"x\"",
+"docker": "other",
+"msg": "decoding failed due to the following error(s):"
+},
+{
+"key": "mem_limit",
+"form": "int",
+"value": "7",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "mem_limit",
+"form": "float",
+"value": "1.5",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "mem_limit",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.mem_limit must be a number or string"
+},
+{
+"key": "mem_limit",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.mem_limit must be a number or string"
+},
+{
+"key": "mem_limit",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.mem_limit must be a number or string"
+},
+{
+"key": "mem_limit",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.mem_limit must be a number or string"
+},
+{
+"key": "mem_limit",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "mem_limit",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "other",
+"msg": "decoding failed due to the following error(s):"
+},
+{
+"key": "mem_limit",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "mem_limit",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "other",
+"msg": "decoding failed due to the following error(s):"
+},
+{
+"key": "mem_limit",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.mem_limit must be a number or string"
+},
+{
+"key": "mem_limit",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.mem_limit must be a number or string"
+},
+{
+"key": "mem_reservation",
+"form": "str",
+"value": "\"x\"",
+"docker": "other",
+"msg": "decoding failed due to the following error(s):"
+},
+{
+"key": "mem_reservation",
+"form": "int",
+"value": "7",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "mem_reservation",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.mem_reservation must be a integer or string"
+},
+{
+"key": "mem_reservation",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.mem_reservation must be a integer or string"
+},
+{
+"key": "mem_reservation",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.mem_reservation must be a integer or string"
+},
+{
+"key": "mem_reservation",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.mem_reservation must be a integer or string"
+},
+{
+"key": "mem_reservation",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.mem_reservation must be a integer or string"
+},
+{
+"key": "mem_reservation",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "mem_reservation",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "other",
+"msg": "decoding failed due to the following error(s):"
+},
+{
+"key": "mem_reservation",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "mem_reservation",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "other",
+"msg": "decoding failed due to the following error(s):"
+},
+{
+"key": "mem_reservation",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.mem_reservation must be a integer or string"
+},
+{
+"key": "mem_reservation",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.mem_reservation must be a integer or string"
+},
+{
+"key": "mem_swappiness",
+"form": "str",
+"value": "\"x\"",
+"docker": "other",
+"msg": "decoding failed due to the following error(s):"
+},
+{
+"key": "mem_swappiness",
+"form": "int",
+"value": "7",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "mem_swappiness",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.mem_swappiness must be a integer or string"
+},
+{
+"key": "mem_swappiness",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.mem_swappiness must be a integer or string"
+},
+{
+"key": "mem_swappiness",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.mem_swappiness must be a integer or string"
+},
+{
+"key": "mem_swappiness",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.mem_swappiness must be a integer or string"
+},
+{
+"key": "mem_swappiness",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.mem_swappiness must be a integer or string"
+},
+{
+"key": "mem_swappiness",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "mem_swappiness",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "other",
+"msg": "decoding failed due to the following error(s):"
+},
+{
+"key": "mem_swappiness",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "mem_swappiness",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "other",
+"msg": "decoding failed due to the following error(s):"
+},
+{
+"key": "mem_swappiness",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.mem_swappiness must be a integer or string"
+},
+{
+"key": "mem_swappiness",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.mem_swappiness must be a integer or string"
+},
+{
+"key": "memswap_limit",
+"form": "str",
+"value": "\"x\"",
+"docker": "other",
+"msg": "decoding failed due to the following error(s):"
+},
+{
+"key": "memswap_limit",
+"form": "int",
+"value": "7",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "memswap_limit",
+"form": "float",
+"value": "1.5",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "memswap_limit",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.memswap_limit must be a number or string"
+},
+{
+"key": "memswap_limit",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.memswap_limit must be a number or string"
+},
+{
+"key": "memswap_limit",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.memswap_limit must be a number or string"
+},
+{
+"key": "memswap_limit",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.memswap_limit must be a number or string"
+},
+{
+"key": "memswap_limit",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "memswap_limit",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "other",
+"msg": "decoding failed due to the following error(s):"
+},
+{
+"key": "memswap_limit",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "memswap_limit",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "other",
+"msg": "decoding failed due to the following error(s):"
+},
+{
+"key": "memswap_limit",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.memswap_limit must be a number or string"
+},
+{
+"key": "memswap_limit",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.memswap_limit must be a number or string"
+},
+{
+"key": "models",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.models must be a array"
+},
+{
+"key": "models",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.models must be a array"
+},
+{
+"key": "models",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.models must be a array"
+},
+{
+"key": "models",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.models must be a array"
+},
+{
+"key": "models",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.models.0 must be a string"
+},
+{
+"key": "models",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.models.a must be a mapping"
+},
+{
+"key": "models",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.models must be a array"
+},
+{
+"key": "models",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.models must be a array"
+},
+{
+"key": "models",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.models must be a array"
+},
+{
+"key": "models",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.models must be a array"
+},
+{
+"key": "models",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.models must be a array"
+},
+{
+"key": "models",
+"form": "listS",
+"value": "[a, b]",
+"docker": "other",
+"msg": "service \"web\" refers to undefined model a: invalid compose project"
+},
+{
+"key": "models",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.models.a must be a mapping"
+},
+{
+"key": "network_mode",
+"form": "str",
+"value": "\"x\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "network_mode",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.network_mode must be a string"
+},
+{
+"key": "network_mode",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.network_mode must be a string"
+},
+{
+"key": "network_mode",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.network_mode must be a string"
+},
+{
+"key": "network_mode",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.network_mode must be a string"
+},
+{
+"key": "network_mode",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.network_mode must be a string"
+},
+{
+"key": "network_mode",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.network_mode must be a string"
+},
+{
+"key": "network_mode",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "network_mode",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "network_mode",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "network_mode",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "network_mode",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.network_mode must be a string"
+},
+{
+"key": "network_mode",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.network_mode must be a string"
+},
+{
+"key": "networks",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.networks must be a array"
+},
+{
+"key": "networks",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.networks must be a array"
+},
+{
+"key": "networks",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.networks must be a array"
+},
+{
+"key": "networks",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.networks must be a array"
+},
+{
+"key": "networks",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.networks.0 must be a string"
+},
+{
+"key": "networks",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.networks.a must be a mapping"
+},
+{
+"key": "networks",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.networks must be a array"
+},
+{
+"key": "networks",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.networks must be a array"
+},
+{
+"key": "networks",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.networks must be a array"
+},
+{
+"key": "networks",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.networks must be a array"
+},
+{
+"key": "networks",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.networks must be a array"
+},
+{
+"key": "networks",
+"form": "listS",
+"value": "[a, b]",
+"docker": "other",
+"msg": "service \"web\" refers to undefined network a: invalid compose project"
+},
+{
+"key": "networks",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.networks.a must be a mapping"
+},
+{
+"key": "oom_kill_disable",
+"form": "str",
+"value": "\"x\"",
+"docker": "other",
+"msg": "error while interpolating services.web.oom_kill_disable: failed to cast to expected type: invalid bo"
+},
+{
+"key": "oom_kill_disable",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.oom_kill_disable must be a boolean or string"
+},
+{
+"key": "oom_kill_disable",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.oom_kill_disable must be a boolean or string"
+},
+{
+"key": "oom_kill_disable",
+"form": "bool",
+"value": "true",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "oom_kill_disable",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.oom_kill_disable must be a boolean or string"
+},
+{
+"key": "oom_kill_disable",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.oom_kill_disable must be a boolean or string"
+},
+{
+"key": "oom_kill_disable",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.oom_kill_disable must be a boolean or string"
+},
+{
+"key": "oom_kill_disable",
+"form": "sint",
+"value": "\"7\"",
+"docker": "other",
+"msg": "error while interpolating services.web.oom_kill_disable: failed to cast to expected type: invalid bo"
+},
+{
+"key": "oom_kill_disable",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "oom_kill_disable",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "other",
+"msg": "error while interpolating services.web.oom_kill_disable: failed to cast to expected type: invalid bo"
+},
+{
+"key": "oom_kill_disable",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "other",
+"msg": "error while interpolating services.web.oom_kill_disable: failed to cast to expected type: invalid bo"
+},
+{
+"key": "oom_kill_disable",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.oom_kill_disable must be a boolean or string"
+},
+{
+"key": "oom_kill_disable",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.oom_kill_disable must be a boolean or string"
+},
+{
+"key": "oom_score_adj",
+"form": "str",
+"value": "\"x\"",
+"docker": "other",
+"msg": "error while interpolating services.web.oom_score_adj: failed to cast to expected type: strconv.Parse"
+},
+{
+"key": "oom_score_adj",
+"form": "int",
+"value": "7",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "oom_score_adj",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.oom_score_adj must be a string"
+},
+{
+"key": "oom_score_adj",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.oom_score_adj must be a string"
+},
+{
+"key": "oom_score_adj",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.oom_score_adj must be a string"
+},
+{
+"key": "oom_score_adj",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.oom_score_adj must be a string"
+},
+{
+"key": "oom_score_adj",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.oom_score_adj must be a string"
+},
+{
+"key": "oom_score_adj",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "oom_score_adj",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "other",
+"msg": "error while interpolating services.web.oom_score_adj: failed to cast to expected type: strconv.Parse"
+},
+{
+"key": "oom_score_adj",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "other",
+"msg": "error while interpolating services.web.oom_score_adj: failed to cast to expected type: strconv.Parse"
+},
+{
+"key": "oom_score_adj",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "other",
+"msg": "error while interpolating services.web.oom_score_adj: failed to cast to expected type: strconv.Parse"
+},
+{
+"key": "oom_score_adj",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.oom_score_adj must be a string"
+},
+{
+"key": "oom_score_adj",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.oom_score_adj must be a string"
+},
+{
+"key": "pid",
+"form": "str",
+"value": "\"x\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "pid",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.pid must be a null or string"
+},
+{
+"key": "pid",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.pid must be a null or string"
+},
+{
+"key": "pid",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.pid must be a null or string"
+},
+{
+"key": "pid",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.pid must be a null or string"
+},
+{
+"key": "pid",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.pid must be a null or string"
+},
+{
+"key": "pid",
+"form": "null",
+"value": "null",
+"docker": "other",
+"msg": "panic: interface conversion: interface {} is nil, not string"
+},
+{
+"key": "pid",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "pid",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "pid",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "pid",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "pid",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.pid must be a null or string"
+},
+{
+"key": "pid",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.pid must be a null or string"
+},
+{
+"key": "pids_limit",
+"form": "str",
+"value": "\"x\"",
+"docker": "other",
+"msg": "error while interpolating services.web.pids_limit: failed to cast to expected type: strconv.ParseInt"
+},
+{
+"key": "pids_limit",
+"form": "int",
+"value": "7",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "pids_limit",
+"form": "float",
+"value": "1.5",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "pids_limit",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.pids_limit must be a number or string"
+},
+{
+"key": "pids_limit",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.pids_limit must be a number or string"
+},
+{
+"key": "pids_limit",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.pids_limit must be a number or string"
+},
+{
+"key": "pids_limit",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.pids_limit must be a number or string"
+},
+{
+"key": "pids_limit",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "pids_limit",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "other",
+"msg": "error while interpolating services.web.pids_limit: failed to cast to expected type: strconv.ParseInt"
+},
+{
+"key": "pids_limit",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "other",
+"msg": "error while interpolating services.web.pids_limit: failed to cast to expected type: strconv.ParseInt"
+},
+{
+"key": "pids_limit",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "other",
+"msg": "error while interpolating services.web.pids_limit: failed to cast to expected type: strconv.ParseInt"
+},
+{
+"key": "pids_limit",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.pids_limit must be a number or string"
+},
+{
+"key": "pids_limit",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.pids_limit must be a number or string"
+},
+{
+"key": "platform",
+"form": "str",
+"value": "\"x\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "platform",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.platform must be a string"
+},
+{
+"key": "platform",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.platform must be a string"
+},
+{
+"key": "platform",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.platform must be a string"
+},
+{
+"key": "platform",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.platform must be a string"
+},
+{
+"key": "platform",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.platform must be a string"
+},
+{
+"key": "platform",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.platform must be a string"
+},
+{
+"key": "platform",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "platform",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "platform",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "platform",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "platform",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.platform must be a string"
+},
+{
+"key": "platform",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.platform must be a string"
+},
+{
+"key": "ports",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.ports must be a array"
+},
+{
+"key": "ports",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.ports must be a array"
+},
+{
+"key": "ports",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.ports must be a array"
+},
+{
+"key": "ports",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.ports must be a array"
+},
+{
+"key": "ports",
+"form": "list",
+"value": "[1, 2]",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "ports",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.ports must be a array"
+},
+{
+"key": "ports",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.ports must be a array"
+},
+{
+"key": "ports",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.ports must be a array"
+},
+{
+"key": "ports",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.ports must be a array"
+},
+{
+"key": "ports",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.ports must be a array"
+},
+{
+"key": "ports",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.ports must be a array"
+},
+{
+"key": "ports",
+"form": "listS",
+"value": "[a, b]",
+"docker": "other",
+"msg": "invalid containerPort: a"
+},
+{
+"key": "ports",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.ports must be a array"
+},
+{
+"key": "post_start",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.post_start must be a array"
+},
+{
+"key": "post_start",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.post_start must be a array"
+},
+{
+"key": "post_start",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.post_start must be a array"
+},
+{
+"key": "post_start",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.post_start must be a array"
+},
+{
+"key": "post_start",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.post_start.0 must be a mapping"
+},
+{
+"key": "post_start",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.post_start must be a array"
+},
+{
+"key": "post_start",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.post_start must be a array"
+},
+{
+"key": "post_start",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.post_start must be a array"
+},
+{
+"key": "post_start",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.post_start must be a array"
+},
+{
+"key": "post_start",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.post_start must be a array"
+},
+{
+"key": "post_start",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.post_start must be a array"
+},
+{
+"key": "post_start",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.post_start.0 must be a mapping"
+},
+{
+"key": "post_start",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.post_start must be a array"
+},
+{
+"key": "pre_start",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.pre_start must be a array"
+},
+{
+"key": "pre_start",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.pre_start must be a array"
+},
+{
+"key": "pre_start",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.pre_start must be a array"
+},
+{
+"key": "pre_start",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.pre_start must be a array"
+},
+{
+"key": "pre_start",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.pre_start.0 must be a mapping"
+},
+{
+"key": "pre_start",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.pre_start must be a array"
+},
+{
+"key": "pre_start",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.pre_start must be a array"
+},
+{
+"key": "pre_start",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.pre_start must be a array"
+},
+{
+"key": "pre_start",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.pre_start must be a array"
+},
+{
+"key": "pre_start",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.pre_start must be a array"
+},
+{
+"key": "pre_start",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.pre_start must be a array"
+},
+{
+"key": "pre_start",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.pre_start.0 must be a mapping"
+},
+{
+"key": "pre_start",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.pre_start must be a array"
+},
+{
+"key": "pre_stop",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.pre_stop must be a array"
+},
+{
+"key": "pre_stop",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.pre_stop must be a array"
+},
+{
+"key": "pre_stop",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.pre_stop must be a array"
+},
+{
+"key": "pre_stop",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.pre_stop must be a array"
+},
+{
+"key": "pre_stop",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.pre_stop.0 must be a mapping"
+},
+{
+"key": "pre_stop",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.pre_stop must be a array"
+},
+{
+"key": "pre_stop",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.pre_stop must be a array"
+},
+{
+"key": "pre_stop",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.pre_stop must be a array"
+},
+{
+"key": "pre_stop",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.pre_stop must be a array"
+},
+{
+"key": "pre_stop",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.pre_stop must be a array"
+},
+{
+"key": "pre_stop",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.pre_stop must be a array"
+},
+{
+"key": "pre_stop",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.pre_stop.0 must be a mapping"
+},
+{
+"key": "pre_stop",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.pre_stop must be a array"
+},
+{
+"key": "privileged",
+"form": "str",
+"value": "\"x\"",
+"docker": "other",
+"msg": "error while interpolating services.web.privileged: failed to cast to expected type: invalid boolean:"
+},
+{
+"key": "privileged",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.privileged must be a boolean or string"
+},
+{
+"key": "privileged",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.privileged must be a boolean or string"
+},
+{
+"key": "privileged",
+"form": "bool",
+"value": "true",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "privileged",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.privileged must be a boolean or string"
+},
+{
+"key": "privileged",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.privileged must be a boolean or string"
+},
+{
+"key": "privileged",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.privileged must be a boolean or string"
+},
+{
+"key": "privileged",
+"form": "sint",
+"value": "\"7\"",
+"docker": "other",
+"msg": "error while interpolating services.web.privileged: failed to cast to expected type: invalid boolean:"
+},
+{
+"key": "privileged",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "privileged",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "other",
+"msg": "error while interpolating services.web.privileged: failed to cast to expected type: invalid boolean:"
+},
+{
+"key": "privileged",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "other",
+"msg": "error while interpolating services.web.privileged: failed to cast to expected type: invalid boolean:"
+},
+{
+"key": "privileged",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.privileged must be a boolean or string"
+},
+{
+"key": "privileged",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.privileged must be a boolean or string"
+},
+{
+"key": "profiles",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.profiles must be a array"
+},
+{
+"key": "profiles",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.profiles must be a array"
+},
+{
+"key": "profiles",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.profiles must be a array"
+},
+{
+"key": "profiles",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.profiles must be a array"
+},
+{
+"key": "profiles",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": "services.web.profiles.[0]: unexpected type int"
+},
+{
+"key": "profiles",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.profiles must be a array"
+},
+{
+"key": "profiles",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.profiles must be a array"
+},
+{
+"key": "profiles",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.profiles must be a array"
+},
+{
+"key": "profiles",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.profiles must be a array"
+},
+{
+"key": "profiles",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.profiles must be a array"
+},
+{
+"key": "profiles",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.profiles must be a array"
+},
+{
+"key": "profiles",
+"form": "listS",
+"value": "[a, b]",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "profiles",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.profiles must be a array"
+},
+{
+"key": "provider",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.provider must be a mapping"
+},
+{
+"key": "provider",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.provider must be a mapping"
+},
+{
+"key": "provider",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.provider must be a mapping"
+},
+{
+"key": "provider",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.provider must be a mapping"
+},
+{
+"key": "provider",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.provider must be a mapping"
+},
+{
+"key": "provider",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.provider additional properties 'a' not allowed"
+},
+{
+"key": "provider",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.provider must be a mapping"
+},
+{
+"key": "provider",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.provider must be a mapping"
+},
+{
+"key": "provider",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.provider must be a mapping"
+},
+{
+"key": "provider",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.provider must be a mapping"
+},
+{
+"key": "provider",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.provider must be a mapping"
+},
+{
+"key": "provider",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.provider must be a mapping"
+},
+{
+"key": "provider",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.provider additional properties 'a' not allowed"
+},
+{
+"key": "pull_policy",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.pull_policy 'x' does not match pattern '^(always|never|build|if_not_present|missing|r"
+},
+{
+"key": "pull_policy",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.pull_policy must be a string"
+},
+{
+"key": "pull_policy",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.pull_policy must be a string"
+},
+{
+"key": "pull_policy",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.pull_policy must be a string"
+},
+{
+"key": "pull_policy",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.pull_policy must be a string"
+},
+{
+"key": "pull_policy",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.pull_policy must be a string"
+},
+{
+"key": "pull_policy",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.pull_policy must be a string"
+},
+{
+"key": "pull_policy",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.pull_policy '7' does not match pattern '^(always|never|build|if_not_present|missing|r"
+},
+{
+"key": "pull_policy",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.pull_policy 'true' does not match pattern '^(always|never|build|if_not_present|missin"
+},
+{
+"key": "pull_policy",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.pull_policy '1.5' does not match pattern '^(always|never|build|if_not_present|missing"
+},
+{
+"key": "pull_policy",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.pull_policy 'abc' does not match pattern '^(always|never|build|if_not_present|missing"
+},
+{
+"key": "pull_policy",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.pull_policy must be a string"
+},
+{
+"key": "pull_policy",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.pull_policy must be a string"
+},
+{
+"key": "pull_refresh_after",
+"form": "str",
+"value": "\"x\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "pull_refresh_after",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.pull_refresh_after must be a string"
+},
+{
+"key": "pull_refresh_after",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.pull_refresh_after must be a string"
+},
+{
+"key": "pull_refresh_after",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.pull_refresh_after must be a string"
+},
+{
+"key": "pull_refresh_after",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.pull_refresh_after must be a string"
+},
+{
+"key": "pull_refresh_after",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.pull_refresh_after must be a string"
+},
+{
+"key": "pull_refresh_after",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.pull_refresh_after must be a string"
+},
+{
+"key": "pull_refresh_after",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "pull_refresh_after",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "pull_refresh_after",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "pull_refresh_after",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "pull_refresh_after",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.pull_refresh_after must be a string"
+},
+{
+"key": "pull_refresh_after",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.pull_refresh_after must be a string"
+},
+{
+"key": "read_only",
+"form": "str",
+"value": "\"x\"",
+"docker": "other",
+"msg": "error while interpolating services.web.read_only: failed to cast to expected type: invalid boolean: "
+},
+{
+"key": "read_only",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.read_only must be a boolean or string"
+},
+{
+"key": "read_only",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.read_only must be a boolean or string"
+},
+{
+"key": "read_only",
+"form": "bool",
+"value": "true",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "read_only",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.read_only must be a boolean or string"
+},
+{
+"key": "read_only",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.read_only must be a boolean or string"
+},
+{
+"key": "read_only",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.read_only must be a boolean or string"
+},
+{
+"key": "read_only",
+"form": "sint",
+"value": "\"7\"",
+"docker": "other",
+"msg": "error while interpolating services.web.read_only: failed to cast to expected type: invalid boolean: "
+},
+{
+"key": "read_only",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "read_only",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "other",
+"msg": "error while interpolating services.web.read_only: failed to cast to expected type: invalid boolean: "
+},
+{
+"key": "read_only",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "other",
+"msg": "error while interpolating services.web.read_only: failed to cast to expected type: invalid boolean: "
+},
+{
+"key": "read_only",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.read_only must be a boolean or string"
+},
+{
+"key": "read_only",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.read_only must be a boolean or string"
+},
+{
+"key": "restart",
+"form": "str",
+"value": "\"x\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "restart",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.restart must be a string"
+},
+{
+"key": "restart",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.restart must be a string"
+},
+{
+"key": "restart",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.restart must be a string"
+},
+{
+"key": "restart",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.restart must be a string"
+},
+{
+"key": "restart",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.restart must be a string"
+},
+{
+"key": "restart",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.restart must be a string"
+},
+{
+"key": "restart",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "restart",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "restart",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "restart",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "restart",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.restart must be a string"
+},
+{
+"key": "restart",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.restart must be a string"
+},
+{
+"key": "runtime",
+"form": "str",
+"value": "\"x\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "runtime",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.runtime must be a string"
+},
+{
+"key": "runtime",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.runtime must be a string"
+},
+{
+"key": "runtime",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.runtime must be a string"
+},
+{
+"key": "runtime",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.runtime must be a string"
+},
+{
+"key": "runtime",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.runtime must be a string"
+},
+{
+"key": "runtime",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.runtime must be a string"
+},
+{
+"key": "runtime",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "runtime",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "runtime",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "runtime",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "runtime",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.runtime must be a string"
+},
+{
+"key": "runtime",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.runtime must be a string"
+},
+{
+"key": "scale",
+"form": "str",
+"value": "\"x\"",
+"docker": "other",
+"msg": "error while interpolating services.web.scale: failed to cast to expected type: strconv.Atoi: parsing"
+},
+{
+"key": "scale",
+"form": "int",
+"value": "7",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "scale",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.scale must be a integer or string"
+},
+{
+"key": "scale",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.scale must be a integer or string"
+},
+{
+"key": "scale",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.scale must be a integer or string"
+},
+{
+"key": "scale",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.scale must be a integer or string"
+},
+{
+"key": "scale",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.scale must be a integer or string"
+},
+{
+"key": "scale",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "scale",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "other",
+"msg": "error while interpolating services.web.scale: failed to cast to expected type: strconv.Atoi: parsing"
+},
+{
+"key": "scale",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "other",
+"msg": "error while interpolating services.web.scale: failed to cast to expected type: strconv.Atoi: parsing"
+},
+{
+"key": "scale",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "other",
+"msg": "error while interpolating services.web.scale: failed to cast to expected type: strconv.Atoi: parsing"
+},
+{
+"key": "scale",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.scale must be a integer or string"
+},
+{
+"key": "scale",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.scale must be a integer or string"
+},
+{
+"key": "secrets",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.secrets must be a array"
+},
+{
+"key": "secrets",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.secrets must be a array"
+},
+{
+"key": "secrets",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.secrets must be a array"
+},
+{
+"key": "secrets",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.secrets must be a array"
+},
+{
+"key": "secrets",
+"form": "list",
+"value": "[1, 2]",
+"docker": "other",
+"msg": "services.web.secrets.[0]: unsupported expose value %!s(int=1)"
+},
+{
+"key": "secrets",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.secrets must be a array"
+},
+{
+"key": "secrets",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.secrets must be a array"
+},
+{
+"key": "secrets",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.secrets must be a array"
+},
+{
+"key": "secrets",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.secrets must be a array"
+},
+{
+"key": "secrets",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.secrets must be a array"
+},
+{
+"key": "secrets",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.secrets must be a array"
+},
+{
+"key": "secrets",
+"form": "listS",
+"value": "[a, b]",
+"docker": "other",
+"msg": "service \"web\" refers to undefined secret a: invalid compose project"
+},
+{
+"key": "secrets",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.secrets must be a array"
+},
+{
+"key": "security_opt",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.security_opt must be a array"
+},
+{
+"key": "security_opt",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.security_opt must be a array"
+},
+{
+"key": "security_opt",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.security_opt must be a array"
+},
+{
+"key": "security_opt",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.security_opt must be a array"
+},
+{
+"key": "security_opt",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.security_opt.0 must be a string"
+},
+{
+"key": "security_opt",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.security_opt must be a array"
+},
+{
+"key": "security_opt",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.security_opt must be a array"
+},
+{
+"key": "security_opt",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.security_opt must be a array"
+},
+{
+"key": "security_opt",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.security_opt must be a array"
+},
+{
+"key": "security_opt",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.security_opt must be a array"
+},
+{
+"key": "security_opt",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.security_opt must be a array"
+},
+{
+"key": "security_opt",
+"form": "listS",
+"value": "[a, b]",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "security_opt",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.security_opt must be a array"
+},
+{
+"key": "shm_size",
+"form": "str",
+"value": "\"x\"",
+"docker": "other",
+"msg": "decoding failed due to the following error(s):"
+},
+{
+"key": "shm_size",
+"form": "int",
+"value": "7",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "shm_size",
+"form": "float",
+"value": "1.5",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "shm_size",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.shm_size must be a number or string"
+},
+{
+"key": "shm_size",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.shm_size must be a number or string"
+},
+{
+"key": "shm_size",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.shm_size must be a number or string"
+},
+{
+"key": "shm_size",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.shm_size must be a number or string"
+},
+{
+"key": "shm_size",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "shm_size",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "other",
+"msg": "decoding failed due to the following error(s):"
+},
+{
+"key": "shm_size",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "shm_size",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "other",
+"msg": "decoding failed due to the following error(s):"
+},
+{
+"key": "shm_size",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.shm_size must be a number or string"
+},
+{
+"key": "shm_size",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.shm_size must be a number or string"
+},
+{
+"key": "stdin_open",
+"form": "str",
+"value": "\"x\"",
+"docker": "other",
+"msg": "error while interpolating services.web.stdin_open: failed to cast to expected type: invalid boolean:"
+},
+{
+"key": "stdin_open",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.stdin_open must be a boolean or string"
+},
+{
+"key": "stdin_open",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.stdin_open must be a boolean or string"
+},
+{
+"key": "stdin_open",
+"form": "bool",
+"value": "true",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "stdin_open",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.stdin_open must be a boolean or string"
+},
+{
+"key": "stdin_open",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.stdin_open must be a boolean or string"
+},
+{
+"key": "stdin_open",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.stdin_open must be a boolean or string"
+},
+{
+"key": "stdin_open",
+"form": "sint",
+"value": "\"7\"",
+"docker": "other",
+"msg": "error while interpolating services.web.stdin_open: failed to cast to expected type: invalid boolean:"
+},
+{
+"key": "stdin_open",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "stdin_open",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "other",
+"msg": "error while interpolating services.web.stdin_open: failed to cast to expected type: invalid boolean:"
+},
+{
+"key": "stdin_open",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "other",
+"msg": "error while interpolating services.web.stdin_open: failed to cast to expected type: invalid boolean:"
+},
+{
+"key": "stdin_open",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.stdin_open must be a boolean or string"
+},
+{
+"key": "stdin_open",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.stdin_open must be a boolean or string"
+},
+{
+"key": "stop_grace_period",
+"form": "str",
+"value": "\"x\"",
+"docker": "other",
+"msg": "decoding failed due to the following error(s):"
+},
+{
+"key": "stop_grace_period",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.stop_grace_period must be a string"
+},
+{
+"key": "stop_grace_period",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.stop_grace_period must be a string"
+},
+{
+"key": "stop_grace_period",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.stop_grace_period must be a string"
+},
+{
+"key": "stop_grace_period",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.stop_grace_period must be a string"
+},
+{
+"key": "stop_grace_period",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.stop_grace_period must be a string"
+},
+{
+"key": "stop_grace_period",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.stop_grace_period must be a string"
+},
+{
+"key": "stop_grace_period",
+"form": "sint",
+"value": "\"7\"",
+"docker": "other",
+"msg": "decoding failed due to the following error(s):"
+},
+{
+"key": "stop_grace_period",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "other",
+"msg": "decoding failed due to the following error(s):"
+},
+{
+"key": "stop_grace_period",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "other",
+"msg": "decoding failed due to the following error(s):"
+},
+{
+"key": "stop_grace_period",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "other",
+"msg": "decoding failed due to the following error(s):"
+},
+{
+"key": "stop_grace_period",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.stop_grace_period must be a string"
+},
+{
+"key": "stop_grace_period",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.stop_grace_period must be a string"
+},
+{
+"key": "stop_signal",
+"form": "str",
+"value": "\"x\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "stop_signal",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.stop_signal must be a string"
+},
+{
+"key": "stop_signal",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.stop_signal must be a string"
+},
+{
+"key": "stop_signal",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.stop_signal must be a string"
+},
+{
+"key": "stop_signal",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.stop_signal must be a string"
+},
+{
+"key": "stop_signal",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.stop_signal must be a string"
+},
+{
+"key": "stop_signal",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.stop_signal must be a string"
+},
+{
+"key": "stop_signal",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "stop_signal",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "stop_signal",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "stop_signal",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "stop_signal",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.stop_signal must be a string"
+},
+{
+"key": "stop_signal",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.stop_signal must be a string"
+},
+{
+"key": "storage_opt",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.storage_opt must be a mapping"
+},
+{
+"key": "storage_opt",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.storage_opt must be a mapping"
+},
+{
+"key": "storage_opt",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.storage_opt must be a mapping"
+},
+{
+"key": "storage_opt",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.storage_opt must be a mapping"
+},
+{
+"key": "storage_opt",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.storage_opt must be a mapping"
+},
+{
+"key": "storage_opt",
+"form": "map",
+"value": "{a: 1}",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "storage_opt",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.storage_opt must be a mapping"
+},
+{
+"key": "storage_opt",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.storage_opt must be a mapping"
+},
+{
+"key": "storage_opt",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.storage_opt must be a mapping"
+},
+{
+"key": "storage_opt",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.storage_opt must be a mapping"
+},
+{
+"key": "storage_opt",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.storage_opt must be a mapping"
+},
+{
+"key": "storage_opt",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.storage_opt must be a mapping"
+},
+{
+"key": "storage_opt",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "sysctls",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.sysctls must be a mapping"
+},
+{
+"key": "sysctls",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.sysctls must be a mapping"
+},
+{
+"key": "sysctls",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.sysctls must be a mapping"
+},
+{
+"key": "sysctls",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.sysctls must be a mapping"
+},
+{
+"key": "sysctls",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": "services.web.sysctls.[0]: unexpected type int"
+},
+{
+"key": "sysctls",
+"form": "map",
+"value": "{a: 1}",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "sysctls",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.sysctls must be a mapping"
+},
+{
+"key": "sysctls",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.sysctls must be a mapping"
+},
+{
+"key": "sysctls",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.sysctls must be a mapping"
+},
+{
+"key": "sysctls",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.sysctls must be a mapping"
+},
+{
+"key": "sysctls",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.sysctls must be a mapping"
+},
+{
+"key": "sysctls",
+"form": "listS",
+"value": "[a, b]",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "sysctls",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "tmpfs",
+"form": "str",
+"value": "\"x\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "tmpfs",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.tmpfs must be a string"
+},
+{
+"key": "tmpfs",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.tmpfs must be a string"
+},
+{
+"key": "tmpfs",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.tmpfs must be a string"
+},
+{
+"key": "tmpfs",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": "services.web.tmpfs.[0]: unexpected type int"
+},
+{
+"key": "tmpfs",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.tmpfs must be a string"
+},
+{
+"key": "tmpfs",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.tmpfs must be a string"
+},
+{
+"key": "tmpfs",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "tmpfs",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "tmpfs",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "tmpfs",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "tmpfs",
+"form": "listS",
+"value": "[a, b]",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "tmpfs",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.tmpfs must be a string"
+},
+{
+"key": "tty",
+"form": "str",
+"value": "\"x\"",
+"docker": "other",
+"msg": "error while interpolating services.web.tty: failed to cast to expected type: invalid boolean: x"
+},
+{
+"key": "tty",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.tty must be a boolean or string"
+},
+{
+"key": "tty",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.tty must be a boolean or string"
+},
+{
+"key": "tty",
+"form": "bool",
+"value": "true",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "tty",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.tty must be a boolean or string"
+},
+{
+"key": "tty",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.tty must be a boolean or string"
+},
+{
+"key": "tty",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.tty must be a boolean or string"
+},
+{
+"key": "tty",
+"form": "sint",
+"value": "\"7\"",
+"docker": "other",
+"msg": "error while interpolating services.web.tty: failed to cast to expected type: invalid boolean: 7"
+},
+{
+"key": "tty",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "tty",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "other",
+"msg": "error while interpolating services.web.tty: failed to cast to expected type: invalid boolean: 1.5"
+},
+{
+"key": "tty",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "other",
+"msg": "error while interpolating services.web.tty: failed to cast to expected type: invalid boolean: abc"
+},
+{
+"key": "tty",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.tty must be a boolean or string"
+},
+{
+"key": "tty",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.tty must be a boolean or string"
+},
+{
+"key": "ulimits",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.ulimits must be a mapping"
+},
+{
+"key": "ulimits",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.ulimits must be a mapping"
+},
+{
+"key": "ulimits",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.ulimits must be a mapping"
+},
+{
+"key": "ulimits",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.ulimits must be a mapping"
+},
+{
+"key": "ulimits",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.ulimits must be a mapping"
+},
+{
+"key": "ulimits",
+"form": "map",
+"value": "{a: 1}",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "ulimits",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.ulimits must be a mapping"
+},
+{
+"key": "ulimits",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.ulimits must be a mapping"
+},
+{
+"key": "ulimits",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.ulimits must be a mapping"
+},
+{
+"key": "ulimits",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.ulimits must be a mapping"
+},
+{
+"key": "ulimits",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.ulimits must be a mapping"
+},
+{
+"key": "ulimits",
+"form": "listS",
+"value": "[a, b]",
+"docker": "other",
+"msg": "error while interpolating services.web.ulimits.[]: failed to cast to expected type: strconv.Atoi: pa"
+},
+{
+"key": "ulimits",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "other",
+"msg": "error while interpolating services.web.ulimits.a: failed to cast to expected type: strconv.Atoi: par"
+},
+{
+"key": "use_api_socket",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.use_api_socket must be a boolean"
+},
+{
+"key": "use_api_socket",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.use_api_socket must be a boolean"
+},
+{
+"key": "use_api_socket",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.use_api_socket must be a boolean"
+},
+{
+"key": "use_api_socket",
+"form": "bool",
+"value": "true",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "use_api_socket",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.use_api_socket must be a boolean"
+},
+{
+"key": "use_api_socket",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.use_api_socket must be a boolean"
+},
+{
+"key": "use_api_socket",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.use_api_socket must be a boolean"
+},
+{
+"key": "use_api_socket",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.use_api_socket must be a boolean"
+},
+{
+"key": "use_api_socket",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.use_api_socket must be a boolean"
+},
+{
+"key": "use_api_socket",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.use_api_socket must be a boolean"
+},
+{
+"key": "use_api_socket",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.use_api_socket must be a boolean"
+},
+{
+"key": "use_api_socket",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.use_api_socket must be a boolean"
+},
+{
+"key": "use_api_socket",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.use_api_socket must be a boolean"
+},
+{
+"key": "user",
+"form": "str",
+"value": "\"x\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "user",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.user must be a string"
+},
+{
+"key": "user",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.user must be a string"
+},
+{
+"key": "user",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.user must be a string"
+},
+{
+"key": "user",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.user must be a string"
+},
+{
+"key": "user",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.user must be a string"
+},
+{
+"key": "user",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.user must be a string"
+},
+{
+"key": "user",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "user",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "user",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "user",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "user",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.user must be a string"
+},
+{
+"key": "user",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.user must be a string"
+},
+{
+"key": "userns_mode",
+"form": "str",
+"value": "\"x\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "userns_mode",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.userns_mode must be a string"
+},
+{
+"key": "userns_mode",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.userns_mode must be a string"
+},
+{
+"key": "userns_mode",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.userns_mode must be a string"
+},
+{
+"key": "userns_mode",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.userns_mode must be a string"
+},
+{
+"key": "userns_mode",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.userns_mode must be a string"
+},
+{
+"key": "userns_mode",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.userns_mode must be a string"
+},
+{
+"key": "userns_mode",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "userns_mode",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "userns_mode",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "userns_mode",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "userns_mode",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.userns_mode must be a string"
+},
+{
+"key": "userns_mode",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.userns_mode must be a string"
+},
+{
+"key": "uts",
+"form": "str",
+"value": "\"x\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "uts",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.uts must be a string"
+},
+{
+"key": "uts",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.uts must be a string"
+},
+{
+"key": "uts",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.uts must be a string"
+},
+{
+"key": "uts",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.uts must be a string"
+},
+{
+"key": "uts",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.uts must be a string"
+},
+{
+"key": "uts",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.uts must be a string"
+},
+{
+"key": "uts",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "uts",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "uts",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "uts",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "uts",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.uts must be a string"
+},
+{
+"key": "uts",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.uts must be a string"
+},
+{
+"key": "volumes",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.volumes must be a array"
+},
+{
+"key": "volumes",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.volumes must be a array"
+},
+{
+"key": "volumes",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.volumes must be a array"
+},
+{
+"key": "volumes",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.volumes must be a array"
+},
+{
+"key": "volumes",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.volumes.0 must be a string"
+},
+{
+"key": "volumes",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.volumes must be a array"
+},
+{
+"key": "volumes",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.volumes must be a array"
+},
+{
+"key": "volumes",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.volumes must be a array"
+},
+{
+"key": "volumes",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.volumes must be a array"
+},
+{
+"key": "volumes",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.volumes must be a array"
+},
+{
+"key": "volumes",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.volumes must be a array"
+},
+{
+"key": "volumes",
+"form": "listS",
+"value": "[a, b]",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "volumes",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.volumes must be a array"
+},
+{
+"key": "volumes_from",
+"form": "str",
+"value": "\"x\"",
+"docker": "schema",
+"msg": ": services.web.volumes_from must be a array"
+},
+{
+"key": "volumes_from",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.volumes_from must be a array"
+},
+{
+"key": "volumes_from",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.volumes_from must be a array"
+},
+{
+"key": "volumes_from",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.volumes_from must be a array"
+},
+{
+"key": "volumes_from",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.volumes_from.0 must be a string"
+},
+{
+"key": "volumes_from",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.volumes_from must be a array"
+},
+{
+"key": "volumes_from",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.volumes_from must be a array"
+},
+{
+"key": "volumes_from",
+"form": "sint",
+"value": "\"7\"",
+"docker": "schema",
+"msg": ": services.web.volumes_from must be a array"
+},
+{
+"key": "volumes_from",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "schema",
+"msg": ": services.web.volumes_from must be a array"
+},
+{
+"key": "volumes_from",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "schema",
+"msg": ": services.web.volumes_from must be a array"
+},
+{
+"key": "volumes_from",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "schema",
+"msg": ": services.web.volumes_from must be a array"
+},
+{
+"key": "volumes_from",
+"form": "listS",
+"value": "[a, b]",
+"docker": "other",
+"msg": "service \"web\" depends on undefined service \"b\": invalid compose project"
+},
+{
+"key": "volumes_from",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.volumes_from must be a array"
+},
+{
+"key": "working_dir",
+"form": "str",
+"value": "\"x\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "working_dir",
+"form": "int",
+"value": "7",
+"docker": "schema",
+"msg": ": services.web.working_dir must be a string"
+},
+{
+"key": "working_dir",
+"form": "float",
+"value": "1.5",
+"docker": "schema",
+"msg": ": services.web.working_dir must be a string"
+},
+{
+"key": "working_dir",
+"form": "bool",
+"value": "true",
+"docker": "schema",
+"msg": ": services.web.working_dir must be a string"
+},
+{
+"key": "working_dir",
+"form": "list",
+"value": "[1, 2]",
+"docker": "schema",
+"msg": ": services.web.working_dir must be a string"
+},
+{
+"key": "working_dir",
+"form": "map",
+"value": "{a: 1}",
+"docker": "schema",
+"msg": ": services.web.working_dir must be a string"
+},
+{
+"key": "working_dir",
+"form": "null",
+"value": "null",
+"docker": "schema",
+"msg": ": services.web.working_dir must be a string"
+},
+{
+"key": "working_dir",
+"form": "sint",
+"value": "\"7\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "working_dir",
+"form": "sbool",
+"value": "\"true\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "working_dir",
+"form": "sfloat",
+"value": "\"1.5\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "working_dir",
+"form": "sstr",
+"value": "\"abc\"",
+"docker": "accept",
+"msg": ""
+},
+{
+"key": "working_dir",
+"form": "listS",
+"value": "[a, b]",
+"docker": "schema",
+"msg": ": services.web.working_dir must be a string"
+},
+{
+"key": "working_dir",
+"form": "mapS",
+"value": "{a: b}",
+"docker": "schema",
+"msg": ": services.web.working_dir must be a string"
+}
+]

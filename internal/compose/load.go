@@ -1,8 +1,11 @@
 package compose
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -840,12 +843,44 @@ func LoadFilesEnvDir(paths []string, envFiles []string, envDir string) (*Project
 	// The files the project was read from: the -f paths, with the files
 	// each includes before it. What a failure in the merged document names.
 	loaded := paths
-	if len(paths) == 1 && !hasInclude(paths[0]) {
+	// A file of several YAML documents is read as that many files, each merged
+	// into the ones before (docker compose's reading, measured, v5.5.1): its
+	// documents come after each other in the list, ahead of the next `-f` file.
+	type source struct {
+		path string
+		raw  []byte // the text of one document; nil is the file, read by loadUnit
+		doc  int    // which document of the file raw is, from 1
+	}
+	var sources []source
+	multi := false
+	for _, path := range paths {
+		raw, rerr := os.ReadFile(path)
+		if rerr != nil {
+			sources = append(sources, source{path: path}) // loadUnit says what could not be read
+			continue
+		}
+		docs, err := splitDocuments(path, raw)
+		if err != nil {
+			return nil, err
+		}
+		if len(docs) == 1 {
+			sources = append(sources, source{path: path})
+			continue
+		}
+		multi = true
+		for i, d := range docs {
+			sources = append(sources, source{path: path, raw: d, doc: i + 1})
+		}
+	}
+	if len(paths) == 1 && !multi && !hasInclude(paths[0]) {
 		// Single file: read the interpolated document directly (no merge
 		// round-trip), so the positions a failure names are the ones in the file.
 		raw, err := os.ReadFile(paths[0])
 		if err != nil {
 			return nil, fmt.Errorf("reading compose file: %w", err)
+		}
+		if err := checkOneDocument(paths[0], raw); err != nil {
+			return nil, err
 		}
 		if doc, err = interpolateDocument(raw, scope.lookup()); err != nil {
 			return nil, fmt.Errorf("interpolating %s: %w", paths[0], err)
@@ -875,15 +910,35 @@ func LoadFilesEnvDir(paths []string, envFiles []string, envDir string) (*Project
 		// then render the merged result.
 		var merged map[string]any
 		loaded = nil
-		for _, path := range paths {
+		for _, src := range sources {
+			path := src.path
 			// Every -f file belongs to the project whose directory is the
 			// first file's: its include paths and its `extends: {file}`
 			// count from there (docker compose, measured), not from its own.
-			m, files, tags, err := loadUnit(path, baseDir, scope, merged, nil)
+			var (
+				m     map[string]any
+				files []string
+				tags  []mergeTag
+				err   error
+			)
+			if src.raw != nil {
+				m, files, tags, err = loadUnitRaw(path, src.raw, baseDir, scope, merged, nil)
+			} else {
+				m, files, tags, err = loadUnit(path, baseDir, scope, merged, nil)
+			}
 			if err != nil {
+				if src.doc > 1 && strings.Contains(err.Error(), "unknown anchor") {
+					// docker compose lets an alias reach an anchor of an earlier
+					// document (measured, v5.5.1); here each document is read by itself.
+					return nil, fmt.Errorf("compose file %s: document %d refers to an anchor written in an earlier document — opossum does not carry an anchor across `---`: write the anchor again in this document, or put the documents in files of their own and pass them with `-f`", path, src.doc)
+				}
 				return nil, err
 			}
-			loaded = append(loaded, files...)
+			for _, f := range files {
+				if !slices.Contains(loaded, f) {
+					loaded = append(loaded, f)
+				}
+			}
 			if merged == nil {
 				merged = m
 			} else {
@@ -919,7 +974,7 @@ func LoadFilesEnvDir(paths []string, envFiles []string, envDir string) (*Project
 	var f composeFile
 	if err := doc.into(&f); err != nil {
 		read := asWritten
-		if len(loaded) > 1 {
+		if len(loaded) > 1 || multi {
 			read = asMerged
 		}
 		return nil, decodeErr(mergedName(loaded), read, blameService(doc, err))
@@ -1071,12 +1126,21 @@ func LoadFilesEnvDir(paths []string, envFiles []string, envDir string) (*Project
 		}
 		// networks: a service joins the declared networks it names. Each must be
 		// declared top-level, and `networks:` can't combine with full isolation.
-		if len(svc.Networks) > 0 {
-			if svc.NetworkMode == NetworkModeNone {
-				return nil, fmt.Errorf("service %q: network_mode: none and networks: cannot both be set", name)
-			}
-			for _, netName := range svc.Networks {
+		if len(svc.Networks) > 0 && svc.NetworkMode == NetworkModeNone {
+			return nil, fmt.Errorf("service %q: network_mode: none and networks: cannot both be set", name)
+		}
+		// A service that lists no networks is on `default`, so its declaration
+		// is read as if the service had listed it.
+		joined := svc.Networks
+		if len(joined) == 0 && svc.NetworkMode != NetworkModeNone {
+			joined = []string{DefaultNetworkDecl}
+		}
+		if len(joined) > 0 {
+			for _, netName := range joined {
 				decl, ok := f.Networks[netName]
+				if !ok && netName == DefaultNetworkDecl {
+					continue // there whether or not the file declares it
+				}
 				if !ok {
 					return nil, fmt.Errorf("service %q references undefined network %q (declare it under top-level networks:)", name, netName)
 				}
@@ -1360,35 +1424,107 @@ func NetworkRuntimeKey(key string) string {
 // `networks:` joins, `<project>-net`.
 const DefaultNetworkKey = "net"
 
-// CheckNetworkKeys refuses two networks the services join that fold to the
-// same runtime network — `backEnd` and `backend`, or a key folding to the
-// default network's `net` while a service is on that — since docker compose
-// gives each its own network and one shared network would join services the
-// file keeps apart. It is for the commands that create networks to call, not
-// the loader: a key `net` beside the default network ran before this check
+// DefaultNetworkDecl is the key under which a compose file declares that
+// network, and lists it in a service's `networks:`. It is there whether or not
+// the file declares it: a service with no `networks:` and a service that lists
+// `default` are on the one network, and the declaration, when there is one
+// (`name`, `internal`, `external`, `labels`, `ipam`), is that network's (measured
+// on docker compose v5.5.1).
+const DefaultNetworkDecl = "default"
+
+// NetworkOwnName is the runtime name of a declared network that carries a
+// `name:` of its own, and whether it does. docker compose creates such a network
+// under that name as written, with no project in front of it, and a network
+// under a name can be shared with another project or another file. External
+// networks are named by `name:` too, but they are not created here.
+func (d NetworkDecl) NetworkOwnName() (string, bool) {
+	if d.External || d.Name == "" {
+		return "", false
+	}
+	return d.Name, true
+}
+
+// sameNetworkDecl reports whether two declarations would make the same
+// network: the same host-only flag, subnets and labels — the labels as they
+// read (an entry written twice under one key is the later one), as docker
+// compose reads them.
+func sameNetworkDecl(a, b NetworkDecl) bool {
+	return a.Internal == b.Internal && a.IPAM.Subnet == b.IPAM.Subnet && a.IPAM.SubnetV6 == b.IPAM.SubnetV6 &&
+		maps.Equal(labelMap(a.Labels), labelMap(b.Labels))
+}
+
+// CheckNetworkKeys refuses the networks the services join that would come to one
+// runtime network although the file means them apart, or the other way round:
+//
+//   - two keys folding to the same runtime network — `backEnd` and `backend`,
+//     or a key folding to the default network's `net` while a service is on
+//     that — since docker compose gives each its own network and one shared
+//     network would join services the file keeps apart;
+//   - two networks that carry the same `name:` but are declared differently
+//     (docker compose makes one network of them and does not say whose
+//     `internal:` or labels it took), or a network whose `name:` is another's
+//     derived `<project>-<key>`.
+//
+// Two networks with the same `name:` and the same declaration are one network,
+// as in docker compose. It is for the commands that create networks to call,
+// not the loader: a key `net` beside the default network ran before this check
 // existed (the two services shared one network), and `down` and `destroy`
 // have to read that file to clean such a project up.
 func (p *Project) CheckNetworkKeys() error {
-	owner := map[string]string{} // folded key -> the key (or "") that took it first
-	take := func(folded, key string) error {
-		first, taken := owner[folded]
-		if !taken {
-			owner[folded] = key
-			return nil
-		}
-		if first == key {
-			return nil
-		}
-		if first == "" {
-			first, key = key, ""
-		}
-		if key != "" && key < first {
-			first, key = key, first
-		}
+	type taker struct {
+		key   string      // the declared key; "" for the default network
+		named bool        // the runtime name is the declaration's own `name:`
+		decl  NetworkDecl // the default network's own declaration, if the file has one, for the default network
+	}
+	shown := func(key string) string {
 		if key == "" {
-			return fmt.Errorf("network %q becomes the runtime network `<project>-%s`, which is the network services without `networks:` join — rename the key", first, folded)
+			return DefaultNetworkDecl
 		}
-		return fmt.Errorf("networks %q and %q both become the runtime network `<project>-%s` (the container runtime (1.4.1) takes network names in lower case, so each character it refuses is written `-` and a trailing `-`, `.` or `_` is dropped) — rename one of them", first, key, folded)
+		return key
+	}
+	owner := map[string]taker{} // runtime network name -> who took it first
+	take := func(real string, t taker) error {
+		first, taken := owner[real]
+		if !taken {
+			owner[real] = t
+			return nil
+		}
+		if first.key == t.key {
+			return nil
+		}
+		// Two keys that name one network: docker compose makes one of them.
+		if (first.named || first.key == "") && (t.named || t.key == "") && sameNetworkDecl(first.decl, t.decl) {
+			return nil
+		}
+		if first.key == "" || (t.key != "" && t.key < first.key) {
+			first, t = t, first
+		}
+		// first is now a declared key, and t the default network or a later key.
+		switch {
+		case first.named && t.named:
+			return fmt.Errorf("networks %q and %q both have `name: %s` and are declared differently (`internal`, `labels` or `ipam`) — docker compose makes one network of them and does not say whose declaration it took; give them one declaration, or different names", shown(first.key), shown(t.key), real)
+		case first.named && t.key == "":
+			return fmt.Errorf("network %q has `name: %s`, which is the network services without `networks:` join, and that network is declared differently (`internal`, `labels` or `ipam`) — give it a name of its own, or declare the same", first.key, real)
+		case first.named:
+			return fmt.Errorf("network %q has `name: %s`, which is the runtime name of network %q (`<project>-%s`) — rename one of them", shown(first.key), real, shown(t.key), NetworkRuntimeKey(t.key))
+		case t.named:
+			return fmt.Errorf("network %q has `name: %s`, which is the runtime name of network %q (`<project>-%s`) — rename one of them", shown(t.key), real, shown(first.key), NetworkRuntimeKey(first.key))
+		case t.key == "":
+			return fmt.Errorf("network %q becomes the runtime network `<project>-%s`, which is the network services without `networks:` join — rename the key", first.key, NetworkRuntimeKey(first.key))
+		}
+		return fmt.Errorf("networks %q and %q both become the runtime network `<project>-%s` (the container runtime (1.4.1) takes network names in lower case, so each character it refuses is written `-` and a trailing `-`, `.` or `_` is dropped) — rename one of them", first.key, t.key, NetworkRuntimeKey(first.key))
+	}
+	// The default network: the one a service with no `networks:` joins, and the one
+	// `default` names. External, it is somebody else's and is not made.
+	takeDefault := func() error {
+		decl := p.Networks[DefaultNetworkDecl]
+		if decl.External {
+			return nil
+		}
+		if own, named := decl.NetworkOwnName(); named {
+			return take(own, taker{named: true, decl: decl})
+		}
+		return take(p.Name+"-"+DefaultNetworkKey, taker{decl: decl})
 	}
 	names := make([]string, 0, len(p.Services))
 	for name := range p.Services {
@@ -1401,16 +1537,29 @@ func (p *Project) CheckNetworkKeys() error {
 			continue
 		}
 		if len(svc.Networks) == 0 {
-			if err := take(DefaultNetworkKey, ""); err != nil {
+			if err := takeDefault(); err != nil {
 				return err
 			}
 			continue
 		}
 		for _, key := range svc.Networks {
-			if p.Networks[key].External {
+			if key == DefaultNetworkDecl {
+				if err := takeDefault(); err != nil {
+					return err
+				}
 				continue
 			}
-			if err := take(NetworkRuntimeKey(key), key); err != nil {
+			decl := p.Networks[key]
+			if decl.External {
+				continue
+			}
+			if own, named := decl.NetworkOwnName(); named {
+				if err := take(own, taker{key: key, named: true, decl: decl}); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := take(p.Name+"-"+NetworkRuntimeKey(key), taker{key: key}); err != nil {
 				return err
 			}
 		}
@@ -1889,6 +2038,20 @@ func validateOne(path string, one interpolated, earlier map[string]any) error {
 	if err := doc.Decode(&f); err != nil {
 		return decodeErr(path, asWritten, blameService(interpolated{node: doc, raw: one.raw}, err))
 	}
+	// The decode has answered for the blocks it reads into a typed shape; what it
+	// took as it came is asked now, so that nothing is said twice.
+	if err := checkRepeatedKeys(path, one.written, true); err != nil {
+		return err
+	}
+	// The keys the decode took as they came are asked what they hold.
+	var generic struct {
+		Services map[string]any `yaml:"services"`
+	}
+	if err := doc.Decode(&generic); err == nil {
+		if err := checkServiceShapes(path, generic.Services); err != nil {
+			return err
+		}
+	}
 	// A file that names one `group_add` entry twice is refused here, where
 	// the entries are the ones that file wrote: the positions are its own,
 	// and a file beside it neither adds to them nor takes them away. The
@@ -1925,7 +2088,27 @@ func validateOne(path string, one interpolated, earlier map[string]any) error {
 // mapping repeats a key (`mapping key "a" already defined at line 2`); the
 // decoder says the same for a block it reads into a typed shape, and never sees
 // an extension, whose contents nobody interprets — so in a single file a repeat
-// there was accepted, where docker compose refuses the file.
+// there was accepted, where docker compose refuses the file. It is asked before
+// the decode, which answers for the typed blocks in its own words; the rest of the
+// file is asked by checkRepeatedKeys once the decode has passed.
+func checkExtensionRepeats(path string, written []byte) error {
+	return checkRepeatedKeys(path, written, false)
+}
+
+// checkRepeatedKeys refuses a key written twice in one mapping (inside an `x-`
+// extension only, or anywhere in the file), and — asked of the whole file — an
+// alias that refers to the block that contains it.
+//
+// Asked of the whole file after the decode has passed, so that a block the
+// decode reads into a typed shape has already answered in its own words and is
+// not asked again to say it twice: what is left is a mapping the decode takes
+// as it comes — `logging.options`, `deploy.resources.reservations`, `sysctls`,
+// `ulimits`, `extra_hosts`, `driver_opts`, a gpu device, a mount's `bind:` block —
+// which accepted a repeat in a single file where docker compose refuses it
+// (measured, v5.5.1: 7 positions of a 31-position sweep, and
+// `deploy.resources.reservations` and `bind:` by probes of their own). Several
+// files were refused already, by
+// the merge of the maps the later ones decode into.
 //
 // Asked of the file as written (`written`), not of the document after `${...}`
 // was expanded: docker compose does not expand the keys of a mapping, so
@@ -1935,16 +2118,15 @@ func validateOne(path string, one interpolated, earlier map[string]any) error {
 // does not parse as written (a `${...}` where a flow mapping needs a plain
 // key) is left to the decode, which reads it after expansion.
 //
-// Only inside an extension: in the blocks that are read into a typed shape the
-// decode has already answered, in its own words, and asking again would say it
-// twice. Keys are the same when their text is: docker compose's decoder does not
+// Keys are the same when their text is: docker compose's decoder does not
 // look at the tag, so `1` and `"1"` are one key, and neither is `<<` left out —
 // `<<` written twice is a repeat there as well. Only what is written in this
 // mapping is compared: a key an alias or a merge brings in is not written twice
 // in it. An alias is followed once, so a block reused by anchor is read where it
-// is written and not again wherever it is pointed at, and a block that contains
-// itself ends.
-func checkExtensionRepeats(path string, written []byte) error {
+// is written and not again wherever it is pointed at; a block that contains
+// itself is refused where the whole file is asked (docker compose: `cycle
+// detected`) and ends the walk where it is not.
+func checkRepeatedKeys(path string, written []byte, everywhere bool) error {
 	if len(written) == 0 {
 		return nil
 	}
@@ -1957,19 +2139,27 @@ func checkExtensionRepeats(path string, written []byte) error {
 		return nil
 	}
 	seen := map[*yaml.Node]bool{}
+	onPath := map[*yaml.Node]bool{}
 	var walk func(n *yaml.Node, inExtension bool) error
 	walk = func(n *yaml.Node, inExtension bool) error {
-		n = unalias(n)
+		target := unalias(n)
+		if everywhere && n.Kind == yaml.AliasNode && onPath[target] {
+			return fmt.Errorf("compose file %s: line %d: an alias refers to the block that contains it (cycle detected)\n  remove the alias, or anchor a block that does not contain it",
+				path, n.Line)
+		}
+		n = target
 		if seen[n] {
 			return nil
 		}
 		seen[n] = true
+		onPath[n] = true
+		defer delete(onPath, n)
 		switch n.Kind {
 		case yaml.MappingNode:
 			first := map[string]int{}
 			for i := 0; i+1 < len(n.Content); i += 2 {
 				key := n.Content[i]
-				if key.Kind == yaml.ScalarNode && inExtension {
+				if key.Kind == yaml.ScalarNode && (inExtension || everywhere) {
 					if at, dup := first[key.Value]; dup {
 						return fmt.Errorf("compose file %s sets the same key twice:\n  line %d: mapping key %q already defined at line %d\n  remove one of them",
 							path, key.Line, key.Value, at)
@@ -2224,6 +2414,9 @@ func extendedServiceFromFile(where, name, path, target string, lookup varLookup,
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("%s: service %q extends %q of %s, which cannot be read: %v — name the file by a path from the project directory (the first file's, or the include entry's), or remove extends:", where, name, target, path, err)
+	}
+	if err := checkOneDocument(path, raw); err != nil {
+		return nil, err
 	}
 	doc, err := interpolateDocument(raw, lookup)
 	if err != nil {
@@ -2524,6 +2717,99 @@ func checkDeclKeys(path, kind string, decls *yaml.Node) error {
 	return nil
 }
 
+// splitDocuments cuts a compose file into its YAML documents (`---` between
+// them). docker compose reads them in order and merges each into the ones before,
+// as it does several `-f` files (measured, v5.5.1: the later value wins, `command`
+// is replaced, `ports` append, `name:` is the last one's), so a top-level file is
+// read as that many files. A file of one document is returned as it is. What is
+// cut keeps its lines: each document's text is padded with the newlines before it,
+// so a failure names the line the file has.
+//
+// A document that is empty or is not a mapping (a trailing `---`, two in a row, a
+// `[1]`) is refused as docker compose refuses it, whatever else the file holds
+// (`top-level object must be a mapping`). A text that does not parse is left to
+// the reader when it is the first document — which says so in its own words — and
+// refused here, naming the document, when it is a later one: the reader would read
+// the first alone and say nothing. A leading `---` or a `...` at the end is one
+// document. An alias to an earlier document's anchor is not carried across: the
+// document that has one is refused by the reader as an unknown anchor.
+func splitDocuments(path string, raw []byte) ([][]byte, error) {
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	var starts []int // the line the content of each document begins on
+	var notMapping []int
+	n := 0
+	for {
+		var doc yaml.Node
+		if err := dec.Decode(&doc); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if n == 0 {
+				return [][]byte{raw}, nil
+			}
+			return nil, fmt.Errorf("compose file %s: document %d does not parse: %v — docker compose refuses the file", path, n+1, err)
+		}
+		n++
+		// An empty document is a `!!null` scalar; an empty node list is not seen
+		// from the decoder but keeps the index below from being one too far.
+		if len(doc.Content) == 0 || doc.Content[0].Kind != yaml.MappingNode {
+			notMapping = append(notMapping, n)
+			starts = append(starts, 0)
+			continue
+		}
+		starts = append(starts, doc.Content[0].Line)
+	}
+	if n <= 1 {
+		return [][]byte{raw}, nil
+	}
+	if len(notMapping) > 0 {
+		return nil, fmt.Errorf("compose file %s: document %d (between two `---`, or after the last one) is empty or not a mapping — docker compose refuses it too (`top-level object must be a mapping`); remove the extra `---`",
+			path, notMapping[0])
+	}
+	lines := bytes.SplitAfter(raw, []byte("\n"))
+	// A document begins at the `---` line before its content (the content may be
+	// on that line); the first one at the top. Where the cut falls is for tidiness:
+	// a text that kept the marker of the next document at its end is read as the
+	// same document, so no answer depends on it but the padding.
+	begin := make([]int, n)
+	for d := 1; d < n; d++ {
+		l := starts[d] - 1 // 0-based index of the content's line
+		for l > 0 && !bytes.HasPrefix(lines[l], []byte("---")) {
+			l--
+		}
+		begin[d] = l
+	}
+	docs := make([][]byte, 0, n)
+	for d := 0; d < n; d++ {
+		end := len(lines)
+		if d+1 < n {
+			end = begin[d+1]
+		}
+		var b bytes.Buffer
+		b.Write(bytes.Repeat([]byte("\n"), begin[d]))
+		for _, line := range lines[begin[d]:end] {
+			b.Write(line)
+		}
+		docs = append(docs, b.Bytes())
+	}
+	return docs, nil
+}
+
+// checkOneDocument is what an included file and the file a service extends are
+// read with: they are read as one document, and a file of several is refused
+// rather than read as its first alone (the top-level files are merged, see
+// splitDocuments).
+func checkOneDocument(path string, raw []byte) error {
+	docs, err := splitDocuments(path, raw)
+	if err != nil {
+		return err
+	}
+	if len(docs) > 1 {
+		return fmt.Errorf("compose file %s holds %d YAML documents (separated by `---`), and is read here as one file: docker compose merges them in order, and opossum reads only the first document of an included or extended file — it does not leave the rest out silently. Put each document in a file of its own", path, len(docs))
+	}
+	return nil
+}
+
 // hasInclude reports whether the file names files to include — a
 // top-level `include:` with something in it. Read cheaply, before the file
 // is read for what it says: such a file is a merge of several, and takes
@@ -2711,6 +2997,23 @@ func loadUnit(path, projectDir string, scope envScope, earlier map[string]any, s
 			return nil, nil, nil, fmt.Errorf("compose file %s: include names %s, which cannot be read: %v — a relative path is resolved from the project directory (the first file's, or the include entry's)", stack[len(stack)-1], path, err)
 		}
 		return nil, nil, nil, fmt.Errorf("reading compose file: %w", err)
+	}
+	if err := checkOneDocument(path, raw); err != nil {
+		return nil, nil, nil, err
+	}
+	return loadUnitRaw(path, raw, projectDir, scope, earlier, stack)
+}
+
+// loadUnitRaw is loadUnit for the text of a file that has been read (or of one
+// document of a file that holds several, which is padded so that the lines a
+// failure names are the file's).
+func loadUnitRaw(path string, raw []byte, projectDir string, scope envScope, earlier map[string]any, stack []string) (map[string]any, []string, []mergeTag, error) {
+	abs := path
+	if a, err := filepath.Abs(path); err == nil {
+		abs = a
+	}
+	if projectDir == "" {
+		projectDir = filepath.Dir(abs)
 	}
 	one, err := interpolateDocument(raw, scope.lookup())
 	if err != nil {

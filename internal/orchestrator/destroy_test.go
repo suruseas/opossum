@@ -563,7 +563,7 @@ func TestDestroySaysBothWhatIsLeftAndWhatCouldNotBeAskedAbout(t *testing.T) {
 	rt, _ := fakeShim(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	setShimEnv(rt, "INSPECT_PROJECT=demo", "STATE_DIR="+t.TempDir(),
-		"IMAGE_ABSENT=web db", "VOLUME_LS=NAME")
+		"IMAGE_ABSENT=web db", "VOLUME_LS=NAME", "NETWORK_DELETE_STICKY=demo-net")
 	p := project("demo", map[string]*compose.Service{"web": {Image: "web"}, "db": {Image: "db"}})
 	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
 	plan, err := o.DestroyPlanFor(false, false, false)

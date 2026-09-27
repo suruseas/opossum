@@ -6,9 +6,9 @@
 // It logs each invocation's arguments (space-joined) to $FAKE_LOG and returns
 // output shaped like the real CLI. Behaviour is steered entirely through the
 // environment (FAKE_LOG, STATE_DIR, DELETE_STICKY, STOP_FAIL, INSPECT_STATE, INSPECT_STOPPED, INSPECT_OWNER, INSPECT_FAIL, LOGS_FAIL, STATS_FAIL, INSPECT_FAIL_ONCE_STOP_ASKED, INSPECT_FAIL_ONCE_GONE, INSPECT_FAIL_ONCE_GONE_ALL,
-// INSPECT_ABSENT, NET_EXISTS, NET_CREATE_{HANG,FAIL}, NETWORK_ABSENT, BUILD_{HANG,FAIL,FAIL_STDERR}, RUN_FAIL,
+// INSPECT_ABSENT, INSPECT_ABSENT_BEFORE_RUN, NET_EXISTS, NET_CREATE_{HANG,FAIL}, NETWORK_ABSENT, NETWORK_LABELS, NETWORK_MODES, BUILD_{HANG,FAIL,FAIL_STDERR}, RUN_FAIL (a name, or several separated by spaces),
 // RUN_IMAGE_FETCH_FAIL, RUN_IMAGE_FETCH_REASON, RUN_IMAGE_FETCH_URL, RUN_IMAGE_FETCH_TRUNCATED,
-// RUN_FAIL_STDERR,
+// RUN_FAIL_STDERR, RUN_FAIL_THEN_INSPECT_FAIL, RUN_FAIL_MAKES_NOTHING,
 // RUN_HANG, RUN_DIE_SIGNAL, RUN_EXISTS[_WORDING|_HASH], RUN_EXISTS_ANY, HEALTH_*,
 // VOLUME_* (VOLUME_DELETE_STICKY, VOLUME_LS_FAIL_FROM among them), LS_*,
 // IMAGE_ABSENT, INSPECT_HANG_WHILE, INSPECT_ANSWERED, INSPECT_GATE,
@@ -290,6 +290,18 @@ func run(args []string) int {
 				return 1
 			}
 		}
+		// $INSPECT_ABSENT_BEFORE_RUN names containers that do not exist until a run
+		// of the name has been made here — the runtime's answer for a service with
+		// no earlier container, and then for the one a run made before it failed.
+		// $INSPECT_ABSENT cannot say that: it is absent for the whole `up`.
+		if dir := os.Getenv("STATE_DIR"); dir != "" {
+			for _, m := range strings.Fields(os.Getenv("INSPECT_ABSENT_BEFORE_RUN")) {
+				if _, err := os.Stat(filepath.Join(dir, m+".ports")); arg(1) == m && err != nil {
+					fmt.Fprintf(os.Stderr, "Error: container not found: %s\n", arg(1))
+					return 1
+				}
+			}
+		}
 		// $INSPECT_STOPPED names individual containers that exist but are not
 		// running — $INSPECT_STATE is the blunt version that applies to every
 		// container and cannot express "db is down while web is up". Same knob and
@@ -324,12 +336,37 @@ func run(args []string) int {
 					return 1
 				}
 			}
+			if networkGone(arg(2)) {
+				fmt.Fprintf(os.Stderr, "Error: network not found: %s\n", arg(2))
+				return 1
+			}
 			// $NETWORK_SUBNETS gives an existing network its subnets, as
 			// `name=v4[,v6]` pairs, in the shape the real `network inspect`
 			// prints them (1.4.1: `configuration.ipv4Subnet` when created with
 			// `--subnet`, and `status.ipv4Subnet` / `ipv6Subnet` — the latter
 			// written with the gateway's address). Without it the inspect answers
 			// nothing, as the shim always did, which opossum reads as "unknown".
+			// The labels an existing network carries (`configuration.labels`,
+			// the real shape: an empty object for one made without any). A
+			// network this shim made under STATE_DIR answers with the labels
+			// its `create` was given; $NETWORK_LABELS gives one that was made
+			// before, as `name=key=value[,key=value]` entries separated by
+			// spaces (`name=` alone: an existing network with no label). Without
+			// either the inspect says nothing of labels, which opossum reads as
+			// "not told". One network is one document, whatever it is asked for.
+			// $NETWORK_MODES gives an existing network its mode
+			// (`configuration.mode`: `hostOnly` for one made with `--internal`,
+			// `nat` for the rest), as `name=mode` entries separated by spaces.
+			// Without it the inspect names no mode, which opossum reads as "not
+			// told".
+			mode := ""
+			for _, e := range strings.Fields(os.Getenv("NETWORK_MODES")) {
+				if n, m, ok := strings.Cut(e, "="); ok && n == arg(2) {
+					mode = m
+				}
+			}
+			labels, labelled := networkLabels(arg(2))
+			subnetted := false
 			for _, pair := range strings.Fields(os.Getenv("NETWORK_SUBNETS")) {
 				name, subs, ok := strings.Cut(pair, "=")
 				if !ok || name != arg(2) {
@@ -342,7 +379,60 @@ func run(args []string) int {
 					conf += fmt.Sprintf(`,"ipv6Subnet":%q`, v6)
 					status += fmt.Sprintf(`,"ipv6Subnet":%q`, strings.Replace(v6, "::/", "::1/", 1))
 				}
+				if mode != "" {
+					conf += fmt.Sprintf(`,"mode":%q`, mode)
+				}
+				if labelled {
+					parts := make([]string, 0, len(labels))
+					for _, l := range labels {
+						k, v, _ := strings.Cut(l, "=")
+						parts = append(parts, fmt.Sprintf("%q:%q", k, v))
+					}
+					conf += fmt.Sprintf(`,"labels":{%s}`, strings.Join(parts, ","))
+				}
 				fmt.Printf(`[{"configuration":{"name":%q,%s},"status":{%s}}]`+"\n", name, conf, status)
+				subnetted = true
+			}
+			switch {
+			case subnetted:
+			case labelled:
+				printNetworkInspect(arg(2), labels, mode)
+			case mode != "":
+				printNetworkInspect(arg(2), nil, mode)
+			}
+		}
+		if arg(1) == "delete" {
+			if dir := os.Getenv("STATE_DIR"); dir != "" {
+				// A network already deleted is not there to delete a second
+				// time: the real CLI fails (1.4.1: `Error: failed to delete one
+				// or more networks: ["<name>"]` — a different shape from
+				// `network inspect`'s `network not found: <name>`; DeleteNetwork's
+				// networkAlreadyGone reads both). Several names at once collect
+				// into one list, as the real CLI's message does.
+				// $NETWORK_DELETE_STICKY names networks whose delete succeeds
+				// and yet leaves them there — a teardown that trusted the exit
+				// code would report them gone. Same shape as $DELETE_STICKY.
+				sticky := strings.Fields(os.Getenv("NETWORK_DELETE_STICKY"))
+				var absent []string
+				for _, n := range args[2:] {
+					if networkGone(n) {
+						absent = append(absent, n)
+						continue
+					}
+					if slices.Contains(sticky, n) {
+						continue
+					}
+					_ = os.WriteFile(netGonePath(dir, n), nil, 0o644)
+					_ = os.Remove(netLabelsPath(dir, n))
+				}
+				if len(absent) > 0 {
+					quoted := make([]string, len(absent))
+					for i, n := range absent {
+						quoted[i] = strconv.Quote(n)
+					}
+					fmt.Fprintf(os.Stderr, "Error: failed to delete one or more networks: [%s]\n", strings.Join(quoted, ", "))
+					return 1
+				}
 			}
 		}
 		if arg(1) == "create" {
@@ -350,6 +440,9 @@ func run(args []string) int {
 			if name == "create" || strings.HasPrefix(name, "-") {
 				fmt.Fprintln(os.Stderr, "Error: Missing expected argument '<name>'")
 				return 64
+			}
+			if dir := os.Getenv("STATE_DIR"); dir != "" {
+				_ = os.Remove(netGonePath(dir, name))
 			}
 			if !validNetworkName(name) {
 				fmt.Fprintf(os.Stderr, "Error: invalid network name: %s\n", name)
@@ -370,6 +463,16 @@ func run(args []string) int {
 			if os.Getenv("NET_CREATE_FAIL") != "" {
 				fmt.Fprintln(os.Stderr, "Error: internalError: \"failed to create network\"")
 				return 1
+			}
+			// The labels it was made with are what a later inspect answers with.
+			if dir := os.Getenv("STATE_DIR"); dir != "" {
+				var labels []string
+				for i, a := range args {
+					if a == "--label" && i+1 < len(args) {
+						labels = append(labels, args[i+1])
+					}
+				}
+				_ = os.WriteFile(netLabelsPath(dir, name), []byte(strings.Join(labels, "\n")), 0o644)
 			}
 			fmt.Println(name) // real CLI echoes the network name on success
 		}
@@ -673,9 +776,23 @@ func run(args []string) int {
 		// runtime's.
 		if fail := os.Getenv("RUN_FAIL"); fail != "" {
 			for i, a := range args {
-				if i > 0 && args[i-1] == "--name" && a == fail {
+				if i > 0 && args[i-1] == "--name" && slices.Contains(strings.Fields(fail), a) {
 					if out := os.Getenv("RUN_FAIL_STDERR"); out != "" {
 						fmt.Fprint(os.Stderr, out)
+					}
+					// $RUN_FAIL_THEN_INSPECT_FAIL is a file the failed run creates:
+					// with $INSPECT_FAIL_WHILE naming it, the runtime stops answering
+					// from the failure on, after the checks before the run got answers.
+					if f := os.Getenv("RUN_FAIL_THEN_INSPECT_FAIL"); f != "" {
+						_ = os.WriteFile(f, nil, 0o644)
+					}
+					// $RUN_FAIL_MAKES_NOTHING: the run was refused before a container was
+					// made, so the name is gone afterwards even if one was there before it
+					// (this up removed it, and nothing took its place).
+					if os.Getenv("RUN_FAIL_MAKES_NOTHING") != "" {
+						if dir := os.Getenv("STATE_DIR"); dir != "" {
+							_ = os.WriteFile(gonePath(dir, a), []byte("1"), 0o644)
+						}
 					}
 					return 1
 				}
@@ -717,6 +834,15 @@ func run(args []string) int {
 		}
 
 	case "exec":
+		// A container that is not there cannot be exec'd into: the real CLI
+		// exits 1 saying so (1.4.1: `Error: get failed: container <name> not
+		// found`) — a healthcheck probe (the one caller of Exec in production)
+		// against a container that vanished mid-probe must see a failure, not
+		// a fake that always answers healthy.
+		if len(args) > 1 && !there(args[1]) {
+			fmt.Fprintf(os.Stderr, "Error: get failed: container %s not found\n", args[1])
+			return 1
+		}
 		if os.Getenv("HEALTH_HANG") != "" {
 			time.Sleep(30 * time.Second) // never returns within the probe timeout
 		}
@@ -971,6 +1097,16 @@ func run(args []string) int {
 				names = append(names, a)
 			}
 		}
+		// A name the `delete` case marked gone is not there to measure, the
+		// same as one $INSPECT_ABSENT names (the real CLI answers both the
+		// same way: the whole call fails, nothing shown for the rest — see
+		// $STATS_FAIL above).
+		for _, n := range names {
+			if !there(n) {
+				fmt.Fprintln(os.Stderr, "Error: no such container: "+strings.Join(names, " "))
+				return 1
+			}
+		}
 		if jsonForm {
 			var objs []string
 			// container 1.4.1 answers in id order, not in the order it was asked.
@@ -1022,6 +1158,21 @@ func goneVolumePath(dir, name string) string {
 	return filepath.Join(dir, "gonevolume-"+hex.EncodeToString([]byte(name)))
 }
 
+// netGonePath marks a network deleted (see the `network delete` case); a
+// `network create` of the name again clears it.
+func netGonePath(dir, name string) string {
+	return filepath.Join(dir, "gonenet-"+hex.EncodeToString([]byte(name)))
+}
+
+func networkGone(name string) bool {
+	dir := os.Getenv("STATE_DIR")
+	if dir == "" {
+		return false
+	}
+	_, err := os.Stat(netGonePath(dir, name))
+	return err == nil
+}
+
 func volumeGone(name string) bool {
 	dir := os.Getenv("STATE_DIR")
 	if dir == "" {
@@ -1055,6 +1206,56 @@ func madeVolumes() []string {
 
 func gonePath(dir, name string) string {
 	return filepath.Join(dir, "gone-"+hex.EncodeToString([]byte(name)))
+}
+
+// printNetworkInspect writes what `network inspect` answers for a network with
+// these labels, in the shape the real CLI prints (an empty `labels` for one made
+// without any).
+func printNetworkInspect(name string, labels []string, mode string) {
+	lines := make([]string, 0, len(labels))
+	for _, l := range labels {
+		k, v, _ := strings.Cut(l, "=")
+		lines = append(lines, fmt.Sprintf("        %q : %q", k, v))
+	}
+	body := "\n"
+	if len(lines) > 0 {
+		body = "\n" + strings.Join(lines, ",\n") + "\n      "
+	}
+	modeLine := ""
+	if mode != "" {
+		modeLine = fmt.Sprintf("      \"mode\" : %q,\n", mode)
+	}
+	fmt.Printf("[\n  {\n    \"configuration\" : {\n      \"labels\" : {%s},\n%s      \"name\" : %q\n    }\n  }\n]\n", body, modeLine, name)
+}
+
+// netLabelsPath is where a `network create` leaves the labels it was given
+// (one `key=value` per line), so that a later `network inspect` answers with them.
+func netLabelsPath(dir, name string) string {
+	return filepath.Join(dir, "netlabels-"+hex.EncodeToString([]byte(name)))
+}
+
+// networkLabels are the labels the network of that name carries, and whether
+// this shim is to say: $NETWORK_LABELS first, then what a `create` left.
+func networkLabels(name string) ([]string, bool) {
+	for _, entry := range strings.Fields(os.Getenv("NETWORK_LABELS")) {
+		n, rest, _ := strings.Cut(entry, "=")
+		if n != name {
+			continue
+		}
+		if rest == "" {
+			return nil, true
+		}
+		return strings.Split(rest, ","), true
+	}
+	if dir := os.Getenv("STATE_DIR"); dir != "" {
+		if b, err := os.ReadFile(netLabelsPath(dir, name)); err == nil {
+			if len(b) == 0 {
+				return nil, true
+			}
+			return strings.Split(string(b), "\n"), true
+		}
+	}
+	return nil, false
 }
 
 // stopAskedPath is the marker every `stop` of a name leaves, whatever it did.

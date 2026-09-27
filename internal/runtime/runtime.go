@@ -462,6 +462,55 @@ func (r *Runtime) EnsureNetworkLabeled(name string, internal bool, labels []stri
 	return false, fmt.Errorf("creating network %q: %w\n%s", name, cerr, strings.TrimSpace(out))
 }
 
+// NetworkLabels reads the labels an existing network carries, from `network
+// inspect` (`configuration.labels`; an unlabelled network has an empty
+// object). ok is false when the network cannot be inspected or the answer is
+// not the document `network inspect` prints — the network is absent, or the
+// runtime did not say — so a caller that acts only on a label it read cannot
+// mistake "not answered" for "not labelled".
+func (r *Runtime) NetworkLabels(name string) (labels map[string]string, ok bool) {
+	out, err := r.capture("network", "inspect", name)
+	if err != nil {
+		return nil, false
+	}
+	var nets []struct {
+		Configuration struct {
+			Labels map[string]string `json:"labels"`
+		} `json:"configuration"`
+	}
+	if json.Unmarshal([]byte(out), &nets) != nil || len(nets) == 0 {
+		return nil, false
+	}
+	return nets[0].Configuration.Labels, true
+}
+
+// NetworkHostOnly reports whether an existing network is host-only, from
+// `network inspect` (`configuration.mode`: `hostOnly` for one made with
+// `--internal`, `nat` for the rest — measured on 1.4.1). known is false when
+// the network cannot be inspected or names a mode this does not know, so a
+// caller that acts on a difference acts only on a mode it read.
+func (r *Runtime) NetworkHostOnly(name string) (hostOnly, known bool) {
+	out, err := r.capture("network", "inspect", name)
+	if err != nil {
+		return false, false
+	}
+	var nets []struct {
+		Configuration struct {
+			Mode string `json:"mode"`
+		} `json:"configuration"`
+	}
+	if json.Unmarshal([]byte(out), &nets) != nil || len(nets) == 0 {
+		return false, false
+	}
+	switch nets[0].Configuration.Mode {
+	case "hostOnly":
+		return true, true
+	case "nat":
+		return false, true
+	}
+	return false, false
+}
+
 // InspectNetworkSubnets reads the subnets an existing network has, from
 // `network inspect`: the ones it was created with (`configuration.ipv4Subnet`
 // / `ipv6Subnet`, present when `--subnet` was given), else the ones the

@@ -1,0 +1,64 @@
+$ container --version
+container CLI version 1.4.1
+
+# Taken 2026-09-26 by asking the runtime directly (`container run --rm --name neko-1350 …`),
+# nothing else running under that name. All five exit 1 with no stdout, and `container ls -a`
+# listed nothing of that name afterwards. In order: (1) an image with no arm64 build
+# (docker.io/amd64/busybox:1.36), a fresh pull; (2) the same run, image now local;
+# (3) the same image with `--platform linux/arm64` written out, local; (4) the mirror, an
+# arm64-only image (docker.io/arm64v8/busybox:1.36) asked for as linux/amd64, a fresh pull;
+# (5) that again, local. A fresh pull (1, 4) words the failure `unsupported platform
+# Platform(…)` and puts the platform that is MISSING in `_rawArch`; a local image says
+# `platform linux/<arch>` (the wording platform-image-no-arm64-131.txt holds). Only these two
+# images were measured: which others say the fresh-pull wording is not known.
+
+$ container run --rm --name neko-1350 docker.io/amd64/busybox:1.36 true
+--- exit code: 1
+--- stdout ---
+--- stderr ---
+[0/6] [0s]
+[1/6] Fetching image [0s]
+[1/6] Fetching image [1s]
+[1/6] Fetching image [2s]
+[2/6] Unpacking image [2s]
+[2/6] Unpacking image [2s]
+Error: unsupported platform Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "arm64")
+
+$ container run --rm --name neko-1350 docker.io/amd64/busybox:1.36 true
+--- exit code: 1
+--- stdout ---
+--- stderr ---
+[0/6] [0s]
+[1/6] Fetching image [0s]
+[1/6] Fetching image [0s]
+Error: platform linux/arm64
+
+$ container run --rm --name neko-1350 --platform linux/arm64 docker.io/amd64/busybox:1.36 true
+--- exit code: 1
+--- stdout ---
+--- stderr ---
+[0/6] [0s]
+[1/6] Fetching image [0s]
+[1/6] Fetching image [0s]
+Error: platform linux/arm64
+
+$ container run --rm --name neko-1350 --platform linux/amd64 docker.io/arm64v8/busybox:1.36 true
+--- exit code: 1
+--- stdout ---
+--- stderr ---
+[0/6] [0s]
+[1/6] Fetching image [0s]
+[1/6] Fetching image [1s]
+[1/6] Fetching image [2s]
+[2/6] Unpacking image [2s]
+[2/6] Unpacking image [2s]
+Error: unsupported platform Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "amd64")
+
+$ container run --rm --name neko-1350 --platform linux/amd64 docker.io/arm64v8/busybox:1.36 true
+--- exit code: 1
+--- stdout ---
+--- stderr ---
+[0/6] [0s]
+[1/6] Fetching image [0s]
+[1/6] Fetching image [0s]
+Error: platform linux/amd64

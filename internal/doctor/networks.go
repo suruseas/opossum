@@ -23,9 +23,11 @@ type networkUse struct {
 // process with it. Sessions accumulate; so do the processes.
 //
 // It reports and does not remove, and it does not claim to know whose a network
-// is. opossum puts no mark on the ones it creates, so from here a network made
-// by `opossum up`, one declared `external: true` (which opossum deliberately
-// never removes), and one someone made by hand all look the same. Naming them
+// is. opossum puts no mark on most of the ones it creates (a network under a
+// `name:` of the compose file's own is the exception, and carries its project's
+// label), so from here a network made by `opossum up`, one declared `external:
+// true` (which opossum deliberately never removes), and one someone made by hand
+// all look the same. Naming them
 // is useful; deciding for the reader which are disposable is not something this
 // can honestly do.
 func checkLeftoverNetworks(rt Runner) check {

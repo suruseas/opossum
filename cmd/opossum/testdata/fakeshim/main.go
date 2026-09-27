@@ -81,6 +81,14 @@ func main() {
 		}
 		return filepath.Join(stopDir, "project-"+hex.EncodeToString([]byte(name)))
 	}
+	// Where a `network create` leaves the labels it was given (one `key=value`
+	// per line), so a later `network inspect` answers with them.
+	netLabelsPath := func(name string) string {
+		if stopDir == "" {
+			return ""
+		}
+		return filepath.Join(stopDir, "netlabels-"+hex.EncodeToString([]byte(name)))
+	}
 	// Where a run's published ports are remembered, so a later inspect can
 	// answer what THIS container holds. Without it every container answers one
 	// fixed mapping, and a question about whose port a number is has the same
@@ -379,13 +387,40 @@ func main() {
 				fmt.Fprintf(os.Stderr, "Error: invalid network name: %s\n", name)
 				os.Exit(1)
 			}
+			// A network deleted, then made again under the same name, is not
+			// gone any more: the mark from an earlier delete is this run's alone.
+			if stateDir != "" {
+				_ = os.Remove(gonePath("network", name))
+			}
+			if p := netLabelsPath(name); p != "" {
+				var labels []string
+				for i, a := range os.Args[1:] {
+					if a == "--label" && i+2 < len(os.Args) {
+						labels = append(labels, os.Args[i+2])
+					}
+				}
+				_ = os.WriteFile(p, []byte(strings.Join(labels, "\n")), 0o644)
+			}
 			fmt.Println(name) // the real CLI echoes the network name on success
 		}
 		// `network inspect` exits non-zero for a network that isn't there, which is
 		// how opossum decides whether one exists. $NETWORK_ABSENT lists the ones to
 		// report missing; by default every network exists.
 		if arg(1) == "delete" {
+			// A network already deleted is not there to delete: the real CLI
+			// fails (1.4.1: `Error: failed to delete one or more networks:
+			// ["<name>"]`) — a different shape from `network inspect`'s
+			// `network not found: <name>` (measured; DeleteNetwork's
+			// networkAlreadyGone reads both shapes, so a fake that always
+			// succeeded here never exercised the one it reads first).
+			if isGone("network", arg(2)) {
+				fmt.Fprintf(os.Stderr, "Error: failed to delete one or more networks: [%q]\n", arg(2))
+				os.Exit(1)
+			}
 			markGone("network", arg(2))
+			if p := netLabelsPath(arg(2)); p != "" {
+				_ = os.Remove(p)
+			}
 		}
 		if arg(1) == "inspect" {
 			for _, m := range strings.Fields(os.Getenv("NETWORK_ABSENT")) {
@@ -397,6 +432,26 @@ func main() {
 			if isGone("network", arg(2)) {
 				fmt.Fprintf(os.Stderr, "Error: network not found: %s\n", arg(2))
 				os.Exit(1)
+			}
+			// The labels the network was made with, in the shape the real CLI
+			// prints (an empty `labels` for one made without any); a network
+			// this shim did not see made answers nothing, as it always did.
+			if p := netLabelsPath(arg(2)); p != "" {
+				if b, err := os.ReadFile(p); err == nil {
+					lines := []string{}
+					for _, l := range strings.Split(string(b), "\n") {
+						if l == "" {
+							continue
+						}
+						k, v, _ := strings.Cut(l, "=")
+						lines = append(lines, fmt.Sprintf("        %q : %q", k, v))
+					}
+					body := "\n"
+					if len(lines) > 0 {
+						body = "\n" + strings.Join(lines, ",\n") + "\n      "
+					}
+					fmt.Printf("[\n  {\n    \"configuration\" : {\n      \"labels\" : {%s},\n      \"name\" : %q\n    }\n  }\n]\n", body, arg(2))
+				}
 			}
 		}
 	case "ls":
@@ -476,6 +531,14 @@ func main() {
 		// Running again in place: the stop marker is cleared.
 		if p := stoppedPath(lastArg()); p != "" {
 			_ = os.Remove(p)
+		}
+
+	case "exec":
+		// A container that is not there cannot be exec'd into (container
+		// 1.4.1, same wording as `start`).
+		if len(args) > 1 && !there(args[1]) {
+			fmt.Fprintf(os.Stderr, "Error: get failed: container %s not found\n", args[1])
+			os.Exit(1)
 		}
 
 	case "logs":
@@ -598,12 +661,12 @@ func main() {
 		}
 		// container 1.3.1: a name that does not exist fails the whole call — no
 		// table for the ones that do (measured 2026-09-04, stats-absent-only.txt).
-		for _, m := range strings.Fields(os.Getenv("INSPECT_ABSENT")) {
-			for _, n := range names {
-				if n == m {
-					fmt.Fprintf(os.Stderr, "Error: no such container: %s\n", n)
-					os.Exit(1)
-				}
+		// `there` reads $INSPECT_ABSENT and a name the `delete` case marked
+		// gone alike: both are "not there" to the real CLI (1.4.1).
+		for _, n := range names {
+			if !there(n) {
+				fmt.Fprintf(os.Stderr, "Error: no such container: %s\n", n)
+				os.Exit(1)
 			}
 		}
 		if jsonForm {

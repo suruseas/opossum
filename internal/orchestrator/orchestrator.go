@@ -103,13 +103,14 @@ type Orchestrator struct {
 
 // upOptions holds the `up` recreate/build flags.
 type upOptions struct {
-	forceRecreate bool // --force-recreate: recreate even if unchanged
-	build         bool // --build: (re)build images even if present
-	noBuild       bool // --no-build: never build (error if an image is missing)
-	removeOrphans bool // --remove-orphans: remove containers for services no longer in the compose
-	fromDocker    bool // --from-docker-compose: import a build service's image from Docker instead of building it
-	noDeps        bool // don't pull in depends_on services (used by rebuild-on-watch to touch only the named service)
-	dryRun        bool // --dry-run: resolve and print the plan, but execute nothing against the runtime
+	forceRecreate bool   // --force-recreate: recreate even if unchanged
+	build         bool   // --build: (re)build images even if present
+	noBuild       bool   // --no-build: never build (error if an image is missing)
+	removeOrphans bool   // --remove-orphans: remove containers for services no longer in the compose
+	fromDocker    bool   // --from-docker-compose: import a build service's image from Docker instead of building it
+	noDeps        bool   // don't pull in depends_on services (used by rebuild-on-watch to touch only the named service)
+	dryRun        bool   // --dry-run: resolve and print the plan, but execute nothing against the runtime
+	oneOffOf      string // the service a `run` is starting dependencies for: it waits on them though it is not among what this Up starts
 }
 
 // orphans returns the project's containers (by label) whose names don't match any
@@ -162,6 +163,16 @@ func (o *Orchestrator) OnSignal(ctx context.Context) {
 // Out returns the writer this orchestrator reports to, so a caller that rebuilds
 // one (after writing an overlay) can keep the same destination.
 func (o *Orchestrator) Out() io.Writer { return o.out }
+
+// upDependenciesOf starts the dependencies a one-off of service is about to run
+// on. The one-off waits on them although it is not among what that Up starts,
+// and a completion failure it requires is fatal for that reason (see
+// completionWaiters).
+func (o *Orchestrator) upDependenciesOf(service string, deps []string) error {
+	o.up.oneOffOf = service
+	defer func() { o.up.oneOffOf = "" }()
+	return o.Up(true, deps...)
+}
 
 // SetUpOptions configures `up`'s recreate/build behavior from the command flags.
 func (o *Orchestrator) SetUpOptions(forceRecreate, build, noBuild, removeOrphans, fromDocker bool) {
@@ -519,8 +530,12 @@ func (o *Orchestrator) networkName() string {
 }
 
 // declaredNetworkName is the runtime network a non-external declared key
-// names: `<project>-<key>`, the key folded to what the runtime takes.
+// names: the declaration's own `name:` where it has one, as docker compose
+// creates it, else `<project>-<key>`, the key folded to what the runtime takes.
 func (o *Orchestrator) declaredNetworkName(key string) string {
+	if own, named := o.Project.Networks[key].NetworkOwnName(); named {
+		return own
+	}
 	return o.Project.Name + "-" + compose.NetworkRuntimeKey(key)
 }
 
@@ -528,17 +543,22 @@ func (o *Orchestrator) declaredNetworkName(key string) string {
 // manages it (whether it's host-only, and whether opossum creates/deletes it).
 type resolvedNetwork struct {
 	key      string                 // the declared key; empty for the default project network
-	name     string                 // the actual `container` network name (namespaced unless external)
+	name     string                 // the actual `container` network name (namespaced unless external or given a `name:`)
 	internal bool                   // created with --internal (host-only): no internet egress
 	external bool                   // pre-existing; opossum never creates or deletes it
-	labels   []string               // the declaration's labels, given to `network create --label`
+	named    bool                   // the declaration's own `name:` is the runtime name (made with the project's label; only that label lets `down` remove it)
+	labels   []string               // the labels given to `network create --label`: the declaration's, then the project's for a named network
 	subnets  runtime.NetworkSubnets // the declaration's `ipam` subnets, given to `network create --subnet` / `--subnet-v6`
 }
 
 // resolveNetwork maps one declared network key to its runtime network. External
 // networks use their real name verbatim; others are namespaced `<project>-<key>`
-// (see declaredNetworkName) and carry the decl's internal flag.
+// (see declaredNetworkName), unless they carry a `name:` of their own, and carry
+// the decl's internal flag.
 func (o *Orchestrator) resolveNetwork(key string) resolvedNetwork {
+	if key == compose.DefaultNetworkDecl {
+		return o.defaultNetwork()
+	}
 	decl := o.Project.Networks[key]
 	if decl.External {
 		real := decl.Name
@@ -547,8 +567,52 @@ func (o *Orchestrator) resolveNetwork(key string) resolvedNetwork {
 		}
 		return resolvedNetwork{key: key, name: real, external: true}
 	}
-	return resolvedNetwork{key: key, name: o.declaredNetworkName(key), internal: decl.Internal, labels: decl.Labels,
+	rn := resolvedNetwork{key: key, name: o.declaredNetworkName(key), internal: decl.Internal, labels: decl.Labels,
 		subnets: runtime.NetworkSubnets{V4: decl.IPAM.Subnet, V6: decl.IPAM.SubnetV6}}
+	if _, named := decl.NetworkOwnName(); named {
+		// A name of the file's own can be one somebody else made, or another
+		// project: the label is what tells `down` this one is this project's.
+		rn.named = true
+		rn.labels = append(append([]string(nil), decl.Labels...), projectLabel+"="+o.Project.Name)
+	}
+	return rn
+}
+
+// defaultNetwork is the network a service with no `networks:` joins and the
+// one a service that lists `default` joins: one network, whether or not the file
+// declares it, and the declaration, when there is one, is its own. It is
+// `<project>-net` unless the declaration gives it a `name:` (then that name, made
+// with the project's label like any network under a name) or makes it external
+// (then that network, by its real name, `default` when it gives none).
+func (o *Orchestrator) defaultNetwork() resolvedNetwork {
+	decl := o.Project.Networks[compose.DefaultNetworkDecl]
+	if decl.External {
+		real := decl.Name
+		if real == "" {
+			real = compose.DefaultNetworkDecl
+		}
+		return resolvedNetwork{key: compose.DefaultNetworkDecl, name: real, external: true}
+	}
+	rn := resolvedNetwork{key: compose.DefaultNetworkDecl, name: o.networkName(), internal: decl.Internal, labels: decl.Labels,
+		subnets: runtime.NetworkSubnets{V4: decl.IPAM.Subnet, V6: decl.IPAM.SubnetV6}}
+	if own, named := decl.NetworkOwnName(); named {
+		rn.name, rn.named = own, true
+		rn.labels = append(append([]string(nil), decl.Labels...), projectLabel+"="+o.Project.Name)
+	}
+	return rn
+}
+
+// networkKeys is the networks a service is on, as the file names them: the ones
+// it lists, or `default` when it lists none, or none at all under
+// `network_mode: none`.
+func (o *Orchestrator) networkKeys(svc *compose.Service) []string {
+	if svc.NetworkMode == compose.NetworkModeNone {
+		return nil // isolated: on no network of the project's
+	}
+	if len(svc.Networks) == 0 {
+		return []string{compose.DefaultNetworkDecl}
+	}
+	return svc.Networks
 }
 
 // ensureNetwork creates a project network as declared, or, when it already
@@ -561,8 +625,23 @@ func (o *Orchestrator) resolveNetwork(key string) resolvedNetwork {
 // it is, not wrapped as a failure to create: the network is there.
 func (o *Orchestrator) ensureNetwork(rn resolvedNetwork) (created bool, err error) {
 	created, err = o.rt.EnsureNetworkLabeled(rn.name, rn.internal, rn.labels, rn.subnets)
-	if err != nil || created || (rn.subnets.V4 == "" && rn.subnets.V6 == "") {
+	if err != nil || created {
 		return created, err
+	}
+	// The network was there. Its mode and subnets are what it was made with, and
+	// no later `up` changes them: a file that declares it otherwise would run
+	// with a network it does not describe — a service that was host-only on
+	// egress it should not have, the other way round with none it should.
+	if hostOnly, known := o.rt.NetworkHostOnly(rn.name); known && hostOnly != rn.internal {
+		have, want := "not host-only", "host-only (`internal: true`)"
+		if hostOnly {
+			have, want = "host-only", "not host-only"
+		}
+		return false, &subnetChangedError{fmt.Errorf("[%s] network %q exists as a %s network, and the compose file now declares it %s — the network is kept while the project is up; %s",
+			codeNetworkSubnetChanged, rn.name, have, want, o.recreateAdvice(rn, "recreate it as the file declares it", "make `internal:` match the existing network to keep it"))}
+	}
+	if rn.subnets.V4 == "" && rn.subnets.V6 == "" {
+		return false, nil
 	}
 	have, ok := o.rt.InspectNetworkSubnets(rn.name)
 	if !ok {
@@ -570,11 +649,23 @@ func (o *Orchestrator) ensureNetwork(rn resolvedNetwork) (created bool, err erro
 	}
 	for _, want := range []struct{ family, declared, has string }{{"IPv4", rn.subnets.V4, have.V4}, {"IPv6", rn.subnets.V6, have.V6}} {
 		if want.declared != "" && want.declared != want.has {
-			return false, &subnetChangedError{fmt.Errorf("[%s] network %q exists with %s subnet %s, and the compose file now declares %s — the network is kept while the project is up; run `opossum down` (which removes it) and `up` again to recreate it with the new subnet, or remove `ipam` to keep the existing one",
-				codeNetworkSubnetChanged, rn.name, want.family, want.has, want.declared)}
+			return false, &subnetChangedError{fmt.Errorf("[%s] network %q exists with %s subnet %s, and the compose file now declares %s — the network is kept while the project is up; %s",
+				codeNetworkSubnetChanged, rn.name, want.family, want.has, want.declared, o.recreateAdvice(rn, "recreate it with the new subnet", "remove `ipam` to keep the existing one"))}
 		}
 	}
 	return false, nil
+}
+
+// recreateAdvice says what to do about a network that is there and is not what
+// the file declares: `down` removes it, and `up` makes it again — unless `down`
+// does not remove it (a network under a `name:` that this project's label is not
+// on, or that the runtime does not say the label of), and then what is left is
+// removing it by hand.
+func (o *Orchestrator) recreateAdvice(rn resolvedNetwork, then, keep string) string {
+	if rn.named && !slices.Contains(o.projectNetworks(), rn.name) {
+		return fmt.Sprintf("this project's label is not on it (or could not be read), so `opossum down` does not remove it: remove it yourself (`container network delete %s`) and `up` again to %s, %s, or declare it `external: true`", rn.name, then, keep)
+	}
+	return "run `opossum down` (which removes it) and `up` again to " + then + ", or " + keep
 }
 
 // networksFor resolves which networks a service joins. A service with no
@@ -582,11 +673,9 @@ func (o *Orchestrator) ensureNetwork(rn resolvedNetwork) (created bool, err erro
 // networks joins each (in declaration order). Callers handle `network_mode: none`
 // before this (an isolated service joins no network).
 func (o *Orchestrator) networksFor(svc *compose.Service) []resolvedNetwork {
-	if len(svc.Networks) == 0 {
-		return []resolvedNetwork{{name: o.networkName()}}
-	}
-	nets := make([]resolvedNetwork, 0, len(svc.Networks))
-	for _, key := range svc.Networks {
+	keys := o.networkKeys(svc)
+	nets := make([]resolvedNetwork, 0, len(keys))
+	for _, key := range keys {
 		nets = append(nets, o.resolveNetwork(key))
 	}
 	return nets
@@ -629,7 +718,7 @@ func (o *Orchestrator) checkExternalNetworks(services []string) error {
 		if svc.NetworkMode == compose.NetworkModeNone {
 			continue
 		}
-		for _, key := range svc.Networks {
+		for _, key := range o.networkKeys(svc) {
 			if !o.Project.Networks[key].External {
 				continue
 			}
@@ -707,7 +796,7 @@ func (o *Orchestrator) checkNetworkNames(nets []resolvedNetwork) error {
 	if err := o.Project.CheckNetworkKeys(); err != nil {
 		return err
 	}
-	return checkNetworkNameLengths(nets)
+	return checkRuntimeNetworkNames(nets)
 }
 
 // checkVolumesFromHolders refuses a service in the given order that takes another
@@ -1304,7 +1393,7 @@ func (o *Orchestrator) warnNamesAmong(started []namedService, involving string) 
 			return nil
 		}
 		var out []attachment
-		for _, key := range svc.Networks {
+		for _, key := range o.networkKeys(svc) {
 			n := o.resolveNetwork(key).name
 			if !slices.ContainsFunc(out, func(a attachment) bool { return a.name == n }) {
 				out = append(out, attachment{key: key, name: n})
@@ -1659,18 +1748,30 @@ func (o *Orchestrator) runNetworks(svc *compose.Service) []resolvedNetwork {
 	return o.networksFor(svc)
 }
 
-// checkNetworkNameLengths refuses, before anything is created, a network
-// opossum would create under a name longer than the runtime takes. The name
-// holds the project's name, which is settled only after the file is read, so
-// this is the first place its length is known. The name is not shortened: a
-// hashed one would no longer say which project and key it belongs to.
-func checkNetworkNameLengths(nets []resolvedNetwork) error {
+// checkRuntimeNetworkNames refuses, before anything is created, a network
+// opossum would create under a name the runtime does not take: one longer than
+// 63 characters — the name holds the project's name, which is settled only after
+// the file is read, so this is the first place its length is known; it is not
+// shortened, since a hashed one would no longer say which project and key it
+// belongs to — or, for a network under a `name:` of the file's own, one that is
+// not lower case letters, digits, `.`, `_` and `-` with a letter or digit at each
+// end (docker compose creates such a name as written). It looks at the networks
+// about to be made, so a service that is not started does not refuse the start of
+// the others.
+func checkRuntimeNetworkNames(nets []resolvedNetwork) error {
 	for _, rn := range nets {
-		if rn.external || len(rn.name) <= compose.MaxRuntimeNetworkNameLen {
+		if rn.external {
+			continue
+		}
+		if rn.named && !compose.ValidRuntimeNetworkName(rn.name) {
+			return fmt.Errorf("network %q has `name: %s`, which the container runtime (1.4.1) cannot create — it takes lower case letters, digits, `.`, `_` and `-`, starting and ending with a letter or digit, and at most %d characters, where docker compose creates the name as written; give the network a name of that form",
+				rn.key, rn.name, compose.MaxRuntimeNetworkNameLen)
+		}
+		if len(rn.name) <= compose.MaxRuntimeNetworkNameLen {
 			continue
 		}
 		fix := "shorten the project name (`-p`, or `name:` in the compose file)"
-		if rn.key != "" {
+		if rn.key != "" && rn.key != compose.DefaultNetworkDecl {
 			fix += fmt.Sprintf(" or the network key %q", rn.key)
 		}
 		return fmt.Errorf("network name %q is %d characters, and the container runtime (1.4.1) creates at most %d — %s",
@@ -2303,23 +2404,52 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 					started, createdSvc = disownLast(started, createdSvc, cname, name)
 					return nameTakenError(name, cname, "a run-to-completion dependency has to be run by this `up` to know it completed")
 				}
-				// The registry would not hand the image over: nothing ran, so there
-				// is no exit to check the output of, and no container to have
-				// removed (unless this up removed the one that was there — see the
-				// same case below).
-				fetch := o.imageFetchFailure(name, err)
-				if fetch != nil && !replaced {
+				// A run that failed before it made anything: see runMadeNothing.
+				madeNothing := o.runMadeNothing(cname)
+				if !replaced && madeNothing {
 					delete(createdSvc, name)
 				}
-				if !o.requiredToComplete(name) {
-					// Every service that waits for this one to complete does
-					// so with `required: false`: docker compose (v5.5.1,
-					// measured) says so and goes on to start them.
-					o.warnf(codeOptionalDependency, "optional dependency %q didn't complete successfully: %v\n", name, err)
+				// The registry would not hand the image over: nothing ran, so there
+				// is no exit to check the output of.
+				fetch := o.imageFetchFailure(name, err)
+				// The services this up starts wait on it; so does a `run`'s one-off,
+				// which is not among them.
+				waiters := order
+				if o.up.oneOffOf != "" {
+					waiters = append(slices.Clone(order), o.up.oneOffOf)
+				}
+				if required, optional := o.completionWaiters(name, waiters); !required {
+					if optional {
+						// Every service this up starts that waits for this one to
+						// complete does so with `required: false`: docker compose
+						// (v5.5.1, measured) says so and goes on to start them.
+						o.warnf(codeOptionalDependency, "optional dependency %q didn't complete successfully: %v\n", name, err)
+					} else {
+						// Nothing this up starts waits for it: a dependent behind a
+						// profile that is not active, or one not named, does not keep
+						// the failure fatal, as docker compose (v5.5.1, measured)
+						// reads only the dependents it starts.
+						o.warnf(codeOptionalDependency, "service %q didn't complete successfully: %v — nothing this command starts waits for it, so it is passed over\n", name, err)
+					}
 					continue
 				}
+				// (The registry's own wording is asked first here and last for a
+				// long-running service; the two matches do not overlap, so the order
+				// changes no answer.)
 				if fetch != nil {
 					return fetch
+				}
+				// Nothing ran either when the runtime refused the run for one of the
+				// reasons it names — an image with no build for this machine, a volume
+				// another container holds — and the diagnosis a long-running service
+				// gets is the one to give. Only then: what a container that ran
+				// printed is read by the same matches, and a job that says "Address
+				// already in use" itself is not a host port conflict. With no
+				// container made, every line of the failure is the runtime's.
+				if madeNothing {
+					if diagnosed := o.specificStartError(name, err); diagnosed != nil {
+						return diagnosed
+					}
 				}
 				return fmt.Errorf("service %q did not complete successfully: %w\n"+
 					"  it's a run-to-completion dependency (a service_completed_successfully target) that exited non-zero — check its output above, or run it directly with `opossum run %s`", name, err, name)
@@ -2354,20 +2484,40 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 				}
 				return nameTakenError(name, cname, "it is not the one this compose file describes (different configuration, or not running)")
 			}
-			decoded := o.decodeStartError(name, err)
-			// The registry would not hand the image over, and imageFetchFailed has
-			// just asked the runtime whether a container of this name exists: it does
-			// not. The name went on the rollback list before the run, in case the run
-			// made a container before failing, so it comes off here — otherwise the
-			// rollback reports "stopped and removed" for a container that was never
-			// made.
+			madeNothing := o.runMadeNothing(cname)
+			// A foreground run carries the container's own output in the failure's
+			// text, next to the runtime's, and the diagnoses read that text for
+			// words a job can say as well as the runtime (`Address already in use`).
+			// Where a container was made and ran, they are not the runtime's to
+			// give — measured on 1.4.1: a port the runtime cannot bind, a mount it
+			// refuses, an image with no arm64 build and a volume it will not attach
+			// all leave no container, and a service that printed the same words and
+			// exited leaves a stopped one. A detached run's text is the runtime's
+			// alone, so it keeps every diagnosis.
+			var decoded error
+			if !detach && !madeNothing {
+				decoded = o.undiagnosedStartError(name, err)
+			} else {
+				decoded = o.decodeStartError(name, err)
+			}
+			// The name went on the rollback list before the run, in case the run
+			// made a container before failing. Whether it did is asked (see
+			// runMadeNothing): a run the runtime refused before making one — an
+			// image the registry would not hand over, one with no build for this
+			// machine, a volume another container holds — leaves nothing to have
+			// been "stopped and removed", and the rollback would say it was.
 			//
-			// Unless this up had just removed one that was there: an image that was
-			// changed to one the registry does not have is a container replaced by
-			// nothing, and "stopped and removed" is what became of the old one.
-			var fetch *imageFetchError
-			if errors.As(decoded, &fetch) && !replaced {
+			// Unless this up had just removed one that was there: a container
+			// replaced by nothing is one whose old container is gone, and "stopped
+			// and removed" is what became of it.
+			if !replaced && madeNothing {
 				delete(createdSvc, name)
+				// And there is no container whose logs the failure could point at:
+				// the rollback marks that for the ones it removed, which is not this.
+				var sf *startFailure
+				if errors.As(decoded, &sf) {
+					sf.noContainer = true
+				}
 			}
 			return decoded
 		}
@@ -4185,23 +4335,33 @@ func unansweredOwners(unanswered []string, command string) error {
 		len(unanswered), strings.Join(unanswered, ", "), command)}
 }
 
-// requiredToComplete is whether some dependent in the file needs name to run
-// to completion and requires it (`required` not written false); with every
-// such dependent optional, a failure to complete is noted and passed over.
-// Every dependent in the file counts, as completedTargets counts every one
-// when deciding what runs to completion: a required dependent behind a
-// profile that is not active keeps the failure fatal here, where docker
-// compose (v5.5.1, measured) reads only the dependents it starts and goes
-// on — a known difference, kept so that the two sets are one.
-func (o *Orchestrator) requiredToComplete(name string) bool {
-	for _, svc := range o.Project.Services {
+// completionWaiters says what the services this command starts (started) want
+// of name's completion: whether one of them needs it to run to completion and
+// requires it (`required` not written false), and whether one needs it and does
+// not (`required: false`). With none that requires it, a failure to complete is
+// noted and passed over. Only the dependents that are started count — the same
+// reading docker compose (v5.5.1, measured) has: a required dependent behind a
+// profile that is not active, or one not named, does not keep the failure fatal.
+// completedTargets still reads every dependent in the file when it decides what
+// runs to completion, so a target nobody started waits for is run all the same
+// and its failure noted.
+func (o *Orchestrator) completionWaiters(name string, started []string) (required, optional bool) {
+	for _, dependent := range started {
+		svc := o.Project.Services[dependent]
+		if svc == nil {
+			continue
+		}
 		for _, dep := range svc.DependsOn {
-			if dep.Name == name && dep.Condition == compose.ConditionCompleted && !dep.Optional {
-				return true
+			if dep.Name == name && dep.Condition == compose.ConditionCompleted {
+				if dep.Optional {
+					optional = true
+				} else {
+					required = true
+				}
 			}
 		}
 	}
-	return false
+	return required, optional
 }
 
 // completedTargets is the set of services that some dependent needs to run to
@@ -4370,10 +4530,10 @@ func (o *Orchestrator) Down(removeVolumes bool, rmi string, removeOrphans bool) 
 		o.removeOrphans(o.orphans())
 	}
 	// Remove the default project net and every declared network opossum created
-	// (skipping external ones, which it never owns). Deletion is best-effort and
+	// (skipping external ones, which it never owns, and a network under a `name:`
+	// this project did not label). Deletion is best-effort and
 	// silent when a network is already gone or still in use.
-	o.rt.DeleteNetwork(o.networkName())
-	for _, net := range o.declaredNetworks() {
+	for _, net := range o.projectNetworks() {
 		o.rt.DeleteNetwork(net)
 	}
 	if removeVolumes {
@@ -4909,12 +5069,16 @@ func isStorageAttachmentError(stderr string) bool {
 // virtualization error becomes a fix. Any other failure gets the generic
 // start-failed pointer to the logs.
 func (o *Orchestrator) decodeStartError(name string, err error) error {
-	if decoded, ok := o.decodeVolumeAttachError(name, o.containerName(name), err); ok {
-		return decoded
+	if specific := o.specificStartError(name, err); specific != nil {
+		return specific
 	}
-	if hint := runErrorHint(o.Project.Services[name], err); hint != "" {
-		return fmt.Errorf("starting service %q: %w%s", name, err, hint)
-	}
+	return o.undiagnosedStartError(name, err)
+}
+
+// undiagnosedStartError is the answer for a failed run that none of the coded
+// diagnoses is asked about: the registry's refusal of the image, and otherwise
+// the generic start failure.
+func (o *Orchestrator) undiagnosedStartError(name string, err error) error {
 	// The registry would not hand the image over, so no container was made and
 	// there are no logs to read: the way out is the name and whether it can be
 	// reached, which is what `pull` says over the same failure. Asked after the
@@ -4927,6 +5091,52 @@ func (o *Orchestrator) decodeStartError(name string, err error) error {
 		return fetch
 	}
 	return startFailed(name, err)
+}
+
+// unsupportedPlatformArm64 reports whether the runtime, pulling an image that
+// is not local, said it has no build for arm64. The message is one line that
+// begins the line and carries the missing arch in `_rawArch`; a container's own
+// output that repeats it, or a line that names arm64 for another reason, is not
+// this failure.
+func unsupportedPlatformArm64(stderr string) bool {
+	for _, line := range strings.Split(stderr, "\n") {
+		if strings.HasPrefix(line, "Error: unsupported platform Platform(") && strings.Contains(line, `_rawArch: "arm64"`) {
+			return true
+		}
+	}
+	return false
+}
+
+// runMadeNothing asks the runtime whether a run that failed left a container of
+// this name. Asked, not decided from the wording of the failure: whether a
+// failed run leaves one differs from failure to failure (measured on 1.4.1: none
+// after an image the registry would not hand over, one with no arm64 build, a
+// volume that would not attach, a port it could not bind, or a mount it could
+// not resolve — errno 20, in either direction; one after a process whose
+// executable is missing, or that ran and exited), and the wording does not say
+// which. A runtime that would not
+// say is not one that said no — read as "made nothing", an apiserver that had
+// stopped answering would take the container off the rollback list while it is
+// still there.
+func (o *Orchestrator) runMadeNothing(cname string) bool {
+	info := o.rt.Inspect(cname)
+	return !info.Exists && !info.Unknown
+}
+
+// specificStartError is the answer for a failed run that one of the coded
+// diagnoses names — a named volume another container holds, or a failure
+// runErrorHint decodes — and nil for any other. It reads the failure's text
+// from the runtime and, in a foreground run, from the container's own output as
+// well, so what it answers for is only as good as the caller's knowledge that
+// the text is the runtime's.
+func (o *Orchestrator) specificStartError(name string, err error) error {
+	if decoded, ok := o.decodeVolumeAttachError(name, o.containerName(name), err); ok {
+		return decoded
+	}
+	if hint := runErrorHint(o.Project.Services[name], err); hint != "" {
+		return fmt.Errorf("starting service %q: %w%s", name, err, hint)
+	}
+	return nil
 }
 
 // imageFetchFailure is the answer for a run of a service that builds nothing and
@@ -5003,8 +5213,16 @@ func runErrorHint(svc *compose.Service, err error) string {
 	// the message — `platform linux/arm64` on its own is also a substring of
 	// `--platform linux/arm64`, which is an ordinary thing for a service to ask
 	// for, and this case sits first and would answer for the others.
+	//
+	// A third: container 1.4.1, pulling an amd64-only image it does not have yet
+	// (busybox, measured), pulls it and then says `Error: unsupported platform
+	// Platform(… _rawArch: "arm64")` — with the same rule, the arch in the message
+	// is the one that is missing (measured in both directions), so only arm64 is
+	// the case for this hint. Which images say this and which say one of the
+	// wordings above on a first pull has not been measured beyond that.
 	case strings.Contains(s, "Error: platform linux/arm64"),
-		strings.Contains(s, "does not support required platforms"):
+		strings.Contains(s, "does not support required platforms"),
+		unsupportedPlatformArm64(s):
 		// Except when amd64 is what was asked for and what is missing. The older
 		// wording does not say which platform it wanted, so the service is what
 		// says it: told to add what it already has, a reader is being told to
@@ -6702,8 +6920,7 @@ func (o *Orchestrator) imageFetchFailed(service string, err error) bool {
 	// as "gone", an apiserver that stopped answering would quietly take this
 	// guard off (#957) — so an answer that did not come keeps the guidance
 	// this failure had.
-	info := o.rt.Inspect(o.containerName(service))
-	return !info.Exists && !info.Unknown
+	return o.runMadeNothing(o.containerName(service))
 }
 
 // imageUnreachable is the way out for an image the runtime could not get, in
@@ -6827,7 +7044,7 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 
 	if !opts.NoDeps {
 		if deps := svc.DependsOn.Names(); len(deps) > 0 {
-			if err := o.Up(true, deps...); err != nil {
+			if err := o.upDependenciesOf(service, deps); err != nil {
 				return fmt.Errorf("starting dependencies: %w", err)
 			}
 			// The pairs the one-off is in, under the name its container

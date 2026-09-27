@@ -75,6 +75,27 @@ func TestUpSaysWhichPeersCannotReachAServiceByName(t *testing.T) {
 			[]string{`"frontend" —`},
 		},
 		{
+			// A service that lists no networks is on `default`, which api lists
+			// second: it shares that network with api and not the first one.
+			"a peer on the default network that lists no networks",
+			"services:\n" +
+				"  api:\n    image: alpine:3.20\n    networks: [front, default]\n" +
+				"  worker:\n    image: alpine:3.20\n" +
+				"networks:\n  front: {}\n",
+			[]string{`[OPSM-211] service "api" answers by name with its address on network "front"`, `service "worker" —`,
+				`which shares "default" with it but not "front"`},
+			nil,
+		},
+		{
+			// An isolated service is on no network, `default` included.
+			"a peer with network_mode none",
+			"services:\n" +
+				"  api:\n    image: alpine:3.20\n    networks: [front, default]\n" +
+				"  worker:\n    image: alpine:3.20\n    network_mode: none\n" +
+				"networks:\n  front: {}\n  default: {}\n",
+			nil, []string{"answers by name"},
+		},
+		{
 			// The peer shares the network api is attached to first, so the
 			// address it gets back is one it is on.
 			"a peer on the first network",

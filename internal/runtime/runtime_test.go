@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/suruseas/opossum/internal/suitedir"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -330,6 +331,61 @@ func TestInspectNetworkSubnets(t *testing.T) {
 			got, ok := replayShim(t, tc.out, tc.exit).InspectNetworkSubnets("a")
 			if ok != tc.ok || got != tc.want {
 				t.Errorf("got %+v ok=%v, want %+v ok=%v", got, ok, tc.want, tc.ok)
+			}
+		})
+	}
+}
+
+// `network inspect` on container 1.4.1 carries the labels a network was made
+// with under configuration (`--label k=v` reads back as `"k" : "v"`; one made
+// with none has an empty object). A network the runtime does not answer for is
+// "not told", which is not "not labelled": the caller removes a network only
+// on a label it read.
+func TestNetworkLabels(t *testing.T) {
+	const labelled = "[\n  {\n    \"configuration\" : {\n      \"creationDate\" : \"2026-09-27T02:36:03Z\",\n      \"labels\" : {\n        \"opossum.project\" : \"demo\",\n        \"tier\" : \"back\"\n      },\n      \"mode\" : \"nat\",\n      \"name\" : \"a\"\n    },\n    \"status\" : {\n      \"ipv4Subnet\" : \"192.168.68.0/24\"\n    }\n  }\n]\n"
+	for _, tc := range []struct {
+		name, out string
+		exit      int
+		want      map[string]string
+		ok        bool
+	}{
+		{"labels the network was made with", labelled, 0, map[string]string{"opossum.project": "demo", "tier": "back"}, true},
+		{"a network made with none", "[\n  {\n    \"configuration\" : {\n      \"labels\" : {\n\n      },\n      \"name\" : \"a\"\n    }\n  }\n]\n", 0, map[string]string{}, true},
+		{"labels in the status are not the network's", `[{"configuration":{"name":"a"},"status":{"labels":{"opossum.project":"demo"}}}]`, 0, nil, true},
+		{"a network that is not there", "Error: network not found: a", 1, nil, false},
+		{"an answer that is not the document", "warning: something\n", 0, nil, false},
+		{"an empty list", "[]", 0, nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := replayShim(t, tc.out, tc.exit).NetworkLabels("a")
+			if ok != tc.ok || !maps.Equal(got, tc.want) {
+				t.Errorf("got %v ok=%v, want %v ok=%v", got, ok, tc.want, tc.ok)
+			}
+		})
+	}
+}
+
+// `network inspect` on container 1.4.1 names the mode a network was made in:
+// `hostOnly` for `--internal`, `nat` for the rest. A mode it does not read, and
+// a network it cannot inspect, are "not known", which is not "not host-only".
+func TestNetworkHostOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name, out       string
+		exit            int
+		hostOnly, known bool
+	}{
+		{"made with --internal", "[\n  {\n    \"configuration\" : {\n      \"labels\" : {\n\n      },\n      \"mode\" : \"hostOnly\",\n      \"name\" : \"a\"\n    }\n  }\n]\n", 0, true, true},
+		{"made without", "[\n  {\n    \"configuration\" : {\n      \"mode\" : \"nat\",\n      \"name\" : \"a\"\n    }\n  }\n]\n", 0, false, true},
+		{"a mode it does not know", `[{"configuration":{"mode":"bridged","name":"a"}}]`, 0, false, false},
+		{"no mode named", `[{"configuration":{"name":"a"}}]`, 0, false, false},
+		{"a mode in the status is not the network's", `[{"configuration":{"name":"a"},"status":{"mode":"hostOnly"}}]`, 0, false, false},
+		{"a network that is not there", "Error: network not found: a", 1, false, false},
+		{"an answer that is not the document", "warning: something\n", 0, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hostOnly, known := replayShim(t, tc.out, tc.exit).NetworkHostOnly("a")
+			if hostOnly != tc.hostOnly || known != tc.known {
+				t.Errorf("got hostOnly=%v known=%v, want hostOnly=%v known=%v", hostOnly, known, tc.hostOnly, tc.known)
 			}
 		})
 	}

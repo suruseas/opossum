@@ -50,22 +50,18 @@ func TestAServiceFieldWithNothingAfterItIsRefused(t *testing.T) {
 }
 
 // A field opossum reads but has not measured docker's word for gets the
-// neutral word; a field opossum does not read (container_name) is not
-// refused at all — it is listed among the ignored fields, as before, where
-// docker refuses it (`must be a string`). (`labels`, which opossum does not
-// read either, is the exception: its shape is checked the way docker checks
-// it, and a bare one is refused — see labelsshape_test.go.)
-func TestAnUnmeasuredFieldSaysAValueAndAnUnreadFieldIsIgnoredNotRefused(t *testing.T) {
+// neutral word; a field it does not act on (container_name) is held to the shape
+// the schema gives it — a bare one is refused, as docker compose refuses it
+// (`must be a string`; servicekeyshapes_test.go holds the rest). (`labels` is
+// checked its own way: a bare one is refused — see labelsshape_test.go.)
+func TestAnUnmeasuredFieldSaysAValueAndAnUnreadFieldIsHeldToItsShape(t *testing.T) {
 	got := loadErr(t, "services:\n  web:\n    image: alpine\n    init:\n")
 	if !strings.Contains(got, "line 4: init: expected a value, got nothing") {
 		t.Errorf("want the neutral word for an unmeasured field, got:\n%s", got)
 	}
-	p, err := Load(writeTemp(t, "services:\n  web:\n    image: alpine\n    container_name:\n"))
-	if err != nil {
-		t.Fatalf("a bare container_name: is an ignored field, not a refusal: %v", err)
-	}
-	if got := strings.Join(p.Services["web"].Unsupported, ","); !strings.Contains(got, "container_name") {
-		t.Errorf("container_name should be listed among the ignored fields, got %q", got)
+	got = loadErr(t, "services:\n  web:\n    image: alpine\n    container_name:\n")
+	if !strings.Contains(got, "services.web.container_name must be a string") {
+		t.Errorf("a bare container_name: is refused as docker compose refuses it, got:\n%s", got)
 	}
 }
 

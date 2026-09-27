@@ -86,8 +86,48 @@ case "$1" in
             printf 'Error: invalid network name: %s\n' "$name" >&2; exit 1 ;;
         esac
         if [ "${#name}" -gt 63 ]; then printf 'Error: invalid network name: %s\n' "$name" >&2; exit 1; fi
+        # The labels it was made with are what a later `inspect` answers with
+        # (one `key=value` per line), where something is being remembered.
+        m=$(marker netlabels "$name")
+        if [ -n "$m" ]; then
+          : > "$m"
+          want=""
+          for a in "$@"; do
+            [ "$want" = 1 ] && printf '%s\n' "$a" >> "$m"
+            want=""
+            [ "$a" = "--label" ] && want=1
+          done
+        fi
+        gm=$(marker netgone "$name")
+        [ -n "$gm" ] && rm -f "$gm"
         printf '%s\n' "$name" ;;
-      delete) echo "$3" ;;
+      # A network already deleted is not there to delete a second time: the
+      # real CLI fails (1.4.1: `Error: failed to delete one or more networks:
+      # ["<name>"]`, a different shape from `network inspect`'s `network not
+      # found: <name>` — DeleteNetwork's networkAlreadyGone reads both).
+      delete)
+        gm=$(marker netgone "$3")
+        if [ -n "$gm" ] && [ -e "$gm" ]; then
+          printf 'Error: failed to delete one or more networks: ["%s"]\n' "$3" >&2; exit 1
+        fi
+        [ -n "$gm" ] && : > "$gm"
+        m=$(marker netlabels "$3")
+        [ -n "$m" ] && rm -f "$m"
+        echo "$3" ;;
+      # `inspect` of a network this fake saw made answers the labels it was
+      # made with, in the shape the real CLI prints (an empty `labels` for one
+      # made without any); of any other, nothing, as it always did.
+      inspect)
+        gm=$(marker netgone "$3")
+        if [ -n "$gm" ] && [ -e "$gm" ]; then
+          printf 'Error: network not found: %s\n' "$3" >&2; exit 1
+        fi
+        m=$(marker netlabels "$3")
+        if [ -n "$m" ] && [ -e "$m" ]; then
+          printf '[\n  {\n    "configuration" : {\n      "labels" : {\n'
+          awk -F= 'NF { k = $1; v = substr($0, length(k) + 2); gsub(/\\/, "\\\\", k); gsub(/"/, "\\\"", k); gsub(/\\/, "\\\\", v); gsub(/"/, "\\\"", v); if (n++) printf ",\n"; printf "        \"%s\" : \"%s\"", k, v } END { if (n) printf "\n" }' "$m"
+          printf '      },\n      "name" : "%s"\n    }\n  }\n]\n' "$3"
+        fi ;;
       list)   printf 'NETWORK  SUBNET\ndefault  192.168.64.0/24\n' ;;
       # `ls` without --format json prints the same table `list` does. The two
       # spellings of one question must not answer with different machines.
@@ -332,7 +372,13 @@ case "$1" in
       echo "$3"
     fi
     ;;
-  exec)    : ;;   # healthcheck probe: succeed (exit 0 = healthy)
+  # A container that is not there cannot be exec'd into: the real CLI exits 1
+  # (1.4.1: `Error: get failed: container <name> not found`) — a healthcheck
+  # probe against a container that vanished mid-probe must see a failure.
+  exec)
+    if ! is_there "$2"; then
+      printf 'Error: get failed: container %s not found\n' "$2" >&2; exit 1
+    fi ;;   # otherwise: succeed (exit 0 = healthy)
   system)
     # `system dns list`: header + one domain per line, matching the real CLI.
     if [ "$2" = dns ] && [ "$3" = list ]; then
@@ -405,9 +451,7 @@ JSON
     # ones are skipped quietly. Otherwise the table's header, as passthrough.
     shift
     for a in "$@"; do
-      for m in ${INSPECT_ABSENT:-}; do
-        [ "$a" = "$m" ] && { echo "Error: no such container: $a" >&2; exit 1; }
-      done
+      is_there "$a" || { echo "Error: no such container: $a" >&2; exit 1; }
     done
     echo "Container ID  Cpu %    Memory Usage         Net Rx/Tx            Block I/O            Pids"
     ;;

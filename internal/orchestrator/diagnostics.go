@@ -47,7 +47,7 @@ const (
 	codePGVersionedLayout       diagCode = "OPSM-110" // Postgres 18+ wants the mount one level above the old data directory
 	codeDataDirNotThisMount     diagCode = "OPSM-111" // the cluster does not land in a mounted data directory, and the overlay left it alone
 	codeHostPortRemapped        diagCode = "OPSM-206" // a container-only port's mirrored host port was not available, so opossum picked a free one and said why
-	codeNetworkSubnetChanged    diagCode = "OPSM-207" // the project network exists with a subnet other than the one `ipam` now declares
+	codeNetworkSubnetChanged    diagCode = "OPSM-207" // the project network exists with a subnet other than the one `ipam` now declares, or host-only where the file says not (or the other way round)
 	codeProjectBusy             diagCode = "OPSM-208" // another opossum command holds the project's lock (an `up` or `down` is under way)
 	codeServiceNameUnresolvable diagCode = "OPSM-209" // a service's name can't be looked up by its peers (upper case or ".")
 	codeExternalVolumeAbsent    diagCode = "OPSM-210" // a volume declared external: true doesn't exist

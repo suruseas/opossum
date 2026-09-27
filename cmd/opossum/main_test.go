@@ -6226,6 +6226,16 @@ const leakProbePidFileEnv = "OPOSSUM_LEAK_PROBE_PIDFILE"
 // directory the parent removes.
 const leakProbeTempDirFileEnv = "OPOSSUM_LEAK_PROBE_TMPDIR_FILE"
 
+// leakProbeStateDirEnv is the directory the probe keeps its supervisor's state
+// in (XDG_STATE_HOME), where the parent names one. The supervisor is left
+// running on purpose and writes there for as long as it lives, so the probe's own
+// t.TempDir cleanup, which removes a directory a live process is still writing
+// into, could fail with "directory not empty" — and fail the child, which for the
+// kind that is meant to pass is the one thing it must not do (CI run
+// 36252066220, `neighbour`). A directory the parent made goes with the parent's
+// cleanup, which runs after killProbe has ended the supervisor.
+const leakProbeStateDirEnv = "OPOSSUM_LEAK_PROBE_STATE_DIR"
+
 // sweepOrphanedProbes ends leaked probe supervisors whose run is over. A run
 // killed by a timeout or a Ctrl-C never reaches its own cleanup, and there is
 // nothing a dead process can do about that — so the next run does it, which is
@@ -6316,7 +6326,10 @@ func TestZZLeakProbeStartsASupervisorAndWalksAway(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	state := t.TempDir()
+	state := os.Getenv(leakProbeStateDirEnv)
+	if state == "" {
+		state = t.TempDir()
+	}
 	t.Setenv("XDG_STATE_HOME", state)
 	t.Setenv("OPOSSUM_SELF_BIN", self)
 	dir := t.TempDir()
@@ -6408,7 +6421,13 @@ func TestALeakedSupervisorFailsTheRunItLeaked(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			cmd.Env = append(cmd.Env, "TMPDIR="+own, leakProbeTempDirFileEnv+"="+tmpFile)
+			// The supervisor's state directory is this test's, not the child's: the
+			// child leaves the supervisor writing into it (see leakProbeStateDirEnv).
+			stateDir := filepath.Join(beside, "state")
+			if err := os.Mkdir(stateDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cmd.Env = append(cmd.Env, "TMPDIR="+own, leakProbeTempDirFileEnv+"="+tmpFile, leakProbeStateDirEnv+"="+stateDir)
 			if tc.kind == "neighbour" {
 				cmd.Env = append(cmd.Env, leakProbeNeighbourDirEnv+"="+other)
 			}
@@ -6470,6 +6489,12 @@ func TestALeakedSupervisorFailsTheRunItLeaked(t *testing.T) {
 				t.Errorf("the probe should have said where it ran: %v\n%s", terr, out)
 			} else if !strings.HasPrefix(filepath.Clean(string(ran))+string(filepath.Separator), filepath.Clean(own)+string(filepath.Separator)) {
 				t.Errorf("the probe ran in %s, not under this test's %s — what it leaves behind would stay in the run's temp directory", ran, own)
+			}
+			// The supervisor kept its state where this test said, which is what makes
+			// the child's exit not depend on a live process's writes: a probe that
+			// went back to its own t.TempDir would leave nothing here.
+			if got := supervisorPID(t, stateDir, project); got == 0 {
+				t.Errorf("the probe's supervisor should have claimed %s in %s, the directory this test made for it\n%s", project, stateDir, out)
 			}
 			raw, rerr := os.ReadFile(pidFile)
 			if rerr != nil {

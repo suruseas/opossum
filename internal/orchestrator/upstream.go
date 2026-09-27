@@ -17,6 +17,8 @@ import "github.com/suruseas/opossum/internal/runtime"
 var UpstreamWordings = []runtime.UpstreamWording{
 	{Site: "runErrorHint", Wording: "does not support required platforms"},
 	{Site: "runErrorHint", Wording: "Error: platform linux/arm64"},
+	{Site: "unsupportedPlatformArm64", Wording: "Error: unsupported platform Platform("},
+	{Site: "unsupportedPlatformArm64", Wording: `_rawArch: "arm64"`},
 	{Site: "runErrorHint", Wording: "failed to resolve"},
 	{Site: "runErrorHint", Wording: "in rootfs"},
 	{Site: "runErrorHint", Wording: "Address already in use"},

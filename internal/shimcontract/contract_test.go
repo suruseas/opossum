@@ -81,6 +81,19 @@ var contract = []struct {
 		{argv: []string{"delete", "--force", "NAME"}},
 		{argv: []string{"inspect", "NAME"}, rc: 1, has: "container not found: NAME"},
 	}},
+	// `exec` and `stats` of a container this fake saw deleted: the real CLI
+	// refuses both (1.4.1: `exec` — `Error: get failed: container <name> not
+	// found`; `stats` — `Error: no such container: <name>`, testdata/real-cli-output.md).
+	// `logs` is asked here too as the control that already worked, so a fake
+	// that answered all three the same way for a container never made cannot
+	// pass by coincidence.
+	{"exec, logs and stats all refuse a container this fake saw deleted", nil, []step{
+		{argv: []string{"run", "-d", "--name", "NAME", "alpine"}},
+		{argv: []string{"delete", "--force", "NAME"}},
+		{argv: []string{"exec", "NAME", "true"}, rc: 1, has: "container NAME not found"},
+		{argv: []string{"logs", "NAME"}, rc: 1, has: "container with ID NAME not found"},
+		{argv: []string{"stats", "--no-stream", "--format", "json", "NAME"}, rc: 1, has: "no such container: NAME"},
+	}},
 	// A published port comes back as the run wrote it: the host port, the
 	// container port, the protocol, and the address — kept as the address it
 	// names rather than folded to the wildcard. A range is ONE entry at its low
@@ -440,6 +453,38 @@ var contract = []struct {
 	}},
 	{"the daemon answers `system status --format json`", nil, []step{
 		{argv: []string{"system", "status", "--format", "json"}, has: `"status":"running"`},
+	}},
+	// A network answers, when inspected, the labels it was made with
+	// (`configuration.labels`, measured on 1.4.1: `--label k=v` on `network
+	// create` reads back as `"k" : "v"`, and a network made without any has an
+	// empty object). `down` removes a network under a name of the compose file's
+	// own only when the project's label is on it, so a fake that answered the
+	// same labels for every network — or none — would turn that question into a
+	// constant.
+	{"a network answers the labels it was made with", nil, []step{
+		{argv: []string{"network", "create", "--label", "tier=back", "--label", "opossum.project=demo", "demo-lab"}},
+		{argv: []string{"network", "create", "demo-plain"}},
+		{argv: []string{"network", "inspect", "demo-lab"}, has: `"opossum.project" : "demo"`},
+		{argv: []string{"network", "inspect", "demo-lab"}, has: `"tier" : "back"`},
+		{argv: []string{"network", "inspect", "demo-lab"}, has: `"name" : "demo-lab"`},
+		{argv: []string{"network", "inspect", "demo-plain"}, has: `"labels" : {`, lacks: `opossum.project`},
+		{argv: []string{"network", "inspect", "demo-plain"}, lacks: `tier`},
+	}},
+	// A network already deleted is not there to delete a second time: the real
+	// CLI fails (1.4.1: `Error: failed to delete one or more networks:
+	// ["<name>"]`), a different shape from `network inspect`'s `network not
+	// found: <name>` — DeleteNetwork's networkAlreadyGone reads both, and a
+	// fake that let a second delete succeed never exercised the one it reads
+	// first (#962). Recreating the name under the same run clears it: it is not
+	// gone forever, only until made again.
+	{"a network already deleted is not there to delete or inspect again", nil, []step{
+		{argv: []string{"network", "create", "demo-once"}},
+		{argv: []string{"network", "delete", "demo-once"}},
+		{argv: []string{"network", "delete", "demo-once"}, rc: 1, has: `failed to delete one or more networks`, lacks: `not found`},
+		{argv: []string{"network", "inspect", "demo-once"}, rc: 1, has: `network not found: demo-once`},
+		{argv: []string{"network", "create", "demo-once"}},
+		{argv: []string{"network", "inspect", "demo-once"}},
+		{argv: []string{"network", "delete", "demo-once"}},
 	}},
 	// A network name the runtime refuses (1.4.1): upper case, a character outside
 	// a-z, 0-9, `.`, `_` and `-`, a first or last character that is not a

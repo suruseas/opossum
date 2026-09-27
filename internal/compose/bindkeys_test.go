@@ -206,17 +206,17 @@ func TestBindOptionsAreCheckedWhateverTheMountType(t *testing.T) {
 
 // Keys the YAML decoder drops before anything can look at them: a key
 // written twice, and a null key. docker compose refuses both
-// (`mapping key "foo" already defined`, `non-string key`); opossum does
-// not, here as before this change.
+// (`mapping key "foo" already defined`, `non-string key`). The repeated key is
+// refused here too, by the check for a key written twice anywhere in the file
+// (repeatedkeys_test.go); the null key is not, here as before.
 //
 // What this row holds is that the block is still named among the ignored
 // fields when that happens. The check runs on what the decoder returns, so
 // a decode that fails returns nothing to check — and if the block dropped
-// out of the ignored list with it, someone who wrote `bind:` twice would be
-// told nothing at all about either copy.
+// out of the ignored list with it, someone who wrote `bind:` with a null key would
+// be told nothing at all about it.
 func TestABlockWhoseKeysTheDecoderDropsIsStillNamedAmongTheIgnoredFields(t *testing.T) {
 	for _, tc := range []struct{ name, options string }{
-		{"the same key twice", "foo: 1\nfoo: 2"},
 		{"a null key", "~: 1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

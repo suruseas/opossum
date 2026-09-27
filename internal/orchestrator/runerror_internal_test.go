@@ -51,6 +51,25 @@ func TestRunErrorHintPlatform(t *testing.T) {
 		// running it with --platform linux/amd64. The message names what is
 		// missing, so this is not an arm64 problem and amd64 is not the answer.
 		{"an image with no amd64 build", "", "Error: platform linux/amd64", false},
+		// container 1.4.1, an image that is not local yet
+		// (platform-unsupported-fresh-pull-141.txt): the runtime pulls it and then
+		// says this instead of `Error: platform linux/arm64`, with the same rule —
+		// the arch it names is the one that is missing.
+		{"a fresh pull of an image with no arm64 build", "",
+			"[2/6] Unpacking image [2s]\n" + freshPullLine("arm64"), true},
+		{"a fresh pull of an image with no amd64 build", "", freshPullLine("amd64"), false},
+		// Asked for amd64 and told to ask for amd64 is not advice (the same rule as
+		// the wordings above).
+		{"a fresh pull that missed arm64, having already asked for amd64", "amd64", freshPullLine("arm64"), false},
+		// The line has to be the runtime's own: it begins the line. A container that
+		// repeats it, or a runtime line that carries arm64 somewhere else, is not
+		// this failure.
+		{"a container repeating the runtime's line", "", "worker: " + freshPullLine("arm64"), false},
+		{"the runtime's line indented", "", " " + freshPullLine("arm64"), false},
+		{"the platform on another line than the message", "",
+			"Error: unsupported platform Platform(osVersion: nil)\n_rawArch: \"arm64\"\n", false},
+		{"the arch on the message but not the missing one's key", "",
+			"Error: unsupported platform Platform(osVersion: nil, arch: \"arm64\")\n", false},
 		// The older wording does not say which platform was wanted, so the service
 		// has to. Asked for amd64 and told to ask for amd64 is not advice.
 		{"the older wording, having already asked for amd64", "linux/amd64",
@@ -187,6 +206,8 @@ func TestEachDecodedHintCarriesItsCode(t *testing.T) {
 			"Error: bind(descriptor:ptr:bytes:): Address already in use", codeHostPortInUse},
 		// Likewise: this is the placeholder directory OPSM-107 warns about,
 		// arriving as a refusal instead of a warning.
+		{"an amd64-only image that was not local", &compose.Service{},
+			freshPullLine("arm64"), codeImageNoArm64},
 		{"a bind mount that will not resolve", &compose.Service{},
 			"Error: mount failed with errno 20: failed to resolve '/etc/caddy/Caddyfile' in rootfs", codeBindFilePlaceholder},
 	} {
@@ -214,4 +235,11 @@ func TestAnUndecodedStartFailureCarriesNoCode(t *testing.T) {
 	if runErrorHint(&compose.Service{}, runErr("Error: something nobody has decoded yet")) != "" {
 		t.Error("an unknown signature should decode to nothing at all")
 	}
+}
+
+// freshPullLine is the runtime's message for an image with no build for arch,
+// pulled for the first time, as container 1.4.1 words it (the capture keeps the
+// whole line).
+func freshPullLine(arch string) string {
+	return `Error: unsupported platform Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "` + arch + `")` + "\n"
 }

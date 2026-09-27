@@ -305,7 +305,7 @@ list; codes are add-only and never change meaning.
   has to change — which is the answer wherever in the order that holder sits, not only
   ahead of the entry.
 - **`[OPSM-412]` … `this image has no build for Apple silicon (arm64)`** → decoded from a
-  failed start under `up` (`does not support required platforms`, or `Error: platform linux/arm64` — 1.2.2 uses both, see `testdata/real-cli-output.md`); a one-off `run` reports
+  failed start under `up` (`does not support required platforms`, or `Error: platform linux/arm64` — 1.2.2 uses both; or, on 1.4.1 for some amd64-only images pulled for the first time, `Error: unsupported platform Platform(… _rawArch: "arm64")`; see `testdata/real-cli-output.md`); a one-off `run` reports
   the runtime's own wording instead. Add `platform: linux/amd64` to the
   service and start again: opossum runs an amd64 image under Rosetta. Check first that the
   image really has no arm64 tag — many publish one under a different tag, and a native
@@ -606,7 +606,7 @@ Every `[OPSM-NNN]` opossum can emit (add-only; grouped 1xx storage / 2xx network
 - `OPSM-411` — the supervisor could not open a size-capped log and is writing without a bound. The file can then grow without limit; remove it if it gets large, or restart the project.
 - `OPSM-407` — a service's container exited right after starting, with no health gate to catch it (`up` reports its logs and fails).
 - `OPSM-412` — the image has no arm64 build, so the container cannot start on Apple silicon.
-- `OPSM-413` — a `required: false` dependency did not become healthy, or did not complete successfully; the dependent is started anyway, as docker compose starts it.
+- `OPSM-413` — a `required: false` dependency did not become healthy, or did not complete successfully; the dependent is started anyway, as docker compose starts it. Also a run-to-completion service that failed while none of the services the command starts requires it (a dependent behind a profile that is not on, or not named): passed over, as docker compose does.
 - `OPSM-501` — unsupported top-level compose field(s), ignored.
 - `OPSM-502` — unsupported service compose field(s), ignored (e.g. `network_mode: host`).
 - `OPSM-601` — a `watch` rebuild action failed.

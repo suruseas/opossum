@@ -10,6 +10,7 @@ corpus 走査（df476）では発火しなかったものを、**corpus の外�
 | `port-in-use-duplicate-publish.txt` | `Address already in use` | OPSM-201（**文言一致の側**） |
 | `vzerror-shared-named-volume.txt` | `VZErrorDomain` + `Code=2` + `storage device attachment is invalid` | OPSM-103 |
 | `platform-image-index-no-arm64.txt` | `Error: platform linux/arm64` | OPSM-412 |
+| `platform-unsupported-fresh-pull-141.txt` | `Error: unsupported platform Platform(` + `_rawArch: "arm64"`（image が手元に無い初回の pull。無いほうの arch が `_rawArch` に入る） | OPSM-412 |
 | `port-attempt-53.txt` | （届かず） | — |
 | `port-attempt-loopback.txt` | （届かず） | — |
 | `volume-in-use.txt` | `in use` | ランタイムの文言（`container volume delete` を直接） |

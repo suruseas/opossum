@@ -6,6 +6,96 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.38.0] - 2026-09-27
+
+### Fixed
+
+- A network declared with a `name:` of its own (one that is not `external`) and
+  joined by a service that lists it is now created under that name, as docker
+  compose creates it, instead of as `<project>-<key>`, so another compose file or
+  project can join it by that name. The network is made with the project's label,
+  and `down` and `destroy` remove it only when that label is there: a network of
+  that name that was already there, made by hand or by another project, is used by
+  `up` and left alone. The `<project>-<key>` network an earlier version made for
+  such a key is still removed. A `name:` the container runtime cannot create (upper
+  case, `+`, more than 63 characters) is refused by `up` and `run` before anything is
+  created, naming what it takes, and two networks with one `name:` are one network
+  when declared alike and refused when declared differently.
+- When `up` fails because the runtime refused to run a service and left no
+  container of it — an image with no build for this machine, or a named volume
+  that would not attach — the rollback line no longer says `Rolled back web —
+  stopped and removed`, and for the image case the error no longer points at
+  `opossum logs web`. Whether the run left a container is now asked of the
+  runtime, not read off the failure's wording; when the runtime cannot be asked,
+  the service stays on the list. A service whose previous container this `up`
+  removed to replace it is still named.
+- Whether a failed run-to-completion service (a `service_completed_successfully`
+  target) stops `up` is now decided by the dependents `up` starts, as in docker
+  compose. A required dependent behind a profile that is not on, or one you did not
+  name (`up migrate` with the dependent left out), no longer makes the failure fatal
+  and rolls the whole `up` back: the failure is noted and `up` goes on. Turning the
+  profile on, naming the dependent, or a started required dependent still stops it,
+  and so does `run` of a service that requires it.
+- In a single compose file, a key written twice in the same mapping is now refused
+  wherever the mapping is, as docker compose refuses it (`mapping key "k" already
+  defined`). It was accepted in `logging` (and its `options`),
+  `deploy.resources.reservations`, `sysctls`, `ulimits`, `extra_hosts`, a network's
+  `driver_opts`, a gpu device and a mount's `bind:` block — read past and listed
+  among the ignored fields, except in `ulimits`, where the second value was used. A
+  block that an alias of its own contains (`x-a: &a {b: *a}`) is refused too
+  (`cycle detected`).
+- With container 1.4.1, pulling an amd64-only image for the first time fails with
+  `Error: unsupported platform Platform(…)`, which `up` did not recognise, so the
+  `platform: linux/amd64` hint (`[OPSM-412]`) did not appear; it appeared once the
+  image was local. It now appears for a fresh pull too. An image missing amd64
+  instead gets no arm64 advice.
+- When the runtime refuses to run a run-to-completion dependency (a
+  `service_completed_successfully` target) — an image with no arm64 build, a named
+  volume another container holds — `up` now gives the diagnosis it gives for a
+  long-running service for the same failure (`[OPSM-412]`, `[OPSM-103]`) instead of `did not complete
+  successfully … exited non-zero`. A dependency that ran and printed such a line
+  itself is still reported as having exited non-zero.
+- `up --foreground` no longer reports a service as having hit a host port
+  conflict (`[OPSM-201]`), an image with no arm64 build (`[OPSM-412]`) or a bind
+  mount that could not be resolved (`[OPSM-107]`) because the service itself
+  printed those words and exited. A foreground run's output includes the
+  container's own, so these diagnoses (and `[OPSM-103]`, the volume another
+  container holds) are now given only when the runtime refused the run and made no
+  container — which is what a port it cannot bind, an image with no arm64 build, a
+  mount it cannot resolve and a volume it will not attach do. A service that ran
+  and failed reads as a plain failed start. A detached `up` is unchanged.
+- A compose file that holds more than one YAML document (`---` between them) is
+  now read as docker compose reads it: each document is merged into the ones before
+  it, as several `-f` files are (the later value wins, `command` is replaced, `ports`
+  append, `name:` is the last one's). The later documents used to be dropped without
+  a word — a service the second one defined was never started. A document that is
+  empty or not a mapping (a trailing `---`, two in a row) is refused as docker
+  compose refuses it, and so is a later document that does not parse. Known
+  differences: an alias to an anchor of an earlier document is refused, and an
+  included or extended file of several documents is refused rather than read as its
+  first alone.
+- A service key opossum does not act on is now held to the shape docker compose
+  gives it, as the keys opossum reads already were: `hostname: [1, 2]`, `dns: 7`,
+  `sysctls: [1]`, `privileged: 7`, `container_name: x` (the pattern wants two
+  characters) and the like are refused (`services.web.hostname must be a string`)
+  where they loaded and were listed among the ignored fields. 58 keys; the shapes
+  are those of docker compose v5.5.1's schema.
+- The `default` network is now one network, as in docker compose: a service that
+  lists no `networks:` and a service that lists `default` are on the same one, and
+  the file's declaration of it (`name`, `internal`, `external`, `labels`, `ipam`) is
+  that network's. A service may list `default` without declaring it (`networks:
+  [default, backend]`), which was refused as an undefined network. Before, the two
+  kinds of service were on different networks (`<project>-net` and
+  `<project>-default`) and a declaration of `default` reached only the second, so
+  with `default: {internal: true}` a service that listed no networks now becomes
+  host-only, and a service that listed `default` moves from `<project>-default` to
+  `<project>-net`.
+- `up` and `run` now refuse a network that is already there in another mode than the
+  file declares it (host-only where the file says not, or the other way round), saying
+  to run `opossum down` and `up` again (`[OPSM-207]`). Before, they went on with the
+  network that was there while warning that it was host-only. A project brought up by
+  an earlier version with `default: {internal: true}` needs a `down` first.
+
 ## [0.37.0] - 2026-09-26
 
 ### Added
@@ -2196,7 +2286,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.37.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.38.0...HEAD
+[0.38.0]: https://github.com/suruseas/opossum/compare/v0.37.0...v0.38.0
 [0.37.0]: https://github.com/suruseas/opossum/compare/v0.36.0...v0.37.0
 [0.36.0]: https://github.com/suruseas/opossum/compare/v0.35.0...v0.36.0
 [0.35.0]: https://github.com/suruseas/opossum/compare/v0.34.1...v0.35.0

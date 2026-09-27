@@ -197,6 +197,8 @@ Error: delete failed for one or more networks: ["<name>"]
       ...
 ```
 1.3.1: `status` に `ipv6Subnet` が増えた（`ipv4Gateway`/`ipv4Subnet` はそのまま）。抜粋部は一致。
+`network create --label opossum.project=demo <name>` で作った network は `configuration.labels` に `"opossum.project" : "demo"` を持つ（2026-09-27 に 1.4.1 で採取。label なしで作ると `"labels" : {\n\n      }`＝空の object）。`network delete <a> <b>` は 2 つ渡すと両方消える。`NetworkLabels` はこの `configuration.labels` を読み、compose file の `name:` を持つ network を `down` が消してよいかの判定（label が project と一致）に使う。
+`container network create --internal <name>` で作った network は `configuration.mode` が `"hostOnly"`（`--internal` 無しは `"nat"`。2026-09-27 に 1.4.1 で採取）。`NetworkHostOnly` はこれを読み、既存 network が `internal:` の宣言と食い違うか判定する。
 
 ## `container network inspect <name>`  （不在, exit 1）
 ```
@@ -421,6 +423,7 @@ HOST FOOTPRINT が黙って `—`／上流はホストのコマンド）。
 | 2 | OPSM-412 | 同上 | `Error: platform linux/arm64` | `raw:platform-image-no-arm64-131.txt` | `raw:platform-image-no-arm64-131.txt` |
 | 3 | OPSM-107 | 同上 | `failed to resolve` `in rootfs` | `raw:rootfs-resolve-131.txt` | `raw:rootfs-resolve-131.txt` |
 | 4 | OPSM-201 | 同上 | `Address already in use` | `raw:port-in-use-duplicate-publish-131.txt` | `raw:port-in-use-duplicate-publish-131.txt` |
+| 2b | OPSM-412 | `orchestrator.go` `unsupportedPlatformArm64` | `Error: unsupported platform Platform(` `_rawArch: "arm64"` | `unverified` | `raw:platform-unsupported-fresh-pull-141.txt` |
 | 5 | OPSM-103 | `isStorageAttachmentError` | `VZErrorDomain` `Code=2` `storage device attachment is invalid` | `raw:vzerror-shared-named-volume-131.txt` | `raw:vzerror-shared-named-volume-131.txt` |
 | 5b | image を取れない | `orchestrator.go` `imageFetchFailed` | `Error: HTTP request to ` ` failed with response: ` `/manifests/` `/blobs/` | `unverified` | `raw:image-fetch-refused-141.txt` |
 | 6 | build（cache 破損） | `buildhint.go` | `unable to read root manifest` | `raw:build-cache-path-only-131.txt` | `unverified` |
@@ -811,6 +814,7 @@ README・`docs/compatibility.md`・`docs/troubleshooting.md`・`docs/networking.
 | `system dns create` は再起動をまたいで残る（README「Setup」） | `/etc/resolver/containerization.opossum`（`domain opossum` / `nameserver 127.0.0.1` / `port 2053`）の日付は 6/20、`kern.boottime` は 9/5——再起動後も `system dns ls` に `opossum` が出る | `p9-dns-persist.txt` |
 | `ports: - "3000"`（host 側なし）は runtime が受けない（compat「Published ports」） | `run -p 3000` → `Error: invalid publish value: 3000`・exit 1（コンテナは作られない） | `p10-port.txt` |
 | `logs`/`exec`/`cp` に不在の名前 | いずれも exit 1。`logs`：`failed to get logs for container X (cause: "internalError: "failed to open container logs: notFound: "container with ID X not found""")`／`exec`：`Error: get failed: container X not found`／`cp`（両向き）：`failed to copy from|into container X (cause: "notFound: "container with ID X not found"")` | `p15-absent.txt` |
+`start` に不在の名前も同じ形（1.4.1、2026-09-27 に採取）：`Error: get failed: container X not found`・exit 1（`exec` と同じ文言）。
 | `logs -f` に signal（`internal/shimcontract` の契約の行） | container 1.4.1（2026-09-15）。`container logs -f <name>` を自分の process group に置き、2 秒後に signal を送って wait status を読んだ：SIGINT → `code=130 signal=0`、SIGTERM → `code=143 signal=0`（どちらも捕まえて自分の exit code で終わる）、SIGHUP → `code=0 signal=1`（signal で死ぬ）。`-f` 無しの `logs` は、小さいログではその前に読み終えて exit 0 | perl で fork・setpgrp・waitpid |
 | `cpus: N` は `-c N`（compat「`mem_limit` / `cpus`」） | container 1.4.1（2026-09-24・この Mac は 8 CPU）。`container run -d -c N alpine` の `inspect` は `cpus: N`（書かないと 4）で、**中から見える `nproc` は N+1**（1→2、2→3、4→5、7→8、書かないと 5）で、**8 が天井**（8・9・9999 は `nproc` 8）。`-c 9999` は **rc 0 で断られず**、`inspect` に 9999 が残る。opossum を通さず直打ちしても同じ | `~/opmprobe/out/raw-20260924T114422Z-12810/`（compose 経由 8 点）・`v1255i.sh-20260924T115247Z.txt`（直打ち） |
 | `-p` の host 側と container 側の本数が揃わないとき（`internal/shimcontract` の契約の行・#1280） | container 1.4.1（2026-09-26）。`container run -d -p 47020:80-82`（host 1 本・container 3 本）、`-p 47030-47031:80-83`（2 本と 4 本）、`-p 47040-47042:80`（3 本と 1 本）は、**3 つとも `Error: publish host and container port counts are not equal: <host>:<container>`・exit 1**（container は作られない）。文の末尾は書いた綴りから host address と protocol を落とした形（`127.0.0.1:7000-7001:80` → `7000-7001:80`、`47000-47001:80/udp` → `47000-47001:80`、`[::1]:…`・`0.0.0.0:…` も同じ・inu の実機 12 形の測定 2026-09-26）。数が揃う `-p 47014-47016:80-82` は通り、`inspect` は 1 件・`count: 3`・下端の hostPort | 自分の名前（`neko-p1280-x`）で 1 つずつ `run`→`delete` |

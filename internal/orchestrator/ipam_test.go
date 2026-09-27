@@ -103,14 +103,16 @@ func TestUpRefusesAnExistingNetworkWithAnotherSubnet(t *testing.T) {
 			t.Errorf("OPSM-207 must not carry the stale-network advice on a one-off run either, got: %v", err)
 		}
 	})
-	// With no subnet declared the network is not even inspected: a read
-	// that has nothing to compare against is a call for nothing.
+	// With no subnet declared the network is not inspected for its subnets: a
+	// read that has nothing to compare against is a call for nothing. It is
+	// inspected once, for its mode (host-only or not), which every network that
+	// is there is held to.
 	rt, log := fakeShim(t)
 	setShimEnv(rt, "NET_EXISTS=1", "NETWORK_SUBNETS=demo-back=10.9.0.0/24")
 	if err := orchestrator.New(ipamProject("", ""), rt, "opossum", &bytes.Buffer{}).Up(true); err != nil {
 		t.Fatalf("Up: %v", err)
 	}
-	if indexOf(log(), "network inspect demo-back") >= 0 {
-		t.Errorf("no subnet declared, so the network must not be inspected for one, got %v", log())
+	if n := countLines(log(), "network inspect demo-back"); n != 1 {
+		t.Errorf("no subnet declared, so the network is inspected once (for its mode) and not again for a subnet, got %d: %v", n, log())
 	}
 }

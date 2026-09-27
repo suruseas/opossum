@@ -168,7 +168,7 @@ func (o *Orchestrator) RunAudited(service string, command []string, opts RunOneO
 	// own connections. Then run with NoDeps.
 	if !opts.NoDeps {
 		if deps := svc.DependsOn.Names(); len(deps) > 0 {
-			if err := o.Up(true, deps...); err != nil {
+			if err := o.upDependenciesOf(service, deps); err != nil {
 				return nil, fmt.Errorf("starting dependencies: %w", err)
 			}
 			// The pairs the one-off is in, under the name its container
