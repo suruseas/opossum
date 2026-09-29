@@ -182,7 +182,7 @@ func watchCmd() *cobra.Command {
 		Short: "Sync host file changes into running containers per each service's develop.watch rules",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			o, err := loadOrchestrator(cmd.OutOrStdout())
+			o, err := loadOrchestratorChecked(cmd.OutOrStdout())
 			if err != nil {
 				return err
 			}
@@ -320,7 +320,7 @@ func servicesCmd(use, short string, fn func(*orchestrator.Orchestrator, []string
 		Use:   use,
 		Short: short,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			o, err := loadOrchestrator(cmd.OutOrStdout())
+			o, err := loadOrchestratorChecked(cmd.OutOrStdout())
 			if err != nil {
 				return err
 			}
@@ -350,7 +350,7 @@ func cpCmd() *cobra.Command {
 		Short: "Copy files between a service's container and the host (each path is a host path or service:path)",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			o, err := loadOrchestrator(cmd.OutOrStdout())
+			o, err := loadOrchestratorChecked(cmd.OutOrStdout())
 			if err != nil {
 				return err
 			}
@@ -652,9 +652,8 @@ func downCmd() *cobra.Command {
 			// or renaming the file would otherwise strand a process the user has no
 			// opossum command to remove.
 			if name := projectNameWithoutCompose(); name != "" {
-				if orchestrator.StopSupervisor(name) {
-					fmt.Fprintln(cmd.ErrOrStderr(), "opossum: stopped the restart supervisor")
-				}
+				stopped, attempted := stopSupervisorFn(name)
+				reportSupervisorStop(cmd.ErrOrStderr(), stopped, attempted, "opossum: stopped the restart supervisor")
 				orchestrator.ClearWatched(name)
 			}
 			o, err := loadOrchestratorToTakeDown(cmd.OutOrStdout(), cmd.ErrOrStderr())
@@ -756,7 +755,7 @@ func imagesCmd() *cobra.Command {
 		// before the runtime is asked anything.
 		Args: func(cmd *cobra.Command, args []string) error { return tableOrJSON(opts.Format) },
 		RunE: func(cmd *cobra.Command, args []string) error {
-			o, err := loadOrchestrator(cmd.OutOrStdout())
+			o, err := loadOrchestratorChecked(cmd.OutOrStdout())
 			if err != nil {
 				return err
 			}
@@ -1027,7 +1026,7 @@ func psCmd() *cobra.Command {
 		// before the runtime is asked anything.
 		Args: func(cmd *cobra.Command, args []string) error { return tableOrJSON(opts.Format) },
 		RunE: func(cmd *cobra.Command, args []string) error {
-			o, err := loadOrchestrator(cmd.OutOrStdout())
+			o, err := loadOrchestratorChecked(cmd.OutOrStdout())
 			if err != nil {
 				return err
 			}
@@ -1061,7 +1060,7 @@ this is the way to read it from a script:
 			if protocol != "tcp" && protocol != "udp" {
 				return fmt.Errorf("--protocol must be tcp or udp, got %q", protocol)
 			}
-			o, err := loadOrchestrator(cmd.OutOrStdout())
+			o, err := loadOrchestratorChecked(cmd.OutOrStdout())
 			if err != nil {
 				return err
 			}
@@ -1114,7 +1113,7 @@ neither is a volume the file no longer mounts.`,
 			if opts.Format != "table" && opts.Format != "json" {
 				return fmt.Errorf("--format must be table or json, got %q", opts.Format)
 			}
-			o, err := loadOrchestrator(cmd.OutOrStdout())
+			o, err := loadOrchestratorChecked(cmd.OutOrStdout())
 			if err != nil {
 				return err
 			}
@@ -1301,7 +1300,7 @@ func execCmd() *cobra.Command {
 		Short: "Run a command in a running service's container",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			o, err := loadOrchestrator(cmd.OutOrStdout())
+			o, err := loadOrchestratorChecked(cmd.OutOrStdout())
 			if err != nil {
 				return err
 			}
@@ -1334,7 +1333,7 @@ func restartCmd() *cobra.Command {
 		Use:   "restart [service...]",
 		Short: "Stop and start services in place (all, or the named services)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			o, err := loadOrchestrator(cmd.OutOrStdout())
+			o, err := loadOrchestratorChecked(cmd.OutOrStdout())
 			if err != nil {
 				return err
 			}
@@ -1350,7 +1349,7 @@ func logsCmd() *cobra.Command {
 		Use:   "logs [service...]",
 		Short: "Show logs for services (all by default)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			o, err := loadOrchestrator(cmd.OutOrStdout())
+			o, err := loadOrchestratorChecked(cmd.OutOrStdout())
 			if err != nil {
 				return err
 			}
@@ -1387,7 +1386,7 @@ func statsCmd() *cobra.Command {
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			o, err := loadOrchestrator(cmd.OutOrStdout())
+			o, err := loadOrchestratorChecked(cmd.OutOrStdout())
 			if err != nil {
 				return err
 			}
@@ -1688,6 +1687,25 @@ func loadOrchestrator(out io.Writer) (*orchestrator.Orchestrator, error) {
 	// services those enable.
 	if err := o.CheckMounts(); err != nil {
 		return nil, mountRefusal(err)
+	}
+	return o, nil
+}
+
+// loadOrchestratorChecked is loadOrchestrator plus the one check every reader
+// of the project makes once profiles are resolved and nothing more specific
+// is coming: an enabled service that depends on one the profiles leave
+// inactive, docker compose's own name for both that and a dependency naming
+// no service at all (measured, #1094). `up` and `run` are not among this
+// function's callers — each enables the services it was named with first,
+// then asks this same question in its own words (Orchestrator.checkProjectLoads),
+// which this call would otherwise pre-empt with a plainer refusal.
+func loadOrchestratorChecked(out io.Writer) (*orchestrator.Orchestrator, error) {
+	o, err := loadOrchestrator(out)
+	if err != nil {
+		return nil, err
+	}
+	if err := o.ValidateProfiles(); err != nil {
+		return nil, err
 	}
 	return o, nil
 }
@@ -2192,6 +2210,44 @@ func mergeServices(a, b []string) []string {
 	return out
 }
 
+// stopSupervisorFn is orchestrator.StopSupervisor behind a seam a test can
+// replace, so the two call sites below (downCmd's early stop, and
+// startSupervisorFor's replace) can be driven with a real, currently-running
+// supervisor whose stop outcome is controlled — "attempted but not
+// confirmed" — without needing that supervisor to actually resist SIGKILL
+// (nothing can) or waiting out the real multi-second budget.
+var stopSupervisorFn = orchestrator.StopSupervisor
+
+// reportSupervisorStop prints the one line that fits what orchestrator.StopSupervisor
+// found, or nothing when there is nothing to say (no supervisor was running).
+// stoppedMsg is what to print on a confirmed stop; a caller that has its own
+// reason to stay quiet there (`up`, replacing a supervisor right before starting
+// its successor) passes "". A stop that was attempted but not confirmed always
+// prints — the point of the second return value existing at all (#1401) is that
+// this case must not be silent.
+func reportSupervisorStop(w io.Writer, stopped, attempted bool, stoppedMsg string) {
+	switch {
+	case stopped:
+		if stoppedMsg != "" {
+			fmt.Fprintln(w, stoppedMsg)
+		}
+	case attempted:
+		fmt.Fprintln(w, "opossum: "+orchestrator.NoticeSupervisorStopFailed())
+	}
+}
+
+// supervisorReplacedSafely reports whether it is safe to go on and start a new
+// supervisor after trying to stop an old one. Not attempted (nothing was
+// running) and a confirmed stop are both fine. Attempted-but-not-confirmed is
+// not: StopSupervisor only clears the pid file on a confirmed stop, so the old
+// pid file is still there, StartSupervisor's own "already watching" check sees
+// it and no-ops, and a caller that pressed on regardless would print
+// NoticeSupervisorStarted — claiming a new service set is being watched while
+// the old supervisor, on the old set, is what may actually still be running.
+func supervisorReplacedSafely(stopped, attempted bool) bool {
+	return !attempted || stopped
+}
+
 // upFailed reports whether the `up` that is asking for a supervisor returned an
 // error. It only ever makes this function do less: a failed `up` may not take an
 // existing supervisor away, because what it started is not a reliable statement
@@ -2216,7 +2272,8 @@ func startSupervisorFor(stderr io.Writer, o *orchestrator.Orchestrator, disabled
 	// ones the runtime could not be asked about, which are not written off over an
 	// outage — so this does not go back to announcing services known never to
 	// have started.
-	services = mergeServices(services, o.StillSupervised(orchestrator.Watched(o.Project.Name)))
+	oldWatched := orchestrator.Watched(o.Project.Name)
+	services = mergeServices(services, o.StillSupervised(oldWatched))
 	if len(services) == 0 {
 		return
 	}
@@ -2282,7 +2339,38 @@ func startSupervisorFor(stderr io.Writer, o *orchestrator.Orchestrator, disabled
 		if upFailed {
 			return
 		}
-		orchestrator.StopSupervisor(o.Project.Name)
+		stopped, attempted := stopSupervisorFn(o.Project.Name)
+		// No "stopped" line here (empty stoppedMsg): the notice below already says
+		// a supervisor is running for this project, so a "stopped the old one"
+		// line right before it would read as a contradiction. A failure to
+		// confirm still has to be said.
+		reportSupervisorStop(stderr, stopped, attempted, "")
+		if !supervisorReplacedSafely(stopped, attempted) {
+			// The generic OPSM-414 notice above only says the old supervisor may
+			// still be running — it does not say what this `up` itself leaves
+			// unwatched (#1414). Only the newly-added half of `services` (the old
+			// supervisor never knew these names) can be said to be watched by
+			// nobody; the carried-over half is still watched if that old
+			// supervisor turns out to still be alive, so the notice must not
+			// claim that half is unwatched too — that would contradict the line
+			// just printed above it.
+			var added []string
+			old := map[string]bool{}
+			for _, s := range oldWatched {
+				old[s] = true
+			}
+			for _, s := range services {
+				if !old[s] {
+					added = append(added, s)
+				}
+			}
+			if len(added) > 0 {
+				fmt.Fprintf(stderr, "opossum: this up is not starting a new supervisor over it, so %s "+
+					"— new to `restart:` watching in this run — will not be watched by anyone until you "+
+					"stop the old one by hand and run `opossum up` again\n", strings.Join(added, ", "))
+			}
+			return
+		}
 	}
 	if _, err := orchestrator.StartSupervisor(o.Project.Name, o.Project.BaseDir, args); err != nil {
 		fmt.Fprintf(stderr, "opossum: couldn't start the restart supervisor (%v) — services with `restart:` "+

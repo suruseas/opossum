@@ -1847,7 +1847,7 @@ func TestMinusFDoesNotSendTheReaderBackForNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("up with the overlay named: %v", err)
 	}
-	if !strings.Contains(applied, "-e PGDATA=/var/lib/postgresql/data/pgdata") {
+	if !strings.Contains(applied, "--env=PGDATA=/var/lib/postgresql/data/pgdata") {
 		t.Errorf("following the advice should apply the change to the planned run, got:\n%s", applied)
 	}
 	// The text carries the Docker-socket note's prose, so the up that follows
@@ -2495,7 +2495,7 @@ func TestBuildCLI(t *testing.T) {
 	if _, err := run(t, "-f", compose, "build"); err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	if joined := strings.Join(readLog(), "\n"); !strings.Contains(joined, "build --progress plain -t demo-api:latest -l opossum.project=demo /ctx") {
+	if joined := strings.Join(readLog(), "\n"); !strings.Contains(joined, "build --progress plain -t demo-api:latest -l opossum.project=demo -l opossum.service=api /ctx") {
 		t.Errorf("build should build api, got:\n%s", joined)
 	}
 }

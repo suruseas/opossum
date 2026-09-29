@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -71,7 +72,7 @@ func TestLogsFollowEndsWhenTheContainerDoes(t *testing.T) {
 	// stream is how long the fake keeps a followed stream open, where a row
 	// does not say (LOGS_SLEEP). A follow that goes on is one that ran to
 	// the stream's end; a follow the container ended is over well before it.
-	const stream = 4 * time.Second
+	const stream = 3 * time.Second
 	if stream%time.Second != 0 {
 		t.Fatal("stream is handed to the fake in whole seconds (LOGS_SLEEP)")
 	}
@@ -79,8 +80,10 @@ func TestLogsFollowEndsWhenTheContainerDoes(t *testing.T) {
 	// row does not say. It has to stay under every row's stream, or the row
 	// could not tell the two apart (checked below). Its value, like the
 	// stream's, is not derived here: what each row spends of it is measured
-	// and tabled where the table is changed.
-	const endedWithin = 3 * time.Second
+	// and tabled where the table is changed. As of #1148 the worst of them —
+	// "lines starting after the stop" — took up to 1.63 s (4 runs, one under
+	// load, the shim warmed first).
+	const endedWithin = 2200 * time.Millisecond
 	poll, settle, drain := orchestrator.LogsExitPoll, orchestrator.LogsExitSettle, orchestrator.LogsExitDrain
 	orchestrator.LogsExitPoll, orchestrator.LogsExitSettle, orchestrator.LogsExitDrain = 50*time.Millisecond, 300*time.Millisecond, 150*time.Millisecond
 	t.Cleanup(func() {
@@ -135,6 +138,28 @@ func TestLogsFollowEndsWhenTheContainerDoes(t *testing.T) {
 				time.Sleep(100 * time.Millisecond)
 				rt.Start("web.demo.opossum")
 			}},
+		// Bounds LogsExitSettle (300 ms in this test) tighter than the row
+		// above and "a plain stop with the same long gap" below do: their
+		// 100 ms and 800 ms both sit outside a doubled settle (600 ms) too,
+		// so neither tells it from the real one. 250 ms is what a halved
+		// settle (150 ms) needs to tell apart — stoppedSince only lands on
+		// the poll after the stop (up to LogsExitPoll late) and ending still
+		// waits for one more idle poll past it, so a gap right at half of
+		// settle is not enough margin for that mutation to turn this red
+		// (measured: 150 ms here passed under a halved settle too).
+		{name: "stopped and started again, a gap under settle", services: map[string]*compose.Service{"web": plain()}, follow: []string{"web"},
+			during: func(rt *runtime.Runtime) {
+				rt.Stop("web.demo.opossum")
+				time.Sleep(250 * time.Millisecond)
+				rt.Start("web.demo.opossum")
+			}},
+		// …one and a half times it is, before the container is started again.
+		{name: "stopped and started again, a gap over settle", services: map[string]*compose.Service{"web": plain()}, follow: []string{"web"},
+			during: func(rt *runtime.Runtime) {
+				rt.Stop("web.demo.opossum")
+				time.Sleep(450 * time.Millisecond)
+				rt.Start("web.demo.opossum")
+			}, ended: true, exited: []string{"web-1"}},
 		// What the runtime still hands over after the container has ended
 		// comes before `exited`, not cut off. (The drips are timed from the
 		// follow's start, one row's under way at the stop and the other's
@@ -163,6 +188,15 @@ func TestLogsFollowEndsWhenTheContainerDoes(t *testing.T) {
 				time.Sleep(100 * time.Millisecond)
 				rt.Start("web.demo.opossum")
 			}},
+		// Bounds LogsExitDrain (150 ms in this test) from below: the drips
+		// above are 20 ms apart, so any drain longer than that reads them the
+		// same way and does not tell a shortened one from the real one. 100 ms
+		// apart — under the drain, over a third of it — a shortened drain
+		// would go idle between drips (the gap alone clears it) and cut the
+		// stream before the last one arrives; the real one does not.
+		{name: "lines a while apart, still under drain", services: map[string]*compose.Service{"web": plain()}, follow: []string{"web"},
+			during: func(rt *runtime.Runtime) { rt.Stop("web.demo.opossum") }, ended: true, exited: []string{"web-1"},
+			env: []string{"LOGS_DRIP=6", "LOGS_DRIP_AFTER=300", "LOGS_DRIP_INTERVAL=100"}, lastLine: "drip 6 web.demo.opossum"},
 		// `opossum restart` whose stop leaves the container stopped longer than
 		// the settle: it marks the service as restarting, so the follow goes on.
 		{name: "opossum restart with a long gap", services: map[string]*compose.Service{"web": plain()}, follow: []string{"web"},
@@ -246,6 +280,31 @@ func TestLogsFollowEndsWhenTheContainerDoes(t *testing.T) {
 				time.Sleep(10 * orchestrator.LogsExitPoll)
 				os.Remove(marker)
 			}, ended: true, exited: []string{"web-1"}},
+		// The gap was already under way, seen and answerable, before the runtime
+		// stopped answering at all: the settle counts from then, not from when it
+		// starts answering again. (The marker in the row above goes up before the
+		// stop, so it never has a stopped answer to count from until it comes
+		// down; this one does, well before the marker goes up.)
+		{name: "the runtime not answering long after it was seen stopped", services: map[string]*compose.Service{"web": plain()}, follow: []string{"web"},
+			during: func(rt *runtime.Runtime) {
+				rt.Stop("web.demo.opossum")
+				time.Sleep(2 * orchestrator.LogsExitPoll) // seen stopped and answerable at least once
+				marker := ""
+				for _, kv := range rt.Env {
+					if f, ok := strings.CutPrefix(kv, "INSPECT_FAIL_WHILE="); ok {
+						marker = f
+					}
+				}
+				os.WriteFile(marker, nil, 0o644)
+				time.Sleep(700 * time.Millisecond) // longer than settle: a reset here would show
+				os.Remove(marker)
+				// Measured from here, not from the follow's start (which the
+				// wait for the first line and the eight polls before during
+				// runs make too noisy a clock for a bound this tight): a reset
+				// needs a whole settle plus a drain more than the real code
+				// does once the runtime answers again.
+				expectExitedWithin("web-1", 200*time.Millisecond)
+			}, ended: true, exited: []string{"web-1"}},
 		// The runtime not answering while followed is not the container's
 		// end: the follow goes on (docker compose knows from its events).
 		{"the runtime not answering while followed", map[string]*compose.Service{"web": plain()}, []string{"web"}, nil,
@@ -257,6 +316,15 @@ func TestLogsFollowEndsWhenTheContainerDoes(t *testing.T) {
 				}
 			}, false, nil, false, nil, "", 0, false, false, false, 0, false},
 	}
+	// The first exec of the compiled shim in this process costs measurably more
+	// than a later one (measured: ~210-360 ms for the first `system status`
+	// against this test's binary, 4-7 ms once warm — against a run's own timing
+	// margin of a few hundred ms) — whichever row runs first would otherwise
+	// pay it, and running this test alone (`-run .../<row>$`, a normal way to
+	// chase one row down) has nothing earlier in the package to have paid it
+	// already. One throwaway call here, untimed, so every row below measures
+	// the shim once it is warm.
+	_ = exec.Command(fakeShimBin, "system", "status").Run()
 	for _, tc := range rows {
 		// --no-log-prefix changes the lines, not the end: it is run again only
 		// where an `exited` line (or a last line before it) is looked for — and

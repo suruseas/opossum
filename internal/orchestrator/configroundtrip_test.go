@@ -152,7 +152,7 @@ func TestConfigOutputRunsAsTheInputDid(t *testing.T) {
 				strings.Join(original, "\n"), strings.Join(again, "\n"), rendered)
 		}
 		joined := strings.Join(again, "\n")
-		for _, want := range []string{"--tmpfs /a:nosuid,nodev,noexec,ro,mode=700", "--tmpfs /b:nosuid,nodev,noexec,size=2097152"} {
+		for _, want := range []string{"--tmpfs=/a:nosuid,nodev,noexec,ro,mode=700", "--tmpfs=/b:nosuid,nodev,noexec,size=2097152"} {
 			if !strings.Contains(joined, want) {
 				t.Errorf("the rendered config's run should carry %q, got:\n%s", want, joined)
 			}

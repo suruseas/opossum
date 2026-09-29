@@ -11,8 +11,8 @@
 // RUN_FAIL_STDERR, RUN_FAIL_THEN_INSPECT_FAIL, RUN_FAIL_MAKES_NOTHING,
 // RUN_HANG, RUN_DIE_SIGNAL, RUN_EXISTS[_WORDING|_HASH], RUN_EXISTS_ANY, HEALTH_*,
 // VOLUME_* (VOLUME_DELETE_STICKY, VOLUME_LS_FAIL_FROM among them), LS_*,
-// IMAGE_ABSENT, INSPECT_HANG_WHILE, INSPECT_ANSWERED, INSPECT_GATE,
-// LOGS_EMPTY[_AFTER], LOGS_FAIL_N, LOGS_DRIP[_AFTER], LOGS_SLEEP, LOGS_SELF_INT,
+// IMAGE_ABSENT, IMAGE_LABELS, INSPECT_HANG_WHILE, INSPECT_ANSWERED, INSPECT_GATE,
+// LOGS_EMPTY[_AFTER], LOGS_FAIL_N, LOGS_DRIP[_AFTER|_INTERVAL], LOGS_SLEEP, LOGS_SELF_INT,
 // LOGS_TEXT, STOP_THEN_SLEEP_MS, START_THEN_SLEEP_MS, SLOW_ONLY),
 // so tests need no t.Setenv and stay
 // isolated: the orchestrator passes these per-Runtime via RunOptions-style Env.
@@ -103,6 +103,30 @@ func run(args []string) int {
 			if ms, err := strconv.Atoi(os.Getenv("STOP_THEN_SLEEP_MS")); err == nil && slowHere(name) {
 				time.Sleep(time.Duration(ms) * time.Millisecond)
 			}
+		}
+
+	case "kill":
+		// The real CLI only truly kills a container that is running: one
+		// already stopped refuses with invalidState, and one this fake never
+		// made or has since seen deleted refuses with notFound — both
+		// measured on 1.4.1 (testdata/real-cli-output.md has no entry yet for
+		// this pair; captured the same way as its neighbours, 2026-09-29).
+		// Orchestrator.Kill re-inspects after either failure and only reports
+		// it when the container is still running or unreadable (orchestrator.go),
+		// so a container not running discards both — this fake answering them
+		// correctly changes no caller's behaviour, only what it says about a
+		// case nothing acts on today.
+		if dir := os.Getenv("STATE_DIR"); dir != "" && len(args) > 0 {
+			name := args[len(args)-1]
+			if !there(name) {
+				fmt.Fprintf(os.Stderr, "Error: internalError: \"failed to kill container\" (cause: \"notFound: \"container with ID %s not found\"\")\n", name)
+				return 1
+			}
+			if _, err := os.Stat(stoppedPath(dir, name)); err == nil {
+				fmt.Fprintln(os.Stderr, `Error: internalError: "failed to kill container" (cause: "invalidState: "no runtime client exists: container is stopped"")`)
+				return 1
+			}
+			_ = os.WriteFile(stoppedPath(dir, name), []byte("1"), 0o644)
 		}
 
 	case "start":
@@ -641,16 +665,22 @@ func run(args []string) int {
 				_ = os.Remove(goneVolumePath(dir, name))
 			}
 		}
-		// Record the config-hash (from -l opossum.config-hash=…) keyed by --name,
-		// so a later inspect reports it and up-idempotency evals can detect it.
+		// Record the config-hash (from -l/--label opossum.config-hash=…, or
+		// opossum's own combined --label=opossum.config-hash=… — #996) keyed by
+		// --name, so a later inspect reports it and up-idempotency evals can
+		// detect it.
 		if dir := os.Getenv("STATE_DIR"); dir != "" {
 			var cname, chash string
 			for i, a := range args {
 				if i > 0 && args[i-1] == "--name" {
 					cname = a
 				}
-				if v, ok := strings.CutPrefix(a, "opossum.config-hash="); ok {
-					chash = v
+				v := a
+				if cut, ok := strings.CutPrefix(a, "--label="); ok {
+					v = cut
+				}
+				if hv, ok := strings.CutPrefix(v, "opossum.config-hash="); ok {
+					chash = hv
 				}
 			}
 			if cname != "" && chash != "" {
@@ -658,11 +688,17 @@ func run(args []string) int {
 			}
 			// Record the project label the run carried (empty for a run without
 			// one), so a later inspect reports what the container was made with.
-			// `-l` is the spelling opossum passes; `--label` is the long one.
+			// `-l` is the short spelling; `--label` is the long one; opossum
+			// passes `--label=<v>` as one argument (#996), so that combined form
+			// is read too.
 			if cname != "" {
 				var proj string
 				for i, a := range args {
-					if i > 0 && (args[i-1] == "-l" || args[i-1] == "--label") {
+					if v, ok := strings.CutPrefix(a, "--label="); ok {
+						if pv, ok := strings.CutPrefix(v, "opossum.project="); ok {
+							proj = pv
+						}
+					} else if i > 0 && (args[i-1] == "-l" || args[i-1] == "--label") {
 						if v, ok := strings.CutPrefix(a, "opossum.project="); ok {
 							proj = v
 						}
@@ -1018,8 +1054,15 @@ func run(args []string) int {
 			if ms, err := strconv.Atoi(os.Getenv("LOGS_DRIP_AFTER")); err == nil {
 				time.Sleep(time.Duration(ms) * time.Millisecond)
 			}
+			// $LOGS_DRIP_INTERVAL=<ms> spaces them that far apart instead of the
+			// default 20 ms — a test bounding LogsExitDrain against the gap
+			// between drips needs one closer to it than 20 ms is.
+			interval := 20 * time.Millisecond
+			if ms, err := strconv.Atoi(os.Getenv("LOGS_DRIP_INTERVAL")); err == nil {
+				interval = time.Duration(ms) * time.Millisecond
+			}
 			for i := 1; i <= n; i++ {
-				time.Sleep(20 * time.Millisecond)
+				time.Sleep(interval)
 				fmt.Printf("drip %d %s\n", i, last)
 			}
 		}
@@ -1135,6 +1178,18 @@ func run(args []string) int {
 					return 1
 				}
 			}
+			// $IMAGE_LABELS gives an existing image its labels (#1126), in the
+			// real shape (`variants[].config.config.Labels`, container 1.4.1 —
+			// see internal/runtime/imagelabels_test.go for how it was measured),
+			// as `ref=key1=v1,key2=v2` entries separated by spaces. An image not
+			// named there still answers (it exists; it just declares nothing),
+			// matching the real CLI's answer for an image built with no `-l`.
+			parts := make([]string, 0, 2)
+			for _, l := range imageLabels(arg(2)) {
+				k, v, _ := strings.Cut(l, "=")
+				parts = append(parts, fmt.Sprintf("%q:%q", k, v))
+			}
+			fmt.Printf(`[{"variants":[{"config":{"config":{"Labels":{%s}}}}]}]`+"\n", strings.Join(parts, ","))
 		}
 	}
 	return 0
@@ -1256,6 +1311,19 @@ func networkLabels(name string) ([]string, bool) {
 		}
 	}
 	return nil, false
+}
+
+// imageLabels are the labels $IMAGE_LABELS gives ref (#1126), or nil if it
+// names no entry for it — an image that exists but declares nothing.
+func imageLabels(ref string) []string {
+	for _, entry := range strings.Fields(os.Getenv("IMAGE_LABELS")) {
+		r, rest, _ := strings.Cut(entry, "=")
+		if r != ref || rest == "" {
+			continue
+		}
+		return strings.Split(rest, ",")
+	}
+	return nil
 }
 
 // stopAskedPath is the marker every `stop` of a name leaves, whatever it did.
@@ -1418,12 +1486,14 @@ func validNetworkName(name string) bool {
 // `_`, `.` and `-` is `Error: container ID <name> is not a valid container ID`
 // (exit 1). refused is false when the run may go ahead.
 //
-// This reads the shapes opossum passes (`--name <name>` among separate flags).
+// This reads the shapes opossum passes (`--name <name>` among separate flags,
+// and `--flag=value` combined for the flags opossum passes that way, #996).
 // Not read the way the real CLI reads them: `--name=<name>`, `-e=<value>`,
 // combined short flags (`-it`), `--`, `-h`/`--help`/`--version`, `--debug` (an
-// unknown option to `run`), a value starting with `-` for another flag (the
-// real CLI calls that flag's value missing, exit 64 — opossum can pass one, as
-// `--user -1` from `user: "-1"`, #996), and a flag with no value at the end.
+// unknown option to `run`), a value starting with `-` given to another flag as
+// a separate argument (the real CLI calls that flag's value missing, exit 64 —
+// measured on `--user -1`; opossum itself now passes such values combined,
+// `--user=-1` from `user: "-1"`, #996), and a flag with no value at the end.
 func containerNameRefused(args []string) (msg string, code int, refused bool) {
 	const missing = "Error: Missing value for '--name <name>'"
 	name, given := "", false
@@ -1433,6 +1503,13 @@ func containerNameRefused(args []string) (msg string, code int, refused bool) {
 			break // the image
 		}
 		if runFlagsWithoutValue[a] {
+			continue
+		}
+		// A long flag opossum passes as one `--flag=value` argument (#996) is
+		// already complete — it does not consume the next word too. `--name`
+		// itself is never passed this way (name comes as a separate argument),
+		// so this cannot hide a genuine `--name=...` from the check below.
+		if strings.HasPrefix(a, "--") && strings.Contains(a, "=") {
 			continue
 		}
 		if i+1 == len(args) {
@@ -1486,6 +1563,11 @@ func volumeNameRefused(args []string) (msg string, refused bool) {
 			break // the image
 		}
 		if runFlagsWithoutValue[a] {
+			continue
+		}
+		// Same reason as containerNameRefused: a combined `--flag=value`
+		// argument (#996) does not consume the next word too.
+		if strings.HasPrefix(a, "--") && strings.Contains(a, "=") {
 			continue
 		}
 		if i+1 == len(args) {

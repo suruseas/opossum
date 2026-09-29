@@ -50,7 +50,7 @@ var codesWithRecoveryProse = []diagCode{
 	codeExternalNetAbsent, codeHostPortRemapped, codeHostPortNotPlaced, codeHostPortTwice, codeHostAddressUnbindable, codeHostPortNotBindable, codeNetworkSubnetChanged, codeProjectBusy, codeExternalVolumeAbsent,
 	codeOrphans,
 	codeDepNotRunning, codeRuntimeAbsent, codeRuntimeStopped, codeRuntimeAutoStart,
-	codeServiceExited, codeSupervisorStarted, codeSupervisorAction,
+	codeServiceExited, codeSupervisorStarted, codeSupervisorAction, codeSupervisorStopFailed,
 	codeImageNoArm64,
 }
 

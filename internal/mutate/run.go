@@ -761,11 +761,39 @@ func (r *Runner) disarmAndRestore() error {
 // hand. A file that already holds the original (somebody put it back by hand, or
 // the write of the mutation was cut short and left it whole) is not an edit.
 //
+// A file this Read cannot get back at all — removed, moved elsewhere, or made
+// unreadable — is the same kind of interference and gets the same treatment:
+// nothing is written back over what might be waiting somewhere else. Writing
+// the original here would recreate the file from nothing, with the exit
+// status and report reading as though the sweep had restored it (#1340).
+// "Gone" (the name itself is not there) and "there but this process cannot
+// read it" are worded apart: only the first can mean the mutated content is
+// sitting at some other name instead, so only that one says so — the second
+// is a file the mutation almost certainly still is, so it keeps the loud
+// still-mutated wording #1253 already gives a restore Write cannot land.
+//
 // Nothing here keeps another process from writing between the read and the write:
 // the lock is this process's own.
 func (r *Runner) restorePendingLocked() error {
 	now, err := r.Read(r.pendPath)
-	if r.pendWritten && err == nil && !bytes.Equal(now, r.pendMut) && !bytes.Equal(now, r.pendOrig) {
+	if err != nil {
+		m := r.pendMutation
+		if !r.pendWritten {
+			return fmt.Errorf("%s could not be read to restore it, and the write of mutation %q to it "+
+				"was never confirmed to have gone through in the first place: %w (the sweep stopped here)",
+				r.pendPath, m.Name, err)
+		}
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("%s could not be found to restore it (mutation %q was applied to it), so it "+
+				"was NOT written back: %w — if it was moved rather than removed, the copy may still hold "+
+				"the mutation, which replaced %q with %q (the sweep stopped here)",
+				r.pendPath, m.Name, err, m.From, m.To)
+		}
+		return fmt.Errorf("could not restore %s — IT IS STILL MUTATED (mutation %q replaced %q with %q) "+
+			"and could not even be read to check: %w (the sweep stopped here)",
+			r.pendPath, m.Name, m.From, m.To, err)
+	}
+	if r.pendWritten && !bytes.Equal(now, r.pendMut) && !bytes.Equal(now, r.pendOrig) {
 		m := r.pendMutation
 		how := fmt.Sprintf("it may or may not still hold the mutation, which replaced %q with %q — "+
 			"compare the file with `git diff` before committing", m.From, m.To)

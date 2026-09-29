@@ -30,8 +30,8 @@ func TestUpPutsServiceLabelsBeforeItsOwn(t *testing.T) {
 	if runLine == "" {
 		t.Fatalf("no run for web, got %v", log())
 	}
-	user := strings.Index(runLine, "-l app.tier=front -l opossum.project=other -l flagonly= ")
-	own := strings.LastIndex(runLine, "-l opossum.project=demo")
+	user := strings.Index(runLine, "--label=app.tier=front --label=opossum.project=other --label=flagonly= ")
+	own := strings.LastIndex(runLine, "--label=opossum.project=demo")
 	if user < 0 || own < 0 || own < user {
 		t.Errorf("want the service's labels first and opossum's project label after them, got: %s", runLine)
 	}
@@ -74,8 +74,8 @@ func TestRunOneOffPutsServiceLabelsBeforeItsOwnAndLabelsTheNetwork(t *testing.T)
 			runLine = line
 		}
 	}
-	user := strings.Index(runLine, "-l app.tier=front -l opossum.project=other ")
-	own := strings.LastIndex(runLine, "-l opossum.project=demo")
+	user := strings.Index(runLine, "--label=app.tier=front --label=opossum.project=other ")
+	own := strings.LastIndex(runLine, "--label=opossum.project=demo")
 	if runLine == "" || user < 0 || own < 0 || own < user {
 		t.Errorf("want the service's labels first and opossum's project label after them on the one-off run, got: %s", runLine)
 	}

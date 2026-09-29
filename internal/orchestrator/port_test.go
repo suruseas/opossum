@@ -25,6 +25,79 @@ func portProject() *compose.Project {
 	})
 }
 
+// #1272 E: a published range arrives from `inspect` as one entry with a
+// count, not as one entry per port (measured on container 1.4.1: a
+// 47210-47212:80-82 range reports one publishedPorts entry, containerPort
+// 80, count 3 — and all three of 47210/47211/47212 are really bound). `port`
+// used to read only that first entry, so asking for 81 or 82 — bound and
+// real — was refused as though nothing there was published at all.
+const rangeInspect = `[{"status":{"state":"running","networks":[{"network":"demo-net","ipv4Address":"192.168.64.10/24"}]},"configuration":{"labels":{"opossum.project":"demo"},"publishedPorts":[` +
+	`{"containerPort":80,"count":3,"hostAddress":"0.0.0.0","hostPort":47210,"proto":"tcp"}]}}]`
+
+func TestPortFindsAContainerPortInTheMiddleOfAPublishedRange(t *testing.T) {
+	rt := fakeShimInspect(t, rangeInspect, 0)
+	for _, tc := range []struct {
+		name string
+		port int
+		want string
+	}{
+		{"the bottom of the range, the one the entry names outright", 80, "0.0.0.0:47210\n"},
+		{"the middle of the range", 81, "0.0.0.0:47211\n"},
+		{"the top of the range", 82, "0.0.0.0:47212\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			if err := orchestrator.New(portProject(), rt, "opossum", &out).Port("web", tc.port, "tcp"); err != nil {
+				t.Fatalf("Port: %v", err)
+			}
+			if out.String() != tc.want {
+				t.Errorf("port %d/tcp printed %q, want %q", tc.port, out.String(), tc.want)
+			}
+		})
+	}
+	// A container port outside the range is refused, and the list of what IS
+	// published names every port the range actually covers — not just the
+	// entry's own first number, which would send the reader looking for 81
+	// and 82 among ports that were never there instead of telling them those
+	// two are taken already.
+	t.Run("outside the range, still refused, naming the whole span", func(t *testing.T) {
+		var out bytes.Buffer
+		err := orchestrator.New(portProject(), rt, "opossum", &out).Port("web", 83, "tcp")
+		want := `no port 83/tcp for container web.demo.opossum: 80/tcp, 81/tcp, 82/tcp`
+		if err == nil || err.Error() != want {
+			t.Errorf("want error %q, got: %v", want, err)
+		}
+		if out.Len() != 0 {
+			t.Errorf("nothing may be printed when the port is refused, got %q", out.String())
+		}
+	})
+}
+
+// A single port BEFORE the range, both on the same container — a version of
+// the fix that only spans info.Ports[0] (plausible, since a range is
+// commonly the only entry) would still collapse THIS range: every row above
+// puts it first.
+const singleThenRangeInspect = `[{"status":{"state":"running","networks":[{"network":"demo-net","ipv4Address":"192.168.64.10/24"}]},"configuration":{"labels":{"opossum.project":"demo"},"publishedPorts":[` +
+	`{"containerPort":3000,"hostAddress":"0.0.0.0","hostPort":65345,"proto":"tcp"},` +
+	`{"containerPort":80,"count":3,"hostAddress":"0.0.0.0","hostPort":47210,"proto":"tcp"}]}}]`
+
+func TestPortFindsAPublishedRangeThatIsNotTheFirstEntry(t *testing.T) {
+	rt := fakeShimInspect(t, singleThenRangeInspect, 0)
+	var out bytes.Buffer
+	if err := orchestrator.New(portProject(), rt, "opossum", &out).Port("web", 82, "tcp"); err != nil {
+		t.Fatalf("Port: %v", err)
+	}
+	if want := "0.0.0.0:47212\n"; out.String() != want {
+		t.Errorf("port 82/tcp printed %q, want %q", out.String(), want)
+	}
+	var refused bytes.Buffer
+	err := orchestrator.New(portProject(), rt, "opossum", &refused).Port("web", 84, "tcp")
+	want := `no port 84/tcp for container web.demo.opossum: 3000/tcp, 80/tcp, 81/tcp, 82/tcp`
+	if err == nil || err.Error() != want {
+		t.Errorf("want error %q, got: %v", want, err)
+	}
+}
+
 func TestPortPrintsTheHostSideOfAPublishedPort(t *testing.T) {
 	rt := fakeShimInspect(t, portInspect, 0)
 	for _, tc := range []struct {

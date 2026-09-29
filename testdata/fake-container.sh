@@ -186,9 +186,11 @@ case "$1" in
     # is not a valid container ID (exit 1). This reads the shapes opossum passes;
     # not read the way the real CLI reads them: `--name=<name>`, `-e=<value>`,
     # combined short flags, `--`, `-h`/`--help`/`--version`, `--debug`, a value
-    # starting with `-` for another flag (the real CLI calls it missing, exit 64
-    # — `--user -1`, #996), and a flag with no value at the end. The letters are
-    # spelled out: a range can take other letters in some locales.
+    # starting with `-` given to another flag as a separate argument (the real
+    # CLI calls it missing, exit 64 — measured on `--user -1`; opossum itself
+    # now passes such values combined, `--user=-1`, #996), and a flag with no
+    # value at the end. The letters are spelled out: a range can take other
+    # letters in some locales.
     name= given= want= n=0
     for a in "$@"; do
       n=$((n+1)); [ "$n" -eq 1 ] && continue  # "run"
@@ -202,6 +204,11 @@ case "$1" in
       case "$a" in
         -d|--detach|-i|--interactive|-t|--tty|--init|--no-dns|--read-only|--rm|--remove|--rosetta|--ssh|--virtualization) : ;;
         --name) want=name ;;
+        # A long flag opossum passes as one `--flag=value` argument (#996) is
+        # already complete — unlike a short flag or one given a separate value,
+        # it does not consume the next word too, so a `--name` after it is not
+        # its value.
+        --*=*) : ;;
         -*) want=value ;;
         *) break ;;
       esac
@@ -246,6 +253,10 @@ case "$1" in
       case "$a" in
         -d|--detach|-i|--interactive|-t|--tty|--init|--no-dns|--read-only|--rm|--remove|--rosetta|--ssh|--virtualization) : ;;
         -v) want=volume ;;
+        # A long flag opossum passes as one `--flag=value` argument (#996) is
+        # already complete — unlike a short flag or one given a separate value,
+        # it does not consume the next word too.
+        --*=*) : ;;
         -*) want=value ;;
         *) break ;;
       esac
@@ -277,9 +288,13 @@ case "$1" in
     done
     # Running a name makes it there and running again (see stop/delete), with
     # the project label this run gave it (none for a run without one), given
-    # as `-l` (the spelling opossum passes) or `--label`.
+    # as `-l` (the short spelling) or `--label`; opossum itself passes
+    # `--label=<v>` as one argument (#996), so that combined form is read too.
     proj= pub= prev=
     for a in "$@"; do
+      case "$a" in
+        --label=opossum.project=*) proj=${a#--label=opossum.project=} ;;
+      esac
       if [ "$prev" = -l ] || [ "$prev" = --label ]; then
         case "$a" in opossum.project=*) proj=${a#opossum.project=} ;; esac
       fi
@@ -353,6 +368,23 @@ case "$1" in
       echo "Error: get failed: container $n not found" >&2; exit 1
     fi
     s=$(marker stopped "$n"); if [ -n "$s" ]; then rm -f "$s"; fi
+    ;;
+  kill)
+    # The real CLI only truly kills a running container: one already stopped
+    # refuses with invalidState, and one not there refuses with notFound —
+    # both measured on 1.4.1, same pair as the other two fakes. Orchestrator.Kill
+    # re-inspects after either failure and only reports it when the container
+    # is still running or unreadable, so a container not running discards
+    # both — answering them correctly here changes no caller's behaviour.
+    n=$(last "$@")
+    if ! is_there "$n"; then
+      echo "Error: internalError: \"failed to kill container\" (cause: \"notFound: \"container with ID $n not found\"\")" >&2; exit 1
+    fi
+    s=$(marker stopped "$n")
+    if [ -n "$s" ] && [ -e "$s" ]; then
+      echo 'Error: internalError: "failed to kill container" (cause: "invalidState: "no runtime client exists: container is stopped"")' >&2; exit 1
+    fi
+    if [ -n "$s" ]; then : > "$s"; fi
     ;;
   delete|rm)
     n=$(last "$@"); g=$(marker gone "$n")

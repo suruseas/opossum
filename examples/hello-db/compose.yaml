@@ -1,0 +1,45 @@
+# The smallest working web + database pair — the reference for AGENTS.md's
+# "Starting from nothing" section, for building a first project on opossum
+# rather than adapting one you already have.
+#
+#   opossum -f examples/hello-db/compose.yaml up
+#   curl localhost:8080
+#   opossum -f examples/hello-db/compose.yaml down -v
+#
+# Both images are pre-built (no `container builder start` needed). It shows the
+# two things worth getting right from the start: a database's data in a
+# *named volume*, with PGDATA pointed one level below the mount point so it
+# also works on Postgres 18+ (see the comment on `db` below), and startup
+# gated on a real `healthcheck` rather than merely on the container having
+# started.
+name: hello-db
+
+services:
+  web:
+    image: nginx:alpine
+    ports:
+      - "8080:80"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # PostgreSQL with a persistent named volume. NOTE the PGDATA subdirectory:
+  # Postgres 18 moved its cluster into a version subdirectory and refuses to
+  # start against a mount that doesn't have one (OPSM-110) — pointing PGDATA
+  # one level below the mount up front works on every version without having
+  # to know which one you're on. MySQL/MariaDB don't need this.
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: demo
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  db_data:

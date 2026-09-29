@@ -152,10 +152,10 @@ func TestStatsJSONRowsFollowTheServices(t *testing.T) {
 	}
 }
 
-// With no container for any service, the JSON form says so the way the table
-// does, and asks the runtime for nothing: `container stats` with no names
-// would report every container on the machine.
-func TestStatsJSONWithNoContainersSaysSo(t *testing.T) {
+// With no container for any service, the JSON form passes it by silently the
+// way the table does (#1098), and asks the runtime for nothing: `container
+// stats` with no names would report every container on the machine.
+func TestStatsJSONWithNoContainersIsPassedBy(t *testing.T) {
 	rt, log := shimWhereSomeContainersDoNotExist(t, ".demo.")
 	p := project("demo", map[string]*compose.Service{
 		"web": {Image: "web:latest"},
@@ -163,8 +163,8 @@ func TestStatsJSONWithNoContainersSaysSo(t *testing.T) {
 	})
 	var out bytes.Buffer
 	err := orchestrator.New(p, rt, "opossum", &out).Stats(nil, orchestrator.StatsOptions{NoStream: true, Format: "json"})
-	if err == nil || !strings.Contains(err.Error(), "opossum up") {
-		t.Fatalf("want an error pointing at `opossum up`, got %v", err)
+	if err != nil {
+		t.Fatalf("want no error (nothing running, like docker compose), got %v", err)
 	}
 	if out.Len() != 0 {
 		t.Errorf("nothing should be printed, got %q", out.String())

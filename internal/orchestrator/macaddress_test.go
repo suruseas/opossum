@@ -23,14 +23,14 @@ func TestUpGivesTheMacAddressToTheFirstNetwork(t *testing.T) {
 	if err := o.Up(true); err != nil {
 		t.Fatalf("Up: %v", err)
 	}
-	if indexOf(log(), "--network demo-front,mac=02:42:ac:11:00:77 --network demo-back ") < 0 {
+	if indexOf(log(), "--network=demo-front,mac=02:42:ac:11:00:77 --network=demo-back ") < 0 {
 		t.Errorf("expected the MAC on the first network only, got %v", log())
 	}
 	// With no networks: the project's default network is the first one.
-	if indexOf(log(), "--name solo.demo.opossum --network demo-net,mac=02:42:ac:11:00:79") < 0 {
+	if indexOf(log(), "--name solo.demo.opossum --network=demo-net,mac=02:42:ac:11:00:79") < 0 {
 		t.Errorf("expected the MAC on the default network for a service with no networks:, got %v", log())
 	}
-	if indexOf(log(), "--name plain.demo.opossum") < 0 || indexOf(log(), "plain.demo.opossum --network demo-front,mac") >= 0 {
+	if indexOf(log(), "--name plain.demo.opossum") < 0 || indexOf(log(), "plain.demo.opossum --network=demo-front,mac") >= 0 {
 		t.Errorf("a service without mac_address must not get one, got %v", log())
 	}
 	for _, line := range log() {
@@ -49,7 +49,7 @@ func TestRunOneOffGivesTheMacAddressToo(t *testing.T) {
 	if err := o.RunOneOff("web", []string{"true"}, orchestrator.RunOneOffOptions{}); err != nil {
 		t.Fatalf("RunOneOff: %v", err)
 	}
-	if indexOf(log(), "--network demo-net,mac=02:42:ac:11:00:78") < 0 {
+	if indexOf(log(), "--network=demo-net,mac=02:42:ac:11:00:78") < 0 {
 		t.Errorf("expected the MAC on the one-off run's network, got %v", log())
 	}
 }

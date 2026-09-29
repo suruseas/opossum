@@ -8,6 +8,36 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 
 .PHONY: build test test-shipped wired hooks real-conformance cover sieve install snapshot changelog changelog-preview
 
+# A TMPDIR of this invocation's own for `test` and `test-shipped`, left alone
+# under CI — which already passes a per-job one (.github/workflows/ci.yml) —
+# but always made here otherwise: on macOS, launchd sets $TMPDIR to a
+# per-login-session directory for every shell, present or not is not the
+# question, so checking `$(origin TMPDIR)` never fires where the bug actually
+# lives (measured: an ordinary Terminal shell already has one, "environment"
+# not "undefined") — two `make test` in the same login session share that
+# same value regardless, and that sharing, not an unset TMPDIR, is what made
+# `cmd/noleftovers` read one run's still-open t.TempDir() as the other's
+# leftover (#1238, seen live: this recipe and a `releasedgate_test.go` sweep,
+# same $TMPDIR, each catching the other's temp dirs mid-test). `ifndef CI`
+# reads the one variable every CI provider sets and a workstation shell does
+# not (GitHub Actions: measured), so it fires for every local run whatever
+# $TMPDIR already holds, and never for CI's own — `ifndef` asks only whether
+# the variable has a value, not what the value says, so a hypothetical
+# `CI=false` would not fire this either; no CI provider is known to set it
+# that way, so this is not chased further. $(shell echo $$PPID) is this make
+# process's own pid — one subshell, asked once per invocation, not per
+# recipe line, so both `go test` lines below (and, for test-shipped, its one
+# line) share the same directory. Short, not content-addressed: a socket path
+# under it can already run into the 104-108 byte unix-socket limit
+# (orchestrator tests have hit this). A run this kills or that panics before
+# reaching the closing `rm -rf` leaves its directory behind — the next run
+# gets a different pid and does not collide with it, so this is left for a
+# human to notice rather than guarded with a trap.
+ifndef CI
+test: export TMPDIR := /tmp/opossum-test-$(shell echo $$PPID)
+test-shipped: export TMPDIR := /tmp/opossum-test-$(shell echo $$PPID)
+endif
+
 build: ## build the opossum binary with the version stamped in
 	go build -ldflags "$(LDFLAGS)" -o opossum ./cmd/opossum
 
@@ -47,16 +77,19 @@ build: ## build the opossum binary with the version stamped in
 # recipe gives the measuring package the quiet it is measuring; both lines
 # run under the leftovers check, and the gate is red if either is.
 test: wired ## run the full test suite (the regression gate)
+	@case "$$TMPDIR" in /tmp/opossum-test-*) mkdir -p "$$TMPDIR" ;; esac
 	go run ./cmd/noleftovers go test $$(go list ./... | grep -v '/cmd/busy$$') -race -cover -count=1
 	go run ./cmd/noleftovers go test ./cmd/busy -race -cover -count=1
+	@case "$$TMPDIR" in /tmp/opossum-test-*) rm -rf "$$TMPDIR" ;; esac
 
 # The gate for a copy of this repository that carries the product and not the
 # workshop: the packages the released binary links, and nothing else. Asked
 # of the compiler rather than listed here, so that a package added to the
-# binary is tested without anyone remembering to add it. The recipe is the
-# whole claim and is pinned as one line, because a grep narrowed by a
-# character tests a fraction of the binary and still prints `ok` for each
-# package it did run.
+# binary is tested without anyone remembering to add it. The gate command
+# itself is the whole claim and is pinned as one line (the mkdir/rm around
+# it, #1238, are this run's own housekeeping, not the claim), because a grep
+# narrowed by a character tests a fraction of the binary and still prints
+# `ok` for each package it did run.
 #
 # What is left out is this repository's tooling — the checks that read
 # CONTRIBUTING.md, the changelog fragments and the notes from real-runtime
@@ -66,7 +99,9 @@ test: wired ## run the full test suite (the regression gate)
 # config is published, so it is not one of them.) Running those checks there
 # asks whether files that were never meant to be shipped are in order.
 test-shipped: wired ## run the tests of the packages the released binary links
+	@case "$$TMPDIR" in /tmp/opossum-test-*) mkdir -p "$$TMPDIR" ;; esac
 	go run ./cmd/noleftovers go test $$(go list -deps ./cmd/opossum | grep '^github.com/suruseas/opossum') -race -cover -count=1
+	@case "$$TMPDIR" in /tmp/opossum-test-*) rm -rf "$$TMPDIR" ;; esac
 
 # Opt-in: measures, against the real `container` runtime, the facts the socket
 # guidance stands on. Not part of the gate — the daily gate is the fake's — and

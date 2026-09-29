@@ -73,7 +73,8 @@ type fakeContainer struct {
 	state     string // "" is running
 	proto     string // "" is tcp
 	hostPort  int
-	container int // 0 is 80
+	container int    // 0 is 80
+	address   string // "" is the wildcard, 0.0.0.0
 	// count is how wide the published entry is: the runtime answers a range
 	// with ONE entry holding the first port and a count of the span. 0 is 1.
 	count int
@@ -87,7 +88,7 @@ func shimFor(t *testing.T, cs ...fakeContainer) *runtime.Runtime {
 	t.Helper()
 	var arms strings.Builder
 	for _, c := range cs {
-		project, state, proto, container := c.project, c.state, c.proto, c.container
+		project, state, proto, container, address := c.project, c.state, c.proto, c.container, c.address
 		if project == "" {
 			project = "demo"
 		}
@@ -100,14 +101,17 @@ func shimFor(t *testing.T, cs ...fakeContainer) *runtime.Runtime {
 		if container == 0 {
 			container = 80
 		}
+		if address == "" {
+			address = "0.0.0.0"
+		}
 		count := c.count
 		if count == 0 {
 			count = 1
 		}
 		fmt.Fprintf(&arms, "      %s.demo.opossum) cat <<'J'\n"+
 			`[{"status":{"state":"%s"},"configuration":{"labels":{"opossum.project":"%s"},`+
-			`"publishedPorts":[{"containerPort":%d,"count":%d,"hostAddress":"0.0.0.0","hostPort":%d,"proto":"%s"}]}}]`+
-			"\nJ\n      ;;\n", c.service, state, project, container, count, c.hostPort, proto)
+			`"publishedPorts":[{"containerPort":%d,"count":%d,"hostAddress":%q,"hostPort":%d,"proto":"%s"}]}}]`+
+			"\nJ\n      ;;\n", c.service, state, project, container, count, address, c.hostPort, proto)
 	}
 	dir := t.TempDir()
 	shim := filepath.Join(dir, "c.sh")

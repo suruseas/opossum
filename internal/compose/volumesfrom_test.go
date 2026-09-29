@@ -228,15 +228,22 @@ func TestVolumesFromKnownDifferences(t *testing.T) {
 		{"a cycle a volumes_from entry closes with a depends_on is not read at the load",
 			"  a:\n    image: a\n    volumes_from: [b]\n  b:\n    image: a\n    depends_on: [a]\n",
 			"", "config rc 1: dependency cycle detected: a -> b -> a"},
-		{"an anonymous volume behind a profile that is off is read",
-			"  main:\n    image: a\n  holder:\n    image: a\n    profiles: [extra]\n    volumes: [/data]\n  user:\n    image: a\n    profiles: [extra]\n    volumes_from: [holder]\n",
-			"anonymous volume at /data", "config rc 0"},
-		{"a missing service behind a profile that is off is read",
+		// A missing service, a container: entry, and a holder's anonymous
+		// volume are no longer read here behind a profile that is off
+		// (#1156, #1402): deferred to command time
+		// (orchestrator.checkVolumesFromRefs), the same way an undefined
+		// depends_on target is (#1094) — matching docker's rc 0, so these
+		// three rows are no longer differences at all. Kept here rather than
+		// moved: this table is where a change to any of them would be seen.
+		{"a missing service behind a profile that is off is not read",
 			"  main:\n    image: a\n  user:\n    image: a\n    profiles: [extra]\n    volumes_from: [nope]\n",
-			`depends on undefined service "nope"`, "config rc 0"},
-		{"a container: entry behind a profile that is off is read",
+			"", "config rc 0"},
+		{"a container: entry behind a profile that is off is not read",
 			"  main:\n    image: a\n  user:\n    image: a\n    profiles: [extra]\n    volumes_from: ['container:other']\n",
-			"names a container outside this compose file", "config rc 0"},
+			"", "config rc 0"},
+		{"an anonymous volume behind a profile that is off is not read",
+			"  main:\n    image: a\n  holder:\n    image: a\n    profiles: [extra]\n    volumes: [/data]\n  user:\n    image: a\n    profiles: [extra]\n    volumes_from: [holder]\n",
+			"", "config rc 0"},
 		{"an anonymous volume at a path a later holder mounts is refused",
 			"  h1:\n    image: a\n    volumes: [/data]\n  h2:\n    image: a\n    volumes: [./h:/data]\n  user:\n    image: a\n    volumes_from: [h1, h2]\n",
 			"anonymous volume at /data", "up rc 0: the user mounts h2's bind at /data and no anonymous volume"},
@@ -253,6 +260,82 @@ func TestVolumesFromKnownDifferences(t *testing.T) {
 				t.Fatalf("want a refusal saying %q (docker compose: %s), got %v", tc.err, tc.docker, err)
 			}
 		})
+	}
+}
+
+// The anonymous-volume deferral above does not extend to a holder that is
+// itself gated AND itself lent on: h borrows h2's anonymous /data, and user
+// borrows h in turn (with an optional dependency on h, so h's own gate being
+// off would not stop user starting). Deferring here on h's own gate would
+// memoize h.Volumes without /data — h's expand runs once and is cached — so
+// user's own look at h.Volumes would never see the conflict to refuse, and
+// user would start silently missing the mount the file asked for. Refused at
+// load instead, whether or not h ever turns out to run: h lends the mount on,
+// so what it does with its own anonymous-volume conflict is never only its
+// own business.
+func TestVolumesFromDoesNotDeferAnonymousVolumeThroughAHolderThatLendsItOn(t *testing.T) {
+	const body = "services:\n" +
+		"  h2:\n    image: a\n    volumes: [/data]\n" +
+		"  h:\n    image: a\n    profiles: [y]\n    volumes_from: [h2]\n" +
+		"  user:\n    image: a\n    volumes_from: [h]\n" +
+		"    depends_on:\n      h:\n        condition: service_started\n        required: false\n"
+	_, err := Load(writeTemp(t, body))
+	if err == nil || !strings.Contains(err.Error(), "anonymous volume at /data") {
+		t.Fatalf("want a refusal saying %q even though h is gated (h lends the mount on to user), got %v", "anonymous volume at /data", err)
+	}
+}
+
+// isHolder must read the holder's name out of a ref carrying a `:ro` (or any
+// other) suffix the same way the rest of expandVolumesFrom does — not just a
+// bare name: the same regression as the test above, reached through
+// `volumes_from: ['h:ro']` instead of `[h]`.
+func TestVolumesFromDoesNotDeferAnonymousVolumeThroughAHolderReferencedWithASuffix(t *testing.T) {
+	const body = "services:\n" +
+		"  h2:\n    image: a\n    volumes: [/data]\n" +
+		"  h:\n    image: a\n    profiles: [y]\n    volumes_from: [h2]\n" +
+		"  user:\n    image: a\n    volumes_from: ['h:ro']\n" +
+		"    depends_on:\n      h:\n        condition: service_started\n        required: false\n"
+	_, err := Load(writeTemp(t, body))
+	if err == nil || !strings.Contains(err.Error(), "anonymous volume at /data") {
+		t.Fatalf("want a refusal saying %q even naming h with a :ro suffix, got %v", "anonymous volume at /data", err)
+	}
+}
+
+// isHolder must not read a `container:` entry's text after the colon as a
+// service name: a `container:ext` ref does not lend from a service actually
+// named "container", and gating that unrelated service's own anonymous-volume
+// conflict must still defer normally.
+func TestVolumesFromContainerRefDoesNotFalselyMarkAServiceNamedContainerAsAHolder(t *testing.T) {
+	const body = "services:\n" +
+		"  other:\n    image: a\n    profiles: [z]\n    volumes_from: ['container:ext']\n" +
+		"  h2:\n    image: a\n    volumes: [/data]\n" +
+		"  container:\n    image: a\n    profiles: [x]\n    volumes_from: [h2]\n"
+	p, err := Load(writeTemp(t, body))
+	if err != nil {
+		t.Fatalf("want the load to go ahead (container is gated, a leaf nobody borrows from, and off) — a container: entry elsewhere must not mark it as a holder, got %v", err)
+	}
+	if got := []string(p.Services["container"].Volumes); len(got) != 0 {
+		t.Errorf("want the deferred anonymous mount held back, got %v", got)
+	}
+}
+
+// The other entries a deferred holder lends are still folded at load time —
+// only the one anonymous entry is held back, not the whole ref: a service
+// this run never starts must not lose mounts that were never in question,
+// once it does run.
+func TestVolumesFromDeferralOnlyHoldsBackTheOneAnonymousEntry(t *testing.T) {
+	// The anonymous entry comes first: skipping only it (continue) still
+	// reaches the safe one after it, where stopping at it (break) would not —
+	// the two read the same with the safe entry before the anonymous one.
+	const body = "volumes:\n  named: {}\nservices:\n" +
+		"  holder:\n    image: a\n    volumes: [/data, 'named:/kept']\n" +
+		"  user:\n    image: a\n    profiles: [x]\n    volumes_from: [holder]\n"
+	p, err := Load(writeTemp(t, body))
+	if err != nil {
+		t.Fatalf("want the load to go ahead (user is gated and inactive), got %v", err)
+	}
+	if got := []string(p.Services["user"].Volumes); !reflect.DeepEqual(got, []string{"named:/kept"}) {
+		t.Errorf("want the holder's other, non-anonymous mount folded in even though the anonymous one before it was deferred, got %v", got)
 	}
 }
 

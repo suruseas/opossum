@@ -26,6 +26,14 @@ func TestStartFailedHasLogsHint(t *testing.T) {
 // is asked about, so a project with a second service needs its own.
 const inspectRunningWeb = `  inspect) echo '[{"status":{"state":"running"},"configuration":{"id":"web.demo.opossum","labels":{"opossum.project":"demo"}}}]' ;;` + "\n"
 
+// inspectRunning is inspectRunningWeb's general form: an `inspect` case
+// answering that this project's container is there and running, whatever
+// name it is asked about — for a test whose subject is a command failing on a
+// container that exists (a service with none is passed by, #1096/#1098, so
+// scriptShim's own default "not found" would make Start/Restart skip it
+// before ever reaching the failure this shim is set up to produce).
+const inspectRunning = `  inspect) echo '[{"status":{"state":"running"},"configuration":{"id":"x","labels":{"opossum.project":"demo"}}}]' ;;` + "\n"
+
 func lifecycleProject() *compose.Project {
 	return &compose.Project{Name: "demo", Services: map[string]*compose.Service{
 		"web": {Name: "web", Image: "web:latest"},
@@ -107,12 +115,29 @@ func TestWatchRebuildFailureHasNextStep(t *testing.T) {
 
 func TestWatchRestartFailureHasNextStep(t *testing.T) {
 	dir := t.TempDir()
-	shim := scriptShim(t, "  start) exit 1 ;;\n") // sync+stop ok, start fails
+	shim := scriptShim(t, "  start) exit 1 ;;\n"+inspectRunning) // sync+stop ok, start fails
 	var out bytes.Buffer
 	o := New(watchProject(dir, "sync+restart"), shim, "opossum", &out)
 	o.applyChanges([]string{dir + "/components/x.js"})
 	if s := out.String(); !strings.Contains(s, "restart app failed") || !strings.Contains(s, "opossum up app") {
 		t.Errorf("restart failure should warn with a next step, got: %s", s)
+	}
+}
+
+// #1098 made a plain `opossum restart` pass a service with no container by
+// silently, matching docker compose. Watch must not inherit that silence for
+// this container: it already told the user it was watching it, so one that has
+// disappeared out from under it (removed by hand, or never created because the
+// image failed to pull, say) is still worth the same warning a failed restart
+// used to produce.
+func TestWatchRestartWarnsWhenTheContainerIsGone(t *testing.T) {
+	dir := t.TempDir()
+	shim := scriptShim(t, "") // no inspect override: scriptShim's default answers "not found"
+	var out bytes.Buffer
+	o := New(watchProject(dir, "sync+restart"), shim, "opossum", &out)
+	o.applyChanges([]string{dir + "/components/x.js"})
+	if s := out.String(); !strings.Contains(s, "restart app failed") || !strings.Contains(s, "opossum up app") {
+		t.Errorf("want the same next-step warning as a failed restart, got: %s", s)
 	}
 }
 
@@ -189,7 +214,7 @@ func TestWatchSaysAnOwnerRefusalWithoutFailureAdvice(t *testing.T) {
 		{"a copy that fails keeps its advice", "sync", "  cp) exit 1 ;;\n", func(dir string) []string {
 			return []string{"warning: [OPSM-603] " + sync(dir) + " failed: …— check the container \"app\" is running (`opossum ps`)"}
 		}, ""},
-		{"a restart that fails keeps its advice", "sync+restart", "  start) exit 1 ;;\n", func(string) []string {
+		{"a restart that fails keeps its advice", "sync+restart", "  start) exit 1 ;;\n" + inspectRunning, func(string) []string {
 			return []string{"warning: [OPSM-602] restart app failed: …— the container may be gone; run `opossum up app` to recreate it"}
 		}, ""},
 	} {
@@ -280,7 +305,7 @@ func TestWatchNextStepsCarryTheRunsFlags(t *testing.T) {
 		}
 	})
 	t.Run("a restart that failed", func(t *testing.T) {
-		shim := scriptShim(t, "  start) exit 1 ;;\n")
+		shim := scriptShim(t, "  start) exit 1 ;;\n"+inspectRunning)
 		var out bytes.Buffer
 		o := New(watchProject(dir, "sync+restart"), shim, "opossum", &out)
 		o.SetRunFlags(flags)
@@ -305,7 +330,34 @@ func TestWatchNextStepsCarryTheRunsFlags(t *testing.T) {
 		}
 	})
 	t.Run("a restart that failed, of a service a shell would take apart", func(t *testing.T) {
-		shim := scriptShim(t, "  start) exit 1 ;;\n")
+		shim := scriptShim(t, "  start) exit 1 ;;\n"+inspectRunning)
+		var out bytes.Buffer
+		p := watchProject(dir, "sync+restart")
+		p.Services["we b"] = p.Services["app"]
+		delete(p.Services, "app")
+		o := New(p, shim, "opossum", &out)
+		o.SetRunFlags(flags)
+		o.applyChanges([]string{dir + "/components/x.js"})
+		if s := out.String(); !strings.Contains(s, "`opossum up"+flags+" 'we b'`") {
+			t.Errorf("want the service quoted in the command, got: %s", s)
+		}
+	})
+	// The "container is gone" warning (applyChanges' own pre-check, ahead of
+	// Restart — see TestWatchRestartWarnsWhenTheContainerIsGone) is a separate
+	// code path from a failed Restart, above, and must carry the run's flags
+	// too.
+	t.Run("a restart skipped because the container is gone", func(t *testing.T) {
+		shim := scriptShim(t, "") // no inspect override: scriptShim's default answers "not found"
+		var out bytes.Buffer
+		o := New(watchProject(dir, "sync+restart"), shim, "opossum", &out)
+		o.SetRunFlags(flags)
+		o.applyChanges([]string{dir + "/components/x.js"})
+		if s := out.String(); !strings.Contains(s, "`opossum up"+flags+" app`") {
+			t.Errorf("want the flags in the command, got: %s", s)
+		}
+	})
+	t.Run("a restart skipped because the container is gone, of a service a shell would take apart", func(t *testing.T) {
+		shim := scriptShim(t, "")
 		var out bytes.Buffer
 		p := watchProject(dir, "sync+restart")
 		p.Services["we b"] = p.Services["app"]

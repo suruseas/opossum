@@ -153,16 +153,103 @@ func TestCIRunsTheGateItself(t *testing.T) {
 			sweepAt, busyAt)
 	}
 	// Counted over the lines that run something: recipeOf keeps blank lines
-	// (they end nothing in make), and a blank is not a command.
-	commands := 0
-	for _, line := range recipe {
-		if strings.TrimSpace(line) != "" {
-			commands++
+	// (they end nothing in make), and a blank is not a command. Four for
+	// test, three for test-shipped (one gate command, not two) — not just
+	// "first and last match", which a line slipped in between the ends would
+	// still pass. Since #1238: a run's own TMPDIR is made before the gate
+	// command(s) and removed after, so a stray leftover in one workstation's
+	// plain $TMPDIR does not read as another's (CI already passes a per-job
+	// one). The two housekeeping lines are matched exactly (not just
+	// "contains mkdir"), so a housekeeping line that drifted onto a path it
+	// does not own trips this too.
+	const wantMkdir = `@case "$$TMPDIR" in /tmp/opossum-test-*) mkdir -p "$$TMPDIR" ;; esac`
+	const wantRM = `@case "$$TMPDIR" in /tmp/opossum-test-*) rm -rf "$$TMPDIR" ;; esac`
+	checkHousekeeping := func(t *testing.T, target string, recipe []string, wantCommands int) {
+		t.Helper()
+		var nonBlank []string
+		for _, line := range recipe {
+			if s := strings.TrimSpace(line); s != "" {
+				nonBlank = append(nonBlank, s)
+			}
+		}
+		if len(nonBlank) != wantCommands {
+			t.Errorf("%s: the recipe runs %d commands, want %d — #1238's mkdir/rm plus the gate "+
+				"command(s) and nothing else; a line slipped in between (or one of these two "+
+				"dropped) is one this cannot vouch for, got %q", target, len(nonBlank), wantCommands, nonBlank)
+			return
+		}
+		last := len(nonBlank) - 1
+		if nonBlank[0] != wantMkdir || nonBlank[last] != wantRM {
+			t.Errorf("%s: want the recipe to open with %q and close with %q (#1238, this run's own "+
+				"TMPDIR, never a caller's), got %q", target, wantMkdir, wantRM, nonBlank)
 		}
 	}
-	if commands != 2 {
-		t.Errorf("the test recipe runs %d commands; this check knows the two gate commands and "+
-			"nothing else — a third line is one it cannot vouch for", commands)
+	checkHousekeeping(t, "test", recipe, 4)
+
+	shippedRecipe, srerr := recipeOf("test-shipped")(joinContinuations(strings.Split(makefile, "\n")))
+	if srerr != nil {
+		t.Fatalf("Makefile: %v", srerr)
+	}
+	checkHousekeeping(t, "test-shipped", shippedRecipe, 3)
+
+	// The housekeeping is only this run's own away from CI: `ifndef CI`
+	// covers exactly the two targets' TMPDIR exports and nothing else, each
+	// pinned by its own PPID-derived value (not just "starts with `test:
+	// export TMPDIR`", which a value that no longer varies per invocation —
+	// and so no longer keeps two concurrent runs apart — would still pass).
+	// Removing the guard (always overriding TMPDIR, CI included), narrowing
+	// it to just one target, or slipping a third export in trips this
+	// rather than passing silently.
+	const wantTestExport = "test: export TMPDIR := /tmp/opossum-test-$(shell echo $$PPID)"
+	const wantShippedExport = "test-shipped: export TMPDIR := /tmp/opossum-test-$(shell echo $$PPID)"
+	lines := strings.Split(makefile, "\n")
+	ifndefAt, endifAt := -1, -1
+	for i, line := range lines {
+		switch strings.TrimSpace(line) {
+		case "ifndef CI":
+			if ifndefAt < 0 {
+				ifndefAt = i
+			}
+		case "endif":
+			if ifndefAt >= 0 && endifAt < 0 {
+				endifAt = i
+			}
+		}
+	}
+	if ifndefAt < 0 || endifAt < 0 {
+		t.Fatalf("want an `ifndef CI` and its `endif` around the TMPDIR exports (#1238), found "+
+			"ifndef at %d, endif at %d", ifndefAt, endifAt)
+	}
+	var inBlock []string
+	for _, line := range lines[ifndefAt+1 : endifAt] {
+		if s := strings.TrimSpace(line); s != "" {
+			inBlock = append(inBlock, s)
+		}
+	}
+	// Sorted, not compared in file order: a make assignment does not care
+	// which of two unrelated lines comes first, and comparing them in the
+	// order written would read swapping them (a change with no effect) as a
+	// mismatch.
+	sortedInBlock := append([]string(nil), inBlock...)
+	sort.Strings(sortedInBlock)
+	sortedWant := []string{wantShippedExport, wantTestExport} // already alphabetical
+	if !reflect.DeepEqual(sortedInBlock, sortedWant) {
+		t.Errorf("want exactly these two lines between `ifndef CI` and `endif` (#1238) and "+
+			"nothing else: %q, got %q", sortedWant, inBlock)
+	}
+	// And nowhere else in the file: a TMPDIR export outside this block would
+	// dodge the ifndef entirely — reaching CI's own run too — and, sharing
+	// one fixed path with nothing to tell concurrent invocations apart,
+	// bring #1238 straight back.
+	total := 0
+	for _, line := range lines {
+		if strings.Contains(line, ": export TMPDIR") {
+			total++
+		}
+	}
+	if total != 2 {
+		t.Errorf("want exactly 2 lines assigning TMPDIR across the whole Makefile (the two inside "+
+			"the `ifndef CI` block, and no others) (#1238), found %d", total)
 	}
 
 	var gates []string

@@ -26,7 +26,11 @@ still in the way.
 > **Using opossum from an AI agent?** Point it at [`AGENTS.md`](AGENTS.md) — a
 > high-density, facts-only reference (command surface, the supported/ignored/
 > rejected compose fields, and failure-signature→fix table) meant to drop into an
-> agent's context window. The human quickstart below still applies.
+> agent's context window. The human quickstart below still applies. **New to
+> Docker Compose and building from an empty directory rather than an existing
+> file?** AGENTS.md's ["Starting from
+> nothing"](AGENTS.md#starting-from-nothing) section is written for exactly
+> that — hand it to an AI agent and describe what you want running.
 
 > **Why this works now:** container-to-container networking and name resolution
 > rely on features in **macOS 26**. On macOS 15 containers are network-isolated,

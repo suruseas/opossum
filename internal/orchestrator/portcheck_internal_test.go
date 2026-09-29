@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"bytes"
 	"fmt"
 	"github.com/suruseas/opossum/internal/compose"
 	"github.com/suruseas/opossum/internal/runtime"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -45,6 +47,69 @@ func TestAirPlayHint(t *testing.T) {
 	// is no port at all and carries no hint.
 	if airPlayHint(0) != "" {
 		t.Error("a port that is not a number should carry no hint")
+	}
+}
+
+// #1272 C: the AirPlay hint is a guess at what a bare port number usually
+// means, and naming this project's own service holding the port is not a
+// guess — said together, they read as contradicting advice ("it's probably
+// AirPlay" beside "it's this project's own service"). The hint is said only
+// where there is no holder of this project's to name instead.
+//
+// The port under test is hardcoded to 5000 — the number airPlayHint keys
+// off — rather than a listener this process holds (as the sibling tests in
+// preflightownport_test.go do): probeHostPort is mocked below, so nothing
+// ever really binds 5000, and a real net.Listen on it would risk colliding
+// with an actual AirPlay Receiver on the machine running the test.
+func TestAirPlayHintDoesNotAppearBesideOurOwnHolder(t *testing.T) {
+	fakeProbe := func(network, address string) error { return syscall.EADDRINUSE }
+	for _, tc := range []struct {
+		name     string
+		aPorts   string // "a"'s own compose entry; default is "5001:80"
+		holder   []fakeContainer
+		wantHeld bool
+		wantAir  bool
+	}{
+		// "a" holds 5000 for real (fakeContainer) but its compose entry asks
+		// for 5001, so "a" and "z" do not name the same host port in the
+		// file — the in-file duplicate check (OPSM-213) stays out of the way
+		// and this check is the one that finds the holder. Restarting frees
+		// the port (takesItBack=false): "a"'s own entries don't publish 5000.
+		{name: "our own service holds it, and lets the port go on restart",
+			holder: []fakeContainer{{service: "a", hostPort: 5000}}, wantHeld: true, wantAir: false},
+		{name: "nothing of ours holds it (control)", holder: nil,
+			wantHeld: false, wantAir: true},
+		// Same holder, but "a"'s own entries publish 5000 too (a range
+		// covering it), so restarting takes the port straight back
+		// (takesItBack=true) — a different branch through heldByUsHint,
+		// and a guard of `holder == "" || takesItBack` would wrongly let
+		// the AirPlay hint back in only here.
+		{name: "our own service holds it and takes it straight back",
+			aPorts: "5000-5001:80-81", holder: []fakeContainer{{service: "a", hostPort: 5000}},
+			wantHeld: true, wantAir: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			aPorts := tc.aPorts
+			if aPorts == "" {
+				aPorts = "5001:80"
+			}
+			p := &compose.Project{Name: "demo", Services: map[string]*compose.Service{
+				"a": {Image: "web:latest", Ports: []string{aPorts}},
+				"z": {Image: "web:latest", Ports: []string{"5000:90"}},
+			}}
+			o := New(p, shimFor(t, tc.holder...), "opossum", &bytes.Buffer{})
+			o.probeHostPort = fakeProbe
+			err := o.checkHostPorts([]string{"z", "a"})
+			if err == nil {
+				t.Fatal("checkHostPorts said nothing; wanted a refusal naming the port")
+			}
+			if got := strings.Contains(err.Error(), "held by this project's service"); got != tc.wantHeld {
+				t.Errorf("held-by-us hint present = %v, want %v:\n%v", got, tc.wantHeld, err)
+			}
+			if got := strings.Contains(err.Error(), "AirPlay"); got != tc.wantAir {
+				t.Errorf("AirPlay hint present = %v, want %v:\n%v", got, tc.wantAir, err)
+			}
+		})
 	}
 }
 

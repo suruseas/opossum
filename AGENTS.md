@@ -95,6 +95,136 @@ Facts to rely on:
 - Nothing is written when `-f` was given (the overlay wouldn't be merged) or when
   no known pattern matched.
 
+## Starting from nothing
+
+For an empty directory with no compose file yet — someone asking you to build
+something on opossum rather than hand you one. (If a `compose.yaml` already
+exists, skip to Quickstart above; this section is for writing the first one.)
+
+**Before you write anything**, confirm the machine is ready:
+
+```sh
+opossum doctor
+```
+
+`doctor` is read-only and never starts anything; it reports what it finds under
+✅/⚠️/❌, one check per line, and skips the checks after `runtime` if that one
+fails (there is nothing further to check against a system that isn't
+answering). A ❌ on
+`runtime` covers two different states this doc treats the same way: the
+`container` CLI isn't on PATH at all, or it's on PATH but its system is simply
+stopped. You do **not** need to fix the second case yourself — `opossum up`
+starts a stopped system for you (`OPSM-406`). A ❌ on `dns` (only shown when
+`runtime` passed) means `sudo container system dns create opossum` hasn't been
+run — services can't look each other up by bare name until it has (`OPSM-202`);
+it needs `sudo`, so it may prompt. `container system start` itself is only for
+using the `container` CLI directly, outside opossum.
+
+**Writing a compose file that runs cleanly the first time**, in order of how
+often getting them wrong costs a retry:
+
+- **Pick an image with an arm64 build, or add `platform: linux/amd64`.** This
+  runtime is Apple silicon only, but an amd64-only image still runs through
+  Rosetta once the service says so explicitly (`OPSM-412` gives this same hint
+  when `up` finds no arm64 variant). The official image for a popular piece of
+  software (`postgres`, `redis`, `nginx`, `node`, `python`) almost always
+  publishes both; a small or unmaintained one may not.
+- **Give a database its own named volume, and point Postgres's `PGDATA` one
+  level below the mount.** A named volume is how data survives `down` (without
+  `-v`) and a restart; a bind mount off the project directory works too but
+  litters it with root-owned files. A volume opossum creates fresh is cleared,
+  so a plain `pgdata:/var/lib/postgresql/data` mount actually works as-is
+  through Postgres 17 — but Postgres 18 moved its cluster to a version
+  subdirectory and refuses to start against a mount it doesn't find that in
+  (`OPSM-110`), so setting `PGDATA: /var/lib/postgresql/data/pgdata` up front
+  is the one setting that works on every version without having to know which
+  one you're on. No other common database (MySQL, MariaDB, Mongo) needs this.
+- **One named volume attaches to one running container at a time.** Two
+  services in the *same* project sharing one named volume are warned about up
+  front (`OPSM-102`) and the second to start fails; a volume already held by a
+  container from a *different* project fails at the storage layer instead
+  (`OPSM-103`). Give each service its own volume, or use a bind mount for data
+  two containers genuinely share.
+- **Don't mount the Docker socket.** `/var/run/docker.sock` (a tool wanting to
+  launch sibling containers, commonly) has nothing answering it here — this
+  runtime has no Docker-compatible daemon to mount (`OPSM-204`). There's no
+  fix that keeps the same tool working; leave it out and use `depends_on`
+  instead of container-launching-container patterns.
+- **Reach other services by their compose name, not `localhost`.** `db`,
+  `cache`, `web` — whatever the service is called under `services:` — resolves
+  to that container's address on the project's shared network. `localhost`
+  inside a container is that container alone, one VM, not the host and not a
+  sibling.
+- **Gate startup order with `depends_on` + a `healthcheck`, not a sleep.** A
+  bare `depends_on:` only waits for the container to *start*, not for the
+  process inside to be ready to take connections — a web service can still
+  race a database that takes a moment to accept connections. Give the
+  dependency a `healthcheck:` and depend on `condition: service_healthy`; the
+  dependent won't start until it passes. (`pg_isready` for Postgres,
+  `redis-cli ping` for Redis are the common one-liners.)
+- **Publish host ports other than 5000 and 7000.** macOS's own AirPlay
+  Receiver listens on both by default; `up` refuses either one up front as
+  already in use (`OPSM-201`) and names AirPlay as the likely holder. Ports in
+  the 8000s or 3000s (other than these two) are conventional and safe. A host
+  port below 1024 works fine in the plain `"80:80"` form (no address); it only
+  needs root when the entry also names a specific host address (`127.0.0.1:80`).
+
+**A minimal example** — one service with a database, verified with a real
+`up`/`ps`/`down` on this runtime (also under `examples/hello-db/`, where
+`internal/compose`'s example-loading test keeps it from rotting):
+
+```yaml
+name: hello-db
+services:
+  web:
+    image: nginx:alpine
+    ports:
+      - "8080:80"
+    depends_on:
+      db:
+        condition: service_healthy
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: demo
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+volumes:
+  db_data:
+```
+
+**Checking it actually works**, in order — each step's success signal, and
+where to look in this file if it isn't:
+
+1. `opossum config` — prints the resolved project with every field opossum
+   read. A refusal here is a syntax or schema problem (a key docker compose
+   itself wouldn't take): fix the file, don't work around it. Ignored-field
+   warnings are fine; they're compose fields opossum doesn't act on, not
+   errors.
+2. `opossum up` — exit 0 and every service printed as `Starting <name>` with
+   no error after it. A failure names the service and the reason; match it
+   against **Failure signatures → fix** below by its `[OPSM-NNN]` code, or
+   read the plain-English reason if it has none.
+3. `opossum ps` — every service should show `running` (not absent from the
+   table, not `stopped`). One missing means its container never started or
+   isn't this project's (see `[OPSM-402]`/orphan handling if it names a
+   service you didn't expect); check `opossum logs <service>` for what it
+   printed before exiting.
+4. Exercise what you actually built (curl an endpoint, run a query — whatever
+   the task calls for) and read `opossum logs <service>` for it.
+5. `opossum down` — stops and removes the project's containers and network
+   (add `-v` to also drop named volumes, which is what actually deletes the
+   database's data). `container ls -a` and `container network ls` afterward
+   should show nothing of this project's left — if something does, its
+   compose entry didn't match what `down` looks for; see the `down` row in
+   **Commands** below.
+
 ## Commands
 
 One line each. `[service…]` means optional service names (default: all). Exit code
@@ -280,8 +410,18 @@ list; codes are add-only and never change meaning.
 - **`[OPSM-201]` … `host port already in use: <port>`** → free the host port or remap
   it in the compose file. On macOS, port 53 is taken by mDNSResponder. Usually a pre-flight
   refusal, but the same code arrives on a `→` line under a failed start when the port is
-  held by something the host probe cannot see — the runtime's own DNS on 53, say. Same
-  port, same fix, whichever moment it is caught at.
+  held by something the host probe cannot see — the runtime's own DNS on 53, say, or a
+  sibling this same `up` has just bootstrapped: a host-port range neither the probe nor
+  the same-port-twice check reads, overlapping a number another service asks for
+  individually, so both pass pre-flight and the range's service binding first is what
+  actually creates the conflict. Same port, same fix, whichever moment it is caught at:
+  the `→` line asks the same question the pre-flight does — is a running container of
+  this project the holder — and, when it can answer, gives the same two fixes below rather
+  than sending the reader to remap a file that is not the problem. It can only ask about
+  the services this run itself starts, the same limit the pre-flight has; a conflict with
+  something entirely outside this run, or a service publishing more than one host port
+  where more than one of them turns out to match a different holder each, still gets the
+  generic "remap the file" advice — naming one of two would be a guess, so none is named.
   An entry is passed over a port its own container holds: `up` recreates that container,
   so the port is free before the new one binds. A port held by another container of this
   project is passed over only when that container is recreated earlier in the startup
@@ -404,7 +544,7 @@ list; codes are add-only and never change meaning.
   it could not be written (a project directory that is read-only, say). Then it
   names the mount and hands the change over, because knowing which mount died is
   worth saying whether or not it could be written down.
-- **`[OPSM-206]` … `opossum published it on <port> instead`** → the compose file gave
+- **`[OPSM-206]` … `opossum publishes it on <port> instead`** → the compose file gave
   only a container port (`ports: ["3000"]`), so the host port is opossum's to choose;
   the mirrored port was not available, so a free one was used. docker compose does the
   same. The notice says which of six reasons made it unavailable: something is listening
@@ -420,7 +560,11 @@ list; codes are add-only and never change meaning.
   `opossum ps` shows the port actually published; write `"<host>:<container>"` in the
   compose file to pin one — the notice spells it with the entry's own address and
   protocol (`"127.0.0.1:<host>:3000"`, `"<host>:3000/udp"`), which the pinned entry has
-  to keep. An explicit mapping is never moved (that's `OPSM-201`).
+  to keep. An explicit mapping is never moved (that's `OPSM-201`). "Publishes" is
+  present tense, not "published": this notice can be followed by a pre-flight refusal
+  or a failed start, and then nothing was actually published on this port — the tense
+  says what opossum is doing, not a fact already settled, which is also why the notice
+  itself points at `opossum ps` for what is actually running.
 - **`[OPSM-212]` … `so opossum left the entry on <port>`** →
   the same situation as `OPSM-206`, except that no free port could be used. opossum asks
   the system for a free port, and the system answers about listeners — a line that fixes a
@@ -528,6 +672,20 @@ list; codes are add-only and never change meaning.
   means the container with that service's name now belongs to another project, or
   carries no `opossum.project` label (it was made outside opossum), so the
   supervisor does not start it.
+- **`[OPSM-414]` … `asked the restart supervisor to stop, but couldn't confirm it
+  did`** → `down`, `destroy`, and `up` (when it replaces a supervisor for a
+  changed compose file) send SIGTERM, then SIGKILL, and wait up to four seconds in
+  total for the process to go; this is what they say when it is still there (or
+  could not be confirmed gone) at the end of that wait, instead of proceeding as
+  if nothing were left running. `down` and `destroy` still go on to remove
+  containers and networks — a supervisor left running could fight that teardown
+  by restarting what it sees disappear, which is exactly why this is worth
+  knowing about, not a reason either command holds off. `up` does not start a
+  replacement in this case, and does not announce one either: the old
+  supervisor's pid file is still there, so nothing new actually starts watching,
+  and the old policy (on the old service set) is left in force. Run `opossum ps`
+  to see whether the supervisor is still listed, and stop it by hand (its pid is
+  there too) if so.
 - **`[OPSM-202]` … `DNS domain "opossum" not found`** → run `sudo container system
   dns create opossum` once, then `up` again (needed for bare-name discovery).
 - **`[OPSM-203]` … `network <n> is internal (host-only): … no internet egress`** →
@@ -582,7 +740,7 @@ Every `[OPSM-NNN]` opossum can emit (add-only; grouped 1xx storage / 2xx network
 - `OPSM-203` — an internal network: no internet egress, and no name resolution for a container attached to it first.
 - `OPSM-204` — a service mounts `docker.sock`, which does not answer for the containers here.
 - `OPSM-205` — a network declared `external: true` doesn't exist (pre-flight; create it or drop `external`).
-- `OPSM-206` — a container-only port's mirrored host port was not available; opossum published on a free port and says why.
+- `OPSM-206` — a container-only port's mirrored host port was not available; opossum publishes on a free port and says why.
 - `OPSM-207` — the project network exists with a subnet other than the one `ipam` now declares (`down` and `up` to recreate it).
 - `OPSM-208` — another `up`/`down`/`destroy` for the project is still running (wait, then retry).
 - `OPSM-209` — a service's name may not be reachable by other services: upper case gets no DNS answer, or another address when spelled like a top-level domain (`Web`), and `.` gets none from a musl image (alpine) and an internet address when one exists (rename it in lower case if a peer reaches it by name).
@@ -607,6 +765,7 @@ Every `[OPSM-NNN]` opossum can emit (add-only; grouped 1xx storage / 2xx network
 - `OPSM-407` — a service's container exited right after starting, with no health gate to catch it (`up` reports its logs and fails).
 - `OPSM-412` — the image has no arm64 build, so the container cannot start on Apple silicon.
 - `OPSM-413` — a `required: false` dependency did not become healthy, or did not complete successfully; the dependent is started anyway, as docker compose starts it. Also a run-to-completion service that failed while none of the services the command starts requires it (a dependent behind a profile that is not on, or not named): passed over, as docker compose does.
+- `OPSM-414` — asked the per-project supervisor to stop but couldn't confirm it did within the time waited; it may still be running.
 - `OPSM-501` — unsupported top-level compose field(s), ignored.
 - `OPSM-502` — unsupported service compose field(s), ignored (e.g. `network_mode: host`).
 - `OPSM-601` — a `watch` rebuild action failed.

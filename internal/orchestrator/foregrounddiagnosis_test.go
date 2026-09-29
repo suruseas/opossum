@@ -93,3 +93,64 @@ func TestAForegroundServiceIsDiagnosedOnlyWhereNoContainerWasMade(t *testing.T) 
 		})
 	}
 }
+
+// A long pull's progress lines (`[1/6] Fetching image [Ns]`, once a second)
+// come before a failure that only shows once the pull ends — an arm64-less
+// image, say — and used to push it past the captured stderr's old head-only
+// cap before runErrorHint ever saw it (#1353): long enough padding lost the
+// hint entirely. Keeping a tail alongside the head (cappedBuffer,
+// internal/runtime) catches it again, however much padding comes first.
+func TestALateRunFailureIsStillDiagnosedPastALongPullsProgressLines(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		padding int // repeats of a ~26-byte progress line
+	}{
+		{"padding past the old 8 KiB head-only cap", 400},     // ~10.8 KiB
+		{"padding past the new head+tail cap entirely", 1000}, // ~27 KiB
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			rt, _ := fakeShim(t)
+			stderr := strings.Repeat("[1/6] Fetching image [1s]\n", tc.padding) + "Error: platform linux/arm64\n"
+			setShimEnv(rt, "RUN_FAIL=app.demo.opossum", "RUN_FAIL_STDERR="+stderr, "INSPECT_ABSENT=app.demo.opossum")
+			proj, err := loadProject(t, "services:\n  app:\n    image: alpine:3\n")
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = orchestrator.New(proj, rt, "opossum", &bytes.Buffer{}).Up(false)
+			if err == nil {
+				t.Fatal("want the up refused")
+			}
+			if want := "[OPSM-412]"; !strings.Contains(err.Error(), want) {
+				t.Errorf("want the arm64 hint %s despite the padding ahead of the failure, got: %v", want, err)
+			}
+		})
+	}
+}
+
+// A failure line straddling the exact byte where head hands off to tail
+// (headCap, internal/runtime's cappedBuffer) must not be split in two: it
+// would still fit in full inside the combined head+tail capacity (nothing
+// here overflows tailCap, so nothing is meant to be dropped), and String()
+// must join head and tail bare in that case for the line to read whole.
+func TestARunFailureStraddlingTheHeadTailBoundaryIsStillDiagnosed(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	rt, _ := fakeShim(t)
+	// headCap is 4 KiB (internal/runtime): padding to 4090 bytes puts "Error:
+	// platform linux/arm64" starting 6 bytes before the boundary, ending
+	// comfortably inside the tail — and the whole thing is well under
+	// headCap+tailCap (8 KiB), so nothing should be dropped at all.
+	stderr := strings.Repeat("x", 4090) + "Error: platform linux/arm64\n"
+	setShimEnv(rt, "RUN_FAIL=app.demo.opossum", "RUN_FAIL_STDERR="+stderr, "INSPECT_ABSENT=app.demo.opossum")
+	proj, err := loadProject(t, "services:\n  app:\n    image: alpine:3\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = orchestrator.New(proj, rt, "opossum", &bytes.Buffer{}).Up(false)
+	if err == nil {
+		t.Fatal("want the up refused")
+	}
+	if want := "[OPSM-412]"; !strings.Contains(err.Error(), want) {
+		t.Errorf("want the arm64 hint %s even though the failure line straddles the head/tail boundary, got: %v", want, err)
+	}
+}

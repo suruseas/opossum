@@ -173,6 +173,38 @@ func TestADependencysDependencyBehindAnInactiveProfileIsRefusedByItsUp(t *testin
 	}
 }
 
+// A dependency's dependency naming no service at all is refused in those
+// words (#1094) — not "whose profile is not active", which is what the
+// otherwise-identical fixture above gets when the missing name is instead a
+// profile that is not active. Both refusals come from the same check
+// (Orchestrator.checkProjectLoads), so a change that confused the two would
+// not show up any other way.
+func TestADependencysDependencyNamingNoServiceIsRefusedInThoseWords(t *testing.T) {
+	const refusal = `service "mid" depends on unknown service "nosuch"`
+	for _, path := range []string{"run", "run --audit"} {
+		t.Run(path, func(t *testing.T) {
+			rt, log := fakeShim(t)
+			p := project("demo", map[string]*compose.Service{
+				"mid": {Image: "alpine:3.20", DependsOn: compose.DependsOn{{Name: "nosuch"}}},
+				"web": {Image: "alpine:3.20", DependsOn: compose.DependsOn{{Name: "mid"}}},
+			})
+			o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
+			var err error
+			if path == "run" {
+				err = o.RunOneOff("web", []string{"true"}, orchestrator.RunOneOffOptions{})
+			} else {
+				_, err = o.RunAudited("web", []string{"true"}, orchestrator.RunOneOffOptions{})
+			}
+			if err == nil || !strings.HasPrefix(err.Error(), refusal) {
+				t.Errorf("\n got %v\nwant it to start %q", err, refusal)
+			}
+			if started := startedNames(log()); len(started) != 0 {
+				t.Errorf("want nothing started, got %v", started)
+			}
+		})
+	}
+}
+
 // A service that depends on itself is a cycle, refused by the `up` that starts
 // the dependencies, whatever its profile: the one-off is the named service, so
 // its own profile is not the reason given.

@@ -388,7 +388,7 @@ func TestAHeldPortGivenUpIsSaidEvenWhenTheMirrorIsFree(t *testing.T) {
 		{"the code", fmt.Sprintf("[%s] service %q", codeHostPortRemapped, "a")},
 		{"the port given up", fmt.Sprintf("was published on host port %d", held)},
 		{"the line that took it", fmt.Sprintf("service %q asks for host port %d in the compose file", "z", held)},
-		{"where it went", fmt.Sprintf("published it on %d instead", container)},
+		{"where it went", fmt.Sprintf("publishes it on %d instead", container)},
 	} {
 		t.Run(tc.what, func(t *testing.T) {
 			if !strings.Contains(said, tc.want) {

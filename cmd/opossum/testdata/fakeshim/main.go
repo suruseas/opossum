@@ -270,11 +270,17 @@ func main() {
 		// Running a name again means it is there again (the `delete` case) and no
 		// longer stopped (the `stop` case), carrying the project label this run
 		// gave it (none for a run without one), for a later inspect. `-l` is the
-		// spelling opossum passes; `--label` is the long one.
+		// short spelling; `--label` is the long one; opossum passes `--label=<v>`
+		// as one argument (#996 — a value taken as a separate argument is read as
+		// another flag when it starts with "-"), so that combined form is read too.
 		var runProject string
 		var runPorts []string
 		for i, a := range args {
-			if i > 0 && (args[i-1] == "-l" || args[i-1] == "--label") {
+			if v, ok := strings.CutPrefix(a, "--label="); ok {
+				if pv, ok := strings.CutPrefix(v, "opossum.project="); ok {
+					runProject = pv
+				}
+			} else if i > 0 && (args[i-1] == "-l" || args[i-1] == "--label") {
 				if v, ok := strings.CutPrefix(a, "opossum.project="); ok {
 					runProject = v
 				}
@@ -533,6 +539,26 @@ func main() {
 			_ = os.Remove(p)
 		}
 
+	case "kill":
+		// The real CLI only truly kills a running container: one already
+		// stopped refuses with invalidState, and one not there (never made or
+		// since deleted) refuses with notFound — both measured on 1.4.1, same
+		// pair as the orchestrator's shim. Orchestrator.Kill re-inspects after
+		// either failure and only reports it when the container is still
+		// running or unreadable, so a container not running discards both —
+		// answering them correctly here changes no caller's behaviour.
+		if !there(lastArg()) {
+			fmt.Fprintf(os.Stderr, "Error: internalError: \"failed to kill container\" (cause: \"notFound: \"container with ID %s not found\"\")\n", lastArg())
+			os.Exit(1)
+		}
+		if p := stoppedPath(lastArg()); p != "" {
+			if _, err := os.Stat(p); err == nil {
+				fmt.Fprintln(os.Stderr, `Error: internalError: "failed to kill container" (cause: "invalidState: "no runtime client exists: container is stopped"")`)
+				os.Exit(1)
+			}
+			_ = os.WriteFile(p, []byte("1"), 0o644)
+		}
+
 	case "exec":
 		// A container that is not there cannot be exec'd into (container
 		// 1.4.1, same wording as `start`).
@@ -786,12 +812,14 @@ func validNetworkName(name string) bool {
 // `_`, `.` and `-` is `Error: container ID <name> is not a valid container ID`
 // (exit 1). refused is false when the run may go ahead.
 //
-// This reads the shapes opossum passes (`--name <name>` among separate flags).
+// This reads the shapes opossum passes (`--name <name>` among separate flags,
+// and `--flag=value` combined for the flags opossum passes that way, #996).
 // Not read the way the real CLI reads them: `--name=<name>`, `-e=<value>`,
 // combined short flags (`-it`), `--`, `-h`/`--help`/`--version`, `--debug` (an
-// unknown option to `run`), a value starting with `-` for another flag (the
-// real CLI calls that flag's value missing, exit 64 — opossum can pass one, as
-// `--user -1` from `user: "-1"`, #996), and a flag with no value at the end.
+// unknown option to `run`), a value starting with `-` given to another flag as
+// a separate argument (the real CLI calls that flag's value missing, exit 64 —
+// measured on `--user -1`; opossum itself now passes such values combined,
+// `--user=-1` from `user: "-1"`, #996), and a flag with no value at the end.
 func containerNameRefused(args []string) (msg string, code int, refused bool) {
 	const missing = "Error: Missing value for '--name <name>'"
 	name, given := "", false
@@ -801,6 +829,13 @@ func containerNameRefused(args []string) (msg string, code int, refused bool) {
 			break // the image
 		}
 		if runFlagsWithoutValue[a] {
+			continue
+		}
+		// A long flag opossum passes as one `--flag=value` argument (#996) is
+		// already complete — it does not consume the next word too. `--name`
+		// itself is never passed this way (name comes as a separate argument),
+		// so this cannot hide a genuine `--name=...` from the check below.
+		if strings.HasPrefix(a, "--") && strings.Contains(a, "=") {
 			continue
 		}
 		if i+1 == len(args) {
@@ -854,6 +889,11 @@ func volumeNameRefused(args []string) (msg string, refused bool) {
 			break // the image
 		}
 		if runFlagsWithoutValue[a] {
+			continue
+		}
+		// Same reason as containerNameRefused: a combined `--flag=value`
+		// argument (#996) does not consume the next word too.
+		if strings.HasPrefix(a, "--") && strings.Contains(a, "=") {
 			continue
 		}
 		if i+1 == len(args) {

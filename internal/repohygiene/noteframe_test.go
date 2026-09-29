@@ -232,6 +232,7 @@ var boundedClaims = []struct {
 	{"AGENTS.md", "It used to say something else for a `docker.sock`", "agents-opsm-204-record.txt", ""},
 	{"AGENTS.md", "- `OPSM-106` — a host device or session socket is mounted", "agents-index-opsm-106.txt", ""},
 	{"AGENTS.md", "- `OPSM-204` — a service mounts `docker.sock`", "agents-index-opsm-204.txt", ""},
+	{"AGENTS.md", "**Don't mount the Docker socket.**", "agents-starting-docker-socket.txt", ""},
 	{"docs/compatibility.md", "| Outcome | Projects | What it is |", "compatibility-survey-table.txt", ""},
 	{"docs/compatibility.md", "- **note** — something opossum writes no YAML for", "compatibility-note-class.txt", ""},
 

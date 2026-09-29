@@ -677,6 +677,11 @@ func collapseMountsByTarget(vs []string) []string {
 	return out
 }
 
+// MountTarget is mountTarget, exported for orchestrator's own volumes_from
+// checks (checkVolumesFromRefs), which re-run this same classification once a
+// gated service turns out to be active.
+func MountTarget(v any) string { return mountTarget(v) }
+
 // mountTarget returns the container path a volumes entry mounts at, for both the
 // short string form ("src:target", "src:target:ro", or a bare "target" for an
 // anonymous volume) and the long mapping form ({type, source, target, …}).
@@ -1636,23 +1641,55 @@ func ClassifyMount(entry string) (MountKind, string) {
 // changes nothing there either); what a holder borrowed itself is borrowed
 // on (A from B from C brings C's to A); and the holder becomes a dependency
 // — `depends_on: {holder: {condition: service_started}}` — unless one is
-// written. A service that is not there is refused in docker compose's words;
-// a cycle among these entries is left to the commands that order the services,
-// as one among `depends_on` is (the holder is one). A named volume borrowed is then
-// one two services share, which the runtime attaches to one container at a
-// time — the shared-volume note (OPSM-102) reads the folded mounts and says
-// so. Two entries are not carried, and are refused instead of being mounted
-// wrongly: a holder's anonymous volume (`- /data`) at a path this service
-// does not mount itself, which docker compose shares and this would name
-// after the service that mounts it — a second volume — and
-// `container:<name>`, whose mounts live outside the compose file. Both are
-// looked for as the file is read, on every service, profile or no profile
-// (a known difference; docker compose reads a gated service only once
-// something activates it), and the anonymous one before a later holder is
-// seen to take the path (another).
+// written. A service that is not there, or a `container:<name>` entry, whose
+// mounts live outside the compose file, is refused in docker compose's words;
+// a holder's anonymous volume (`- /data`) at a path this service does not
+// mount itself, which docker compose shares and this would instead name after
+// the service that mounts it — a second volume, not the one shared — is
+// refused too, as a permanent limit on what this can mount, not a timing
+// question. All three are refused unless the service naming the ref carries
+// `profiles:`, whether it ever runs being decided per invocation rather than
+// known here — deferred to command time the same way an undefined
+// depends_on target is (#1094, #1156): checked again once the service turns
+// out to be active (orchestrator.checkVolumesFromRefs). The anonymous-volume
+// one is the exception to its own deferral: a service that lends its own
+// anonymous-volume conflict on to a further service (isHolder, below) is
+// refused right away regardless of its own gate — deferring it there would
+// drop the fault for good once the further service asks, not just delay it.
+//
+// A cycle among these
+// entries is left to the commands that order the services, as one among
+// `depends_on` is (the holder is one). A named volume borrowed is then one two
+// services share, which the runtime attaches to one container at a time —
+// the shared-volume note (OPSM-102) reads the folded mounts and says so.
 func expandVolumesFrom(services map[string]*Service, names []string) error {
 	const visiting, done = 1, 2
 	state := map[string]int{}
+	// isHolder names every service some other service's volumes_from
+	// borrows from — computed once, over every service's own list, not just
+	// names: a holder can be lent from without itself being asked for. A
+	// service in here is not a leaf consumer of what it borrows, so its own
+	// anonymous-volume conflicts are never deferred (below): were one held
+	// back because THIS service is gated, borrowing it further on (through
+	// this same holder, to whoever borrows from it) would silently drop the
+	// entry from what that borrower sees, with no later look to catch it —
+	// expand's memoizing (state[name] = done) makes this service's Volumes
+	// permanent once computed, so a later borrower reads the entry as never
+	// having existed rather than as pending. A leaf nobody borrows from has
+	// no such further borrower to mislead, so its own gating alone decides.
+	isHolder := map[string]bool{}
+	for _, svc := range services {
+		for _, ref := range svc.VolumesFrom {
+			// A container: entry names no service of this file's at all — a
+			// service actually called "container" is not lent from just
+			// because some other ref happens to read "container:whatever".
+			if strings.HasPrefix(ref, "container:") {
+				continue
+			}
+			holder, _, _ := strings.Cut(ref, ":")
+			isHolder[holder] = true
+		}
+	}
 	var expand func(name string) error
 	expand = func(name string) error {
 		svc := services[name]
@@ -1702,11 +1739,26 @@ func expandVolumesFrom(services map[string]*Service, names []string) error {
 		subpathAt := map[string]*VolumeSubpath{}
 		for _, ref := range svc.VolumesFrom {
 			holder, _, _ := strings.Cut(ref, ":")
+			// A `volumes_from` naming a container outside the file, or a
+			// service the file does not define, is refused here — except
+			// when svc itself carries `profiles:`, since whether it ever
+			// runs is decided per invocation and not known yet here: that
+			// case is deferred to command time (orchestrator.checkVolumesFromRefs),
+			// the same way an undefined depends_on target is (#1094, #1156).
+			// A service with no `profiles:` is always active, so its
+			// volumes_from is always this run's business and is still
+			// checked here.
 			if strings.HasPrefix(ref, "container:") {
+				if len(svc.Profiles) != 0 {
+					continue
+				}
 				return fmt.Errorf("service %q: volumes_from %q names a container outside this compose file, whose mounts cannot be read here — name the service that mounts them, or write the mounts under `volumes:`", name, ref)
 			}
 			h, ok := services[holder]
 			if !ok || h == nil {
+				if len(svc.Profiles) != 0 {
+					continue
+				}
 				return fmt.Errorf("service %q depends on undefined service %q: invalid compose project", name, holder)
 			}
 			if err := expand(holder); err != nil {
@@ -1727,6 +1779,21 @@ func expandVolumesFrom(services map[string]*Service, names []string) error {
 					continue
 				}
 				if kind, _ := ClassifyMount(entry); kind == MountAnonymous {
+					// Deferred to command time when svc is gated (see the
+					// deferral above, for a missing holder or a container:
+					// entry) — this one entry only, not the rest of the ref:
+					// the other targets borrowed from the same holder here are
+					// always correct, whether or not svc turns out to run.
+					// Not deferred when svc is itself a holder (isHolder):
+					// svc.Volumes is about to be memoized and read by whoever
+					// borrows from svc in turn, and a deferred entry does not
+					// travel with it — a later borrower would see it as never
+					// having existed, not as pending. Refusing here, whether
+					// or not svc itself ever runs, is conservative rather
+					// than silently wrong.
+					if len(svc.Profiles) != 0 && !isHolder[name] {
+						continue
+					}
 					return fmt.Errorf("service %q: volumes_from %q would share %s's anonymous volume at %s, which is named after the service that mounts it and would be a second volume here (docker compose shares the one) — declare it under `volumes:` and mount it by name in both", name, ref, holder, target)
 				}
 				borrowed = append(borrowed, entry)
@@ -1769,6 +1836,17 @@ func expandVolumesFrom(services map[string]*Service, names []string) error {
 
 // validateDeps ensures every depends_on target exists, uses a known condition,
 // and — for service_healthy — actually defines a (non-disabled) healthcheck.
+//
+// A dependency named by a service that itself carries `profiles:` is the one
+// exception: whether that service ever runs is decided per invocation (a
+// `--profile` flag, COMPOSE_PROFILES, or being named), which is not known yet
+// here — docker compose does not even look at a gated-inactive service's
+// depends_on (measured, #1094). Refusing it unconditionally, as this used to,
+// is a divergence of opossum's own for exactly this reason: it is checked
+// again once profiles are resolved and the service turns out to be active
+// (orchestrator.checkProjectLoads / validateProfileDeps), in the active set's
+// own words. A service with no `profiles:` is always active, so its
+// dependencies are always this run's business and are still checked here.
 func (p *Project) validateDeps() error {
 	// Services that some dependent needs to run to completion (exit 0). opossum
 	// runs these in the foreground, so they finish and stop; nobody may also
@@ -1786,6 +1864,9 @@ func (p *Project) validateDeps() error {
 		for _, dep := range svc.DependsOn {
 			target, ok := p.Services[dep.Name]
 			if !ok {
+				if len(svc.Profiles) != 0 {
+					continue // deferred: see whether name ever activates (above)
+				}
 				return fmt.Errorf("service %q depends on unknown service %q — define %q under services: or remove it from depends_on", name, dep.Name, dep.Name)
 			}
 			switch dep.Condition {

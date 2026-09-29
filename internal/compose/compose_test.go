@@ -662,6 +662,81 @@ services:
 	}
 }
 
+// #1093: StartupOrderTolerant places every service despite the same cycle
+// StartupOrder refuses — the cycle is broken, not read as "nothing to place".
+// A service the cycle does not touch is placed too.
+func TestStartupOrderTolerantPlacesEveryServiceDespiteACycle(t *testing.T) {
+	p, err := Load(writeTemp(t, `
+services:
+  a: {image: x, depends_on: [b]}
+  b: {image: y, depends_on: [a]}
+  c: {image: z}
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	got, err := p.StartupOrderTolerant(nil)
+	if err != nil {
+		t.Fatalf("StartupOrderTolerant: %v", err)
+	}
+	sort.Strings(got)
+	want := []string{"a", "b", "c"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v — every service, cycle included", got, want)
+	}
+}
+
+// The cycle is broken at the edge that comes back to a service already being
+// placed — everything else still lands after what it depends on. Comparing
+// the sorted set (as the test above does) cannot tell this apart from
+// StartupOrderTolerant falling back to alphabetical order the moment any
+// cycle exists anywhere in the project, so this checks a dependency untouched
+// by the a/b cycle keeps its place, against names where that fallback would
+// get it backwards ("aweb" sorts before "zdb").
+func TestStartupOrderTolerantKeepsOrderOutsideTheCycle(t *testing.T) {
+	p, err := Load(writeTemp(t, `
+services:
+  a: {image: x, depends_on: [b]}
+  b: {image: y, depends_on: [a]}
+  zdb: {image: z}
+  aweb: {image: w, depends_on: [zdb]}
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	got, err := p.StartupOrderTolerant(nil)
+	if err != nil {
+		t.Fatalf("StartupOrderTolerant: %v", err)
+	}
+	dbAt, webAt := -1, -1
+	for i, name := range got {
+		switch name {
+		case "zdb":
+			dbAt = i
+		case "aweb":
+			webAt = i
+		}
+	}
+	if dbAt == -1 || webAt == -1 {
+		t.Fatalf("got %v, want both zdb and aweb placed", got)
+	}
+	if dbAt > webAt {
+		t.Errorf("got %v, want zdb before aweb despite the unrelated a/b cycle", got)
+	}
+}
+
+// An undefined dependency is a different problem from a cycle, and
+// StartupOrderTolerant still refuses it — a cycle-shaped fallback does not
+// paper over a service that names one the file never defines.
+func TestStartupOrderTolerantStillRefusesAnUndefinedDependency(t *testing.T) {
+	p := &Project{Services: map[string]*Service{
+		"a": {DependsOn: DependsOn{{Name: "nosuch"}}},
+	}}
+	if _, err := p.StartupOrderTolerant(nil); err == nil || !strings.Contains(err.Error(), "depends on unknown service") {
+		t.Errorf("want the undefined dependency refused, got: %v", err)
+	}
+}
+
 func TestUnknownDependency(t *testing.T) {
 	_, err := Load(writeTemp(t, `
 services:
@@ -1385,17 +1460,28 @@ services:
 // not fall over one all the same — a caller that assembles a project itself,
 // or a reader that comes to refuse it later, must not meet a panic on the way.
 func TestStartupOrderWithADependencyTheFileDoesNotDefine(t *testing.T) {
-	// Built here rather than loaded: reading a file refuses this, and what is
-	// being pinned is that the ordering does not fall over one all the same —
-	// a caller that assembles a project itself, or a reader that comes to
-	// refuse it later, must not meet a panic on the way.
+	// Built here rather than loaded, so that a caller who assembles a project
+	// itself (or a reader that comes to refuse it later) is pinned too: it
+	// must not meet a panic on the way, whatever StartupOrder decides about
+	// the fault itself.
 	p := &Project{Services: map[string]*Service{
 		"keep": {Image: "x"},
 		"a":    {Image: "x", Profiles: []string{"g"}, DependsOn: DependsOn{{Name: "nosuch"}}},
 	}}
-	order, err := p.StartupOrder()
+	// StartupOrder reads the whole project — the same "a is read" this file's
+	// TestStartupOrderReadingPartOfAProject uses for a cycle — so a's
+	// undefined dependency is refused the same way reading the file does for
+	// one no service anywhere defines (#1094): a gated service's profile
+	// being off only excuses a fault in its depends_on from a partial read
+	// that leaves it out, and this read leaves nothing out.
+	if _, err := p.StartupOrder(); err == nil {
+		t.Fatal("want the undefined dependency refused when the whole project is read")
+	}
+	// Read without "a", the same fault is nobody's business — and does not
+	// panic either.
+	order, err := p.StartupOrderReading([]string{"keep"})
 	if err != nil {
-		t.Fatalf("order: %v", err)
+		t.Fatalf("want a's undefined dependency passed over, got %v", err)
 	}
 	if len(order) != 2 || indexOf(order, "keep") < 0 || indexOf(order, "a") < 0 {
 		t.Errorf("want keep and a placed and nothing else, got %v", order)

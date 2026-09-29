@@ -34,13 +34,16 @@ func TestAServiceKeyIsHeldToTheShapeDockerComposeGivesIt(t *testing.T) {
 		stricter["restart/"+f] = "opossum reads the policy and refuses one it does not have"
 		stricter["mac_address/"+f] = "opossum reads the address and refuses one that is not six hex pairs"
 	}
-	// Refused by docker compose for the shape and accepted here: a string where
-	// the schema says an integer and docker compose's reading of it into one does
-	// not read `1.5`. The reading is a check of its own (`cpu_shares: "abc"` is
-	// refused there too and accepted here, and is among the rows docker compose
-	// refuses for "another reason").
+	// Refused by docker compose for the shape and accepted here: cpu_percent
+	// does not cast the way the other nine int-cast keys of #1366's castKeys
+	// do (it is deliberately left out of that map — see the comment on
+	// castKeys in servicespec.go: it casts through a float, then a
+	// whole-number check, then the same 0–100 bound the schema already gives
+	// native values, and only the last of those three is wired up anywhere
+	// yet), so this specific row is still laxer than docker compose until
+	// the cast and the bound are wired together.
 	laxer := map[string]string{
-		"cpu_percent/sfloat": "a string is taken for an integer; whether it reads is another check",
+		"cpu_percent/sfloat": "cpu_percent casts through a float, not plain strconv (see castKeys' comment); not yet checked",
 	}
 	// A key the schema does not give a mapping is refused there (`additional
 	// properties 'a' not allowed`) and taken here: a newer docker compose may know it.

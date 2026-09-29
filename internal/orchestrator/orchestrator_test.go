@@ -139,10 +139,10 @@ func project(name string, svcs map[string]*compose.Service) *compose.Project {
 	return &compose.Project{Name: name, BaseDir: testBaseDir, Services: svcs}
 }
 
-// stripConfigHash removes the " -l opossum.config-hash=<hex>" token from a logged
+// stripConfigHash removes the " --label=opossum.config-hash=<hex>" token from a logged
 // command so command-shape assertions don't depend on the hash value.
 func stripConfigHash(line string) string {
-	const tok = " -l opossum.config-hash="
+	const tok = " --label=opossum.config-hash="
 	i := strings.Index(line, tok)
 	if i < 0 {
 		return line
@@ -223,9 +223,9 @@ func TestUpEmitsOrderedCommands(t *testing.T) {
 	// Each service is force-deleted (stale cleanup) then run, with the DNS flags,
 	// on the shared network, named "<svc>.<domain>".
 	wantRun := map[string]string{
-		"cache": "run -d --name cache.demo.opossum --network demo-net --dns-domain opossum --dns-search demo.opossum -l opossum.project=demo redis:7",
-		"db":    "run -d --name db.demo.opossum --network demo-net --dns-domain opossum --dns-search demo.opossum -e POSTGRES_PASSWORD=secret -l opossum.project=demo postgres:16",
-		"web":   "run -d --name web.demo.opossum --network demo-net --dns-domain opossum --dns-search demo.opossum -p 8080:8080 -l opossum.project=demo web:latest",
+		"cache": "run -d --name cache.demo.opossum --network=demo-net --dns-domain opossum --dns-search demo.opossum --label=opossum.project=demo redis:7",
+		"db":    "run -d --name db.demo.opossum --network=demo-net --dns-domain opossum --dns-search demo.opossum --env=POSTGRES_PASSWORD=secret --label=opossum.project=demo postgres:16",
+		"web":   "run -d --name web.demo.opossum --network=demo-net --dns-domain opossum --dns-search demo.opossum -p 8080:8080 --label=opossum.project=demo web:latest",
 	}
 	for svc, want := range wantRun {
 		if !hasLine(lines, want) {
@@ -503,8 +503,8 @@ func TestUpPassesEntrypoint(t *testing.T) {
 		t.Fatalf("Up: %v", err)
 	}
 	// --entrypoint takes the executable; the rest goes positional before command.
-	want := "run -d --name web.demo.opossum --network demo-net --dns-domain opossum --dns-search demo.opossum " +
-		"-l opossum.project=demo --entrypoint /app/run web:latest --serve -c cfg"
+	want := "run -d --name web.demo.opossum --network=demo-net --dns-domain opossum --dns-search demo.opossum " +
+		"--label=opossum.project=demo --entrypoint=/app/run web:latest --serve -c cfg"
 	if !hasLine(log(), want) {
 		t.Errorf("expected entrypoint to be assembled, got %v", log())
 	}
@@ -591,11 +591,11 @@ func TestUpBuildsAndTags(t *testing.T) {
 		t.Fatalf("Up: %v", err)
 	}
 	lines := log()
-	if !hasLine(lines, "build --progress plain -t demo-api:latest -l opossum.project=demo /ctx") {
+	if !hasLine(lines, "build --progress plain -t demo-api:latest -l opossum.project=demo -l opossum.service=api /ctx") {
 		t.Errorf("expected build with project-scoped tag, got %v", lines)
 	}
 	// The built image tag is what gets run.
-	if indexOf(lines, "--name api.demo.opossum --network demo-net --dns-domain opossum --dns-search demo.opossum -l opossum.project=demo demo-api:latest") < 0 {
+	if indexOf(lines, "--name api.demo.opossum --network=demo-net --dns-domain opossum --dns-search demo.opossum --label=opossum.project=demo demo-api:latest") < 0 {
 		t.Errorf("expected api to run the built image demo-api:latest, got %v", lines)
 	}
 }
@@ -612,7 +612,7 @@ func TestUpBuildTargetFlag(t *testing.T) {
 	if err := o.Up(true); err != nil {
 		t.Fatalf("Up: %v", err)
 	}
-	if !hasLine(log(), "build --progress plain -t demo-api:latest -l opossum.project=demo --target builder /ctx") {
+	if !hasLine(log(), "build --progress plain -t demo-api:latest -l opossum.project=demo -l opossum.service=api --target builder /ctx") {
 		t.Errorf("expected build to pass --target builder, got %v", log())
 	}
 }
@@ -654,7 +654,7 @@ func TestBuildContextUnderTmpOrASymlinkIsBuiltWithoutResolvingSymlinks(t *testin
 			if strings.Contains(out.String(), "build context") || strings.Contains(out.String(), "[OPSM-3") {
 				t.Errorf("no warning about the build context any more, got:\n%s", out.String())
 			}
-			if !hasLine(log(), "build --progress plain -t demo-api:latest -l opossum.project=demo "+tc.want) {
+			if !hasLine(log(), "build --progress plain -t demo-api:latest -l opossum.project=demo -l opossum.service=api "+tc.want) {
 				t.Errorf("context %q must be built as %q, got %v", tc.ctx, tc.want, log())
 			}
 		})
@@ -689,7 +689,7 @@ func TestUpMountsFileSecrets(t *testing.T) {
 }
 
 func TestUpMountsTmpfs(t *testing.T) {
-	// tmpfs targets are passed as `--tmpfs <path>` (not `-v`), so a service can
+	// tmpfs targets are passed as `--tmpfs=<path>` (not `-v`), so a service can
 	// mount an in-memory filesystem (#79).
 	rt, log := fakeShim(t)
 	p := project("demo", map[string]*compose.Service{
@@ -699,7 +699,7 @@ func TestUpMountsTmpfs(t *testing.T) {
 	if err := o.Up(true); err != nil {
 		t.Fatalf("Up: %v", err)
 	}
-	if indexOf(log(), "--tmpfs /tmp") < 0 || indexOf(log(), "--tmpfs /run") < 0 {
+	if indexOf(log(), "--tmpfs=/tmp") < 0 || indexOf(log(), "--tmpfs=/run") < 0 {
 		t.Errorf("expected --tmpfs mounts, got %v", log())
 	}
 }
@@ -715,7 +715,7 @@ func TestUpWithoutDNSDomainUsesBareNames(t *testing.T) {
 		t.Fatalf("Up: %v", err)
 	}
 	lines := log()
-	if !hasLine(lines, "run -d --name solo --network demo-net -l opossum.project=demo busybox") {
+	if !hasLine(lines, "run -d --name solo --network=demo-net --label=opossum.project=demo busybox") {
 		t.Errorf("without a DNS domain, expected bare container name and no --dns-* flags, got %v", lines)
 	}
 	for _, l := range lines {
@@ -725,7 +725,7 @@ func TestUpWithoutDNSDomainUsesBareNames(t *testing.T) {
 	}
 }
 
-// network_mode: none isolates a service — it must reach `--network none` (not the
+// network_mode: none isolates a service — it must reach `--network=none` (not the
 // project network) and, being networkless, carry no DNS flags. A sibling on the
 // default network still joins the project net and resolves peers by name, so the
 // isolation is per-service.
@@ -739,8 +739,8 @@ func TestUpNetworkModeNoneIsolatesService(t *testing.T) {
 		t.Fatalf("Up: %v", err)
 	}
 	lines := log()
-	if !hasLine(lines, "run -d --name agent.demo.opossum --network none -l opossum.project=demo agent:latest") {
-		t.Errorf("isolated service should get --network none and no DNS flags, got %v", lines)
+	if !hasLine(lines, "run -d --name agent.demo.opossum --network=none --label=opossum.project=demo agent:latest") {
+		t.Errorf("isolated service should get --network=none and no DNS flags, got %v", lines)
 	}
 	for _, l := range lines {
 		if strings.Contains(l, "agent.demo.opossum") && (strings.Contains(l, "--dns-domain") || strings.Contains(l, "--dns-search") || strings.Contains(l, "demo-net")) {
@@ -748,7 +748,7 @@ func TestUpNetworkModeNoneIsolatesService(t *testing.T) {
 		}
 	}
 	// The sibling still joins the project network with DNS for name resolution.
-	if !hasLine(lines, "run -d --name peer.demo.opossum --network demo-net --dns-domain opossum --dns-search demo.opossum -l opossum.project=demo peer:latest") {
+	if !hasLine(lines, "run -d --name peer.demo.opossum --network=demo-net --dns-domain opossum --dns-search demo.opossum --label=opossum.project=demo peer:latest") {
 		t.Errorf("default-network sibling should keep project net + DNS, got %v", lines)
 	}
 }
@@ -777,10 +777,10 @@ func TestUpInternalNetworkCreatesAndAttaches(t *testing.T) {
 		t.Errorf("default project net should still be created, got %v", lines)
 	}
 	// agent joins the internal net; peer stays on the default net.
-	if !hasLine(lines, "run -d --name agent.demo.opossum --network demo-caged --dns-domain opossum --dns-search demo.opossum -l opossum.project=demo agent:latest") {
+	if !hasLine(lines, "run -d --name agent.demo.opossum --network=demo-caged --dns-domain opossum --dns-search demo.opossum --label=opossum.project=demo agent:latest") {
 		t.Errorf("agent should join the namespaced internal net, got %v", lines)
 	}
-	if !hasLine(lines, "run -d --name peer.demo.opossum --network demo-net --dns-domain opossum --dns-search demo.opossum -l opossum.project=demo peer:latest") {
+	if !hasLine(lines, "run -d --name peer.demo.opossum --network=demo-net --dns-domain opossum --dns-search demo.opossum --label=opossum.project=demo peer:latest") {
 		t.Errorf("peer should stay on the default net, got %v", lines)
 	}
 	// The internal-network egress caveat is surfaced to the user.
@@ -809,8 +809,8 @@ func TestUpAttachesMultipleNetworks(t *testing.T) {
 		t.Errorf("expected internal network demo-back created, got %v", lines)
 	}
 	// The service joins both, in declaration order (front then back).
-	if !hasLine(lines, "run -d --name app.demo.opossum --network demo-front --network demo-back --dns-domain opossum --dns-search demo.opossum -l opossum.project=demo app:latest") {
-		t.Errorf("service should get one --network per declared net in order, got %v", lines)
+	if !hasLine(lines, "run -d --name app.demo.opossum --network=demo-front --network=demo-back --dns-domain opossum --dns-search demo.opossum --label=opossum.project=demo app:latest") {
+		t.Errorf("service should get one --network= per declared net in order, got %v", lines)
 	}
 }
 
@@ -834,8 +834,8 @@ func TestUpRecreatesOnNetworkSetChange(t *testing.T) {
 }
 
 // Reordering a service's networks changes which one becomes eth0, so the emitted
-// --network order (and thus the container) must change — the config hash tracks
-// declaration order, not just set membership.
+// order of --network= flags (and thus the container) must change — the config
+// hash tracks declaration order, not just set membership.
 func TestUpRecreatesOnNetworkReorder(t *testing.T) {
 	rt, log := fakeShim(t)
 	svc := &compose.Service{Image: "app:latest", Networks: compose.ServiceNetworks{"a", "b"}}
@@ -867,7 +867,7 @@ func TestExternalNetworkNotManaged(t *testing.T) {
 		t.Fatalf("Up: %v", err)
 	}
 	lines := log()
-	if !hasLine(lines, "run -d --name app.demo.opossum --network prod-shared --dns-domain opossum --dns-search demo.opossum -l opossum.project=demo app:latest") {
+	if !hasLine(lines, "run -d --name app.demo.opossum --network=prod-shared --dns-domain opossum --dns-search demo.opossum --label=opossum.project=demo app:latest") {
 		t.Errorf("service should join the external net by its real name, got %v", lines)
 	}
 	for _, l := range lines {
@@ -952,7 +952,7 @@ func TestBuildAndPullSelectByServiceKind(t *testing.T) {
 	}
 	lines := log()
 	// Only the build service is built; the image-only service is skipped.
-	if !hasLine(lines, "build --progress plain -t demo-api:latest -l opossum.project=demo /ctx") {
+	if !hasLine(lines, "build --progress plain -t demo-api:latest -l opossum.project=demo -l opossum.service=api /ctx") {
 		t.Errorf("expected api to be built, got %v", lines)
 	}
 	if countLines(lines, "build ") != 1 {
@@ -1025,7 +1025,7 @@ func TestRunOneOffStartsDepsAndOverridesCommand(t *testing.T) {
 	if dbRun < 0 || oneOff < 0 || dbRun > oneOff {
 		t.Fatalf("db should start before the one-off (db=%d one-off=%d) in %v", dbRun, oneOff, lines)
 	}
-	if !hasLine(lines, "run -i --name web-run.demo.opossum --network demo-net --dns-domain opossum --dns-search demo.opossum -l opossum.project=demo web:latest echo hi") {
+	if !hasLine(lines, "run -i --name web-run.demo.opossum --network=demo-net --dns-domain opossum --dns-search demo.opossum --label=opossum.project=demo web:latest echo hi") {
 		t.Errorf("one-off run mismatch, got %v", lines)
 	}
 	// The one-off is foreground (no -d) and publishes no ports.
@@ -1086,7 +1086,7 @@ func TestRunOneOffForwardsSSH(t *testing.T) {
 }
 
 // A one-off of a network_mode: none service is isolated the same way `up` is:
-// `--network none` and no DNS flags (the docs promise up/run parity).
+// `--network=none` and no DNS flags (the docs promise up/run parity).
 func TestRunOneOffNetworkModeNone(t *testing.T) {
 	rt, log := fakeShim(t)
 	p := project("demo", map[string]*compose.Service{
@@ -1097,8 +1097,8 @@ func TestRunOneOffNetworkModeNone(t *testing.T) {
 		t.Fatalf("RunOneOff: %v", err)
 	}
 	lines := log()
-	if !hasLine(lines, "run -i --name agent-run.demo.opossum --network none -l opossum.project=demo agent:latest") {
-		t.Errorf("isolated one-off should get --network none and no DNS flags, got %v", lines)
+	if !hasLine(lines, "run -i --name agent-run.demo.opossum --network=none --label=opossum.project=demo agent:latest") {
+		t.Errorf("isolated one-off should get --network=none and no DNS flags, got %v", lines)
 	}
 	if i := indexOf(lines, "--name agent-run.demo.opossum"); i >= 0 {
 		if l := lines[i]; strings.Contains(l, "demo-net") || strings.Contains(l, "--dns-domain") || strings.Contains(l, "--dns-search") {
@@ -1124,7 +1124,7 @@ func TestRunOneOffInternalNetworkWarnsAndAttaches(t *testing.T) {
 	if !hasLine(lines, "network create --internal demo-caged") {
 		t.Errorf("one-off should create the internal net with --internal, got %v", lines)
 	}
-	if i := indexOf(lines, "--name agent-run.demo.opossum"); i < 0 || !strings.Contains(lines[i], "--network demo-caged") {
+	if i := indexOf(lines, "--name agent-run.demo.opossum"); i < 0 || !strings.Contains(lines[i], "--network=demo-caged") {
 		t.Errorf("one-off should join the namespaced internal net, got %v", lines)
 	}
 	if !strings.Contains(out.String(), "internal (host-only)") || !strings.Contains(out.String(), "no internet egress") {
@@ -1143,7 +1143,7 @@ func TestRunOneOffNoDeps(t *testing.T) {
 		t.Errorf("--no-deps must not start db, got %v", lines)
 	}
 	// Falls back to the service's own command when none is given.
-	if !hasLine(lines, "run -i --name web-run.demo.opossum --network demo-net --dns-domain opossum --dns-search demo.opossum -l opossum.project=demo web:latest serve") {
+	if !hasLine(lines, "run -i --name web-run.demo.opossum --network=demo-net --dns-domain opossum --dns-search demo.opossum --label=opossum.project=demo web:latest serve") {
 		t.Errorf("expected the service command, got %v", lines)
 	}
 }
@@ -3062,7 +3062,7 @@ func TestUpProceedsForSameProjectContainer(t *testing.T) {
 	if !hasLine(lines, "delete --force db.demo.opossum") {
 		t.Errorf("expected stale-delete of our own container, got %v", lines)
 	}
-	if indexOf(lines, "run -d --name db.demo.opossum") < 0 || indexOf(lines, "-l opossum.project=demo") < 0 {
+	if indexOf(lines, "run -d --name db.demo.opossum") < 0 || indexOf(lines, "--label=opossum.project=demo") < 0 {
 		t.Errorf("expected db to run with the project label, got %v", lines)
 	}
 }
@@ -3233,10 +3233,10 @@ func TestUpRunsCompletedDependencyToCompletion(t *testing.T) {
 
 	// … but the one-shot dependency runs in the FOREGROUND (no -d) so its exit
 	// code is observable, while the long-running dependent keeps -d.
-	if !hasLine(lines, "run --name migrate.demo.opossum --network demo-net --dns-domain opossum --dns-search demo.opossum -l opossum.project=demo migrate:latest ./migrate") {
+	if !hasLine(lines, "run --name migrate.demo.opossum --network=demo-net --dns-domain opossum --dns-search demo.opossum --label=opossum.project=demo migrate:latest ./migrate") {
 		t.Errorf("migrate should run foreground (no -d) to completion, got %v", lines)
 	}
-	if !hasLine(lines, "run -d --name web.demo.opossum --network demo-net --dns-domain opossum --dns-search demo.opossum -l opossum.project=demo web:latest") {
+	if !hasLine(lines, "run -d --name web.demo.opossum --network=demo-net --dns-domain opossum --dns-search demo.opossum --label=opossum.project=demo web:latest") {
 		t.Errorf("web should run detached after migrate, got %v", lines)
 	}
 	// Ordering: migrate completes before web starts.
@@ -4013,7 +4013,7 @@ func TestUpRemapsBareHostPortWhenTaken(t *testing.T) {
 		t.Fatalf("no -p <free>:%d in the run command, calls:\n%s", port, calls)
 	}
 	for _, want := range []string{
-		fmt.Sprintf("so opossum published it on %s instead.", m[1]),
+		fmt.Sprintf("so opossum publishes it on %s instead.", m[1]),
 		fmt.Sprintf(`write it in the compose file as "<host>:%d".`, port),
 	} {
 		if !strings.Contains(out.String(), want) {

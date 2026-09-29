@@ -116,18 +116,44 @@ func TestTheSpellingAReaderIsToldToWriteKeepsTheEntry(t *testing.T) {
 		name  string
 		words string // what only this path says
 		run   func(t *testing.T, spec string) (said string)
+		// racy is true for a path whose run does a real bind check (rather
+		// than stubbing probeHostPort) on the port drawn below. freePortsForSticky
+		// only verifies the number free on tcp/127.0.0.1; a form that binds a
+		// different protocol or address (udp, a wildcard, [::1]) is checked
+		// there for real instead, and something outside this test entirely —
+		// not another goroutine of this run, and not a race — can already
+		// hold that number on that other (protocol, address) pair (#1376: CI
+		// run 36290611668 failed this way on a udp entry at port 41641, which
+		// tailscaled listens on by default on the runner; confirmed
+		// deterministically with TestAMirrorOnADifferentProtocolIsThe1376Failure,
+		// not assumed from the traceback). Retrying draws a different number,
+		// which this mismatch does not reliably collide with twice.
+		racy bool
 	}
 	paths := []path{
-		{"the mirrored port was taken and the entry moved", "picks a free port here too", movedNotice},
-		{"nothing could be found to move it to", "could not place it", unplacedNotice},
-		{"a port the service was on was given up", "was published on host port", gaveUpNotice},
+		{"the mirrored port was taken and the entry moved", "picks a free port here too", movedNotice, false},
+		{"nothing could be found to move it to", "could not place it", unplacedNotice, false},
+		{"a port the service was on was given up", "was published on host port", gaveUpNotice, true},
 	}
 	for _, pa := range paths {
 		for _, form := range pinnedForms {
 			t.Run(pa.name+"/"+form.name, func(t *testing.T) {
-				port := freePortsForSticky(t, 1)[0]
-				spec := fmt.Sprintf(form.spec, port)
-				said := pa.run(t, spec)
+				attempts := 1
+				if pa.racy {
+					attempts = 3
+				}
+				var spec, said string
+				for attempt := 1; attempt <= attempts; attempt++ {
+					port := freePortsForSticky(t, 1)[0]
+					spec = fmt.Sprintf(form.spec, port)
+					said = pa.run(t, spec)
+					if strings.Contains(said, pa.words) {
+						break
+					}
+					if attempt < attempts {
+						t.Logf("attempt %d: this row's port may already be held on this form's own protocol/address by something %s's real bind check reaches and freePortsForSticky's tcp/127.0.0.1 check does not; retrying with a fresh one. The reader was told:\n%s", attempt, pa.name, said)
+					}
+				}
 				if !strings.Contains(said, pa.words) {
 					t.Fatalf("this row was meant to reach the notice that says %q, and the reader was told:\n%s", pa.words, said)
 				}
@@ -200,7 +226,12 @@ func unplacedNotice(t *testing.T, spec string) string {
 }
 
 // gaveUpNotice: the service's container is on a port the file now fixes for
-// another service, so it gives that up and lands on its own mirror, which is free.
+// another service, so it gives that up and lands on its own mirror, which is
+// free — real, not stubbed (unlike movedNotice/unplacedNotice below): this
+// row's whole point is that a's own bind check finds spec's mirror free.
+// TestTheSpellingAReaderIsToldToWriteKeepsTheEntry retries this path (#1376)
+// rather than stubbing it here too, because that real check is on spec's own
+// protocol and address, which freePortsForSticky's draw does not verify.
 func gaveUpNotice(t *testing.T, spec string) string {
 	t.Helper()
 	proto := "tcp"
@@ -219,4 +250,42 @@ func gaveUpNotice(t *testing.T, spec string) string {
 	o := New(p, shimHolding(t, "a", held, container, proto), "opossum", &out)
 	o.remapAutoHostPorts([]string{"a", "z"})
 	return out.String()
+}
+
+// TestAMirrorOnADifferentProtocolIsThe1376Failure confirms, deterministically,
+// what the retry in TestTheSpellingAReaderIsToldToWriteKeepsTheEntry is a
+// mitigation for: a's own real bind check on its mirror (askHostPort, inside
+// remapAutoHostPorts) finding that (protocol, address) pair held by something
+// outside this test entirely produces the "moved" notice's wording instead of
+// "was published on host port", in the exact words CI showed (#1376, run
+// 36290611668). That run's row was a udp entry at port 41641 — tailscaled's
+// default UDP port on the runner (a self-hosted Linux box) — while
+// freePortsForSticky had verified only that port free on tcp/127.0.0.1: two
+// different sockets, not a race between two listeners of the same run. held
+// (z's port, and the one a's container is shimmed to already be on) is
+// untouched; only the mirror's own bind is forced busy, with probeHostPort
+// stubbed (as bindanswer_internal_test.go's other rows already do) rather
+// than holding a real socket, which needs no coordination with anything
+// external to reproduce reliably.
+func TestAMirrorOnADifferentProtocolIsThe1376Failure(t *testing.T) {
+	const held = 39620   // z's port, and where a's container already is
+	const mirror = 39621 // a's own entry: the number its own bind check finds held
+	spec := fmt.Sprintf("%d:%d", mirror, mirror)
+	z, _ := withHostPort(spec, held)
+	p := &compose.Project{Name: "demo", Services: map[string]*compose.Service{
+		"a": {Image: "web:latest", Ports: []string{decoy, spec}, AutoHostPort: map[string]bool{spec: true}},
+		"z": {Image: "web:latest", Ports: []string{z}},
+	}}
+	var out bytes.Buffer
+	o := New(p, shimHolding(t, "a", held, mirror, "tcp"), "opossum", &out)
+	probe := &bindAnswers{by: map[string]error{}}
+	probe.by[fmt.Sprintf("tcp4 :%d", mirror)] = refusedBind(t, "tcp4", fmt.Sprintf(":%d", mirror), syscall.EADDRINUSE)
+	o.probeHostPort = probe.probe
+	o.remapAutoHostPorts([]string{"a", "z"})
+	said := out.String()
+	for _, want := range []string{"picks a free port here too", fmt.Sprintf("host port %d is in use", mirror)} {
+		if !strings.Contains(said, want) {
+			t.Fatalf("got %q\nwant it to hold %q — the exact CI wording (#1376)", said, want)
+		}
+	}
 }

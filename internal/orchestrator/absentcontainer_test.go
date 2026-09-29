@@ -96,11 +96,13 @@ func TestACommandOverTheWholeProjectPassesByAServiceWithNoContainer(t *testing.T
 	}
 }
 
-// Asking for a service by name is a different question, and this change does
-// not answer it: a service that is not running still says so when someone asks
-// for it, so that a name typed wrong is not passed over in silence. What that
-// answer should be is issue #1098; this row is here to say it did not change.
-func TestNamingAServiceWithNoContainerStillAnswersForIt(t *testing.T) {
+// Naming a service by itself does not change the answer (#1098): docker
+// compose v5.5.1 passes a service with no container by whether it is named or
+// the whole project is asked about (measured, `-p` present or not made no
+// difference). A name that does not resolve to a project service is a
+// different mistake, and stays one — resolveServices/resolveServicesTolerant
+// catch it before worksOn is ever asked, so nothing here is hidden by this.
+func TestNamingAServiceWithNoContainerIsPassedByLikeTheWholeProject(t *testing.T) {
 	const body = `services:
   web:
     image: alpine:3.20
@@ -108,39 +110,48 @@ func TestNamingAServiceWithNoContainerStillAnswersForIt(t *testing.T) {
     image: alpine:3.20
     profiles: [x]
 `
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	rt, _ := fakeShim(t)
-	setShimEnv(rt, "INSPECT_ABSENT=debug.demo.opossum")
-	proj, err := loadProject(t, body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var out bytes.Buffer
-	o := orchestrator.New(proj, rt, "opossum", &out)
-	if err := o.Logs([]string{"debug"}, runtime.LogsOptions{Tail: 1}); err == nil {
-		t.Error("want `logs debug` to answer for the service it was given, got no error")
-	}
-	if err := o.Start([]string{"debug"}); err == nil {
-		t.Error("want `start debug` to answer for the service it was given, got no error")
-	}
-	// The other four take a name that is not running as something to do
-	// nothing about, and say so — which is where they were before this, and
-	// what #1098 is about. Pinned so that a change to it is seen.
-	var said bytes.Buffer
-	o2 := orchestrator.New(proj, rt, "opossum", &said)
-	if err := o2.Stop([]string{"debug"}); err != nil {
-		t.Errorf("want `stop debug` to stay as it was, got %v", err)
-	}
-	if err := o2.Kill([]string{"debug"}, "SIGKILL"); err != nil {
-		t.Errorf("want `kill debug` to stay as it was, got %v", err)
-	}
-	if s := said.String(); !strings.Contains(s, "Stopping debug") || !strings.Contains(s, "Killing debug") {
-		t.Errorf("want both to name the service they were given, got\n%s", s)
-	}
-	// And it says which service it is about, so that the answer is about the
-	// name that was asked for.
-	if s := out.String(); !strings.Contains(s, "debug") {
-		t.Errorf("want the service named in what it says, got\n%s", s)
+	for _, tc := range []struct {
+		cmd string
+		run func(o *orchestrator.Orchestrator) error
+		// A verb the runtime must never see sent for debug's container: passed
+		// by means nothing was attempted on it, not just that nothing failed.
+		neverVerb string
+	}{
+		{"logs", func(o *orchestrator.Orchestrator) error {
+			return o.Logs([]string{"debug"}, runtime.LogsOptions{Tail: 1})
+		}, "logs"},
+		{"start", func(o *orchestrator.Orchestrator) error { return o.Start([]string{"debug"}) }, "start"},
+		{"restart", func(o *orchestrator.Orchestrator) error { return o.Restart([]string{"debug"}) }, "start"},
+		{"stop", func(o *orchestrator.Orchestrator) error { return o.Stop([]string{"debug"}) }, "stop"},
+		{"kill", func(o *orchestrator.Orchestrator) error { return o.Kill([]string{"debug"}, "SIGKILL") }, "kill"},
+		{"stats", func(o *orchestrator.Orchestrator) error {
+			return o.Stats([]string{"debug"}, orchestrator.StatsOptions{NoStream: true})
+		}, "stats"},
+	} {
+		t.Run(tc.cmd, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			rt, log := fakeShim(t)
+			setShimEnv(rt, "INSPECT_ABSENT=debug.demo.opossum")
+			proj, err := loadProject(t, body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			o := orchestrator.New(proj, rt, "opossum", &out)
+			if err := tc.run(o); err != nil {
+				t.Errorf("want naming a service with no container passed by like the whole project does, got %v", err)
+			}
+			if s := out.String(); strings.Contains(s, "debug") {
+				t.Errorf("want nothing said about the named service with no container, got %q", s)
+			}
+			// Passed by, not just quiet about it: the runtime was never asked
+			// to do the verb this command is about, to debug's container.
+			for _, l := range log() {
+				if strings.HasPrefix(l, tc.neverVerb) && strings.Contains(l, "debug") {
+					t.Errorf("want the runtime never asked %q of debug's container, got %q in\n%s", tc.neverVerb, l, strings.Join(log(), "\n"))
+				}
+			}
+		})
 	}
 }
 

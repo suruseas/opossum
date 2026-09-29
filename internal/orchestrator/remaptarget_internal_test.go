@@ -49,7 +49,6 @@ func (t *tracked) Close() error { t.closed = true; return nil }
 // one ask per claimed port.
 type answers struct {
 	any           int
-	then          int // what a second "any port" answers, when a row needs one
 	busy          []int
 	asked         int
 	given         []*tracked
@@ -73,9 +72,6 @@ func (a *answers) hold(network, address string, port int) (int, io.Closer, error
 	n := port
 	if port == 0 {
 		n = a.any
-		if a.asked > 1 && a.then != 0 {
-			n = a.then
-		}
 	}
 	for _, b := range a.busy {
 		if b == n {
@@ -266,8 +262,8 @@ func TestAMovedPortIsNotOneTheFileHasAlreadySpokenFor(t *testing.T) {
 			if !strings.Contains(said, "[OPSM-206]") {
 				t.Errorf("no notice about the move:\n%s", said)
 			}
-			if got := strings.SplitN(published, ":", 2)[0]; !strings.Contains(said, "published it on "+got) {
-				t.Errorf("the notice does not say it published on %s:\n%s", got, said)
+			if got := strings.SplitN(published, ":", 2)[0]; !strings.Contains(said, "publishes it on "+got) {
+				t.Errorf("the notice does not say it publishes on %s:\n%s", got, said)
 			}
 		})
 	}
@@ -275,12 +271,91 @@ func TestAMovedPortIsNotOneTheFileHasAlreadySpokenFor(t *testing.T) {
 
 // Every number from the system's answer up to the last host port is spoken
 // for. The walk has to stop, and what it says then has to be about the file.
-func TestWhenEveryNumberAboveTheAnswerIsClaimedTheWalkStopsAndSaysSo(t *testing.T) {
+// #1273: everything above the answer being claimed used to end the search —
+// the walk only ever went up, and a claim reaching the ceiling left nowhere
+// above to go. It now turns around and walks down from there instead, which
+// this row's claim (base to the very top) leaves wide open below base.
+func TestWhenEveryNumberAboveTheAnswerIsClaimedTheWalkGoesBelowInstead(t *testing.T) {
 	base := freeRunOf(t, 6)
 	mirror := fmt.Sprintf("%[1]d:%[1]d", base+1)
 	// A range from base to the last host port there is: nothing above the
-	// answer is free for this project.
+	// answer is free for this project, but base-1 and below are not this
+	// project's — nothing claims or holds them.
 	claim := []string{fmt.Sprintf("%d-65535:%d-65535", base, base)}
+	alloc := &answers{any: base + 1}
+	published, said := remapWith(t, mirror, claim, true, alloc)
+	if want := fmt.Sprintf("%d:%d", base-1, base+1); published != want {
+		t.Errorf("a published %q, want %q — the claim reaches the ceiling, so the room is below "+
+			"where the walk started, not above it.", published, want)
+	}
+	if strings.Contains(said, "[OPSM-212]") {
+		t.Errorf("the notice says there was nowhere to move it, and there was (below):\n%s", said)
+	}
+	if want := fmt.Sprintf("publishes it on %d", base-1); !strings.Contains(said, want) {
+		t.Errorf("the notice does not say it publishes on %d:\n%s", base-1, said)
+	}
+}
+
+// Turning around goes back to where the walk started, not to the ceiling it
+// just came from: walking down from the ceiling would re-tread the whole
+// claimed stretch already known to be no good, re-trying (and paying a try
+// for) any gap in it a second time — costing tries a file with several gaps
+// mixed into a ceiling-reaching claim cannot spare.
+func TestTurningAroundGoesBackToWhereTheWalkStartedNotToTheCeiling(t *testing.T) {
+	base := freeRunOf(t, 6)
+	mirror := fmt.Sprintf("%[1]d:%[1]d", base+1)
+	// Two claimed stretches with a gap between them, and the gap itself
+	// refused by something else — so the upward walk meets it once, fails,
+	// and only then runs into the ceiling.
+	claim := []string{
+		fmt.Sprintf("%d-%d:%d-%d", base, base+2, base, base+2),
+		fmt.Sprintf("%d-65535:%d-65535", base+4, base+4),
+	}
+	alloc := &answers{any: base + 1, busy: []int{base + 3}}
+	published, said := remapWith(t, mirror, claim, true, alloc)
+	if want := fmt.Sprintf("%d:%d", base-1, base+1); published != want {
+		t.Errorf("a published %q, want %q", published, want)
+	}
+	if strings.Contains(said, "[OPSM-212]") {
+		t.Errorf("the notice says there was nowhere to move it, and base-1 was free:\n%s", said)
+	}
+	if want := fmt.Sprintf("[0 %d %d]", base+3, base-1); alloc.askedPorts() != want {
+		t.Errorf("the asks named %s, want %s — %d should be asked once, on the way up, not asked "+
+			"again on the way back down through ground the walk has already covered.",
+			alloc.askedPorts(), want, base+3)
+	}
+}
+
+// Once the walk has turned around it stays turned around: a candidate below
+// the claim that is itself refused (held by something else, not named by any
+// claim) is not a reason to climb back up into the same claim and meet the
+// ceiling again — that would just retry the same refused number forever,
+// never reaching the one below it.
+func TestOnceTheWalkTurnsAroundItDoesNotClimbBackIntoTheSameClaim(t *testing.T) {
+	base := freeRunOf(t, 6)
+	mirror := fmt.Sprintf("%[1]d:%[1]d", base+1)
+	claim := []string{fmt.Sprintf("%d-65535:%d-65535", base, base)}
+	alloc := &answers{any: base + 1, busy: []int{base - 1}}
+	published, said := remapWith(t, mirror, claim, true, alloc)
+	if want := fmt.Sprintf("%d:%d", base-2, base+1); published != want {
+		t.Errorf("a published %q, want %q — base-1 is refused, not claimed, so the walk has to "+
+			"carry on down past it rather than climb back up looking for another way down.",
+			published, want)
+	}
+	if strings.Contains(said, "[OPSM-212]") {
+		t.Errorf("the notice says there was nowhere to move it, and base-2 was free:\n%s", said)
+	}
+}
+
+// The genuine version of the above: nothing free anywhere, not just above.
+// The walk goes off the top, turns around, and runs out of numbers on the
+// way down too — 1 is as far as a host port goes, so that is where it gives
+// up, not a try budget (skipping a claim, unlike meeting a listener, costs
+// no try — see freeHostPortTries).
+func TestWhenNothingIsFreeAboveOrBelowTheWalkStopsAndSaysSo(t *testing.T) {
+	base := freeRunOf(t, 6)
+	mirror := fmt.Sprintf("%[1]d:%[1]d", base+1)
+	claim := []string{"1-65535:1-65535"}
 	alloc := &answers{any: base + 1}
 	published, said := remapWith(t, mirror, claim, true, alloc)
 	if published != mirror {
@@ -300,12 +375,13 @@ func TestWhenEveryNumberAboveTheAnswerIsClaimedTheWalkStopsAndSaysSo(t *testing.
 	// The line that took the port is still named. That is the line the reader
 	// has to change, and it is the whole reason this notice exists rather than
 	// leaving the runtime to complain about publish specs.
-	if want := fmt.Sprintf("publishes container ports %d-65535", base); !strings.Contains(said, want) {
+	if want := "publishes container ports 1-65535"; !strings.Contains(said, want) {
 		t.Errorf("the notice does not name the line that took the port (%q):\n%s", want, said)
 	}
-	// And it says what was tried, rather than picking a reason. The two
-	// reasons come mixed — a walk steps over a claim and then meets a
-	// listener — so naming one would be wrong half the time.
+	// This row runs no bind at all past the first (the claim leaves nothing
+	// to try, above or below) — the wording still says 32, since it is fixed
+	// rather than counted; unrelated to this change, but worth keeping this
+	// row's check of it so a rewording is not missed here either.
 	if want := "tried 32 other host ports"; !strings.Contains(said, want) {
 		t.Errorf("the notice does not say what was tried (%q):\n%s", want, said)
 	}
@@ -328,8 +404,8 @@ func TestTheWalkReachesTheLastHostPort(t *testing.T) {
 	if strings.Contains(said, "[OPSM-212]") {
 		t.Errorf("the notice says there was nowhere to move it, and there was:\n%s", said)
 	}
-	if want := fmt.Sprint(65535); !strings.Contains(said, "published it on "+want) {
-		t.Errorf("the notice does not say it published on %s:\n%s", want, said)
+	if want := fmt.Sprint(65535); !strings.Contains(said, "publishes it on "+want) {
+		t.Errorf("the notice does not say it publishes on %s:\n%s", want, said)
 	}
 }
 
@@ -377,9 +453,13 @@ func TestWhenEveryCandidateIsHeldTheTriesRunOut(t *testing.T) {
 }
 
 // The system's answer can be the last host port there is, or close to it. The
-// walk goes upward, so from there it has almost nowhere to go — and the space
-// below, which is most of the range, is not reachable by stepping up. Asking
-// the system again is what covers it: the next answer is somewhere else.
+// walk goes upward, so from there it has almost nowhere to go before meeting
+// the ceiling — and turns around: the number just below the one just tried is
+// asked for by name instead (#1273 — this used to ask the system to choose
+// again, whose answers are ephemeral ports and so tend to cluster back near
+// the ceiling a wide claim also reaches, rather than escape it; walking down
+// by name does not depend on where the system's ephemeral cursor happens to
+// be).
 //
 // This is a real answer to get, not a contrived one: the answers are ephemeral
 // ports, and the top of that range is one of them.
@@ -389,42 +469,18 @@ func TestAnAnswerAtTheTopOfTheRangeStillFindsRoom(t *testing.T) {
 	// z fixes the port the entry mirrors, so the entry has to move; the system
 	// answers with the very last host port, which is also spoken for.
 	claim := []string{fmt.Sprintf("%d:80", base+1), "65535:81"}
-	alloc := &answers{any: 65535, then: base + 4}
+	alloc := &answers{any: 65535}
 	published, said := remapWith(t, mirror, claim, false, alloc)
-	if want := fmt.Sprintf("%d:%d", base+4, base+1); published != want {
-		t.Errorf("a published %q, want %q — the walk ran off the top and the second answer is "+
-			"where the room is.", published, want)
+	if want := fmt.Sprintf("%d:%d", 65534, base+1); published != want {
+		t.Errorf("a published %q, want %q — the walk ran off the top and turned around; 65534 is "+
+			"the first number below it neither claim names.", published, want)
 	}
 	if strings.Contains(said, "[OPSM-212]") {
 		t.Errorf("the notice says there was nowhere to move it, and there was:\n%s", said)
 	}
-	if got := alloc.askedPorts(); got != "[0 0]" {
-		t.Errorf("the asks named %s, want [0 0] — off the top there is nothing to ask for by "+
-			"number, so the system is asked to choose again.", got)
-	}
-}
-
-// The second answer can be spoken for too. It is held while the walk carries on
-// from it, for the same reason the first one is: a number opossum is still
-// sitting on is one nothing else can take, and letting it go would put it back
-// in the pool the very next ask draws from.
-func TestASecondAnswerThatIsAlsoClaimedIsHeldWhileTheWalkGoesOn(t *testing.T) {
-	base := freeRunOf(t, 6)
-	mirror := fmt.Sprintf("%[1]d:%[1]d", base+1)
-	claim := []string{fmt.Sprintf("%d:80", base+1), "65535:81"}
-	// Both answers are ones the file publishes: the last host port, and then
-	// the one the entry mirrors.
-	alloc := &answers{any: 65535, then: base + 1}
-	published, _ := remapWith(t, mirror, claim, false, alloc)
-	if want := fmt.Sprintf("%d:%d", base+2, base+1); published != want {
-		t.Errorf("a published %q, want %q", published, want)
-	}
-	if got, want := alloc.askedPorts(), fmt.Sprintf("[0 0 %d]", base+2); got != want {
-		t.Errorf("the asks named %s, want %s", got, want)
-	}
-	if got := alloc.heldWhenAsked(); got != "[0 1 2]" {
-		t.Errorf("the answers still open at each ask were %s, want [0 1 2] — a claimed answer is "+
-			"held while the walk goes on from it.", got)
+	if got := alloc.askedPorts(); got != "[0 65534]" {
+		t.Errorf("the asks named %s, want [0 65534] — off the top the walk turns around and asks "+
+			"for a number by name, not for the system to choose again.", got)
 	}
 }
 
@@ -528,7 +584,9 @@ func TestWhenTheOperatingSystemWillNotAnswerNothingIsSaid(t *testing.T) {
 func TestAnEntryLeftBehindIsStillTheOneOpossumMayMove(t *testing.T) {
 	base := freeRunOf(t, 6)
 	mirror := fmt.Sprintf("%[1]d:%[1]d", base+1)
-	claim := []string{fmt.Sprintf("%d-65535:%d-65535", base, base)}
+	// Nothing free above or below (#1273: a claim reaching only the ceiling is
+	// no longer out of room — see TestWhenEveryNumberAboveTheAnswerIsClaimedTheWalkGoesBelowInstead).
+	claim := []string{"1-65535:1-65535"}
 	alloc := &answers{any: base + 1}
 	z := &compose.Service{Image: "web:latest", Ports: claim,
 		AutoHostPort: map[string]bool{claim[0]: true}}

@@ -712,6 +712,48 @@ func (r *Runtime) ImageWorkingDir(ref string) (string, bool) {
 	return "", true
 }
 
+// ImageLabels reads the labels an image carries on its own config — the ones
+// a build puts there with `-l` (`container build`, measured on 1.4.1: it
+// lands in the same `variants[].config.config.Labels` this reads, survives a
+// cache hit, and a Dockerfile `LABEL` loses to it) — from `image inspect`.
+// The same field docker compose's own build stamps with
+// `com.docker.compose.project`, which is how a caller can tell a docker
+// compose build from an opossum one, or from neither.
+//
+// ok is false only when the image could not be asked at all — see ImageEnv.
+// An image with no labels answers with an empty map and ok true: "declared
+// none" is not "could not be asked". Variants are read in order and the
+// first value for a name wins, the same rule as ImageEnv.
+func (r *Runtime) ImageLabels(ref string) (map[string]string, bool) {
+	out, _, err := r.captureSplitQuery("image", "inspect", ref)
+	if err != nil {
+		return nil, false
+	}
+	var images []struct {
+		Variants []struct {
+			Config struct {
+				Config struct {
+					Labels map[string]string `json:"Labels"`
+				} `json:"config"`
+			} `json:"config"`
+		} `json:"variants"`
+	}
+	if err := json.Unmarshal([]byte(out), &images); err != nil {
+		return nil, false
+	}
+	labels := map[string]string{}
+	for _, img := range images {
+		for _, v := range img.Variants {
+			for k, val := range v.Config.Config.Labels {
+				if _, seen := labels[k]; !seen {
+					labels[k] = val
+				}
+			}
+		}
+	}
+	return labels, true
+}
+
 // DeleteImage removes an image, best-effort (--force ignores a missing image),
 // for `down --rmi`.
 func (r *Runtime) DeleteImage(ref string) {
@@ -1281,10 +1323,14 @@ func (r *Runtime) Run(o RunOptions) error {
 		args = append(args, "--gid", o.GID)
 	}
 	if o.User != "" {
-		args = append(args, "--user", o.User)
+		// One argument, not two ("--user", o.User): the runtime reads a value
+		// starting with "-" as another flag when it is a separate argument
+		// (`Missing value for '--user'`), and a compose file's `user:` is not
+		// guaranteed not to (#996 — measured on container 1.4.1).
+		args = append(args, "--user="+o.User)
 	}
 	if o.WorkingDir != "" {
-		args = append(args, "--workdir", o.WorkingDir)
+		args = append(args, "--workdir="+o.WorkingDir)
 	}
 	for _, c := range o.CapAdd {
 		args = append(args, "--cap-add", c)
@@ -1313,7 +1359,9 @@ func (r *Runtime) Run(o RunOptions) error {
 		if i == 0 && o.MacAddress != "" && n != "none" {
 			n += ",mac=" + o.MacAddress
 		}
-		args = append(args, "--network", n)
+		// One argument (#996, as --user above): an `external: true` network's
+		// real name is whatever the compose file wrote.
+		args = append(args, "--network="+n)
 	}
 	if o.DNSDomain != "" {
 		// Register the container under the local (registered) DNS domain.
@@ -1325,7 +1373,10 @@ func (r *Runtime) Run(o RunOptions) error {
 		args = append(args, "--dns-search", o.DNSSearch)
 	}
 	for _, e := range o.Env {
-		args = append(args, "-e", e)
+		// `--env=KEY=value`, not `-e`/`KEY=value` as two arguments (#996): a
+		// `environment:` key can itself start with "-", which the runtime reads
+		// as another flag when the value is a separate argument.
+		args = append(args, "--env="+e)
 	}
 	for _, p := range o.Ports {
 		args = append(args, "-p", p)
@@ -1334,16 +1385,18 @@ func (r *Runtime) Run(o RunOptions) error {
 		args = append(args, "-v", v)
 	}
 	for _, t := range o.Tmpfs {
-		args = append(args, "--tmpfs", t)
+		args = append(args, "--tmpfs="+t)
 	}
 	for _, l := range o.Labels {
-		args = append(args, "-l", l)
+		// Same reason as Env above: a `labels:` key can start with "-".
+		args = append(args, "--label="+l)
 	}
 	// `container run --entrypoint` takes only the executable, so entrypoint args
 	// past the first go positional (before the command) — the container then runs
 	// entrypoint ++ command.
 	if len(o.Entrypoint) > 0 {
-		args = append(args, "--entrypoint", o.Entrypoint[0])
+		// Same reason as --user above: an `entrypoint:` can start with "-".
+		args = append(args, "--entrypoint="+o.Entrypoint[0])
 	}
 	args = append(args, o.Image)
 	if len(o.Entrypoint) > 1 {
@@ -1363,8 +1416,17 @@ func (r *Runtime) Run(o RunOptions) error {
 	// A foreground run (a one-off) streams live. When the caller's terminal is
 	// not attached we can also tee stderr into a small capped buffer so the same
 	// bootstrap failure (VZError) is decodable here too — that text appears at
-	// the very start of the run, so the head is enough and memory stays bounded
-	// even for a long-running one-off. A run with the terminal attached keeps
+	// the very start of the run, so the head alone used to be kept, and memory
+	// stayed bounded even for a long-running one-off. But an image pull's own
+	// progress lines (`[1/6] Fetching image [Ns]`, written roughly once a
+	// second) come first for a long enough pull to push a *later* failure —
+	// arm64-less image, a host-port conflict the pre-flight missed — past a
+	// head-only cap before it is ever written, so runErrorHint never sees it
+	// (#1353: a pull's own progress lines run roughly 70 bytes each, so about
+	// two minutes of them already fills the old 8 KiB cap on their own).
+	// Keeping a tail alongside the head catches that failure too, for the same
+	// bounded memory: the middle of an oversized stream is what nobody's
+	// decoder reads anyway. A run with the terminal attached keeps
 	// stderr as the terminal's own (a tee would make it a pipe), so it isn't
 	// captured; stdin and stdout are the same in both branches. A `-t` of the
 	// service's own (`tty: true` under `up`, run to completion or in the
@@ -1375,32 +1437,73 @@ func (r *Runtime) Run(o RunOptions) error {
 	if o.Attached && o.TTY {
 		return r.stream(args...)
 	}
-	stderr := &cappedBuffer{cap: 8 << 10}
+	// Split from the old single 8 KiB cap rather than grown: a bootstrap
+	// VZError is a short, one-line message right at the start, so 4 KiB of
+	// head is generously more than it needs, and the other 4 KiB goes to the
+	// tail this fix adds — the budget stays 8 KiB, not grown (a write can
+	// briefly hold a little more than tailCap in the tail's backing array
+	// before the next slice brings it back down, which is not worth avoiding
+	// for a buffer this size).
+	stderr := &cappedBuffer{headCap: 4 << 10, tailCap: 4 << 10}
 	if err := r.streamCaptureStderr(stderr, args...); err != nil {
 		return &RunError{Err: err, Stderr: stderr.String()}
 	}
 	return nil
 }
 
-// cappedBuffer accumulates up to cap bytes and silently drops the rest — enough to
-// detect a bootstrap failure (emitted at the start of a run) without buffering an
-// unbounded foreground stream.
+// cappedBuffer keeps the first headCap bytes written and the last tailCap,
+// silently dropping only whatever falls strictly between them — enough to
+// detect a bootstrap failure (emitted at the very start of a run) and a
+// failure that comes after a long pull's progress lines (emitted at the very
+// end), without buffering an unbounded foreground stream. A stream that never
+// exceeds headCap+tailCap is kept in full: the head and tail together cover
+// it, nothing dropped, and String() reads as if it had never been capped.
 type cappedBuffer struct {
-	buf []byte
-	cap int
+	head, tail       []byte
+	headCap, tailCap int
+	dropped          bool // true once something between head and tail was lost
 }
 
 func (c *cappedBuffer) Write(p []byte) (int, error) {
-	if room := c.cap - len(c.buf); room > 0 {
-		if room > len(p) {
-			room = len(p)
+	n := len(p)
+	if room := c.headCap - len(c.head); room > 0 {
+		take := room
+		if take > len(p) {
+			take = len(p)
 		}
-		c.buf = append(c.buf, p[:room]...)
+		c.head = append(c.head, p[:take]...)
+		p = p[take:]
 	}
-	return len(p), nil // always report full write; the drop is intentional
+	if len(p) > 0 {
+		c.tail = append(c.tail, p...)
+		if over := len(c.tail) - c.tailCap; over > 0 {
+			c.tail = c.tail[over:]
+			c.dropped = true
+		}
+	}
+	return n, nil // always report full write; the drop is intentional
 }
 
-func (c *cappedBuffer) String() string { return string(c.buf) }
+func (c *cappedBuffer) String() string {
+	if len(c.tail) == 0 {
+		return string(c.head)
+	}
+	if !c.dropped {
+		// head and tail together are everything written — concatenating them
+		// bare reconstructs it exactly. A separator here would insert a
+		// newline nothing wrote, splitting a failure line that happens to
+		// straddle headCap and breaking a substring match (runErrorHint) that
+		// spans it.
+		return string(c.head) + string(c.tail)
+	}
+	// Something in the middle is genuinely gone here, so a line straddling
+	// either edge of that gap can still come out cut — the "..." says a gap
+	// is there, not that the lines beside it are whole. A failure signature
+	// landing exactly on one of these two cuts, in a stream long enough to
+	// drop anything at all, would need its own read-to-the-next-newline
+	// handling to survive; not done here; it is not the ordinary case (#1353).
+	return string(c.head) + "\n...\n" + string(c.tail)
+}
 
 // RunError wraps a failed detached `container run` with its captured stderr, so a
 // caller can decode a cryptic runtime failure (e.g. a VZError attach conflict)

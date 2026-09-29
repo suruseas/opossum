@@ -90,7 +90,7 @@ func TestRunErrorHintPlatform(t *testing.T) {
 			"run -d --platform linux/arm64 --name web web:latest: exit status 1", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h := runErrorHint(&compose.Service{Platform: tc.platform}, runErr(tc.stderr))
+			h := runErrorHint(&compose.Service{Platform: tc.platform}, "", false, runErr(tc.stderr))
 			if got := strings.Contains(h, "platform: linux/amd64"); got != tc.wantHint {
 				if tc.wantHint {
 					t.Errorf("this is an image with no arm64 build and nothing said so; the runtime "+
@@ -115,7 +115,7 @@ func TestRunErrorHintPlatform(t *testing.T) {
 
 func TestRunErrorHintPortConflict(t *testing.T) {
 	svc := &compose.Service{Ports: []string{"8080:80/tcp", "53:53/udp"}}
-	h := runErrorHint(svc, runErr("Error: failed to bootstrap container (cause: bind(descriptor:ptr:bytes:): Address already in use) (errno: 48)"))
+	h := runErrorHint(svc, "", false, runErr("Error: failed to bootstrap container (cause: bind(descriptor:ptr:bytes:): Address already in use) (errno: 48)"))
 	// Names the service's published ports (svc-derived, not just the static text)…
 	if !strings.Contains(h, "this service publishes") || !strings.Contains(h, "localhost:8080") || !strings.Contains(h, "localhost:53") {
 		t.Errorf("port hint should echo the service's published ports, got: %q", h)
@@ -129,7 +129,7 @@ func TestRunErrorHintPortConflict(t *testing.T) {
 // The per-service culprit note ("on macOS, …") only appears for the ports the
 // service actually publishes — no spurious 53/AirPlay note for an unrelated port.
 func TestRunErrorHintPortNoSpuriousCulprit(t *testing.T) {
-	h := runErrorHint(&compose.Service{Ports: []string{"8080:80"}},
+	h := runErrorHint(&compose.Service{Ports: []string{"8080:80"}}, "", false,
 		runErr("bind: Address already in use"))
 	if strings.Contains(h, "AirPlay") || strings.Contains(h, "on macOS,") {
 		t.Errorf("an 8080-only conflict must not append the 53/AirPlay culprit note, got: %q", h)
@@ -140,7 +140,7 @@ func TestRunErrorHintPortNoSpuriousCulprit(t *testing.T) {
 }
 
 func TestRunErrorHintFileBind(t *testing.T) {
-	h := runErrorHint(&compose.Service{Volumes: []string{"./Caddyfile:/etc/caddy/Caddyfile"}},
+	h := runErrorHint(&compose.Service{Volumes: []string{"./Caddyfile:/etc/caddy/Caddyfile"}}, "", false,
 		runErr("Error: failed to start process (cause: mount failed with errno 20: failed to resolve '/etc/caddy/Caddyfile' in rootfs)"))
 	if !strings.Contains(h, "/etc/caddy/Caddyfile") || !strings.Contains(h, "config FILE") || !strings.Contains(h, "directory") {
 		t.Errorf("a file bind-mount failure should name the path and explain the dir-vs-file gotcha, got: %q", h)
@@ -148,15 +148,15 @@ func TestRunErrorHintFileBind(t *testing.T) {
 }
 
 func TestRunErrorHintUnknownAndNonRunError(t *testing.T) {
-	if h := runErrorHint(&compose.Service{}, runErr("some other failure\nexit 1")); h != "" {
+	if h := runErrorHint(&compose.Service{}, "", false, runErr("some other failure\nexit 1")); h != "" {
 		t.Errorf("an unrecognized failure must yield no hint, got: %q", h)
 	}
 	// A plain (non-RunError) error carries no captured stderr — no hint.
-	if h := runErrorHint(&compose.Service{}, fmt.Errorf("exit status 1")); h != "" {
+	if h := runErrorHint(&compose.Service{}, "", false, fmt.Errorf("exit status 1")); h != "" {
 		t.Errorf("a non-RunError must yield no hint, got: %q", h)
 	}
 	// nil service is safe (port branch guards it).
-	if h := runErrorHint(nil, runErr("Address already in use")); !strings.Contains(h, "host port") {
+	if h := runErrorHint(nil, "", false, runErr("Address already in use")); !strings.Contains(h, "host port") {
 		t.Errorf("nil service should still give the generic port hint, got: %q", h)
 	}
 }
@@ -166,15 +166,15 @@ func TestRunErrorHintUnknownAndNonRunError(t *testing.T) {
 func TestDecodeStartErrorAppendsHint(t *testing.T) {
 	p := &compose.Project{Name: "demo", Services: map[string]*compose.Service{"web": {Name: "web", Image: "x"}}}
 	o := New(p, &rt.Runtime{}, "", &bytes.Buffer{})
-	if s := o.decodeStartError("web", runErr("Error: image does not support required platforms")).Error(); !strings.Contains(s, "platform: linux/amd64") {
+	if s := o.decodeStartError("web", nil, runErr("Error: image does not support required platforms")).Error(); !strings.Contains(s, "platform: linux/amd64") {
 		t.Errorf("a recognized run failure should get the decoded hint, got: %s", s)
 	}
 	// The service name opens the line and the hint closes it; both are strings,
 	// and exchanged the hint would be quoted as the service's name (#559).
-	if s := o.decodeStartError("web", runErr("Error: image does not support required platforms")).Error(); !strings.HasPrefix(s, `starting service "web": `) {
+	if s := o.decodeStartError("web", nil, runErr("Error: image does not support required platforms")).Error(); !strings.HasPrefix(s, `starting service "web": `) {
 		t.Errorf("the decoded error should open with the service's name, got: %s", s)
 	}
-	if s := o.decodeStartError("web", runErr("random crash")).Error(); !strings.Contains(s, "opossum logs web") {
+	if s := o.decodeStartError("web", nil, runErr("random crash")).Error(); !strings.Contains(s, "opossum logs web") {
 		t.Errorf("an unrecognized failure should fall back to startFailed, got: %s", s)
 	}
 }
@@ -212,7 +212,7 @@ func TestEachDecodedHintCarriesItsCode(t *testing.T) {
 			"Error: mount failed with errno 20: failed to resolve '/etc/caddy/Caddyfile' in rootfs", codeBindFilePlaceholder},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h := runErrorHint(tc.svc, runErr(tc.stderr))
+			h := runErrorHint(tc.svc, "", false, runErr(tc.stderr))
 			if h == "" {
 				t.Fatalf("this signature should still decode at all, got no hint")
 			}
@@ -232,7 +232,7 @@ func TestAnUndecodedStartFailureCarriesNoCode(t *testing.T) {
 	if strings.Contains(err.Error(), "OPSM-") {
 		t.Errorf("an undiagnosed failure must not look diagnosed, got: %v", err)
 	}
-	if runErrorHint(&compose.Service{}, runErr("Error: something nobody has decoded yet")) != "" {
+	if runErrorHint(&compose.Service{}, "", false, runErr("Error: something nobody has decoded yet")) != "" {
 		t.Error("an unknown signature should decode to nothing at all")
 	}
 }

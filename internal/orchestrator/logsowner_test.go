@@ -329,9 +329,11 @@ func TestLogsAndStatsReadOnlyThisProjectsContainers(t *testing.T) {
 		}
 	})
 	// This project's own service with no container yet, beside one the
-	// runtime gave no readable answer about: `stats` still says there is no
-	// container to measure (and offers `opossum up` for that one), and names
-	// the unanswered one.
+	// runtime gave no readable answer about: `stats` passes the never-started
+	// one by silently (#1098, like `opossum up` never having been asked to
+	// create it — docker compose v5.5.1 exits 0 and prints nothing over it,
+	// measured), but still names the one it could not get a readable answer
+	// about.
 	t.Run("stats: own service never started, the other unanswered", func(t *testing.T) {
 		rt, _ := fakeShim(t)
 		setShimEnv(rt, "INSPECT_ABSENT=db.demo.opossum", "INSPECT_FAIL=web.demo.opossum")
@@ -339,10 +341,11 @@ func TestLogsAndStatsReadOnlyThisProjectsContainers(t *testing.T) {
 		_ = stderrOf(t, func() {
 			err = orchestrator.New(newP(), rt, "opossum", &bytes.Buffer{}).Stats(nil, orchestrator.StatsOptions{NoStream: true})
 		})
-		for _, want := range []string{"no container found for any of the 1 service(s)", "so they were left: web.demo.opossum"} {
-			if err == nil || !strings.Contains(err.Error(), want) {
-				t.Errorf("want %q, got %v", want, err)
-			}
+		if want := "so they were left: web.demo.opossum"; err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("want %q, got %v", want, err)
+		}
+		if strings.Contains(err.Error(), "db") {
+			t.Errorf("want nothing said about db (never started, passed by), got %v", err)
 		}
 	})
 	// Bare names (--dns-domain ""): the same reading, by the bare name.

@@ -195,6 +195,12 @@ func (f *fakeRunner) set(p, v string) {
 	f.files[p] = v
 }
 
+func (f *fakeRunner) remove(p string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.files, p)
+}
+
 func boolErr(b bool) error {
 	if b {
 		return errors.New("exit 1")
@@ -2062,6 +2068,141 @@ func TestAnEditDuringASweepIsNotThrownAway(t *testing.T) {
 		}
 		if got := mustGet(t, f, "x.go"); got != "call()" {
 			t.Errorf("x.go is %q, want the original", got)
+		}
+	})
+}
+
+// #1340: the same silent-recreate the file above is about, met a different
+// way — the restore's own pre-write Read fails instead of finding an edit. A
+// file removed during the sweep must not come back from nothing with the exit
+// status and report reading as though it had been restored, and a file moved
+// aside must not leave the mutation sitting at the other name unmentioned.
+func TestAFileGoneDuringASweepIsNotSilentlyRecreated(t *testing.T) {
+	t.Run("removed", func(t *testing.T) {
+		f := newFake(t, map[string]string{"x.go": "call()"})
+		f.testOut["noop()"] = passJSON
+		runs := 0
+		f.Runner.Go = func(args ...string) (string, string, error) {
+			if args[0] == "test" {
+				runs++
+				if runs == 2 {
+					f.remove("x.go")
+				}
+			}
+			return passJSON, "", nil
+		}
+		_, err := f.Sweep([]Mutation{mut()})
+		if err == nil {
+			t.Fatal("a file removed under the sweep came back with no error")
+		}
+		for _, want := range []string{"x.go", "NOT written back", "the wire is cut", `"noop()"`, `"call()"`, "file does not exist"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("the error does not say %q:\n%v", want, err)
+			}
+		}
+		if _, ok := f.get("x.go"); ok {
+			t.Errorf("x.go was recreated from nothing, want it left gone")
+		}
+	})
+	// Present but unreadable (permissions, a disk error) is not "gone": the
+	// mutation is almost certainly still sitting right there, so this gets the
+	// loud still-mutated wording #1253 already gives a restore Write that
+	// cannot land, not the "moved rather than removed" wording — the file has
+	// not been moved anywhere, and saying so would send a reader looking for a
+	// copy that does not exist while the real one is missed.
+	t.Run("present but unreadable", func(t *testing.T) {
+		f := newFake(t, map[string]string{"x.go": "call()"})
+		f.testOut["noop()"] = passJSON
+		denied := errors.New("permission denied")
+		realRead := f.Runner.Read
+		runs := 0
+		f.Runner.Go = func(args ...string) (string, string, error) {
+			if args[0] == "test" {
+				runs++
+				if runs == 2 {
+					f.Runner.Read = func(p string) ([]byte, error) {
+						if p == "x.go" {
+							return nil, denied
+						}
+						return realRead(p)
+					}
+				}
+			}
+			return passJSON, "", nil
+		}
+		_, err := f.Sweep([]Mutation{mut()})
+		if err == nil {
+			t.Fatal("a file unreadable under the sweep came back with no error")
+		}
+		for _, want := range []string{"x.go", "IT IS STILL MUTATED", "the wire is cut", `"noop()"`, `"call()"`, "permission denied"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("the error does not say %q:\n%v", want, err)
+			}
+		}
+		if strings.Contains(err.Error(), "moved rather than removed") {
+			t.Errorf("a file that was never gone should not be told apart as possibly moved:\n%v", err)
+		}
+	})
+	t.Run("moved aside", func(t *testing.T) {
+		f := newFake(t, map[string]string{"x.go": "call()"})
+		f.testOut["noop()"] = passJSON
+		runs := 0
+		f.Runner.Go = func(args ...string) (string, string, error) {
+			if args[0] == "test" {
+				runs++
+				if runs == 2 {
+					if moved, ok := f.get("x.go"); ok {
+						f.set("x.go.moved", moved)
+					}
+					f.remove("x.go")
+				}
+			}
+			return passJSON, "", nil
+		}
+		_, err := f.Sweep([]Mutation{mut()})
+		if err == nil {
+			t.Fatal("a file moved aside under the sweep came back with no error")
+		}
+		if !strings.Contains(err.Error(), "moved") {
+			t.Errorf("the error does not say the file may have been moved aside:\n%v", err)
+		}
+		if _, ok := f.get("x.go"); ok {
+			t.Errorf("x.go was recreated from nothing, want it left gone")
+		}
+		if got, ok := f.get("x.go.moved"); !ok || got != "noop()" {
+			t.Errorf("x.go.moved is (%q, %v), want the mutation left exactly where it was moved to", got, ok)
+		}
+	})
+	// The write of the mutation itself can fail partway (a full disk, a quota),
+	// leaving pendWritten false — and the file it was writing to can then also
+	// be unreadable (the same failure destroyed it, or removed it). Nothing
+	// confirmed the mutation ever landed, so restoring here must neither guess
+	// the original back into existence (that would recreate a file the write
+	// may have destroyed, #1340's mistake) nor read the write's own failure as
+	// "gone, might be elsewhere" (#1253's wording for that is for a file a
+	// successful write did reach).
+	t.Run("the mutation's own write failed, and the file could not be read back either", func(t *testing.T) {
+		f := newFake(t, map[string]string{"x.go": "call()"})
+		writeErr := errors.New("disk full")
+		realWrite := f.Runner.Write
+		f.Runner.Write = func(p string, b []byte) error {
+			if p == "x.go" && string(b) == "noop()" {
+				f.remove("x.go")
+				return writeErr
+			}
+			return realWrite(p, b)
+		}
+		_, err := f.Sweep([]Mutation{mut()})
+		if err == nil {
+			t.Fatal("a mutation whose own write failed, unreadable afterwards, came back with no error")
+		}
+		for _, want := range []string{"x.go", "never confirmed", "disk full"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("the error does not say %q:\n%v", want, err)
+			}
+		}
+		if _, ok := f.get("x.go"); ok {
+			t.Errorf("x.go was recreated from nothing, want it left gone")
 		}
 	})
 }

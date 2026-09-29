@@ -12,7 +12,7 @@ import (
 func TestBuildOptionsCarryTheAdditionalContextNames(t *testing.T) {
 	o := &Orchestrator{Project: &compose.Project{Name: "demo"}}
 	b := &compose.Build{Context: ".", AdditionalContexts: compose.AdditionalContexts{"lib", "sharedlib"}}
-	if got := o.buildOptions("x:1", b, "opossum up").AdditionalContexts; !slices.Equal(got, []string{"lib", "sharedlib"}) {
+	if got := o.buildOptions("x:1", "web", b, "opossum up").AdditionalContexts; !slices.Equal(got, []string{"lib", "sharedlib"}) {
 		t.Errorf("got %q", got)
 	}
 }

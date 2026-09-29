@@ -80,7 +80,7 @@ func TestDecodeStartErrorNamesVolumeAndHolder(t *testing.T) {
 	o := New(p, rt, "", &buf)
 
 	raw := &runtime.RunError{Err: fmt.Errorf("exit status 1"), Stderr: realVZError}
-	err := o.decodeStartError("app", raw)
+	err := o.decodeStartError("app", nil, raw)
 	if err == nil {
 		t.Fatal("expected an error")
 	}
@@ -101,7 +101,7 @@ func TestDecodeStartErrorPassesThroughNonAttachError(t *testing.T) {
 
 	// A plain failure (image pull, bad command) must not be dressed up as OPSM-103.
 	raw := &runtime.RunError{Err: fmt.Errorf("exit status 1"), Stderr: "Error: image not found"}
-	s := o.decodeStartError("app", raw).Error()
+	s := o.decodeStartError("app", nil, raw).Error()
 	if strings.Contains(s, "OPSM-103") {
 		t.Errorf("non-attach failure should pass through, not decode to OPSM-103; got: %s", s)
 	}
@@ -120,7 +120,7 @@ func TestDecodeStartErrorSignatureButNoHolder(t *testing.T) {
 	o := New(p, rt, "", &bytes.Buffer{})
 
 	raw := &runtime.RunError{Err: fmt.Errorf("exit status 1"), Stderr: realVZError}
-	s := o.decodeStartError("app", raw).Error()
+	s := o.decodeStartError("app", nil, raw).Error()
 	if !strings.Contains(s, "OPSM-103") || !strings.Contains(s, `"pj_data"`) {
 		t.Errorf("expected OPSM-103 naming the volume even without a holder; got: %s", s)
 	}
@@ -183,7 +183,7 @@ func TestDecodeStartErrorPassesThroughBindMountOnly(t *testing.T) {
 	o := New(p, rt, "", &bytes.Buffer{})
 
 	raw := &runtime.RunError{Err: fmt.Errorf("exit status 1"), Stderr: realVZError}
-	s := o.decodeStartError("app", raw).Error()
+	s := o.decodeStartError("app", nil, raw).Error()
 	if strings.Contains(s, "OPSM-103") {
 		t.Errorf("a bind-mount-only service should not decode to OPSM-103; got: %s", s)
 	}

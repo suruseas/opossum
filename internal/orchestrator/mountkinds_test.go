@@ -59,7 +59,7 @@ func TestAMountRunsAsWhatItLoadedAs(t *testing.T) {
 		{"an anonymous volume", "/anon", "-v demo_web_anon_", ""},
 		{"an anonymous volume written with an empty source", ":/es", "-v demo_web_es_", ""},
 		{"a long-form anonymous volume", "{type: volume, target: /la}", "-v demo_web_la_", ""},
-		{"a tmpfs", "{type: tmpfs, target: /t}", "--tmpfs /t", ""},
+		{"a tmpfs", "{type: tmpfs, target: /t}", "--tmpfs=/t", ""},
 		{"a declared volume with a mode", "good:/g:ro", "-v demo_good:/g:ro", ""},
 		{"a declared volume with nocopy", "good:/n:nocopy", "-v demo_good:/n", ""},
 		{"a declared external volume", "ext:/e", "-v ext:/e", ""},

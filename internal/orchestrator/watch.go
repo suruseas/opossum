@@ -164,6 +164,21 @@ func (o *Orchestrator) applyChanges(paths []string) {
 		if _, alsoRebuilt := rebuilds[svc]; alsoRebuilt {
 			continue // a rebuild already recreated it
 		}
+		// Restart itself now passes a service with no container by silently,
+		// matching docker compose for the ordinary CLI case (#1098) — but watch
+		// is not asking about a service nobody has started: it already told
+		// the user it was watching this one, so a container that has
+		// unexpectedly disappeared out from under it is still worth the
+		// warning Restart used to produce by trying and failing on it.
+		cname := o.containerName(svc)
+		// Unknown is left to Restart itself: it is not "gone" (see
+		// ContainerInfo.Unknown), and Restart's own owner check turns it into
+		// the "no readable answer" warning below, not this one.
+		if info := o.rt.Inspect(cname); !info.Exists && !info.Unknown {
+			o.warnf(codeWatchRestart, "restart %s failed: %v — the container may be gone; run `opossum up%s %s` to recreate it\n",
+				svc, fmt.Errorf("no container named %s", cname), o.runFlags, ShellWord(svc))
+			continue
+		}
 		if err := o.Restart([]string{svc}); err != nil {
 			var refusal ownerRefusal
 			if errors.As(err, &refusal) {

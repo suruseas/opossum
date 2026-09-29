@@ -22,17 +22,21 @@ func TestTheGateRunsTheSuiteThroughTheLeftoverCheck(t *testing.T) {
 	// The `test` target and nothing else: `cover` runs the same suite for a
 	// different reason, and a rule that every recipe must go through the check
 	// would be a rule about recipes nobody has written yet.
+	//
+	// Reset rather than stop at the first line no longer in a recipe: `test:
+	// export TMPDIR := …` (#1238, a target-specific variable, not a recipe)
+	// also starts with "test:", and stopping there — instead of looking
+	// onward for the real `test: wired …` recipe — would end the search
+	// before it ever reached a tab-indented line.
 	var recipes []string
 	inTarget := false
 	for _, line := range strings.Split(string(b), "\n") {
-		if strings.HasPrefix(line, "test:") {
+		switch {
+		case strings.HasPrefix(line, "test:"):
 			inTarget = true
-			continue
-		}
-		if inTarget && !strings.HasPrefix(line, "\t") {
-			break
-		}
-		if inTarget && strings.Contains(line, "go test") {
+		case inTarget && !strings.HasPrefix(line, "\t") && strings.TrimSpace(line) != "":
+			inTarget = false
+		case inTarget && strings.Contains(line, "go test"):
 			recipes = append(recipes, line)
 		}
 	}

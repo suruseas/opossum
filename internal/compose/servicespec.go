@@ -7,6 +7,7 @@ import (
 	"math"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -144,6 +145,92 @@ func init() {
 // string` (the string is read into the boolean, or refused by that reading).
 var strictBooleanKeys = map[string]bool{"use_api_socket": true}
 
+// castKeys is the kind of value docker compose casts a string into, for the
+// keys of heldToTheSchema whose schema gives them a string branch alongside a
+// boolean or number/integer one (#1366's cast layer, stage 2: the shape
+// check above takes the string as the right kind on the strength of that
+// branch; this asks whether the string is one docker compose can actually
+// read). Measured against docker compose v5.5.1, quoted so YAML hands the
+// value through as a string rather than reading it as the native kind
+// itself (a bare `cpu_shares: 7.0` never reaches this check — it is already
+// a number).
+//
+// `cpus`, `init`, `read_only` and `tty` are deliberately not here despite
+// being on #1366's original list of 24: none of the four is in
+// heldToTheSchema — opossum already reads and validates each through its own
+// decoder (`cpus` names its own error, "cpus: not a number of CPUs"; `init`,
+// `read_only` and `tty` go through the existing `readQuotedBools`/`boolWord`
+// in types.go, measured to accept the identical YAML-1.1-word set as
+// yamlBools below), so this check would never run for any of them, and at
+// least `cpus`' own decoder does not agree with docker compose's cast in
+// every case measured here (it takes "inf", "nan" and a leading space,
+// docker compose's cast does not). All four are a gap of their own, for
+// keys opossum reads, not for the ignored-key layer this map is about.
+//
+// `cpu_percent` is also deliberately not here, despite being on the same
+// list and in heldToTheSchema: measured separately from the other nine
+// int-cast keys, and it does not share their cast. `cpu_shares: "7.0"` is
+// refused (plain strconv.ParseInt); `cpu_percent: "7.0"` is ACCEPTED —
+// docker compose casts it through a float first (also taking "7e0", "1e1",
+// "7.", and Go's digit-separator syntax: "5_0", "1_0" and "1_00" all read as
+// their obvious values). `strconv.ParseFloat` agrees with all of that —
+// `cpu_percent: "1_000"` is where it stops agreeing, but not for the reason
+// first assumed here: measured again, docker compose reads it as 1000 the
+// same way it reads "1_00" as 100 (both are v5.5.1's "must be a string"
+// schema-stage wording, not a cast failure), and refuses it for being
+// **above the 0–100 bound** — the same bound `mismatch`'s own
+// `Minimum`/`Maximum` check already reads off the schema, but only for a
+// native number (see `number(v)` below); a string never reaches it. So the
+// missing piece for `cpu_percent` is not really a cast rule of its own: it
+// is ParseFloat, a whole-number check, and wiring the cast result back
+// through that existing bound check — needs doing before a check can be
+// written with the same confidence as the nine below.
+//
+// bytes-shaped (mem_reservation, mem_swappiness, memswap_limit, shm_size —
+// mem_limit is, like cpus, a key opossum reads itself) and duration-shaped
+// (stop_grace_period) keys are not in this map yet: docker compose's cast
+// for those is not plain Go syntax (`1d` reads as a day, which
+// time.ParseDuration does not take; `mem_swappiness` casts through the same
+// byte-suffix reading as mem_limit despite being a percentage by name) and
+// needs its own measurement before a check can be written with the same
+// confidence as the two kinds below.
+var castKeys = map[string]string{
+	"attach": "bool", "oom_kill_disable": "bool", "privileged": "bool", "stdin_open": "bool",
+	"cpu_count": "int", "cpu_shares": "int", "cpu_quota": "int",
+	"cpu_period": "int", "cpu_rt_period": "int", "cpu_rt_runtime": "int",
+	"oom_score_adj": "int", "pids_limit": "int", "scale": "int",
+}
+
+// castKindNames is what castMismatch's refusal calls each kind, matching
+// describe()'s wording for the shape check above so the two read as one
+// family of message rather than two different voices for the same key.
+var castKindNames = map[string]string{"bool": "a boolean", "int": "an integer"}
+
+// yamlBools are the spellings YAML 1.1 (which docker compose's cast reads
+// through, case-insensitively) takes as true or false — measured: `y`, `n`,
+// `on`, `off`, and the full words all work in any case; `t`, `f`, `1`, `0` do
+// not (docker compose's own message on those: `invalid boolean: <value>`).
+var yamlBools = map[string]bool{
+	"true": true, "false": true, "yes": true, "no": true,
+	"y": true, "n": true, "on": true, "off": true,
+}
+
+// castOK reports whether s is a string docker compose's cast reads into kind,
+// for the keys castKeys names. int is plain strconv.ParseInt(s, 10, 64) —
+// measured: cpu_shares takes no hex (`0x10`), no digit separators
+// (`1_000`), no surrounding space, and no fractional spelling of a whole
+// number (`7.0`), none of which base-10 ParseInt takes either.
+func castOK(kind, s string) bool {
+	switch kind {
+	case "bool":
+		return yamlBools[strings.ToLower(s)]
+	case "int":
+		_, err := strconv.ParseInt(s, 10, 64)
+		return err == nil
+	}
+	return true
+}
+
 // checkServiceShapes refuses a service key whose value is not what docker compose
 // takes for it. Only the keys the schema gives a shape are looked at: a key it
 // does not know is the business of the check that says which keys a service may
@@ -152,9 +239,12 @@ var strictBooleanKeys = map[string]bool{"use_api_socket": true}
 // A value of the wrong kind is refused. A string where the schema says a number or
 // a boolean is taken: the schema of the keys checked here gives such a key a string
 // branch as well (`number or string`, `boolean or string`), for the value that
-// docker compose reads into the number or boolean (`cpu_shares: "7"`); whether the
-// string reads (`cpu_shares: "abc"`, and the bounds of the number it reads into —
-// `cpu_percent: "150"`) is a check of its own, not made here.
+// docker compose reads into the number or boolean (`cpu_shares: "7"`). Whether the
+// string reads (`cpu_shares: "abc"`) is castKeys/castOK's business, made right below
+// — for the keys castKeys names. The bounds of the number a string reads into
+// (`cpu_percent: "150"`) is still a check of its own, not made anywhere yet: the
+// `Minimum`/`Maximum` check further down only ever sees a native number, never a
+// string that castOK has already confirmed reads as one.
 func checkServiceShapes(path string, services map[string]any) error {
 	spec, err := loadServiceSpec()
 	if err != nil {
@@ -188,6 +278,15 @@ func checkServiceShapes(path string, services map[string]any) error {
 			}
 			if msg := node.mismatch(svc[k], where); msg != "" {
 				return fmt.Errorf("compose file %s: %s", path, msg)
+			}
+			// The shape above took the string on the strength of its kind's
+			// string branch; this asks whether docker compose can actually
+			// read it into the kind that branch exists for (#1366).
+			if kind, ok := castKeys[k]; ok {
+				if s, isString := svc[k].(string); isString && !castOK(kind, s) {
+					return fmt.Errorf("compose file %s: %s %q does not read as %s",
+						path, where, s, castKindNames[kind])
+				}
 			}
 		}
 	}

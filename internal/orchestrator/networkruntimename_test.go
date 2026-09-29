@@ -37,7 +37,7 @@ func TestADeclaredNetworkKeyIsFoldedOnEveryPathThatNamesIt(t *testing.T) {
 		if !hasLine(log(), "network create demo-backend") {
 			t.Errorf("want the network created as demo-backend, got %v", log())
 		}
-		if i := runLine(log()); i < 0 || !strings.Contains(log()[i], " --network demo-backend ") {
+		if i := runLine(log()); i < 0 || !strings.Contains(log()[i], " --network=demo-backend ") {
 			t.Errorf("want the service run on demo-backend, got %v", log())
 		}
 		onlyFolded(t, log())

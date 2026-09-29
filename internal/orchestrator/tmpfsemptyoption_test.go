@@ -50,9 +50,9 @@ func tmpfsArgs(lines []string) []string {
 			continue
 		}
 		f := strings.Fields(l)
-		for i := 0; i+1 < len(f); i++ {
-			if f[i] == "--tmpfs" {
-				out = append(out, f[i+1])
+		for _, a := range f {
+			if v, ok := strings.CutPrefix(a, "--tmpfs="); ok {
+				out = append(out, v)
 			}
 		}
 	}
@@ -348,7 +348,7 @@ func TestATmpfsEntryWithAnEmptyOptionIsRefusedAfterTheExternalVolumes(t *testing
 				}
 				return
 			}
-			if err != nil || !strings.Contains(out.String(), "--tmpfs /t:nosuid,nodev,noexec,exec,") {
+			if err != nil || !strings.Contains(out.String(), "--tmpfs=/t:nosuid,nodev,noexec,exec,") {
 				t.Errorf("want the plan printed with the entry, got err %v\n%s", err, out.String())
 			}
 			// Nothing is said about the entry either, as docker compose's dry run

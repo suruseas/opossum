@@ -13,17 +13,41 @@ import (
 )
 
 func TestCappedBuffer(t *testing.T) {
-	c := &cappedBuffer{cap: 4}
+	c := &cappedBuffer{headCap: 4, tailCap: 4}
 	if n, _ := c.Write([]byte("ab")); n != 2 {
 		t.Errorf("write should report 2, got %d", n)
 	}
-	// Overshoots the cap: only the head fits, but the write still reports full length
-	// (so the child's pipe never blocks on a short write).
+	// Still within head+tail (2 of 8): nothing dropped yet, so this reads as
+	// plain, uncapped content.
+	if got := c.String(); got != "ab" {
+		t.Errorf("under head+tail, capped buffer should read as written, got %q", got)
+	}
+	// Overshoots headCap but not headCap+tailCap: the head is full (4), and
+	// the rest ("ef", 2 bytes) fits entirely in the tail — nothing dropped,
+	// so the two together still reconstruct everything written.
 	if n, _ := c.Write([]byte("cdef")); n != 4 {
 		t.Errorf("write should report the full 4 even when capped, got %d", n)
 	}
-	if got := c.String(); got != "abcd" {
-		t.Errorf("capped buffer should hold only the first 4 bytes, got %q", got)
+	if got := c.String(); got != "abcdef" {
+		t.Errorf("head+tail together should cover everything written when nothing overflows tailCap, got %q", got)
+	}
+	// Exactly headCap+tailCap (8 of 8): still nothing dropped — the boundary
+	// itself (over == 0, not over > 0) must not be misread as an overflow, or
+	// a failure line landing right on it would gain a spurious "\n...\n".
+	if n, _ := c.Write([]byte("gh")); n != 2 {
+		t.Errorf("write should report the full 2, got %d", n)
+	}
+	if got := c.String(); got != "abcdefgh" {
+		t.Errorf("exactly headCap+tailCap should still read as written, nothing dropped, got %q", got)
+	}
+	// Now overshoots headCap+tailCap (12 written, cap 8): the middle ("efgh")
+	// is what the tail's window slides past and drops, keeping only the head
+	// and the most recent tailCap bytes.
+	if n, _ := c.Write([]byte("ijkl")); n != 4 {
+		t.Errorf("write should report the full 4 even when capped, got %d", n)
+	}
+	if got := c.String(); got != "abcd\n...\nijkl" {
+		t.Errorf("capped buffer should hold the first 4 and the last 4 bytes once it overflows both, got %q", got)
 	}
 }
 

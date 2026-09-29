@@ -130,6 +130,9 @@ func pidFlags(pids []string) []string {
 // the Mac. The host column is host-derived and approximate (see HostFootprinter);
 // a service whose VM can't be mapped shows "—" rather than failing the command.
 func (o *Orchestrator) StatsHost(services []string) error {
+	// Unlike Stats, this stays on resolveServices (strict): it is opossum's
+	// own command, with no docker compose equivalent to measure a tolerant
+	// split against, so #1093's reasoning is not applied here on a guess.
 	targets, err := o.resolveServices(services)
 	if err != nil {
 		return err

@@ -1,0 +1,1 @@
+- **Don't mount the Docker socket.** `/var/run/docker.sock` (a tool wanting to launch sibling containers, commonly) has nothing answering it here — this runtime has no Docker-compatible daemon to mount (`OPSM-204`). There's no fix that keeps the same tool working; leave it out and use `depends_on` instead of container-launching-container patterns.

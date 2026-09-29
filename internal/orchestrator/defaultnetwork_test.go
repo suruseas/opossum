@@ -60,7 +60,7 @@ func TestServicesOnTheDefaultNetworkAreOnOneNetwork(t *testing.T) {
 			if indexOf(log(), "demo-default") >= 0 {
 				t.Errorf("the network was also made under its key, got %v", log())
 			}
-			for svc, want := range map[string]string{"a": " --network demo-net ", "b": " --network demo-net ", "c": " --network demo-net --network demo-other "} {
+			for svc, want := range map[string]string{"a": " --network=demo-net ", "b": " --network=demo-net ", "c": " --network=demo-net --network=demo-other "} {
 				if l := runOf(log(), svc); !strings.Contains(l, want) {
 					t.Errorf("want %s run with%q, got %q", svc, want, l)
 				}
@@ -82,7 +82,7 @@ func TestTheDefaultNetworksDeclarationIsThatNetworks(t *testing.T) {
 			t.Errorf("want no demo-net, got %v", log())
 		}
 		for _, svc := range []string{"a", "b", "c"} {
-			if l := runOf(log(), svc); !strings.Contains(l, " --network shared ") {
+			if l := runOf(log(), svc); !strings.Contains(l, " --network=shared ") {
 				t.Errorf("want %s on shared, got %q", svc, l)
 			}
 		}
@@ -137,7 +137,7 @@ func TestTheDefaultNetworksDeclarationIsThatNetworks(t *testing.T) {
 		if n := countLines(log(), "network create"); n != 1 || !hasLine(log(), "network create demo-other") {
 			t.Errorf("want demo-other made and nothing else, got %v", log())
 		}
-		for svc, want := range map[string]string{"a": " --network ext ", "b": " --network ext ", "c": " --network ext --network demo-other "} {
+		for svc, want := range map[string]string{"a": " --network=ext ", "b": " --network=ext ", "c": " --network=ext --network=demo-other "} {
 			if l := runOf(log(), svc); !strings.Contains(l, want) {
 				t.Errorf("want %s run with%q, got %q", svc, want, l)
 			}
@@ -148,7 +148,7 @@ func TestTheDefaultNetworksDeclarationIsThatNetworks(t *testing.T) {
 		if err := orchestrator.New(defaultProject(&compose.NetworkDecl{External: true}), rt, "opossum", &bytes.Buffer{}).Up(true); err != nil {
 			t.Fatalf("Up: %v", err)
 		}
-		if l := runOf(log(), "a"); !strings.Contains(l, " --network default ") {
+		if l := runOf(log(), "a"); !strings.Contains(l, " --network=default ") {
 			t.Errorf("want a on `default`, got %q", l)
 		}
 	})

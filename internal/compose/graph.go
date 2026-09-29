@@ -37,8 +37,71 @@ func (p *Project) StartupOrderReading(read []string) ([]string, error) {
 	}
 	sort.Strings(names)
 
+	// A dependency naming no service at all is usually caught while the file
+	// is read (compose.validateDeps) — except when the service that names it
+	// carries `profiles:` and was not yet known to be read, which is deferred
+	// to here (#1094): it is this walk's business now that reading(name) says
+	// so, before cycleAmong and order below, which both still pass over one
+	// outside what is being read (that half of the file is not this walk's
+	// business at all, undefined dependency included).
+	for _, name := range names {
+		if !reading(name) {
+			continue
+		}
+		for _, dep := range p.Services[name].DependsOn.Names() {
+			if p.Services[dep] == nil {
+				return nil, fmt.Errorf("service %q depends on unknown service %q — define %q under services: or remove it from depends_on", name, dep, dep)
+			}
+		}
+	}
 	if err := p.cycleAmong(names, reading); err != nil {
 		return nil, err
+	}
+	return p.order(names), nil
+}
+
+// StartupOrderTolerant is StartupOrderReading without the cycle refusal:
+// every service still gets a place, each after what it depends on where that
+// is possible, but a dependency cycle among the services read does not stop
+// the walk — it is broken by not placing a service a second time once it is
+// already being placed (the same fallback order() always falls back to;
+// cycleAmong exists only to turn that into an error, and this skips it). A
+// dependency naming no service at all is still refused, exactly as
+// StartupOrderReading refuses it — that is a different problem a cycle-shaped
+// fallback cannot paper over, and is not what #1093 is about.
+//
+// For commands that only act on containers already there — they do not start
+// anything in dependency order, so there is nothing for a cycle to actually
+// break — refusing a whole project over a cycle in the file would leave it
+// stuck running with no way back down through opossum (#1093). docker
+// compose does not refuse for its own commands of that kind either, given
+// `-p` and left to discover the file (measured on v5.5.1: `ps`, `images`,
+// `logs`, `stop`, `kill`, `down`, `restart`, `stats` all go through; `up`,
+// `run`, `pull`, `build` and `config --services` still refuse, and so does
+// StartupOrderReading above, which serves them). opossum's own `import`,
+// `start`, `volumes` and `watch` stay refused too, for the same reason as
+// `pull` and `build` — see docs/compatibility.md.
+func (p *Project) StartupOrderTolerant(read []string) ([]string, error) {
+	in := map[string]bool{}
+	for _, name := range read {
+		in[name] = true
+	}
+	reading := func(name string) bool { return read == nil || in[name] }
+	names := make([]string, 0, len(p.Services))
+	for name := range p.Services {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		if !reading(name) {
+			continue
+		}
+		for _, dep := range p.Services[name].DependsOn.Names() {
+			if p.Services[dep] == nil {
+				return nil, fmt.Errorf("service %q depends on unknown service %q — define %q under services: or remove it from depends_on", name, dep, dep)
+			}
+		}
 	}
 	return p.order(names), nil
 }

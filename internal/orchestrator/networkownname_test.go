@@ -36,10 +36,10 @@ func TestANetworkWithANameOfItsOwnIsMadeAndJoinedUnderThatName(t *testing.T) {
 			if !hasLine(log(), "network create --label opossum.project=demo shared") {
 				t.Errorf("want the network made as `shared` with the project's label, got %v", log())
 			}
-			if i := indexOf(log(), "--name web"); i < 0 || !strings.Contains(log()[i], " --network shared ") {
+			if i := indexOf(log(), "--name web"); i < 0 || !strings.Contains(log()[i], " --network=shared ") {
 				t.Errorf("want web run on `shared`, got %v", log())
 			}
-			if i := indexOf(log(), "--name db."); path == "up" && (i < 0 || !strings.Contains(log()[i], " --network demo-net ")) {
+			if i := indexOf(log(), "--name db."); path == "up" && (i < 0 || !strings.Contains(log()[i], " --network=demo-net ")) {
 				t.Errorf("want db left on the default network, got %v", log())
 			}
 			if hasLine(log(), "network create demo-n") || hasLine(log(), "network create --label opossum.project=demo demo-n") {

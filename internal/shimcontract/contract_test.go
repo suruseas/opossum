@@ -215,6 +215,19 @@ var contract = []struct {
 		{argv: []string{"inspect", "second.demo.opossum"}, has: `"opossum.project":"other"`},
 		{argv: []string{"inspect", "NAME"}, lacks: `opossum.project`},
 	}},
+	// opossum itself passes `--label=<v>` and `--env=<v>` as one argument each
+	// (#996), not `-e`/`-l` followed by a separate value — because a
+	// compose-sourced key can start with "-", which the real CLI reads as
+	// another flag when the value is its own argument (measured on container
+	// 1.4.1: `--env=-X=1` and `--label=-x=1` both take the value; the
+	// two-argument form fails with `Missing value for '<flag>'` for the same
+	// input). A fake that only recognised the two-argument form would silently
+	// drop the label, or worse, misread the next flag as this one's value.
+	{"the combined --flag=value form opossum passes is read the same as the separate form", nil, []step{
+		{argv: []string{"run", "-d", "--name", "NAME", "--label=opossum.project=demo", "--env=-X=1", "alpine"}},
+		{argv: []string{"inspect", "NAME"}, has: `"opossum.project":"demo"`},
+		{argv: []string{"delete", "--force", "NAME"}},
+	}},
 	// The test knobs: a name never run carries the project its spelling names,
 	// one that was run carries what its run gave it, and $INSPECT_UNLABELED
 	// takes the label away.
@@ -250,6 +263,22 @@ var contract = []struct {
 		{argv: []string{"run", "-d", "--name", "NAME", "alpine"}},
 		{argv: []string{"inspect", "NAME"}, has: `"state":"running"`},
 		{argv: []string{"stop", "NAME"}},
+	}},
+	// `kill` only truly succeeds on a running container: one already stopped
+	// refuses with invalidState, and one gone refuses with notFound — both
+	// measured on 1.4.1 (#962). Orchestrator.Kill re-inspects after either
+	// failure and only reports it when the container is still running or
+	// unreadable, so a container not running discards both — a fake that
+	// answered rc 0 for all three (the state every fake gave kill before this
+	// row) passed regardless, and hid that nothing here was ever asked what
+	// kill does to a container it cannot affect.
+	{"kill only takes on a running container: a stopped one and a gone one both refuse", nil, []step{
+		{argv: []string{"run", "-d", "--name", "NAME", "alpine"}},
+		{argv: []string{"kill", "NAME"}},
+		{argv: []string{"inspect", "NAME"}, has: `"state":"stopped"`},
+		{argv: []string{"kill", "NAME"}, rc: 1, has: `invalidState: "no runtime client exists: container is stopped"`},
+		{argv: []string{"delete", "--force", "NAME"}},
+		{argv: []string{"kill", "NAME"}, rc: 1, has: `notFound: "container with ID NAME not found"`},
 	}},
 	{"a stopped container is deleted the way down and destroy delete it: stop, then delete", nil, []step{
 		{argv: []string{"run", "-d", "--name", "NAME", "alpine"}},
@@ -304,9 +333,10 @@ var contract = []struct {
 	// the runtime's, and the last `--name` there counts. Not modelled, and in some
 	// rows below the exit is the fake's rather than the real CLI's (said where so):
 	// `--name=x`, `-e=x`, combined short flags, `--`, `-h`/`--help`/`--version`,
-	// `--debug`, a value starting with `-` for another flag (the real CLI calls
-	// it missing, exit 64; opossum can pass `--user -1`, #996), and a flag with no
-	// value at the end.
+	// `--debug`, a value starting with `-` given to another flag as a separate
+	// argument (the real CLI calls it missing, exit 64; measured on `--user -1`
+	// — opossum itself now passes such values combined, `--user=-1`, #996), and
+	// a flag with no value at the end.
 	// Each rule has a row that holds and one that breaks it. A fake that ran any
 	// name would keep a caller passing one green.
 	{"a container name the runtime refuses is refused, and one it takes is run", nil, []step{
@@ -362,6 +392,11 @@ var contract = []struct {
 		// one that takes none does not.
 		{argv: []string{"run", "-l", "tier", "--name", "_afterlabel", "alpine"}, rc: 1, has: "Error: container ID _afterlabel is not a valid container ID"},
 		{argv: []string{"run", "--rm", "--init", "--read-only", "--ssh", "--rosetta", "-i", "-t", "--name", "_afterbools", "alpine"}, rc: 1, has: "Error: container ID _afterbools is not a valid container ID"},
+		// A `--flag=value` opossum passes combined (#996) is complete in one
+		// argument — it must not consume the `--name` after it as if it were a
+		// separate value the flag itself took.
+		{argv: []string{"run", "-d", "--user=1000", "--name", "_afterequals", "alpine"}, rc: 1, has: "Error: container ID _afterequals is not a valid container ID"},
+		{argv: []string{"run", "-d", "--user=1000", "--name", "-dash", "alpine"}, rc: 64, has: "Error: Missing value for '--name <name>'"},
 	}},
 	// A refused run records nothing: a name marked gone stays gone, as the real
 	// CLI (which never made the container) answers it.
@@ -400,6 +435,10 @@ var contract = []struct {
 		{argv: []string{"run", "--rm", "-v", "q:/x", "alpine"}, lacks: "invalid volume name"},
 		{argv: []string{"run", "--rm", "-v", "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv:/x", "alpine"}, lacks: "invalid volume name"},
 		{argv: []string{"run", "--rm", "-v", "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv:/x", "alpine"}, rc: 1, has: "Error: invalid volume name 'vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv': must match ^[A-Za-z0-9][A-Za-z0-9_.-]*$"},
+		// A `--flag=value` opossum passes combined (#996) before the `-v` is
+		// complete in one argument — it must not consume the `-v` after it as
+		// if it were a separate value the flag itself took.
+		{argv: []string{"run", "--rm", "--workdir=/a", "-v", "-dash:/y", "alpine"}, rc: 1, has: "Error: invalid volume name '-dash': must match ^[A-Za-z0-9][A-Za-z0-9_.-]*$"},
 		// With the options opossum adds after the target.
 		{argv: []string{"run", "--rm", "-v", "ro+name:/x:ro", "alpine"}, rc: 1, has: "Error: invalid volume name 'ro+name': must match ^[A-Za-z0-9][A-Za-z0-9_.-]*$"},
 		{argv: []string{"run", "--rm", "-v", "roname:/x:ro", "alpine"}, lacks: "invalid volume name"},

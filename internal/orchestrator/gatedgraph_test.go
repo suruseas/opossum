@@ -17,14 +17,12 @@ import (
 
 // What a command reads out of a compose file when it puts its services in
 // order: the ones the profiles leave active, and only those. A dependency
-// cycle behind a profile nothing turned on, and a dependency on a service
-// behind another profile, are nobody's business until something enables them.
-// Naming a service enables it and what it depends on behind its own profiles;
-// `--profile`, `COMPOSE_PROFILES` and `*` open whole profiles. A depends_on
-// naming a service the file does not define is the exception: reading the file
-// refuses that whatever the profiles say, which is a difference from docker
-// compose of its own and tracked separately — the rows for it are here to sit
-// beside the cycle rows, so that a change to either is seen.
+// cycle behind a profile nothing turned on, a dependency on a service behind
+// another profile, and (#1094) a dependency naming a service the file does
+// not define anywhere, are all nobody's business until something enables the
+// service that names it. Naming a service enables it and what it depends on
+// behind its own profiles; `--profile`, `COMPOSE_PROFILES` and `*` open whole
+// profiles.
 //
 // The table is docker compose v5.5.1, measured over the same three skeletons
 // (issue #1088): `a` behind profile `x` depends on `b` (also `x`), `plain` is
@@ -60,16 +58,19 @@ func TestWhatAFaultBehindAProfileIsReadBy(t *testing.T) {
 		body                       string
 		named, profile, all, plain string
 	}{
-		// Reading the file refuses a depends_on it does not define, wherever it
-		// sits and whatever the profiles say — before any command runs, so
-		// every column is the same. docker compose reads a gated service's
-		// depends_on only once something activates it: a difference of its
-		// own, measured and tracked separately. These rows are here so that a
-		// change to it is seen beside the cycle rows.
+		// Reading the file refuses a depends_on it does not define the same way
+		// it refuses one behind an inactive profile: only once something
+		// activates the service that names it (#1094, measured against docker
+		// compose v5.5.1 — this used to be a divergence of opossum's own,
+		// refusing every column alike, which is why these rows sit beside the
+		// cycle and gated-profile ones). Unlike a gated dependency, though,
+		// opening a profile never resolves an undefined one — nosuch does not
+		// start existing — so `all` stays U everywhere gatedChain/gatedOther
+		// turn to ok.
 		{name: "an undefined dependency in the chain", body: nameChain,
-			named: "U", profile: "U", all: "U", plain: "U"},
+			named: "U", profile: "U", all: "U", plain: "ok"},
 		{name: "an undefined dependency on a service of the same profile", body: nameOther,
-			named: "U", profile: "U", all: "U", plain: "U"},
+			named: "ok", profile: "U", all: "U", plain: "ok"},
 		{name: "an undefined dependency on an ungated service", body: namePlain,
 			named: "U", profile: "U", all: "U", plain: "U"},
 		// `*` opens `y` as well, so the dependency is active and there is no
@@ -260,25 +261,52 @@ func TestAGatedFaultDoesNotStopTheCommandsThatReadOrTakeDown(t *testing.T) {
 	// the names as the whole answer and build no order — which is what
 	// decides whether a cycle is read. The rows are both sides of that.
 	readsNoOrderWhenNamed := map[string]bool{"stop web": true, "logs web": true, "restart web": true}
+	// #1385: unlike logs web and restart web, stop web (and kill, untested by
+	// this table — it has no "kill web" row) now also checks the named
+	// service's own dependency once a container exists for it to act on, the
+	// same way up already does (checkProjectLoads); the fake shim answers
+	// every Inspect this table makes as though web already has one (its
+	// default), so this table exercises that half of #1385, not the "no
+	// container yet" half (covered by namedteardowndeps_test.go instead).
+	// This only reopens the one row where web's own depends_on names a gated
+	// service directly (halfGated) — the other fixtures' gated fault sits on
+	// other/zed, not on web, so stop web still does not read it (checked
+	// below, not by naming — see #1094's own remap above).
+	checksOwnGatedDepWhenNamed := map[string]bool{"stop web": true}
+	// #1093: with no service named, these no longer refuse a cycle among the
+	// active services either — they only touch containers already there, so
+	// docker compose does not refuse them for it given `-p` and left to
+	// discover the file (measured on v5.5.1), and now opossum does not
+	// either. `start` was not measured either way and stays refused, as
+	// before.
+	tolerantOfActiveCycle := map[string]bool{
+		"ps": true, "images": true, "stop": true, "kill": true, "down": true,
+		"destroy plan": true, "logs": true, "restart": true, "ps web": true,
+	}
 	for _, cmd := range []string{"ps", "images", "stop", "kill", "down", "destroy plan", "logs", "start", "restart", "stop web", "logs web", "restart web", "ps web", "start web"} {
 		// Both halves of the claim: gated, the fault is nobody's business;
-		// with the profile on, the same file is refused, as it was before this
-		// change and as docker compose v5.5.1 refuses it — with the caveat
-		// that docker answers these commands from the containers, without
-		// reading the file at all, when it is given a project name with `-p`
-		// and left to find the file itself (measured, #1093). What this table
-		// pins is the gated half, where the two agree in every form; the
-		// active half is here because it is the half that was refused before
-		// and must go on being refused.
+		// with the profile on, the same file used to be refused for the
+		// commands that put their services in order — now the ones that only
+		// touch containers already there go on instead (#1093, tolerantOfActiveCycle
+		// above); the rest (`start`) are refused as before, and as docker
+		// compose v5.5.1 refuses all of these unless given `-p` and left to
+		// find the file itself (measured). What this table pins is the gated
+		// half, where opossum and docker agree in every form; the active half
+		// is here so that a change to which commands tolerate it is seen.
 		for _, tc := range []struct {
 			name, body string
 			off, on    string // what the fault is with the profile off, and on
 		}{
 			{name: "a cycle", body: gated, off: "ok", on: "C"},
 			{name: "an ungated cycle", body: ungated, off: "C", on: "C"},
-			// Reading the file refuses these, gated or not, before the command
-			// runs: they are here so that a change to that is seen.
-			{name: "an undefined dependency", body: gatedUndefined, off: "U", on: "U"},
+			// A gated service's undefined dependency reads the same as its
+			// gated-inactive one now (#1094): nobody's business while its
+			// profile is off, refused once it is on — unlike the plain cycle
+			// row, opening the profile never resolves it (nosuch does not
+			// start existing), so it stays refused rather than turning to C.
+			// The ungated row is unconditional either way, and is here so
+			// that a change to it is seen.
+			{name: "an undefined dependency", body: gatedUndefined, off: "ok", on: "U"},
 			{name: "an ungated undefined dependency", body: ungatedUndefined, off: "U", on: "U"},
 			{name: "a cycle through a gated service", body: halfGated, off: "ok", on: "C"},
 		} {
@@ -287,14 +315,34 @@ func TestAGatedFaultDoesNotStopTheCommandsThatReadOrTakeDown(t *testing.T) {
 				on := profile == "profile g turned on"
 				want := map[bool]string{false: tc.off, true: tc.on}[on]
 				// `stop`, `logs` and `restart` take the names as the whole
-				// answer and build no order, so they read no cycle — as they
-				// did before this. `ps` and `start` put even the services they
-				// were given in order, so they do read it. docker compose
-				// refuses both kinds: the first is a difference of its own,
-				// measured and tracked separately, pinned here so that a
-				// change to it shows up beside the rows it sits with.
-				if readsNoOrderWhenNamed[cmd] && want == "C" {
+				// answer and build no order, so they read no cycle and no
+				// gated service's undefined dependency either (#1094: finding
+				// that one is now also part of reading an order — an ungated
+				// one is still refused while the file is read, before any
+				// command runs, so it is not part of this remap). `ps` and
+				// `start` put even the services they were given in order, so
+				// they do read all three. docker compose refuses every kind:
+				// the first is a difference of its own, measured and tracked
+				// separately, pinned here so that a change to it shows up
+				// beside the rows it sits with.
+				//
+				// This is the Orchestrator API called directly, not the CLI:
+				// `opossum logs web` and `opossum restart web` go through
+				// cmd/opossum's own loadOrchestratorChecked first and are
+				// refused there (cmd/opossum/gatedcommandcheck_test.go) — this
+				// remap only says the two methods themselves, called without
+				// that, do not ask again. `opossum stop web` has no such
+				// second layer (`stop`/`kill` use loadOrchestratorToTakeDown,
+				// which never refuses over the file — see docs/compatibility.md's
+				// `depends_on` row), so for it this remap is the real answer.
+				if readsNoOrderWhenNamed[cmd] && (want == "C" || (want == "U" && tc.body == gatedUndefined)) {
 					want = "ok"
+				}
+				if tolerantOfActiveCycle[cmd] && want == "C" {
+					want = "ok"
+				}
+				if checksOwnGatedDepWhenNamed[cmd] && tc.body == halfGated && !on {
+					want = "P"
 				}
 				t.Run(cmd+"/"+tc.name+"/"+profile, func(t *testing.T) {
 					runReadOrTakeDown(t, cmd, tc.body, on, want)

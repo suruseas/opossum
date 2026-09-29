@@ -6,6 +6,197 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.39.0] - 2026-09-29
+
+### Changed
+
+- The `[OPSM-206]` notice about an auto-assigned host port now says
+  "opossum publishes it on `<port>` instead", not "published" — the past
+  tense read as a settled fact even though the run can still be refused or
+  fail to start afterward, in which case nothing was actually published on
+  that port. The present tense states opossum's plan rather than an outcome,
+  matching the notice's own pointer to `opossum ps` for what is actually
+  running.
+
+### Fixed
+
+- `up` and `run` no longer fail with exit 64 ("Missing value for...") when a
+  compose file's `environment:`, `labels:`, `user:`, `working_dir:`,
+  `tmpfs:`, `entrypoint:` or a service's network name starts with `-`.
+  container 1.4.1 reads a value starting with `-` as another flag when it is
+  passed as a separate argument, so opossum now passes these as a single
+  `--flag=value` argument instead, which container 1.4.1 reads correctly.
+  `docker compose` already tolerated such values.
+- `ps`, `images`, `logs`, `stop`, `kill`, `down`, `destroy`, `restart` and
+  `stats` no longer refuse a project whose compose file has a dependency
+  cycle among its active services, when run with no service named — they
+  only touch containers already there and never start anything in
+  dependency order, so a cycle is no longer their business to refuse. A
+  project brought up before a cycle was introduced can now be brought back
+  down through opossum instead of requiring `container rm`/`container
+  network rm` by hand. Commands that start, build or bring a service into
+  being — `up`, `run`, `pull`, `build`, `import`, `start` and
+  `config --services` among them — still refuse such a file, as before.
+- A service behind an inactive `profiles:` gate no longer makes `opossum`
+  refuse the whole project over one of its own dependencies naming a service
+  the file does not define anywhere. docker compose does not read a
+  gated-off service's `depends_on` at all, and `opossum` now agrees; once
+  that service's profile is active (`--profile`, `COMPOSE_PROFILES`, or
+  naming the service directly), the same fault is refused again. This check,
+  and the existing one for a dependency on another inactive profile, now run
+  for every command that reads the project without starting, stopping, or
+  removing it — `ps`, `logs`, `exec`, `images`, `port`, `volumes`, `restart`,
+  `stats`, `cp`, `build`, `pull`, `import`, `start`, and `watch` — matching
+  `up`, `run` and `config`, which already read the project this way. Given a
+  service name, `stop` and `kill` still check neither fault (unchanged by
+  this).
+- `logs`, `start`, `restart`, `stop`, `kill` and `stats`, when given the name
+  of a service that has no container yet (behind a profile never turned on,
+  or one `up` did not reach), now pass it by silently instead of failing or
+  claiming to act on it — matching docker compose, and matching how these
+  commands already behaved when run over the whole project. Naming a service
+  that is not defined at all is unaffected and still refuses.
+- `down --rmi local` now removes an image built under a custom `image:` name
+  when it was actually built by this project — opossum's own build labels it
+  with both `opossum.project` and `opossum.service`, required together, or an
+  imported docker compose build's `com.docker.compose.project` alone — instead
+  of always leaving it behind. A build with no `image:` was already removed
+  under opossum's own name; this closes the gap for one that names its image.
+  `--rmi all` removes it regardless, as before. An image built by opossum
+  before this labeling pair existed is recognized once rebuilt.
+- A `volumes_from` naming a service the file does not define, or a
+  `container:` entry (whose mounts opossum cannot read, since they live
+  outside the compose file), no longer makes `opossum` refuse the whole
+  project when the service that names it is behind an inactive
+  `profiles:` gate. docker compose reads `volumes_from` as part of the same
+  dependency graph as `depends_on`, and does not look at a gated-off
+  service's `volumes_from` either, and `opossum` now agrees. Once that
+  service's profile is active (`--profile`, `COMPOSE_PROFILES`, or naming it
+  directly), the same fault is refused as before.
+- The `[OPSM-201]` line that appears when a start fails on a host port
+  conflict the pre-flight check could not see beforehand now names this
+  project's own service if a running container of it holds the port (the same
+  message the pre-flight check itself gives), instead of always sending the
+  reader to remap a compose file that is not the problem. This is reachable
+  when one service publishes a host-port range that overlaps a number another
+  of the run's own services asks for individually: neither the pre-flight's
+  own probe nor its check for two entries naming the same host port reads a
+  range, so both pass beforehand, and the range's service binding first is
+  what actually creates the conflict. A conflict with something genuinely
+  outside the run still gets the previous "remap the file" wording, which is
+  the right fix there.
+- `up` no longer refuses to place an auto-assigned host port (`[OPSM-212]`,
+  "could not place it on any of them") when another service's `ports:` range
+  reaches all the way to 65535 and happens to leave nothing above the port
+  the operating system first offered. The search now walks downward from
+  there once it runs off the top, instead of asking the operating system for
+  another ephemeral port — which tends to land back inside the same range,
+  since both draw from the same high end of the port space. Verified on
+  container 1.4.1: a claimed range up to 65535 that previously failed most of
+  the time now places the port below the range every time (5 of 5 runs).
+- `ps` and `port` now show every host port a published range actually covers,
+  not just the first one. Apple `container` 1.4.1 reports a range as one entry
+  with a count rather than one entry per port, and `ps`'s `PORTS` column and
+  `port`'s lookup only read the first — so `ps` showed one line for a service
+  publishing three ports, and `port <service> <container-port>` refused a
+  container port in the middle of a range even though it was really bound,
+  telling the reader it wasn't published when it was.
+- `up --foreground` (and any other foreground/one-off run) now keeps both the
+  start and the end of a failed run's captured stderr instead of only the
+  start, so a hint like the arm64-build one still appears when a long pull's
+  progress lines pushed the actual `Error:` line past the old 8 KiB
+  head-only cap.
+- `up`, after a failed bring-up, no longer hands a service it never got to —
+  because an earlier one in the startup order failed first — to the restart
+  supervisor just because the runtime could not answer whether it has a
+  container. Whether that answer is trusted as "still there" now depends on
+  whether the service already had a container when this `up` began: one that
+  did keeps its supervision through the outage, as before; one that never had
+  a container from this run or any earlier one is no longer added on the
+  strength of an unanswered question alone.
+- The compose file loader now refuses a service key whose value is a string
+  docker compose cannot cast into the type it needs, for the keys opossum
+  does not read itself and only checked for the right general kind (a string
+  is the right kind for `cpu_shares: "abc"`, since docker compose reads
+  strings into these keys — but `"abc"` does not read as an integer, and
+  docker compose refuses it). Covers the boolean-cast keys (`attach`,
+  `oom_kill_disable`, `privileged`, `stdin_open`) and the integer-cast keys
+  (`cpu_count`, `cpu_period`, `cpu_quota`, `cpu_rt_period`,
+  `cpu_rt_runtime`, `cpu_shares`, `oom_score_adj`, `pids_limit`, `scale`),
+  matching docker compose v5.5.1's own cast rules (plain decimal integers
+  only — no hex, digit separators, or fractional spellings of whole numbers;
+  the YAML 1.1 boolean words, case-insensitively).
+- `opossum run` now gives the same actionable hints `opossum up` does when the
+  runtime refuses to start the one-off before making a container — an image
+  with no build for this platform (`[OPSM-412]`), for example — instead of
+  only the runtime's raw error. Verified on container 1.4.1: a `run` of an
+  `amd64`-only image now prints `[OPSM-412]` with the `platform:` fix,
+  matching `up`. This is applied only where the run made no container, so a
+  job that happens to print similar words after starting is not misread as
+  the runtime's refusal.
+- `stop` and `kill`, given a service name, now refuse when that service
+  already has a container here to act on and depends on one the file does
+  not define at all, or on one behind a `profiles:` gate that is not active
+  and required (`required: false` still excuses it) — the same faults `up`
+  would refuse over. A named service with no container yet is unaffected: an
+  earlier `opossum` never started it over the bad dependency, so
+  `stop`/`kill` still go ahead with whatever else was named. docker compose
+  refuses the same way, once it too has a container to resolve the
+  dependency for (measured on v5.5.1).
+- The host-port conflict message no longer suggests AirPlay when it has
+  already named one of this project's own containers as the holder of the
+  port. Showing both together read as contradicting advice — the message
+  named the actual holder, then guessed it might be AirPlay Receiver instead.
+  The guess is now shown only when there is no holder of this project's to
+  name.
+- `down`, `destroy`, and `up` (when it replaces a supervisor for a changed
+  compose file) now warn (`[OPSM-414]`) when they asked this project's restart
+  supervisor to stop but could not confirm it did within the time waited,
+  instead of silently proceeding as though every watcher was already gone. Run
+  `opossum ps` to check, and stop it by hand if it's still there.
+- `volumes_from` naming a holder whose anonymous volume (`- /data`) would
+  become a second, wrongly-named volume here — something opossum cannot
+  mount the way docker compose shares it — no longer refuses loading the
+  compose file for a service behind a `profiles:` gate that is off; the
+  refusal is now deferred to the moment that service turns out to be active,
+  the same way an undefined `volumes_from` target and a `container:` entry
+  already were. A service that itself lends the same volume on to a further
+  service is unaffected and still refused right away, whatever its own gate
+  says.
+- `down --rmi local` no longer removes an image built under a custom
+  `image:` name based on an `opossum.project` or `com.docker.compose.project`
+  label a `FROM` chain merely carried forward from an unrelated base image.
+  Recognizing opossum's own builds now requires its `opossum.project` and
+  `opossum.service` labels to both be present and match, instead of trusting
+  either alone — an image descended from a base a different project built no
+  longer reads as proof that this project made it.
+- `down --rmi local` no longer removes a hand-built image that merely shares
+  a tag with a service's `image:` and happens to descend from a base this
+  same project built for a *different* service — opossum's own build labels
+  now name the service as well as the project, and both are required to
+  match before an image is recognized as this build's own.
+- `up`, when it cannot confirm an old restart supervisor stopped and so
+  leaves it in place instead of replacing it (`[OPSM-414]`), now also names
+  any service this very run just gave a `restart:` policy that the old
+  supervisor never knew about — those are watched by nobody until the old
+  supervisor is stopped by hand and `up` is run again.
+- `down`/`destroy`'s `[OPSM-414]` notice (printed when the old restart
+  supervisor's stop could not be confirmed) now starts with `opossum: `, the
+  same prefix `up`'s own equivalent notices already use — it used to print
+  with no prefix at all, reading differently from every other command that
+  can show this same warning.
+- `build`, `pull` and `import` now check a gated (`profiles:`) service's own
+  dependencies once it is named on the command line, the same way naming it
+  does for `up`: a named service that depends on one the file does not
+  define, or on another gated-inactive service, is refused instead of being
+  silently built or pulled with a dependency `opossum` never checked. docker
+  compose refuses the same way, whether or not a container already exists for
+  the service (measured on v5.5.1). Not naming the service is unaffected — its
+  dependency stays nobody's business while its profile is off. Naming any
+  service for these three now also refuses a dependency cycle among the
+  services already active (ungated) in the file, which naming used to skip
+  entirely — as docker compose does too (measured on v5.5.1).
+
 ## [0.38.0] - 2026-09-27
 
 ### Fixed
@@ -2286,7 +2477,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.38.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.39.0...HEAD
+[0.39.0]: https://github.com/suruseas/opossum/compare/v0.38.0...v0.39.0
 [0.38.0]: https://github.com/suruseas/opossum/compare/v0.37.0...v0.38.0
 [0.37.0]: https://github.com/suruseas/opossum/compare/v0.36.0...v0.37.0
 [0.36.0]: https://github.com/suruseas/opossum/compare/v0.35.0...v0.36.0

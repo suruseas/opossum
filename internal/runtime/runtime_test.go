@@ -517,7 +517,7 @@ func TestRunPutsTheMacOnTheFirstNetworkAndNotOnNone(t *testing.T) {
 	if err := rt.Run(RunOptions{Name: "w", Image: "a", Networks: []string{"demo-net", "back"}, MacAddress: "02:42:ac:11:00:77"}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if got := lastLine(t, read); !strings.Contains(got, "--network demo-net,mac=02:42:ac:11:00:77 --network back ") {
+	if got := lastLine(t, read); !strings.Contains(got, "--network=demo-net,mac=02:42:ac:11:00:77 --network=back ") {
 		t.Errorf("want the MAC on the first network only, got: %s", got)
 	}
 	// One network is still the first network — the guard is on `none`, not
@@ -525,14 +525,14 @@ func TestRunPutsTheMacOnTheFirstNetworkAndNotOnNone(t *testing.T) {
 	if err := rt.Run(RunOptions{Name: "w", Image: "a", Networks: []string{"demo-net"}, MacAddress: "02:42:ac:11:00:77"}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if got := lastLine(t, read); !strings.Contains(got, "--network demo-net,mac=02:42:ac:11:00:77 ") {
+	if got := lastLine(t, read); !strings.Contains(got, "--network=demo-net,mac=02:42:ac:11:00:77 ") {
 		t.Errorf("want the MAC on a lone network, got: %s", got)
 	}
 	if err := rt.Run(RunOptions{Name: "w", Image: "a", Networks: []string{"none"}, MacAddress: "02:42:ac:11:00:77"}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if got := lastLine(t, read); !strings.Contains(got, "--network none ") || strings.Contains(got, "mac=") {
-		t.Errorf("want --network none bare, got: %s", got)
+	if got := lastLine(t, read); !strings.Contains(got, "--network=none ") || strings.Contains(got, "mac=") {
+		t.Errorf("want --network=none bare, got: %s", got)
 	}
 }
 
@@ -555,8 +555,8 @@ func TestRunAssemblesFullArgv(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 	got := lastLine(t, read)
-	want := "run -d --name db.demo.opossum --network demo-net --dns-domain opossum --dns-search demo.opossum " +
-		"-e A=1 -e B=2 -p 5432:5432 -v /host:/data -l opossum.project=demo postgres:16 postgres -c log=all"
+	want := "run -d --name db.demo.opossum --network=demo-net --dns-domain opossum --dns-search demo.opossum " +
+		"--env=A=1 --env=B=2 -p 5432:5432 -v /host:/data --label=opossum.project=demo postgres:16 postgres -c log=all"
 	if got != want {
 		t.Errorf("Run argv mismatch\n got: %s\nwant: %s", got, want)
 	}
@@ -576,7 +576,7 @@ func TestRunArgvBranches(t *testing.T) {
 			RunOptions{Name: "web", Image: "web:latest", Platform: "linux/amd64",
 				Memory: "512M", CPUs: "2", Tmpfs: []string{"/tmp"},
 				Interactive: true, TTY: true, SSH: true},
-			"run -i -t --ssh --name web --platform linux/amd64 --rosetta -m 512M -c 2 --tmpfs /tmp web:latest",
+			"run -i -t --ssh --name web --platform linux/amd64 --rosetta -m 512M -c 2 --tmpfs=/tmp web:latest",
 		},
 		{
 			// The other spelling of the same architecture. The runtime takes the
@@ -603,7 +603,7 @@ func TestRunArgvBranches(t *testing.T) {
 			RunOptions{Name: "app", Image: "app", Init: true, ReadOnly: true,
 				User: "1000:1000", WorkingDir: "/app",
 				CapAdd: []string{"NET_ADMIN"}, CapDrop: []string{"ALL"}},
-			"run --init --read-only --user 1000:1000 --workdir /app --cap-add NET_ADMIN --cap-drop ALL --name app app",
+			"run --init --read-only --user=1000:1000 --workdir=/app --cap-add NET_ADMIN --cap-drop ALL --name app app",
 		},
 	}
 	for _, c := range cases {
@@ -1266,7 +1266,7 @@ func TestRunWithEntrypoint(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 	got := lastLine(t, read)
-	want := "run --name web.demo.opossum --entrypoint /app/run web:latest --serve web -c cfg"
+	want := "run --name web.demo.opossum --entrypoint=/app/run web:latest --serve web -c cfg"
 	if got != want {
 		t.Errorf("entrypoint argv mismatch\n got: %s\nwant: %s", got, want)
 	}
@@ -1296,7 +1296,7 @@ func TestRunOmitsDetachAndDNSWhenUnset(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 	got := lastLine(t, read)
-	if want := "run --name solo --network demo-net busybox"; got != want {
+	if want := "run --name solo --network=demo-net busybox"; got != want {
 		t.Errorf("Run (no detach/dns) mismatch\n got: %s\nwant: %s", got, want)
 	}
 	if strings.Contains(got, "-d ") || strings.Contains(got, "--dns") {

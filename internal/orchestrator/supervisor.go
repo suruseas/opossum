@@ -140,6 +140,13 @@ func processAlive(pid int) bool {
 	return p.Signal(syscall.Signal(0)) == nil
 }
 
+// processAliveFn is processAlive behind a seam a test can replace. No real
+// process resists both SIGTERM and SIGKILL — SIGKILL cannot be caught — so the
+// only way to exercise StopSupervisor's "waited the whole budget and still
+// couldn't tell" branch without an unreproducible race is to make the check
+// itself say "still alive" on command.
+var processAliveFn = processAlive
+
 // ClaimSupervisor is how a supervisor takes ownership of a project: it creates the
 // pid file exclusively, so exactly one process can hold it. The CHILD claims,
 // not the parent — a parent that checked first and wrote after would leave a
@@ -291,40 +298,89 @@ func clearPidFile(project string) {
 	}
 }
 
+// stopSupervisorTermWait, stopSupervisorKillWait and stopSupervisorPoll are the
+// budgets StopSupervisor waits before giving up on each signal, and how often it
+// checks in between. Variables, not constants, so a test can shrink them instead
+// of spending real seconds on the "never confirms" path.
+var (
+	stopSupervisorTermWait = 3 * time.Second
+	stopSupervisorKillWait = 1 * time.Second
+	stopSupervisorPoll     = 100 * time.Millisecond
+)
+
+// waitForDeath polls processAliveFn until pid is gone or timeout runs out.
+func waitForDeath(pid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if !processAliveFn(pid) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(stopSupervisorPoll)
+	}
+}
+
 // StopSupervisor asks this project's supervisor to exit and waits briefly for it.
 // `down` calls this FIRST: a watcher that sees containers disappearing mid-teardown
 // would try to bring them back, and the two would fight.
-func StopSupervisor(project string) (stopped bool) {
+//
+// The two results answer different questions. attempted says whether there was
+// anything to stop at all (false when no supervisor was running — the ordinary,
+// silent case). stopped, when attempted is true, says whether the exit was
+// actually confirmed within budget. A caller that only reports success on stopped
+// and says nothing otherwise treats "confirmed gone" and "asked, but still might
+// be running" as the same silence — which is the bug this shape exists to rule
+// out (#1401): the difference is exactly what a caller about to remove this
+// project's containers and networks needs to know.
+func StopSupervisor(project string) (stopped, attempted bool) {
 	pid := SupervisorPID(project)
 	if pid == 0 {
 		clearPidFile(project)
-		return false
+		return
 	}
 	p, err := os.FindProcess(pid)
 	if err != nil {
 		clearPidFile(project)
-		return false
+		return
 	}
+	attempted = true
 	_ = p.Signal(syscall.SIGTERM)
 	// Give it a moment to go quietly, then insist.
-	for i := 0; i < 30; i++ {
-		if !processAlive(pid) {
-			clearPidFile(project)
-			return true
-		}
-		time.Sleep(100 * time.Millisecond)
+	if waitForDeath(pid, stopSupervisorTermWait) {
+		clearPidFile(project)
+		stopped = true
+		return
 	}
 	_ = p.Signal(syscall.SIGKILL)
-	for i := 0; i < 10; i++ {
-		if !processAlive(pid) {
-			clearPidFile(project)
-			return true
-		}
-		time.Sleep(100 * time.Millisecond)
+	if waitForDeath(pid, stopSupervisorKillWait) {
+		clearPidFile(project)
+		stopped = true
+		return
 	}
 	// Still there after SIGKILL: keep the pid file so the next `down` (or a human)
 	// can still find it. Reporting success here would hide an orphan.
-	return false
+	return
+}
+
+// stopSupervisorAndReport stops this project's supervisor and logs what happened,
+// including the case a bare `if StopSupervisor(...) { … }` would otherwise drop on
+// the floor: asked, but not confirmed stopped (#1401). Shared by Down and Destroy,
+// which do this identically before touching anything else.
+func (o *Orchestrator) stopSupervisorAndReport() {
+	if stopped, attempted := StopSupervisor(o.Project.Name); stopped {
+		o.logf("Stopped the restart supervisor\n")
+	} else if attempted {
+		// "opossum: " matches the prefix cmd/opossum's own two call sites for
+		// this same notice already use (the early stop in `down`/`destroy`,
+		// and `up`'s replace path) — this one differs only in landing on
+		// whatever writer the caller gave this Orchestrator (o.out), since it
+		// has no writer of its own dedicated to warnings the way cmd's stderr
+		// is (#1415: unifying the stream too would need Orchestrator to carry
+		// a second writer, out of scope for a text-only inconsistency).
+		o.logf("opossum: %s\n", NoticeSupervisorStopFailed())
+	}
 }
 
 // SupervisedServices returns the services whose `restart:` asks to be kept up,
@@ -363,6 +419,16 @@ func NoticeSupervisorStarted(project string, services []string, logPath string) 
 		"`opossum down` stops it, `opossum ps` shows it, and it logs to %s. "+
 		"Start with --no-supervisor (or OPOSSUM_NO_SUPERVISOR=1) to skip it.",
 		codeSupervisorStarted, strings.Join(services, ", "), logPath)
+}
+
+// NoticeSupervisorStopFailed is the one line `down`, `destroy` and `up` (when
+// replacing a supervisor) print when StopSupervisor asked but could not confirm
+// the exit within its budget — so a caller about to remove this project's
+// containers and networks doesn't do it believing every watcher is already gone.
+func NoticeSupervisorStopFailed() string {
+	return fmt.Sprintf("[%s] asked the restart supervisor to stop, but couldn't confirm it did — "+
+		"it may still be watching this project's containers. Run `opossum ps` to check, and stop it "+
+		"by hand (`kill`) if it's still there.", codeSupervisorStopFailed)
 }
 
 // StartSupervisor launches the watcher for this project in the background and

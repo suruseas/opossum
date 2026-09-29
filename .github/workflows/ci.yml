@@ -85,9 +85,11 @@ jobs:
     # switch: an unreadable field also turns the cache on and picks
     # `make test-shipped`, the narrower gate. The three triggers this
     # workflow has — pull_request, push and workflow_dispatch — all carry
-    # `repository` in their payload, so the field is there to read; this says
-    # where the expression lands if that ever stops being true, not that
-    # landing there is as good.
+    # `repository` in their payload (measured, #1237: a `toJSON(github.event.
+    # repository)` step run once under each trigger, all three showed it
+    # populated), so the field is there to read; this says where the
+    # expression lands if that ever stops being true, not that landing there
+    # is as good.
     runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted", "Linux", "X64"]') || 'ubuntu-latest' }}
     # The compiler each section installed is the compiler it uses. Left to
     # itself, go reads the `toolchain` line in go.mod and downloads a different

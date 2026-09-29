@@ -75,4 +75,48 @@ func TestAPublishedPortSaysWhichSideIsWhich(t *testing.T) {
 			t.Errorf("formatPorts =\n %q\nwant\n %q", got, want)
 		}
 	})
+
+	// #1272 E: a published range arrives as one entry with a Count, not as one
+	// entry per port — `ps` used to read only that first entry (Span's zero
+	// value, Count 0, is one port), so a 3-port range showed as one line even
+	// though the runtime really has all three bound.
+	t.Run("a range expands to every port it covers", func(t *testing.T) {
+		got := formatPorts([]runtime.PortMapping{
+			{HostAddress: "0.0.0.0", HostPort: 47210, ContainerPort: 80, Proto: "tcp", Count: 3},
+		})
+		want := "0.0.0.0:47210->80/tcp, 0.0.0.0:47211->81/tcp, 0.0.0.0:47212->82/tcp"
+		if got != want {
+			t.Errorf("formatPorts =\n %q\nwant\n %q", got, want)
+		}
+	})
+
+	// A single port BEFORE a range, both from the same container — a fixture
+	// where the range is not the only entry, nor the first one. A version of
+	// the fix that only spans info.Ports[0] (plausible: the range is the
+	// common case, and a first-entry-only bug would pass every other row
+	// here, which puts the range there too) would show this one still
+	// collapsed.
+	t.Run("a single port ahead of a range, in the same entries", func(t *testing.T) {
+		got := formatPorts([]runtime.PortMapping{
+			{HostAddress: "0.0.0.0", HostPort: 8080, ContainerPort: 80, Proto: "tcp"},
+			{HostAddress: "0.0.0.0", HostPort: 47210, ContainerPort: 80, Proto: "tcp", Count: 3},
+		})
+		want := "0.0.0.0:8080->80/tcp, 0.0.0.0:47210->80/tcp, 0.0.0.0:47211->81/tcp, 0.0.0.0:47212->82/tcp"
+		if got != want {
+			t.Errorf("formatPorts =\n %q\nwant\n %q", got, want)
+		}
+	})
+
+	// Control: a single published port, right beside the range case above,
+	// still renders as exactly one line — expanding a range must not also
+	// grow an entry that was never one.
+	t.Run("a single port stays one line", func(t *testing.T) {
+		got := formatPorts([]runtime.PortMapping{
+			{HostAddress: "0.0.0.0", HostPort: 47210, ContainerPort: 80, Proto: "tcp"},
+		})
+		want := "0.0.0.0:47210->80/tcp"
+		if got != want {
+			t.Errorf("formatPorts =\n %q\nwant\n %q", got, want)
+		}
+	})
 }

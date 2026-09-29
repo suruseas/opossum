@@ -77,16 +77,18 @@ func TestStatsAsksOnlyForContainersThatExist(t *testing.T) {
 
 // When no service has a container, there is nothing to hand to `stats` — and
 // handing it nothing would show every running container on the machine, other
-// projects included. Say so instead.
-func TestStatsWithNoContainersSaysSoInsteadOfAskingForEverything(t *testing.T) {
+// projects included. Pass it by silently instead (#1098): docker compose
+// v5.5.1 exits 0 and prints nothing over a project with nothing running
+// (measured), whole project or named alike.
+func TestStatsWithNoContainersIsPassedByInsteadOfAskingForEverything(t *testing.T) {
 	rt, log := shimWhereSomeContainersDoNotExist(t, ".demo.")
 	p := project("demo", map[string]*compose.Service{
 		"web": {Image: "web:latest"},
 		"db":  {Image: "postgres:16"},
 	})
 	err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Stats(nil, orchestrator.StatsOptions{NoStream: true})
-	if err == nil || !strings.Contains(err.Error(), "opossum up") {
-		t.Fatalf("want an error pointing at `opossum up`, got %v", err)
+	if err != nil {
+		t.Fatalf("want no error (nothing running, like docker compose), got %v", err)
 	}
 	for _, l := range log() {
 		if strings.HasPrefix(l, "stats") {

@@ -218,15 +218,18 @@ func TestAServiceCanUseTheImageAnotherBuilds(t *testing.T) {
 	}
 }
 
-// `--rmi local` goes by opossum's own name for a built image and no other.
-// Under `<project>-<service>:latest` is what a build of this project made; under
-// a name `image:` gives there may be something pulled, tagged by hand or built
-// by another project — `up` builds only when nothing is there — and a name
-// alone does not say which. So "local" leaves an image under an `image:` name,
-// whoever made it, and "all" removes it (telling this project's builds apart is
-// #1126). What it does clear out is the image such a service had under the old
-// name, before `image:` was read: a project brought up back then still has it,
-// and nothing else reads that name now.
+// `--rmi local` goes by opossum's own name for a built image, or by a label
+// saying THIS project built it (builtHere, #1126 — see builtprojectimage_test.go
+// for that table; every row here leaves the image unlabeled, so it reads as
+// "local leaves it" throughout). Under `<project>-<service>:latest` is what a
+// build of this project made; under a name `image:` gives there may be
+// something pulled, tagged by hand or built by another project — `up` builds
+// only when nothing is there — and an unlabeled name alone does not say which.
+// So "local" leaves an unlabeled image under an `image:` name, and "all"
+// removes it whoever made it. What "local" does clear out regardless of labels
+// is the image such a service had under the old name, before `image:` was
+// read: a project brought up back then still has it, and nothing else reads
+// that name now.
 func TestRmiLocalGoesByOpossumsOwnName(t *testing.T) {
 	const image = "org/custom:v9"
 	build := &compose.Build{Context: "."}
@@ -341,9 +344,10 @@ func TestDestroyListsTheImageAndTheOldName(t *testing.T) {
 	}
 }
 
-// Every build says whose it is, on the image: `-l opossum.project=<project>`.
-// Nothing reads the label yet (#1126); it is put there now so that images built
-// from here on can be told apart when something does.
+// Every build says whose it is, and for which service, on the image:
+// `-l opossum.project=<project> -l opossum.service=<service>`. The pair is
+// read by builtHere (#1126, #1413) to tell "this project's own build of this
+// service" from a label a FROM chain merely inherited from some other build.
 func TestEveryBuildCarriesTheProjectsLabel(t *testing.T) {
 	named := compose.Service{Build: &compose.Build{Context: "."}, Image: "org/custom:v9"}
 	for _, via := range []struct {
@@ -366,8 +370,8 @@ func TestEveryBuildCarriesTheProjectsLabel(t *testing.T) {
 				t.Fatal(err)
 			}
 			built := linesWith(log(), "build ")
-			if len(built) != 1 || !argvNames(built[0], "-l opossum.project=demo") {
-				t.Errorf("the build should carry the project's label, got: %v", built)
+			if len(built) != 1 || !argvNames(built[0], "-l opossum.project=demo") || !argvNames(built[0], "-l opossum.service=web") {
+				t.Errorf("the build should carry the project's and the service's label, got: %v", built)
 			}
 		})
 	}

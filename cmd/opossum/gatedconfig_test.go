@@ -18,7 +18,7 @@ name: demo
 services:
   keep:
     image: alpine:3.20
-  a:
+  broken:
     image: alpine:3.20
     profiles: [x]
     depends_on: [nosuch]
@@ -28,7 +28,7 @@ name: demo
 services:
   keep:
     image: alpine:3.20
-  a:
+  broken:
     image: alpine:3.20
     depends_on: [nosuch]
 `
@@ -79,6 +79,18 @@ services:
 			args: []string{"config", "--services"}, says: "dependency cycle detected"},
 		{name: "a cycle nothing gates", body: cyclePlain,
 			args: []string{"config", "--services"}, says: "dependency cycle detected"},
+		// An undefined dependency reads the same way, gated or not (#1094):
+		// nobody's business while the profile that would activate it is off,
+		// refused (in the same words reading the file uses for one that names
+		// no service anywhere) once it is on — `config` checks this
+		// unconditionally, so `--services` makes no difference here, unlike
+		// the cycle rows above.
+		{name: "an undefined dependency behind an inactive profile", body: undefinedGated,
+			args: []string{"config"}, wantOut: []string{"keep"}, wantNone: []string{"broken"}},
+		{name: "that profile turned on (undefined dependency)", body: undefinedGated, env: "x",
+			args: []string{"config"}, says: `service "broken" depends on unknown service "nosuch"`},
+		{name: "an undefined dependency nothing gates", body: undefinedPlain,
+			args: []string{"config"}, says: `service "broken" depends on unknown service "nosuch"`},
 		// The third of the three reading the project refuses: an active
 		// service that depends on one behind a profile that is not active.
 		// `config` refuses the projects `up` refuses, so a reader who runs it
@@ -243,6 +255,19 @@ func everyCommandReadsTheProject(t *testing.T, body string) {
 	// docker compose refuses all four — a difference of its own, as old as
 	// these commands and not touched here.
 	readsNoOrder := map[string]bool{"config": true, "exec": true, "cp": true, "port": true}
+	// These build an order but do not refuse a cycle among active services —
+	// they only touch containers already there, so a cycle is not theirs to
+	// be stuck on (#1093; docker compose does not refuse for these either,
+	// given `-p` and left to discover the file, measured on v5.5.1). `pull`,
+	// `build`, `import` and `start` still refuse (docker compose does too,
+	// measured for pull and build): bringing a build's image into being is
+	// close enough to starting something that the same reasoning does not
+	// carry over, and `start` was not measured either way, so it stays as it
+	// was.
+	tolerantOfCycle := map[string]bool{
+		"ps": true, "images": true, "logs": true, "stop": true, "kill": true,
+		"down": true, "destroy": true, "restart": true, "stats": true,
+	}
 	var commands []string
 	for _, c := range newRootCmd().Commands() {
 		name := c.Name()
@@ -272,14 +297,17 @@ func everyCommandReadsTheProject(t *testing.T, body string) {
 				compose := writeCompose(t, body)
 				out, err := run(t, append([]string{"-f", compose, cmd}, rest...)...)
 				said := err != nil && strings.Contains(err.Error(), "dependency cycle detected")
-				if want := on && !readsNoOrder[cmd]; said != want {
+				if want := on && !readsNoOrder[cmd] && !tolerantOfCycle[cmd]; said != want {
 					t.Errorf("want the cycle said=%v, got %v\n%s", want, err, out)
 				}
 				// With the gate on it the command has to get on with its work,
 				// not fail for something else: a row that fails either way
-				// would say nothing about whether the cycle was read.
-				if !on && err != nil && !worksOnAnEmptyProject[cmd] {
-					t.Errorf("want %s to do its work while the cycle is gated, got %v\n%s", cmd, err, out)
+				// would say nothing about whether the cycle was read. A
+				// tolerant command with the profile turned on (an active
+				// cycle) must get on with its work too, the same as the gated
+				// case below.
+				if (!on || tolerantOfCycle[cmd]) && err != nil && !worksOnAnEmptyProject[cmd] {
+					t.Errorf("want %s to do its work despite the cycle, got %v\n%s", cmd, err, out)
 				}
 			})
 		}

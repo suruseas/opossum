@@ -38,28 +38,28 @@ func TestTmpfsMountsGetDockerDefaultOptions(t *testing.T) {
 		tmpfs []string
 		want  []string
 	}{
-		{"no options", []string{"/t"}, []string{"--tmpfs /t:nosuid,nodev,noexec"}},
-		{"options written", []string{"/t:exec,mode=700"}, []string{"--tmpfs /t:nosuid,nodev,noexec,exec,mode=700"}},
-		{"an empty option list", []string{"/t:"}, []string{"--tmpfs /t:nosuid,nodev,noexec"}},
-		{"options only on the second", []string{"/a", "/b:size=1m"}, []string{"--tmpfs /a:nosuid,nodev,noexec", "--tmpfs /b:nosuid,nodev,noexec,size=1m"}},
-		{"options only on the first, out of order", []string{"/b:suid,dev", "/a"}, []string{"--tmpfs /b:nosuid,nodev,noexec,suid,dev", "--tmpfs /a:nosuid,nodev,noexec"}},
+		{"no options", []string{"/t"}, []string{"--tmpfs=/t:nosuid,nodev,noexec"}},
+		{"options written", []string{"/t:exec,mode=700"}, []string{"--tmpfs=/t:nosuid,nodev,noexec,exec,mode=700"}},
+		{"an empty option list", []string{"/t:"}, []string{"--tmpfs=/t:nosuid,nodev,noexec"}},
+		{"options only on the second", []string{"/a", "/b:size=1m"}, []string{"--tmpfs=/a:nosuid,nodev,noexec", "--tmpfs=/b:nosuid,nodev,noexec,size=1m"}},
+		{"options only on the first, out of order", []string{"/b:suid,dev", "/a"}, []string{"--tmpfs=/b:nosuid,nodev,noexec,suid,dev", "--tmpfs=/a:nosuid,nodev,noexec"}},
 		// Split at the first `:`: an option may hold one (`mpol=bind:0`, which
 		// container 1.4.1 mounts; split at the last, it fails with errno 22).
-		{"an option holding a colon", []string{"/t:mpol=bind:0"}, []string{"--tmpfs /t:nosuid,nodev,noexec,mpol=bind:0"}},
+		{"an option holding a colon", []string{"/t:mpol=bind:0"}, []string{"--tmpfs=/t:nosuid,nodev,noexec,mpol=bind:0"}},
 		// `defaults` is nothing to the docker engine and fails the mount on
 		// container 1.4.1, alone or among other options; `DEFAULTS` is not it.
-		{"defaults alone", []string{"/t:defaults"}, []string{"--tmpfs /t:nosuid,nodev,noexec"}},
-		{"defaults among options", []string{"/t:exec,defaults,mode=700,defaults"}, []string{"--tmpfs /t:nosuid,nodev,noexec,exec,mode=700"}},
-		{"defaults only in the middle", []string{"/t:exec,defaults,mode=700"}, []string{"--tmpfs /t:nosuid,nodev,noexec,exec,mode=700"}},
-		{"DEFAULTS", []string{"/t:DEFAULTS"}, []string{"--tmpfs /t:nosuid,nodev,noexec,DEFAULTS"}},
+		{"defaults alone", []string{"/t:defaults"}, []string{"--tmpfs=/t:nosuid,nodev,noexec"}},
+		{"defaults among options", []string{"/t:exec,defaults,mode=700,defaults"}, []string{"--tmpfs=/t:nosuid,nodev,noexec,exec,mode=700"}},
+		{"defaults only in the middle", []string{"/t:exec,defaults,mode=700"}, []string{"--tmpfs=/t:nosuid,nodev,noexec,exec,mode=700"}},
+		{"DEFAULTS", []string{"/t:DEFAULTS"}, []string{"--tmpfs=/t:nosuid,nodev,noexec,DEFAULTS"}},
 		// Spellings that are not the word, which the engine and the runtime both
 		// refuse, are passed as written (one with a space, which the shim's log
 		// cannot show apart, is in tmpfsmounts_internal_test.go).
-		{"defaults=1", []string{"/t:defaults=1"}, []string{"--tmpfs /t:nosuid,nodev,noexec,defaults=1"}},
-		{"nodefaults", []string{"/t:nodefaults"}, []string{"--tmpfs /t:nosuid,nodev,noexec,nodefaults"}},
-		{"defaultsx", []string{"/t:defaultsx"}, []string{"--tmpfs /t:nosuid,nodev,noexec,defaultsx"}},
+		{"defaults=1", []string{"/t:defaults=1"}, []string{"--tmpfs=/t:nosuid,nodev,noexec,defaults=1"}},
+		{"nodefaults", []string{"/t:nodefaults"}, []string{"--tmpfs=/t:nosuid,nodev,noexec,nodefaults"}},
+		{"defaultsx", []string{"/t:defaultsx"}, []string{"--tmpfs=/t:nosuid,nodev,noexec,defaultsx"}},
 		// The same target twice is passed twice, in the order written.
-		{"the same target twice", []string{"/t:exec", "/t"}, []string{"--tmpfs /t:nosuid,nodev,noexec,exec", "--tmpfs /t:nosuid,nodev,noexec"}},
+		{"the same target twice", []string{"/t:exec", "/t"}, []string{"--tmpfs=/t:nosuid,nodev,noexec,exec", "--tmpfs=/t:nosuid,nodev,noexec"}},
 	}
 	for _, p := range paths {
 		for _, tc := range cases {
@@ -78,7 +78,7 @@ func TestTmpfsMountsGetDockerDefaultOptions(t *testing.T) {
 				if line == "" {
 					t.Fatalf("want a %q line, got %v", p.runLine, log())
 				}
-				if got := regexp.MustCompile(`--tmpfs \S+`).FindAllString(line, -1); strings.Join(got, " | ") != strings.Join(tc.want, " | ") {
+				if got := regexp.MustCompile(`--tmpfs=\S+`).FindAllString(line, -1); strings.Join(got, " | ") != strings.Join(tc.want, " | ") {
 					t.Errorf("want %v, got %v in %q", tc.want, got, line)
 				}
 			})

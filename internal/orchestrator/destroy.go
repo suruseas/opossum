@@ -116,7 +116,7 @@ func (o *Orchestrator) DestroyPlanFor(keepOverlay, keepImages, keepLocal bool) (
 	if !o.rt.SystemRunning() {
 		return p, ErrRuntimeStopped()
 	}
-	order, err := o.startupOrder()
+	order, err := o.startupOrderTolerant()
 	if err != nil {
 		return p, err
 	}
@@ -444,9 +444,7 @@ func (o *Orchestrator) Destroy(p DestroyPlan) error {
 	}
 	defer lock.release()
 	if p.SupervisorRunning {
-		if StopSupervisor(o.Project.Name) {
-			o.logf("Stopped the restart supervisor\n")
-		}
+		o.stopSupervisorAndReport()
 	}
 
 	for _, cname := range p.Containers {
