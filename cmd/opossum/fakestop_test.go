@@ -27,6 +27,13 @@ func TestCLIFakeStopAndDeleteChangeWhatInspectSays(t *testing.T) {
 	if out, _ := shim("inspect", name); !strings.Contains(out, `"state":"stopped"`) {
 		t.Errorf("after a stop, inspect says stopped, got: %s", out)
 	}
+	// A stop is not for ever, but `run` does not revive a stopped container by
+	// name — 1.4.1 refuses an existing name the same way whether it is running
+	// or stopped (measured, testdata/real-cli-output.md) — so a replace deletes
+	// first, the way opossum's own replace path does.
+	if _, err := shim("delete", "--force", name); err != nil {
+		t.Fatalf("delete before replacing: %v", err)
+	}
 	if _, err := shim("run", "-d", "--name", name, "alpine"); err != nil {
 		t.Fatalf("run again: %v", err)
 	}

@@ -175,6 +175,7 @@ func run(args []string) int {
 			if !sticky {
 				_ = os.WriteFile(gonePath(dir, name), []byte("1"), 0o644)
 				_ = os.Remove(stoppedPath(dir, name))
+				_ = os.Remove(createdPath(dir, name))
 			}
 		}
 
@@ -593,6 +594,23 @@ func run(args []string) int {
 			fmt.Fprintf(os.Stderr, "Error: container with id %s already exists\n", taken)
 			return 1
 		}
+		// A name this fake itself has already run and not since deleted is taken,
+		// whether or not either $RUN_EXISTS knob asked for that answer: 1.4.1
+		// refuses `run` of an existing name the same way whether it is running or
+		// stopped (measured, testdata/real-cli-output.md), and until this a second
+		// run of one name silently replaced the first — a call opossum never
+		// makes deliberately (a genuine replace always deletes first), so nothing
+		// exercised this question until #962's contract row asked it.
+		if dir := os.Getenv("STATE_DIR"); dir != "" {
+			for i, a := range args {
+				if i > 0 && args[i-1] == "--name" {
+					if _, err := os.Stat(createdPath(dir, a)); err == nil {
+						fmt.Fprintf(os.Stderr, "Error: container with id %s already exists\n", a)
+						return 1
+					}
+				}
+			}
+		}
 		// A volume the runtime would not create is refused after the name (a taken
 		// name is said first on 1.4.1) and before anything is recorded: the real
 		// run makes no volume, not even a valid one before it.
@@ -637,12 +655,14 @@ func run(args []string) int {
 			}
 		}
 		// Creating it again means it is no longer gone (see the `delete` case),
-		// and no longer stopped (see the `stop` case).
+		// and no longer stopped (see the `stop` case). It is also, from here,
+		// taken (see createdPath above) until a `delete` clears it.
 		if dir := os.Getenv("STATE_DIR"); dir != "" {
 			for k, a := range args {
 				if k > 0 && args[k-1] == "--name" {
 					_ = os.Remove(gonePath(dir, a))
 					_ = os.Remove(stoppedPath(dir, a))
+					_ = os.WriteFile(createdPath(dir, a), []byte("1"), 0o644)
 				}
 			}
 		}
@@ -1261,6 +1281,13 @@ func madeVolumes() []string {
 
 func gonePath(dir, name string) string {
 	return filepath.Join(dir, "gone-"+hex.EncodeToString([]byte(name)))
+}
+
+// createdPath marks a name `run` has made here and `delete` has not since
+// cleared — what the default "already exists" refusal in the `run` case
+// checks, independent of the $RUN_EXISTS knobs above.
+func createdPath(dir, name string) string {
+	return filepath.Join(dir, "created-"+hex.EncodeToString([]byte(name)))
 }
 
 // printNetworkInspect writes what `network inspect` answers for a network with

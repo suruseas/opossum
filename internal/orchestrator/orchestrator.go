@@ -7272,7 +7272,14 @@ func (o *Orchestrator) Import(services ...string) error {
 		return err
 	}
 	imported := 0
+	named := namedSet(services)
 	for _, name := range order {
+		// Gated behind a profile that is not active: not imported, as Build and
+		// Pull leave it (docker compose v5.5.1 reads only the active services
+		// there, measured). Naming it enables it, as there (#1433).
+		if !o.enabled(name, named) {
+			continue
+		}
 		svc := o.Project.Services[name]
 		target, built := o.serviceImage(name, svc)
 		if !built {

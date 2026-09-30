@@ -108,10 +108,9 @@ func TestNamingAGatedServiceMakesBuildPullImportSeeItsGatedInactiveDependency(t 
 
 // Left unnamed, broken's profile stays inactive and its bad dependency is not
 // this run's business — the same three commands go on. This fixture's broken
-// has no `build:` (Import's own, pre-existing and separate gap — it does not
-// call o.enabled() in its loop the way Build and Pull do — is not this
-// test's business either, so it is kept out of the way here rather than
-// exercised by accident).
+// has no `build:`, so it is not what these commands would build or import
+// either way; whether Import leaves a gated build service alone is asked by
+// TestImportFollowsTheProfilesTheWayBuildAndPullDo.
 func TestNotNamingTheGatedServiceLeavesBuildPullImportAlone(t *testing.T) {
 	noBuildProject := func() *compose.Project {
 		return project("demo", map[string]*compose.Service{

@@ -6,6 +6,181 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.40.0] - 2026-09-30
+
+### Added
+
+- A new `docs/getting-started.md` (Getting started) page walks someone who has
+  never used Docker Compose from an empty directory to a web server and a
+  database running together and back to no containers, network or data left, with the first-run
+  pitfalls (arm64 images, named volumes, service names, ports 5000/7000)
+  explained in plain terms. It is the first page on the documentation site and
+  is linked from the top of the README's quickstart in both languages.
+
+### Fixed
+
+- The compose file loader now refuses a string docker compose does not read as a
+  byte size in `shm_size`, `mem_reservation`, `memswap_limit` and `mem_swappiness`
+  (`"abc"`, `"1x"`, `" 1g"`, `"0x10"`), and one it does not read as a duration in
+  `stop_grace_period` (`"abc"`, `"10"`, `"1S"`, `"1 s"`). A number with a unit
+  (`64m`, `1.5 GiB`) and a duration such as `10s`, `1m30s` or `1d` still load.
+  `down`, `destroy`, `stop` and `kill` name it on stderr and go on, so a project
+  an earlier version started from such a file still comes down (`shm_size` is
+  also read by opossum itself, which used to take some values docker compose
+  refuses — `" 1g"`, `"1  g"`, `"1ib"`, an empty string — and now refuses them,
+  as docker compose does).
+- The compose file loader now refuses a `cpu_percent` given as a string
+  docker compose would refuse: one that does not read as a number at all
+  (`cpu_percent: "abc"`), one with a fractional part (`"7.5"`), or one
+  outside the 0–100 range docker compose's schema gives it (`"150"`,
+  `"-1"`). A whole number in range, however it is spelled (`"7.0"`, `"7e0"`,
+  digit separators like `"1_00"`), still loads, matching docker compose
+  v5.5.1's own cast for this key.
+- `opossum import` now skips a build service whose profile is not active, as
+  `build` and `pull` do, instead of trying to bring in an image for it. Naming
+  the service, or turning its profile on with `--profile` or `COMPOSE_PROFILES`,
+  imports it as before.
+- The compose file loader now refuses a string value outside the range docker
+  compose's schema gives the key, for two more keys: `oom_score_adj` outside
+  -1000 to 1000 (`"2000"`, `"-1001"`) and `cpu_count` below 0 (`"-1"`). Values
+  on the edge (`"1000"`, `"-1000"`, `"0"`) and spelled with a sign (`"+5"`)
+  still load, and keys the schema does not bound (`cpu_shares`, `pids_limit`)
+  are unchanged.
+- The compose file loader now refuses a negative `scale` and a negative
+  `deploy.replicas` (`scale: -1`, `deploy.replicas: "-1"`), as docker compose
+  does with `must be greater than or equal to 0`. The count is asked of the
+  merged project, so a base file's negative value that an override sets back
+  to zero or more still loads. Zero and a positive count, including one written
+  with a sign (`"+2"`), still load, and so does a service behind `profiles:`
+  (docker compose refuses that one only once the profile is active).
+- The compose file loader now refuses a service that sets `scale` and
+  `deploy.replicas` to two different numbers, as docker compose does
+  (`can't set distinct values on 'scale' and 'deploy.replicas'`). A number and a
+  string that reads as the same number (`"2"`, `"+2"`, `"02"`), one of them alone,
+  and a service behind `profiles:` still load. `down`, `destroy`, `stop` and
+  `kill` name it on stderr and go on, so a project an earlier version started
+  from such a file still comes down.
+- The compose file loader now refuses a `deploy.replicas` that does not read as a whole
+  number (`replicas: two`, `1.5`, `true`, an empty value, a list), as docker compose does;
+  `replicas: 2`, `"2"` and `2.0` are read as before. In a file given with `-f`, `down`,
+  `destroy`, `stop` and `kill` name it on stderr and go on, so a project an earlier
+  version started from such a file still comes down.
+- `down`, `destroy`, `stop` and `kill` no longer refuse a compose file over a
+  value of these kinds that an earlier opossum accepted and that the loader now refuses (a string
+  outside a key's bounds such as `oom_score_adj: "2000"` or `cpu_count: "-1"`,
+  a string that is not a number or a boolean, `use_api_socket: "true"`, a negative
+  `scale` or `deploy.replicas`), wherever the file reads it from, an included or
+  extended file too. They name it on stderr and go on, so a project started from
+  such a file comes down from its own directory; `up`, `run`, `config` and the
+  other commands still refuse it.
+- `down`, `destroy`, `stop` and `kill` now also go on past three more things in the
+  compose file that 0.38.0 started refusing and an earlier version took: a key
+  written twice inside a mapping such as `sysctls`, `extra_hosts` or
+  `logging.options`, an alias that refers to the block that contains it (in an
+  `x-` extension), and a `---` after the one document the file holds. A project started from such a file
+  comes down from its own directory with the first one named on stderr; `up`,
+  `run`, `config` and the other commands still refuse it.
+- `down`, `destroy`, `stop` and `kill` now also go on past a value of the wrong
+  kind or a number outside its bound in a service key that the loader started
+  refusing in 0.38.0 (`hostname: [a, b]`, `pids_limit: true`, `shm_size: [a]`,
+  `oom_score_adj: 2000`, `cpu_count: -1`). A project that an earlier version
+  started from such a file comes down from its own directory, with the value
+  named on stderr; `up`, `run`, `config` and the other commands still refuse it.
+- `down`, `destroy`, `stop` and `kill` no longer stop or remove another project's
+  containers when a compose file of several YAML documents comes to a different
+  project name than the one its first document gives (a later document's `name:`,
+  including one written with `${VAR:-default}`, an alias or an empty value).
+  0.38.0 started reading every document, so the later name won, and a project an
+  earlier version had started from the first document was left running while the
+  containers of a project named by a later document went down. They now refuse and
+  ask for the name (`opossum -p <name> down`); a name given with `-p`,
+  `COMPOSE_PROJECT_NAME` or the project's `.env` is taken as before, and every
+  other command reads the file as it did.
+- `opossum down` no longer stops a restart supervisor, or deletes its record, when
+  it refuses a compose file of several YAML documents that comes to a different
+  project name than the first document gives and asks for the name
+  (`opossum -p <name> down`). The supervisor was stopped by a name guessed without
+  the file, which left the project's containers running with nothing watching them
+  or, where the guessed name was another project's, stopped that project's.
+- The compose file loader now refuses a `scale` or `deploy.replicas` written as
+  a whole number from 9223372036854775808 to 18446744073709551615, as docker
+  compose does (it reads such a number as less than 0). A count from 0 up to
+  9223372036854775807 loads as before.
+- The restart supervisor's record of which services it is watching is now
+  replaced whole, so a reader that looks while it is being written sees the old
+  set or the new one and never an empty file. An empty read made `up` take a
+  supervisor that was fine for one watching a different set and replace it.
+- Two `opossum up` commands started at the same moment for one project no longer
+  start two supervisors that restart the same containers: the supervisor's claim is
+  taken under a lock and written whole, so a second claim never reads the first one
+  as empty and takes its place.
+- The compose file loader now refuses an infinity or a NaN written as a number
+  (`.inf`, `-.inf`, `+.inf`, `.nan`) anywhere in a file, as docker compose does:
+  it cannot write one into the model it checks, so it refuses the whole file. A
+  string is read as before (`".inf"`, `!!str .inf`, and a value a `${VAR}` expands
+  to). `down`, `destroy`, `stop` and `kill` name it on stderr and go on, so a
+  project an earlier version started from such a file still comes down.
+- The compose file loader now refuses a value tagged `!!float` that is not a
+  number docker compose can read (`!!float abc`, `!!float inf`, `!!float 1.0e999`),
+  as docker compose does; `!!float 1.5`, `!!float 0x10` and `!!float "1.5"` are
+  read as before. In a file given with `-f`, `down`, `destroy`, `stop` and `kill`
+  name it on stderr and go on, so a project an earlier version started from such a
+  file still comes down; in a file that `extends` or `include` reads, every
+  command refuses it, as every earlier version did.
+- A file that another service `extends` from is no longer refused for an infinity or
+  a NaN written as a number (`.inf`, `.nan`) in an `x-` key or a volume label of
+  it, or in an `x-` key of a service that is not the one taken: docker compose
+  reads only the named service of such a file, and now so does this check. In the
+  named service, in the services of that file it extends in turn, and in what an
+  alias in it points at, it is refused as before. A value the extending service
+  writes again, or resets, is still checked in the file it came from, and so is a
+  `.inf` in a `labels`, `environment`, `healthcheck` or `build` of a service that
+  is not taken, which an older check of those keys refuses (docker compose does
+  not).
+- The compose file loader now refuses a value tagged `!!int`, `!!bool`, `!!null`,
+  `!!timestamp` or `!!binary` that is not a value of that type (`!!int abc`,
+  `!!int 1.5`, `!!bool yes`, `!!null x`, `!!timestamp x`), as docker compose does,
+  and as it already did for `!!float`; `!!int 0x10`, `!!bool TRUE`, `!!null ~` and
+  `!!timestamp 2001-12-14` are read as before. An integer tag over a `${VAR}`
+  (`!!int ${PORT}`) is refused too, since docker compose reads the text before it
+  expands it. In a file given with `-f`, `down`, `destroy`, `stop` and `kill` name
+  it on stderr and go on, so a project an earlier version started from such a file
+  still comes down.
+- The compose file loader now refuses `!!int -0`, as docker compose does; `!!int 0`,
+  `!!int +0`, `!!int -00` and `!!int -0x0` are read as before. In a file given with
+  `-f`, `down`, `destroy`, `stop` and `kill` name it on stderr and go on, so a project
+  an earlier version started from such a file still comes down.
+- The compose file loader now refuses a mapping key that is not a string, wherever
+  it stands (`1: a`, `true: a`, `~: a`, `!!int 1: a`, an alias to one), as docker
+  compose does; a quoted key (`"1": a`), a `!!str` key and `yes:` are read as
+  before. The most common place is an `x-` extension block. In a file given with
+  `-f`, `down`, `destroy`, `stop` and `kill` name it on stderr and go on, so a
+  project an earlier version started from such a file still comes down.
+- The compose file loader now refuses a port written as a float (`ports: [!!float 80]`,
+  or a long-form `published: !!float 8080`), as docker compose does: a port is an
+  integer or a string. `!!int 80`, `!!str 80`, `80` and `"80"` are read as before. In a
+  file given with `-f`, `down`, `destroy`, `stop` and `kill` name it on stderr and go
+  on, so a project an earlier version started from such a file still comes down.
+- The compose file loader now refuses a `<<` merge key that holds no mapping and no
+  list of mappings (`<<: v`, `<<: ~`, `<<: [a, b]`), wherever it stands, as docker
+  compose does; `<<: *anchor`, `<<: [*a, *b]` and `<<: []` are read as before. In a
+  file given with `-f`, `down`, `destroy`, `stop` and `kill` name it on stderr and go
+  on, so a project an earlier version started from such a file still comes down.
+- The compose file loader now refuses a name of no characters in `sysctls`,
+  `extra_hosts` and `annotations` (`sysctls: {"": 1}`), as docker compose does. In a
+  file given with `-f`, `down`, `destroy`, `stop` and `kill` name it on stderr and go
+  on, so a project an earlier version started from such a file still comes down.
+- The compose file loader now refuses a number, a bool, an empty value or a list as
+  `ports[].mode` or `deploy.mode`, as docker compose does (a string is wanted: `host`,
+  `ingress`, `replicated`, `global`). In a file given with `-f`, `down`, `destroy`, `stop`
+  and `kill` name it on stderr and go on, so a project an earlier version started from
+  such a file still comes down.
+- The compose file loader now refuses a long-form port whose `name` or `app_protocol`
+  is not a string, whose `host_ip` or `protocol` is null (`host_ip: ~`), or whose `published` is a
+  list or a mapping, as docker compose does. In a file given with `-f`, `down`,
+  `destroy`, `stop` and `kill` name it on stderr and go on, so a project an earlier
+  version started from such a file still comes down.
+
 ## [0.39.0] - 2026-09-29
 
 ### Changed
@@ -2477,7 +2652,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.39.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.40.0...HEAD
+[0.40.0]: https://github.com/suruseas/opossum/compare/v0.39.0...v0.40.0
 [0.39.0]: https://github.com/suruseas/opossum/compare/v0.38.0...v0.39.0
 [0.38.0]: https://github.com/suruseas/opossum/compare/v0.37.0...v0.38.0
 [0.37.0]: https://github.com/suruseas/opossum/compare/v0.36.0...v0.37.0

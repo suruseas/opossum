@@ -431,7 +431,7 @@ func killCmd() *cobra.Command {
 		Use:   "kill [service...]",
 		Short: "Send a signal (default KILL) to running services",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			o, err := loadOrchestratorToTakeDown(cmd.OutOrStdout(), cmd.ErrOrStderr())
+			o, err := loadOrchestratorToTakeDown(cmd.OutOrStdout(), cmd.ErrOrStderr(), "kill")
 			if err != nil {
 				return err
 			}
@@ -646,6 +646,16 @@ func downCmd() *cobra.Command {
 			default:
 				return fmt.Errorf("--rmi must be \"local\" or \"all\", got %q", rmi)
 			}
+			o, err := loadOrchestratorToTakeDown(cmd.OutOrStdout(), cmd.ErrOrStderr(), "down")
+			// A file that asks for the project's name (see nameAsked) is refused before
+			// anything is touched: the supervisor below is stopped and its record
+			// deleted by a name guessed without the file, which is the directory's where
+			// the first document names nothing — the project an earlier version started,
+			// left running with no supervisor, or another project's of that name (#1489).
+			var asked *nameAsked
+			if errors.As(err, &asked) {
+				return err
+			}
 			// Stop the supervisor BEFORE the compose file is needed. A watcher is a
 			// resident process, and `down` is the only thing that stops it — so it
 			// must not be reachable only when the compose file still parses. Deleting
@@ -656,7 +666,6 @@ func downCmd() *cobra.Command {
 				reportSupervisorStop(cmd.ErrOrStderr(), stopped, attempted, "opossum: stopped the restart supervisor")
 				orchestrator.ClearWatched(name)
 			}
-			o, err := loadOrchestratorToTakeDown(cmd.OutOrStdout(), cmd.ErrOrStderr())
 			if err != nil {
 				// A file that cannot be read is no reason to leave what it started
 				// running: an earlier opossum may have started this project from a
@@ -790,7 +799,7 @@ func destroyCmd() *cobra.Command {
 			"global --file.)",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			o, err := loadOrchestratorToTakeDown(cmd.OutOrStdout(), cmd.ErrOrStderr())
+			o, err := loadOrchestratorToTakeDown(cmd.OutOrStdout(), cmd.ErrOrStderr(), "destroy")
 			if err != nil {
 				return err
 			}
@@ -1319,7 +1328,7 @@ func stopCmd() *cobra.Command {
 		Use:   "stop [service...]",
 		Short: "Stop services without removing them (all, or the named services)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			o, err := loadOrchestratorToTakeDown(cmd.OutOrStdout(), cmd.ErrOrStderr())
+			o, err := loadOrchestratorToTakeDown(cmd.OutOrStdout(), cmd.ErrOrStderr(), "stop")
 			if err != nil {
 				return err
 			}
@@ -1733,6 +1742,31 @@ func enableProfiles(o *orchestrator.Orchestrator) {
 // loadOrchestratorWith reads the project the way every command does, and
 // checks nothing about it that a command may want to decide for itself.
 func loadOrchestratorWith(out io.Writer) (*orchestrator.Orchestrator, error) {
+	return loadOrchestratorAs(out, false)
+}
+
+// loadOrchestratorAs is loadOrchestratorWith, reading the project softly when
+// softValues is set: a value docker compose reads as another kind is kept on the
+// project (CheckValueFaults) instead of failing the read. Only the commands that
+// take a project down ask for that (loadOrchestratorToTakeDown).
+// nameAsked is the refusal of a take-down that asks for the project's name (see
+// compose.DocumentNameFault): there is nothing more to offer with it, and no name
+// of its own to guess.
+type nameAsked struct{ error }
+
+func (e *nameAsked) Unwrap() error { return e.error }
+
+// givenFilesAsFlags is the -f flags this run was given, in the form to write them
+// again (with the trailing space), or "" where the files were found and not named.
+func givenFilesAsFlags() string {
+	var b strings.Builder
+	for _, f := range filesChosen.paths {
+		b.WriteString("-f " + f + " ")
+	}
+	return b.String()
+}
+
+func loadOrchestratorAs(out io.Writer, softValues bool) (*orchestrator.Orchestrator, error) {
 	chosen, err := chooseFiles()
 	if err != nil {
 		return nil, err
@@ -1770,7 +1804,11 @@ func loadOrchestratorWith(out io.Writer) (*orchestrator.Orchestrator, error) {
 			files = append(files, ol)
 		}
 	}
-	proj, err := compose.LoadFilesEnvDir(files, envFiles, chosen.envDir)
+	load := compose.LoadFilesEnvDir
+	if softValues {
+		load = compose.LoadFilesEnvDirSoft
+	}
+	proj, err := load(files, envFiles, chosen.envDir)
 	if err != nil {
 		return nil, err
 	}
@@ -1819,10 +1857,27 @@ func loadOrchestratorWith(out io.Writer) (*orchestrator.Orchestrator, error) {
 // project; an earlier opossum passed the pair on to the runtime and did, and
 // refusing here would leave that project with no way down but `container
 // delete` by hand.
-func loadOrchestratorToTakeDown(out, stderr io.Writer) (*orchestrator.Orchestrator, error) {
-	o, err := loadOrchestratorWith(out)
+func loadOrchestratorToTakeDown(out, stderr io.Writer, verb string) (*orchestrator.Orchestrator, error) {
+	o, err := loadOrchestratorAs(out, true)
 	if err != nil {
 		return nil, err
+	}
+	// The documents of one file that name the project differently: 0.38.0 and later
+	// read every one, a release before it read the first alone, and which project a
+	// take-down means cannot be told from the file — so it is asked for by name,
+	// unless it was (`-p`, or COMPOSE_PROJECT_NAME).
+	if err := o.Project.CheckDocumentName(); err != nil && projectName == "" && o.Project.EnvName == "" {
+		var fault *compose.DocumentNameFault
+		if errors.As(err, &fault) {
+			return nil, &nameAsked{fmt.Errorf("compose file: %w\n  name the project you mean: `opossum %s-p %s %s` for the one an earlier version started, `opossum %s-p %s %s` for the one every document names", err, givenFilesAsFlags(), fault.Before, verb, givenFilesAsFlags(), fault.After, verb)}
+		}
+		return nil, err
+	}
+	// A value docker compose reads as another kind — a string that is not a number,
+	// one outside a key's bounds, a `scale` below zero: `up` refuses it, and an
+	// earlier opossum passed it on, so the project it started has to come down.
+	if err := o.Project.CheckValueFaults(); err != nil {
+		fmt.Fprintf(stderr, "opossum: %s — `up` refuses this compose file; going on, as an earlier opossum may have started it\n", orchestrator.OneLine(err.Error()))
 	}
 	// The profiles first, as everywhere else: a pair in a service they enable
 	// is named here too, rather than going unmentioned because the command

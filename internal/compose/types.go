@@ -46,6 +46,14 @@ type Project struct {
 	// (CheckDeclaredNames); nil when there is none.
 	nameFault error
 
+	// valueFault is the first value a LoadFilesEnvDirSoft read went on past
+	// (CheckValueFaults); nil when there is none.
+	valueFault error
+
+	// docNameFault is set where the documents of a file disagree about the project's
+	// name (CheckDocumentName); nil when they do not.
+	docNameFault error
+
 	// Unsupported holds top-level compose keys opossum doesn't act on (e.g.
 	// networks, volumes), collected so it can warn rather than silently ignore.
 	Unsupported []string

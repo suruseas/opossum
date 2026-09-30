@@ -204,30 +204,19 @@ func TestBindOptionsAreCheckedWhateverTheMountType(t *testing.T) {
 	}
 }
 
-// Keys the YAML decoder drops before anything can look at them: a key
-// written twice, and a null key. docker compose refuses both
-// (`mapping key "foo" already defined`, `non-string key`). The repeated key is
-// refused here too, by the check for a key written twice anywhere in the file
-// (repeatedkeys_test.go); the null key is not, here as before.
-//
-// What this row holds is that the block is still named among the ignored
-// fields when that happens. The check runs on what the decoder returns, so
-// a decode that fails returns nothing to check — and if the block dropped
-// out of the ignored list with it, someone who wrote `bind:` with a null key would
-// be told nothing at all about it.
-func TestABlockWhoseKeysTheDecoderDropsIsStillNamedAmongTheIgnoredFields(t *testing.T) {
+// Keys the YAML decoder drops before anything can look at them: a key written twice,
+// and a null key. docker compose refuses both (`mapping key "foo" already defined`,
+// `non-string key`), and so does opossum, each by a check of the whole file
+// (repeatedkeys_test.go; a key that is not a string, #1525). This row holds that the
+// null key under `bind:` is refused, and not read past with the block dropped: the
+// check runs on what the decoder returns, and a decode that fails returns nothing.
+func TestABlockWhoseKeysTheDecoderDropsIsRefused(t *testing.T) {
 	for _, tc := range []struct{ name, options string }{
 		{"a null key", "~: 1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p, err := loadBind(t, tc.options)
-			if err != nil {
-				t.Fatalf("this is read past here, as it was before: %v", err)
-			}
-			if got := bindDerived(p); len(got) != 1 || got[0] != "volumes entry 1.bind" {
-				t.Errorf("the ignored fields from bind: are %v, want exactly "+
-					"[\"volumes entry 1.bind\"]. The keys could not be read, but the block "+
-					"is there and nothing under it is acted on — which is what the list says.", got)
+			if _, err := loadBind(t, tc.options); err == nil || !strings.Contains(err.Error(), "is not a string") {
+				t.Errorf("want the null key refused as a key that is not a string, got %v", err)
 			}
 		})
 	}

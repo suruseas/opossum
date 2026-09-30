@@ -207,6 +207,15 @@ func main() {
 		}
 		return !isGone("container", name)
 	}
+	// createdPath marks a name `run` has made here and `delete` has not since
+	// cleared — what the default "already exists" refusal in the `run` case
+	// checks. "" (no $STATE_DIR) disables it the same way the other markers do.
+	createdPath := func(name string) string {
+		if stateDir == "" {
+			return ""
+		}
+		return filepath.Join(stateDir, "created-"+hex.EncodeToString([]byte(name)))
+	}
 	// The object name is the last argument for every delete form the runtime takes
 	// (`delete --force NAME`, `volume delete NAME`, …).
 	lastArg := func() string {
@@ -261,6 +270,23 @@ func main() {
 			fmt.Fprintln(os.Stderr, msg)
 			os.Exit(1)
 		}
+		// A name this fake itself has already run and not since deleted is taken:
+		// 1.4.1 refuses `run` of an existing name the same way whether it is
+		// running or stopped (measured, testdata/real-cli-output.md), and until
+		// this a second run of one name silently replaced the first — a call
+		// opossum never makes deliberately (a genuine replace always deletes
+		// first), so nothing exercised this question until #962's contract row
+		// asked it. Said before the volume check, as the real CLI does.
+		for i, a := range args {
+			if i > 0 && args[i-1] == "--name" {
+				if p := createdPath(a); p != "" {
+					if _, err := os.Stat(p); err == nil {
+						fmt.Fprintf(os.Stderr, "Error: container with id %s already exists\n", a)
+						os.Exit(1)
+					}
+				}
+			}
+		}
 		// A volume the runtime would not create is refused after the name, and
 		// before anything is recorded (the real run makes no volume at all).
 		if msg, refused := volumeNameRefused(args); refused {
@@ -302,6 +328,9 @@ func main() {
 				}
 				if p := portsPath(a); p != "" {
 					_ = os.WriteFile(p, []byte(strings.Join(runPorts, ",")), 0o644)
+				}
+				if p := createdPath(a); p != "" {
+					_ = os.WriteFile(p, []byte("1"), 0o644)
 				}
 			}
 		}
@@ -482,7 +511,10 @@ func main() {
 	case "volume":
 		// `volume ls` is a table whose first column is the name; opossum reads it to
 		// decide whether a volume exists. $VOLUME_LS is that table.
-		if arg(1) == "delete" {
+		// `rm` is `delete`'s alias on 1.4.1 (opossum itself only ever issues
+		// `delete`, so nothing here depended on this until #962's contract row
+		// asked what the fake says about the one it never uses).
+		if arg(1) == "delete" || arg(1) == "rm" {
 			// A volume already deleted is not there to delete: the real CLI fails
 			// (1.4.1: `Error: failed to delete one or more volumes: ["<name>"]`).
 			if isGone("volume", arg(2)) {
@@ -526,6 +558,9 @@ func main() {
 		}
 		markGone("container", lastArg())
 		if p := stoppedPath(lastArg()); p != "" {
+			_ = os.Remove(p)
+		}
+		if p := createdPath(lastArg()); p != "" {
 			_ = os.Remove(p)
 		}
 	case "start":

@@ -220,6 +220,17 @@ case "$1" in
           printf 'Error: container ID %s is not a valid container ID\n' "$name" >&2; exit 1 ;;
       esac
       if [ "${#name}" -gt 63 ]; then printf 'Error: container ID %s is not a valid container ID\n' "$name" >&2; exit 1; fi
+      # A name this fake itself has already run and not since deleted is taken:
+      # 1.4.1 refuses `run` of an existing name the same way whether it is
+      # running or stopped (measured, testdata/real-cli-output.md), before the
+      # volume check below — and until this a second run of one name silently
+      # replaced the first, a call opossum never makes deliberately (a genuine
+      # replace always deletes first), so nothing exercised this question
+      # until #962's contract row asked it.
+      m=$(marker created "$name")
+      if [ -n "$m" ] && [ -e "$m" ]; then
+        printf 'Error: container with id %s already exists\n' "$name" >&2; exit 1
+      fi
     fi
     # A `-v <source>:<target>` whose source container 1.4.1 reads as a volume
     # name and refuses is refused next, before anything is recorded; the first
@@ -315,6 +326,7 @@ case "$1" in
         m=$(marker stopped "$a"); if [ -n "$m" ]; then rm -f "$m"; fi
         m=$(marker project "$a"); if [ -n "$m" ]; then printf '%s' "$proj" > "$m"; fi
         m=$(marker ports "$a"); if [ -n "$m" ]; then printf '%s' "$pub" > "$m"; fi
+        m=$(marker created "$a"); if [ -n "$m" ]; then : > "$m"; fi
       fi
       prev=$a
     done
@@ -393,6 +405,7 @@ case "$1" in
     fi
     if [ -n "$g" ]; then : > "$g"; fi
     s=$(marker stopped "$n"); if [ -n "$s" ]; then rm -f "$s"; fi
+    c=$(marker created "$n"); if [ -n "$c" ]; then rm -f "$c"; fi
     ;;
   volume)
     if [ "$2" = delete ] || [ "$2" = rm ]; then

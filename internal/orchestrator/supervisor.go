@@ -147,8 +147,9 @@ func processAlive(pid int) bool {
 // itself say "still alive" on command.
 var processAliveFn = processAlive
 
-// ClaimSupervisor is how a supervisor takes ownership of a project: it creates the
-// pid file exclusively, so exactly one process can hold it. The CHILD claims,
+// ClaimSupervisor is how a supervisor takes ownership of a project: it takes the
+// project's claim lock and writes the pid file whole under it, so exactly one process
+// can hold it. The CHILD claims,
 // not the parent — a parent that checked first and wrote after would leave a
 // window in which two `up`s both see "nobody is watching" and both spawn, and the
 // loser of that race becomes an orphan nothing can stop.
@@ -166,27 +167,43 @@ func ClaimSupervisor(project string) error {
 	path := filepath.Join(dir, "supervisor.pid")
 	me := os.Getpid()
 	content := []byte(strconv.Itoa(me) + " " + processStartedAt(me) + "\n")
-	for attempt := 0; attempt < 2; attempt++ {
-		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-		if err == nil {
-			_, werr := f.Write(content)
-			if cerr := f.Close(); werr == nil {
-				werr = cerr
-			}
-			return werr
-		}
-		if !os.IsExist(err) {
-			return err
-		}
-		if SupervisorPID(project) != 0 {
-			return errAlreadySupervised
-		}
-		// The file is there but nobody is behind it: a crash or a reboot left it.
-		if rmErr := os.Remove(path); rmErr != nil && !os.IsNotExist(rmErr) {
-			return rmErr
-		}
+	// Every claim goes through one lock, held from the first look at the file to the
+	// moment the claim is in place. Without it a racer that found the file just created
+	// and not yet written read it as empty — nobody behind it — removed it, and claimed
+	// over the top, so two supervisors stood (#1500: 7 to 11 of 400 rounds of 8 claims at
+	// once had more than one winner).
+	lock, err := os.OpenFile(path+".lock", os.O_RDWR|os.O_CREATE, 0o644)
+	if err != nil {
+		return err
 	}
-	return errAlreadySupervised
+	defer lock.Close() // closing the file releases the lock
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return err
+	}
+	if SupervisorPID(project) != 0 {
+		return errAlreadySupervised
+	}
+	// Nothing is behind a file that is there now: a crash or a reboot left it. The claim
+	// replaces it in one step, written whole into a file of its own first, so that a
+	// reader (SupervisorPID takes no lock) never sees a half-written one.
+	tmp, err := os.CreateTemp(dir, "supervisor.pid.tmp-*")
+	if err != nil {
+		return err
+	}
+	_, werr := tmp.Write(content)
+	if cerr := tmp.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr == nil {
+		werr = os.Chmod(tmp.Name(), 0o644)
+	}
+	if werr == nil {
+		werr = os.Rename(tmp.Name(), path)
+	}
+	if werr != nil {
+		os.Remove(tmp.Name())
+	}
+	return werr
 }
 
 // errAlreadySupervised means another process holds this project's claim.
@@ -217,7 +234,32 @@ func RecordWatched(project string, services []string) error {
 	}
 	sorted := append([]string(nil), services...)
 	sort.Strings(sorted)
-	return os.WriteFile(path, []byte(strings.Join(sorted, "\n")+"\n"), 0o644)
+	// Written beside the record and renamed over it, so a reader sees the old set
+	// or the new one and never the moment between os.WriteFile's truncate and its
+	// write — an empty record, which WatchedMatches reads as "the set changed" and
+	// a test read as "watching nothing" (#1496).
+	tmp, err := os.CreateTemp(filepath.Dir(path), "supervised.tmp-*")
+	if err != nil {
+		return err
+	}
+	if _, err := tmp.WriteString(strings.Join(sorted, "\n") + "\n"); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmp.Name())
+		return err
+	}
+	if err := os.Chmod(tmp.Name(), 0o644); err != nil {
+		os.Remove(tmp.Name())
+		return err
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		os.Remove(tmp.Name())
+		return err
+	}
+	return nil
 }
 
 // Watched returns the services a supervisor last recorded itself as watching, or

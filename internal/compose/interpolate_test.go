@@ -1522,15 +1522,25 @@ services:
 	}
 }
 
-// A value carrying an explicit tag. Emptying it has to leave a string behind:
-// `!!int` with nothing under it is not a number, and the document would come back
-// out unreadable.
+// A value carrying an explicit tag. Emptying a `!!str` has to leave a string behind.
+// A `!!int` over a `${VAR}` is refused: docker compose reads the text before it
+// expands it, and `${NOPE}` is not an integer (measured, v5.5.1, `config` rc 1, as
+// for `!!int abc`); it was let through until #1520.
 func TestAnEmptiedValueWithAnExplicitTagBecomesAString(t *testing.T) {
 	unsetHostVars(t, "NOPE")
-	for _, tag := range []string{"!!str", "!!int"} {
-		t.Run(tag, func(t *testing.T) {
-			p := writeProject(t, "services:\n  app:\n    image: app\n    environment:\n      K: "+tag+" ${NOPE}\n", "")
+	for _, tc := range []struct {
+		tag    string
+		refuse bool
+	}{{"!!str", false}, {"!!int", true}} {
+		t.Run(tc.tag, func(t *testing.T) {
+			p := writeProject(t, "services:\n  app:\n    image: app\n    environment:\n      K: "+tc.tag+" ${NOPE}\n", "")
 			proj, err := Load(p)
+			if tc.refuse {
+				if err == nil || !strings.Contains(err.Error(), "is tagged !!int") {
+					t.Fatalf("want the tagged value refused, got %v", err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("Load: %v", err)
 			}

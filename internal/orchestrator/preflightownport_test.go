@@ -131,6 +131,24 @@ func shimFor(t *testing.T, cs ...fakeContainer) *runtime.Runtime {
 // came read as "in use" and refused a row that wants none (seen once on the
 // runner: 42957 held, 42956 taken by someone else).
 func freeBelow(t *testing.T, held int) int {
+	return freeBelowSpan(t, held, 0)
+}
+
+// freeBelowSpan is freeBelow for a row whose holder publishes a span that starts holderPort
+// away from held (a range `held-1 … held+1` is holderPort -1): "some other port" has to be
+// under the whole span, or the free port it finds can be one of the span's own — held-1,
+// which the fake holder does not listen on, so the OS calls it free — and the row reads as
+// a conflict with the holder it means to be about (#1501: `37154` asked for by a, inside
+// `37154-37156` published by z, on the runner).
+func freeBelowSpan(t *testing.T, held, holderPort int) int {
+	t.Helper()
+	if holderPort < 0 {
+		held += holderPort
+	}
+	return freeBelowPort(t, held)
+}
+
+func freeBelowPort(t *testing.T, held int) int {
 	t.Helper()
 	for p := held - 1; p > held-64 && p > 1024; p-- {
 		l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", p))
@@ -337,7 +355,19 @@ func TestAHostPortThisRunFreesItselfIsNotAConflict(t *testing.T) {
 				attempts = 3
 			}
 			for attempt := 1; attempt <= attempts; attempt++ {
-				aPorts = fmt.Sprintf("%d:80", freeBelow(t, held))
+				holderSpan := 0
+				if tc.holder != "" {
+					holderSpan = tc.holderPort
+				}
+				asked := freeBelowSpan(t, held, holderSpan)
+				aPorts = fmt.Sprintf("%d:80", asked)
+				// The port this row leaves to freeBelowSpan is under everything the holder
+				// publishes: read here, not only in the helper's own test, because a row that
+				// hands the helper the wrong span (or none) fails only on the runs where the
+				// OS calls the span's lowest port free (#1501, #1546).
+				if tc.aPorts == "" && tc.holder != "" && asked >= held+min(0, tc.holderPort) {
+					t.Fatalf("a asks for %d, which is not under the holder's span (it starts at %d): the row would read as a conflict with its own holder", asked, held+min(0, tc.holderPort))
+				}
 				if tc.aPorts != "" {
 					aPorts = fmt.Sprintf(tc.aPorts, held, held+2, held-1, held+1, held-2)
 				}
@@ -671,5 +701,28 @@ func TestAStaleBindOnAsOwnPortIsThe1372Failure(t *testing.T) {
 	want := `39610/tcp (service "a") — held by this project's service "z", which this run starts after this entry`
 	if err == nil || !strings.Contains(err.Error(), want) {
 		t.Fatalf("got %v\nwant it to hold %q — the exact CI wording", err, want)
+	}
+}
+
+// The port a row asks for when it leaves it to freeBelowSpan is under the whole span the
+// holder publishes, not just under held (#1501): held-1 is free to the OS when the holder is
+// a fake that listens on nothing, and is inside a span that starts one under held.
+func TestTheAskedPortIsUnderTheHoldersWholeSpan(t *testing.T) {
+	// A port that is free right now, closed again, then the one above it as `held`.
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	free := l.Addr().(*net.TCPAddr).Port
+	l.Close()
+	held := free + 1
+	if got := freeBelowSpan(t, held, -1); got >= free {
+		t.Errorf("freeBelowSpan(%d, -1) = %d, want a port under %d, the start of the span held-1…held+1", held, got, free)
+	}
+	if got := freeBelowSpan(t, held, -3); got >= held-3 {
+		t.Errorf("freeBelowSpan(%d, -3) = %d, want a port under %d", held, got, held-3)
+	}
+	if got := freeBelowSpan(t, held, 0); got >= held {
+		t.Errorf("freeBelowSpan(%d, 0) = %d, want a port under held", held, got)
 	}
 }

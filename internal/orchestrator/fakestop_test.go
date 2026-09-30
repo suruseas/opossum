@@ -26,7 +26,11 @@ func TestFakeStopAndDeleteChangeWhatInspectSays(t *testing.T) {
 	if info := rt.Inspect(name); !info.Exists || info.State != "stopped" {
 		t.Errorf("after a stop the container is there and stopped, got %+v", info)
 	}
-	// Running the name again makes it running again — a stop is not for ever.
+	// A stop is not for ever, but `run` does not revive a stopped container by
+	// name — 1.4.1 refuses an existing name the same way whether it is running
+	// or stopped (measured, testdata/real-cli-output.md) — so a replace deletes
+	// first, the way opossum's own replace path does.
+	rt.Delete(name)
 	if err := rt.Run(runtime.RunOptions{Name: name, Image: "alpine"}); err != nil {
 		t.Fatalf("run again: %v", err)
 	}

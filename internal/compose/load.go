@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 )
@@ -825,6 +827,20 @@ func LoadFiles(paths []string, envFiles []string) (*Project, error) {
 // own directory's `.env` is read under the working directory's, for what that
 // one does not set (measured on docker compose v5.5.1; see loadEnvLayers).
 func LoadFilesEnvDir(paths []string, envFiles []string, envDir string) (*Project, error) {
+	return loadFilesEnvDir(paths, envFiles, envDir, false)
+}
+
+// LoadFilesEnvDirSoft is LoadFilesEnvDir for the commands that take a project
+// down: a value docker compose reads as another kind (a string that is not a
+// number, one outside a key's bounds, a `scale` below zero) is kept on the project
+// (CheckValueFaults) and the read goes on, where LoadFilesEnvDir fails on it. An
+// earlier opossum passed such a value on, so a project may be running on it, and
+// the commands that take it down have to read the file (#1468).
+func LoadFilesEnvDirSoft(paths []string, envFiles []string, envDir string) (*Project, error) {
+	return loadFilesEnvDir(paths, envFiles, envDir, true)
+}
+
+func loadFilesEnvDir(paths []string, envFiles []string, envDir string, soft bool) (*Project, error) {
 	if len(paths) == 0 {
 		return nil, fmt.Errorf("no compose file given")
 	}
@@ -842,6 +858,9 @@ func LoadFilesEnvDir(paths []string, envFiles []string, envDir string) (*Project
 	scope, err := loadEnvLayers(envDir, baseDir, envFiles, true)
 	if err != nil {
 		return nil, err
+	}
+	if soft {
+		scope.values = &[]error{}
 	}
 
 	var doc interpolated
@@ -864,7 +883,7 @@ func LoadFilesEnvDir(paths []string, envFiles []string, envDir string) (*Project
 			sources = append(sources, source{path: path}) // loadUnit says what could not be read
 			continue
 		}
-		docs, err := splitDocuments(path, raw)
+		docs, err := splitDocuments(path, raw, scope.values)
 		if err != nil {
 			return nil, err
 		}
@@ -877,6 +896,13 @@ func LoadFilesEnvDir(paths []string, envFiles []string, envDir string) (*Project
 			sources = append(sources, source{path: path, raw: d, doc: i + 1})
 		}
 	}
+	// What a release before 0.38.0 read of these files — the first document of each,
+	// merged — kept beside what is read now, to tell whether the project's name is the
+	// same in both (#1483). Both are the loader's own merge of what it has read, so
+	// what a `${VAR}`, an alias or an empty `name:` comes to is decided as it is for
+	// the project.
+	var mergedFirst map[string]any
+	var documentNameFault error
 	if len(paths) == 1 && !multi && !hasInclude(paths[0]) {
 		// Single file: read the interpolated document directly (no merge
 		// round-trip), so the positions a failure names are the ones in the file.
@@ -884,7 +910,7 @@ func LoadFilesEnvDir(paths []string, envFiles []string, envDir string) (*Project
 		if err != nil {
 			return nil, fmt.Errorf("reading compose file: %w", err)
 		}
-		if err := checkOneDocument(paths[0], raw); err != nil {
+		if err := checkOneDocument(paths[0], raw, scope.values); err != nil {
 			return nil, err
 		}
 		if doc, err = interpolateDocument(raw, scope.lookup()); err != nil {
@@ -902,10 +928,10 @@ func LoadFilesEnvDir(paths []string, envFiles []string, envDir string) (*Project
 		// service that extends another resolved, on the plain tree. The
 		// resolved tree decodes as the file did, but for a key that is
 		// still nothing once extends is read, which the resolver refuses.
-		if err := validateOne(paths[0], doc, nil); err != nil {
+		if err := validateOne(paths[0], doc, nil, scope.values, ""); err != nil {
 			return nil, err
 		}
-		if resolved, err := resolveSameFileExtends(doc, tags, paths[0], baseDir, scope.lookup()); err != nil {
+		if resolved, err := resolveSameFileExtends(doc, tags, paths[0], baseDir, scope.lookup(), scope.values); err != nil {
 			return nil, err
 		} else if resolved != nil {
 			doc = *resolved
@@ -944,6 +970,15 @@ func LoadFilesEnvDir(paths []string, envFiles []string, envDir string) (*Project
 					loaded = append(loaded, f)
 				}
 			}
+			if multi && src.doc <= 1 {
+				first := deepCopyTree(m).(map[string]any)
+				if mergedFirst == nil {
+					mergedFirst = first
+				} else {
+					applyMergeTags(mergedFirst, tags, true)
+					mergedFirst = mergeMap(mergedFirst, first, "")
+				}
+			}
 			if merged == nil {
 				merged = m
 			} else {
@@ -969,6 +1004,12 @@ func LoadFilesEnvDir(paths []string, envFiles []string, envDir string) (*Project
 		// picking one and being wrong. The per-file pass above is the part that
 		// reads each file as the reader wrote it, and it only sees what a plain
 		// map can hold.
+		if multi && mergedFirst != nil {
+			before, after := mapProjectName(mergedFirst, baseDir), mapProjectName(merged, baseDir)
+			if before != after {
+				documentNameFault = &DocumentNameFault{Before: before, After: after}
+			}
+		}
 		data, err := yaml.Marshal(merged)
 		if err != nil {
 			return nil, fmt.Errorf("merging compose files: %w", err)
@@ -983,6 +1024,19 @@ func LoadFilesEnvDir(paths []string, envFiles []string, envDir string) (*Project
 			read = asMerged
 		}
 		return nil, decodeErr(mergedName(loaded), read, blameService(doc, err))
+	}
+	// What docker compose checks of the model it built out of every file:
+	// the merged document, with `extends` read (#1462).
+	var modelDoc struct {
+		Services map[string]any `yaml:"services"`
+	}
+	if err := doc.into(&modelDoc); err == nil {
+		if err := checkModelBounds("compose file "+mergedName(loaded), modelDoc.Services); err != nil {
+			if scope.values == nil {
+				return nil, err
+			}
+			*scope.values = append(*scope.values, err)
+		}
 	}
 	// A declared name starting with `.` takes the spelling a `type: volume`
 	// mount of it has (dotVolumeKey), so the two meet by key.
@@ -1046,17 +1100,19 @@ func LoadFilesEnvDir(paths []string, envFiles []string, envDir string) (*Project
 	envName, _ := scope.lookup()(projectNameVar)
 	envProfiles, _ := scope.lookup()(profilesVar)
 	p := &Project{
-		Name:        f.Name,
-		EnvName:     envName,
-		EnvProfiles: envProfiles,
-		BaseDir:     baseDir,
-		Services:    f.Services,
-		Secrets:     f.Secrets,
-		Configs:     f.Configs,
-		Volumes:     f.Volumes,
-		Networks:    f.Networks,
-		Unsupported: ignoredTopLevel(doc),
-		nameFault:   nameFault,
+		Name:         f.Name,
+		EnvName:      envName,
+		EnvProfiles:  envProfiles,
+		BaseDir:      baseDir,
+		Services:     f.Services,
+		Secrets:      f.Secrets,
+		Configs:      f.Configs,
+		Volumes:      f.Volumes,
+		Networks:     f.Networks,
+		Unsupported:  ignoredTopLevel(doc),
+		nameFault:    nameFault,
+		docNameFault: documentNameFault,
+		valueFault:   firstOf(scope.values),
 	}
 	// `ipam` is read for its subnets; the keys under it opossum reads past
 	// (`driver`, an entry's `gateway`) are named the way the other
@@ -1372,6 +1428,46 @@ func refuseBadNames(file, kind string, names []string) error {
 // the loader: an earlier opossum ran such a project, and `down` and `destroy` have
 // to read the file to take it down.
 func (p *Project) CheckDeclaredNames() error { return p.nameFault }
+
+// CheckValueFaults is the first value docker compose reads as another kind that a
+// LoadFilesEnvDirSoft read went on past, or nil (and always nil after a read that
+// failed on it instead). The commands that take a project down name it and go on.
+func (p *Project) CheckValueFaults() error { return p.valueFault }
+
+// CheckDocumentName is a refusal for the commands that take a project down when a
+// file of several YAML documents names the project differently in a later document
+// than in the first (#1483): 0.38.0 and later read every document, so the name is
+// the later one's, and a release before it read the first document alone, so the
+// project it started is the first one's. Which one a take-down means cannot be
+// told from the file, and naming the wrong one takes down another project's
+// containers, so the caller asks for -p. Nil where the documents agree.
+func (p *Project) CheckDocumentName() error { return p.docNameFault }
+
+// DocumentNameFault is what CheckDocumentName returns: the name a release before
+// 0.38.0 gave the project (the first document of each file, merged) and the name it
+// has now (every document), sanitised as project names are.
+type DocumentNameFault struct{ Before, After string }
+
+func (e *DocumentNameFault) Error() string {
+	return fmt.Sprintf("the project is named %q where only the first YAML document of each file is read (an opossum before 0.38.0 read no other), and %q where every document is (0.38.0 and later): which one a take-down means cannot be told from the file", e.Before, e.After)
+}
+
+// mapProjectName is the project name a merged document comes to: its `name:` when
+// that is a non-empty string, the directory's otherwise, sanitised.
+func mapProjectName(m map[string]any, dir string) string {
+	if name, ok := m["name"].(string); ok && name != "" {
+		return SanitizeName(name)
+	}
+	return SanitizeName(filepath.Base(dir))
+}
+
+// firstOf is the first error a sink recorded, or nil where there is no sink.
+func firstOf(sink *[]error) error {
+	if sink == nil || len(*sink) == 0 {
+		return nil
+	}
+	return (*sink)[0]
+}
 
 // keysOf is the keys of a map, in no order.
 func keysOf[V any](m map[string]V) []string {
@@ -2094,7 +2190,7 @@ func withoutEchoedValues(te *yaml.TypeError) *yaml.TypeError {
 // taken out before the decode and the bare-key check does not fire on
 // them. The nodes are pruned, not re-rendered, so a failure keeps the
 // line the reader wrote.
-func validateOne(path string, one interpolated, earlier map[string]any) error {
+func validateOne(path string, one interpolated, earlier map[string]any, values *[]error, only string) error {
 	override := earlier != nil
 	doc := one.node
 	if doc == nil {
@@ -2121,15 +2217,30 @@ func validateOne(path string, one interpolated, earlier map[string]any) error {
 	}
 	// The decode has answered for the blocks it reads into a typed shape; what it
 	// took as it came is asked now, so that nothing is said twice.
+	// A key written twice in a mapping the decode takes as it comes, and an alias
+	// that refers to its own block: an opossum before 0.38.0 read both (#1475).
 	if err := checkRepeatedKeys(path, one.written, true); err != nil {
-		return err
+		if values == nil {
+			return err
+		}
+		*values = append(*values, err)
+	}
+	// An infinity or a NaN written as a number, anywhere in the file: docker compose
+	// cannot put one in its model and refuses the file (#1507). A file that is only
+	// extended from (`only` names the service) is asked in that service alone, the
+	// one part of it docker compose takes (#1510).
+	if err := checkNonFiniteNumbers(path, one.written, only); err != nil {
+		if values == nil {
+			return err
+		}
+		*values = append(*values, err)
 	}
 	// The keys the decode took as they came are asked what they hold.
 	var generic struct {
 		Services map[string]any `yaml:"services"`
 	}
 	if err := doc.Decode(&generic); err == nil {
-		if err := checkServiceShapes(path, generic.Services); err != nil {
+		if err := checkServiceShapes(path, generic.Services, values); err != nil {
 			return err
 		}
 	}
@@ -2174,6 +2285,248 @@ func validateOne(path string, one interpolated, earlier map[string]any) error {
 // file is asked by checkRepeatedKeys once the decode has passed.
 func checkExtensionRepeats(path string, written []byte) error {
 	return checkRepeatedKeys(path, written, false)
+}
+
+// nonFiniteRE is what YAML 1.1 reads as an infinity or a NaN: `.inf`, `.Inf`, `.INF`,
+// their signed forms, and `.nan`, `.NaN`, `.NAN`.
+var nonFiniteRE = regexp.MustCompile(`^[-+]?\.(?i:inf)$|^\.(?i:nan)$`)
+
+// checkNonFiniteNumbers refuses a `.inf`, `-.inf` or `.nan` written as a number in a
+// file, in a value, a list item, a mapping key or an `x-` extension alike: docker
+// compose reads it as a float and cannot write it into the model it checks
+// (`json: unsupported value: +Inf`), so the whole file is refused (measured,
+// v5.5.1). A string is not one — quoted, or tagged `!!str`, or a `${VAR}` that
+// expands to it, since docker compose expands after it reads — and a number too big
+// for a float (`1.0e999`) is read. A value tagged `!!float` that the reader cannot
+// take as a float (`!!float abc`, `!!float inf`, `!!float 1.0e999`) is refused too.
+//
+// Asked of the file as written (`written`), as checkRepeatedKeys is, so that the line
+// it names is the reader's. A text that does not parse is left to the decode.
+func checkNonFiniteNumbers(path string, written []byte, only string) error {
+	if len(written) == 0 {
+		return nil
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(written, &doc); err != nil {
+		return nil
+	}
+	// finite: also ask for an infinity or a NaN. A value tagged `!!float` that is no
+	// float is a fault of the read, so docker compose finds it anywhere in a file it
+	// reads; an infinity is a fault of the model it builds, so in a file that is only
+	// extended from it is asked of the service taken, once its own extends is resolved
+	// (nonFiniteInService), and not here (measured, v5.5.1).
+	var walk func(n *yaml.Node) error
+	walk = func(n *yaml.Node) error {
+		if n == nil || n.Kind == yaml.AliasNode {
+			return nil // the anchor it points at is walked where it stands
+		}
+		if n.Kind == yaml.ScalarNode && n.Tag == "!!float" {
+			if nonFiniteRE.MatchString(n.Value) {
+				if only == "" {
+					return fmt.Errorf("compose file %s: line %d: %s is a number docker compose cannot read — infinity and NaN cannot go into its model; quote it to keep it a string", path, n.Line, n.Value)
+				}
+				return nil
+			}
+			// A value tagged `!!float` that is not one (`!!float abc`, `!!float inf`, a
+			// number past the float range) is refused by the reader the way docker
+			// compose refuses it (#1509); the decode is the same reader's answer.
+			var f float64
+			if err := n.Decode(&f); err != nil {
+				return fmt.Errorf("compose file %s: line %d: %q is tagged !!float and is not a number docker compose can read", path, n.Line, n.Value)
+			}
+		}
+		// The same for the other tags that name a plain value: `!!int abc`, `!!bool yes`,
+		// `!!null x`, `!!timestamp x`, `!!binary !!!` are refused by docker compose as
+		// `!!float abc` is (#1520; measured, v5.5.1, 408 tag-and-value forms, the decode
+		// agrees with docker compose on every one). A value the reader resolved by its
+		// look is a value of its tag already, so only a tag that was written is asked.
+		if n.Kind == yaml.ScalarNode && n.Style&yaml.TaggedStyle != 0 {
+			switch n.Tag {
+			case "!!int", "!!bool", "!!null", "!!timestamp", "!!binary":
+				var v any
+				err := n.Decode(&v)
+				// `!!int -0` decodes here and is refused by docker compose, which reads it as
+				// a float (#1524; `+0`, `-00`, `-0x0` and `-0_0` are read by both).
+				if err == nil && n.Tag == "!!int" && n.Value == "-0" {
+					err = fmt.Errorf("negative zero")
+				}
+				if err != nil {
+					return fmt.Errorf("compose file %s: line %d: %q is tagged %s and is not a value docker compose can read as one", path, n.Line, n.Value, n.Tag)
+				}
+			}
+		}
+		if n.Kind == yaml.MappingNode {
+			// A mapping key that is not a string (`1: a`, `true: a`, `!!int 1: a`, a
+			// list or a mapping as a key) is refused by docker compose wherever it
+			// stands (#1525; measured, v5.5.1). The `<<` merge key is a string here, and
+			// an infinity in a file read whole is left to the number check below, which names it
+			// as one (in a file only extended from, that check asks the service taken alone, and
+			// docker compose refuses an infinity as a key anywhere in it).
+			for i := 0; i+1 < len(n.Content); i += 2 {
+				k := n.Content[i]
+				for k.Kind == yaml.AliasNode && k.Alias != nil {
+					k = k.Alias
+				}
+				// The `<<` merge key takes a mapping, or a list of mappings (an empty list
+				// too); docker compose refuses anything else (#1529; measured, v5.5.1).
+				// Asked of the key as written: a key that is an alias to a `<<` is not a merge key.
+				if mk := n.Content[i]; mk.Kind == yaml.ScalarNode && mk.Tag == "!!merge" && !mergeValueOK(n.Content[i+1]) {
+					return fmt.Errorf("compose file %s: line %d: the merge key `<<` takes a mapping or a list of mappings, and this is %s — docker compose refuses it", path, n.Content[i].Line, mergeValueKind(n.Content[i+1]))
+				}
+				// What docker compose refuses is a key its core schema reads as something
+				// other than a string: a number, a bool, a null, a timestamp, a list or a
+				// mapping. A key with a tag of its own (`!foo 1`, `! 1`, `!!binary YQ==`),
+				// a `!!str`, and the `<<` merge key are read as strings (#1525; measured).
+				refused := k.Kind != yaml.ScalarNode
+				switch k.Tag {
+				case "!!int", "!!bool", "!!null", "!!timestamp", "!!float":
+					refused = true
+					// The reader gives `! 1` the tag of `1`; the text tells them apart, and a
+					// key written with a `!` of its own is a string.
+					if k.Style&yaml.TaggedStyle == 0 && startsWithBang(written, k.Line, k.Column) {
+						refused = false
+					}
+					// An infinity in a file read whole is named by the number check.
+					if k.Tag == "!!float" && only == "" && nonFiniteRE.MatchString(k.Value) {
+						refused = false
+					}
+				}
+				if !refused {
+					continue
+				}
+				return fmt.Errorf("compose file %s: line %d: the mapping key %s is not a string — docker compose refuses a key of another type; quote it to keep it a string", path, n.Content[i].Line, keyText(k))
+			}
+		}
+		for _, c := range n.Content {
+			if err := walk(c); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return walk(&doc)
+}
+
+// startsWithBang reports whether the node at a line and column (1-based, in characters,
+// a line ending in `\n`, `\r\n` or a lone `\r`, a byte order mark not counted) is written
+// with a `!` before its text — after an anchor, if it has one: the non-specific tag
+// `! 1`, which the reader does not keep.
+func startsWithBang(written []byte, line, column int) bool {
+	rest := bytes.TrimPrefix(written, []byte("\xef\xbb\xbf"))
+	for i := 1; i < line; i++ {
+		nl := bytes.IndexAny(rest, "\r\n")
+		if nl < 0 {
+			return false
+		}
+		if rest[nl] == '\r' && nl+1 < len(rest) && rest[nl+1] == '\n' {
+			nl++
+		}
+		rest = rest[nl+1:]
+	}
+	for i := 1; i < column; i++ {
+		_, size := utf8.DecodeRune(rest)
+		if size == 0 {
+			return false
+		}
+		rest = rest[size:]
+	}
+	if len(rest) > 0 && rest[0] == '&' {
+		if sp := bytes.IndexAny(rest, " \t"); sp >= 0 {
+			rest = bytes.TrimLeft(rest[sp:], " \t")
+		}
+	}
+	return len(rest) > 0 && rest[0] == '!'
+}
+
+// mergeValueOK reports whether what a `<<` merge key holds is one docker compose reads:
+// a mapping, or a list whose every item is one (aliases followed).
+func mergeValueOK(v *yaml.Node) bool {
+	for v != nil && v.Kind == yaml.AliasNode {
+		v = v.Alias
+	}
+	if v == nil {
+		return false
+	}
+	switch v.Kind {
+	case yaml.MappingNode:
+		return true
+	case yaml.SequenceNode:
+		for _, item := range v.Content {
+			for item != nil && item.Kind == yaml.AliasNode {
+				item = item.Alias
+			}
+			if item == nil || item.Kind != yaml.MappingNode {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// mergeValueKind names what a `<<` merge key holds when it is not a mapping or a list of them.
+func mergeValueKind(v *yaml.Node) string {
+	for v != nil && v.Kind == yaml.AliasNode {
+		v = v.Alias
+	}
+	switch {
+	case v == nil:
+		return "nothing"
+	case v.Kind == yaml.SequenceNode:
+		return "a list with an item that is not a mapping"
+	case v.Kind == yaml.ScalarNode && (v.Tag == "!!null" || v.Value == ""):
+		return "empty"
+	case v.Kind == yaml.ScalarNode:
+		return "the scalar " + v.Value
+	}
+	return "not a mapping"
+}
+
+// keyText is how a mapping key that is not a string is named: its text when it is a
+// scalar, and what it is when it is a list or a mapping.
+func keyText(k *yaml.Node) string {
+	switch k.Kind {
+	case yaml.ScalarNode:
+		if k.Value == "" {
+			return "(empty)"
+		}
+		return k.Value
+	case yaml.SequenceNode:
+		return "(a list)"
+	}
+	return "(a mapping)"
+}
+
+// nonFiniteInService is an infinity or a NaN that a service holds after everything
+// docker compose does to it before it checks its model — `<<` merges, `${…}`
+// expansion, aliases, the extends it resolves in its own file — for the service an
+// `extends: {file: …}` takes from another file (#1510). It returns the path of the
+// value, or "".
+func nonFiniteInService(v any, at string) string {
+	switch x := v.(type) {
+	case float64:
+		if math.IsInf(x, 0) || math.IsNaN(x) {
+			return at
+		}
+	case map[string]any:
+		keys := make([]string, 0, len(x))
+		for k := range x {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys) // the same value is named on every run
+		for _, k := range keys {
+			if r := nonFiniteInService(x[k], at+"."+k); r != "" {
+				return r
+			}
+		}
+	case []any:
+		for i, e := range x {
+			if r := nonFiniteInService(e, fmt.Sprintf("%s[%d]", at, i)); r != "" {
+				return r
+			}
+		}
+	}
+	return ""
 }
 
 // checkRepeatedKeys refuses a key written twice in one mapping (inside an `x-`
@@ -2332,8 +2685,8 @@ func documentRoot(doc *yaml.Node) *yaml.Node {
 // several -f files this runs on each file before the merge, as docker
 // compose resolves it: what a file extends is what that file defines.
 // Reports whether anything was resolved.
-func resolveExtendsInTree(where, projectDir string, tree map[string]any, lookup varLookup) (bool, error) {
-	return resolveExtends(where, projectDir, tree, lookup, nil)
+func resolveExtendsInTree(where, projectDir string, tree map[string]any, lookup varLookup, values *[]error) (bool, error) {
+	return resolveExtends(where, projectDir, tree, lookup, nil, values)
 }
 
 // extendsID names one service of one file on the resolution stack, so that
@@ -2344,7 +2697,7 @@ func extendsID(where, name string) string { return where + "#" + name }
 // resolved, which a service of another file joins. stack entries are
 // extendsIDs; the cycle message shows the names, with the file where it
 // is not this one.
-func resolveExtends(where, projectDir string, tree map[string]any, lookup varLookup, stack []string) (bool, error) {
+func resolveExtends(where, projectDir string, tree map[string]any, lookup varLookup, stack []string, values *[]error) (bool, error) {
 	services, _ := tree["services"].(map[string]any)
 	touched := false
 	done := map[string]bool{}
@@ -2420,7 +2773,7 @@ func resolveExtends(where, projectDir string, tree map[string]any, lookup varLoo
 			if !filepath.IsAbs(path) {
 				path = filepath.Join(projectDir, path)
 			}
-			b, err := extendedServiceFromFile(where, name, path, target, lookup, append(stack, id))
+			b, err := extendedServiceFromFile(where, name, path, target, lookup, append(stack, id), values)
 			if err != nil {
 				return err
 			}
@@ -2485,7 +2838,7 @@ func resolveExtends(where, projectDir string, tree map[string]any, lookup varLoo
 // made absolute against that file's directory, since the project resolves
 // relative paths against its first file. Only the service comes over: the
 // file's top-level declarations do not (measured).
-func extendedServiceFromFile(where, name, path, target string, lookup varLookup, stack []string) (map[string]any, error) {
+func extendedServiceFromFile(where, name, path, target string, lookup varLookup, stack []string, values *[]error) (map[string]any, error) {
 	// A relative -f leaves `where` relative, and so this path; the paths
 	// rebased below must be absolute, since the project resolves relative
 	// ones against its own directory (a relative one would be doubled).
@@ -2496,7 +2849,7 @@ func extendedServiceFromFile(where, name, path, target string, lookup varLookup,
 	if err != nil {
 		return nil, fmt.Errorf("%s: service %q extends %q of %s, which cannot be read: %v — name the file by a path from the project directory (the first file's, or the include entry's), or remove extends:", where, name, target, path, err)
 	}
-	if err := checkOneDocument(path, raw); err != nil {
+	if err := checkOneDocument(path, raw, values); err != nil {
 		return nil, err
 	}
 	doc, err := interpolateDocument(raw, lookup)
@@ -2507,7 +2860,7 @@ func extendedServiceFromFile(where, name, path, target string, lookup varLookup,
 	if err != nil {
 		return nil, err
 	}
-	if err := validateOne(path, doc, nil); err != nil {
+	if err := validateOne(path, doc, nil, values, target); err != nil {
 		return nil, err
 	}
 	var tree map[string]any
@@ -2521,7 +2874,7 @@ func extendedServiceFromFile(where, name, path, target string, lookup varLookup,
 	// measured: a/two.yml → b/near.yml → c/far.yml reads a/b/c/far.yml,
 	// where the first hop from a -f file counts from the project
 	// directory).
-	if _, err := resolveExtends(path, filepath.Dir(path), tree, lookup, stack); err != nil {
+	if _, err := resolveExtends(path, filepath.Dir(path), tree, lookup, stack, values); err != nil {
 		return nil, err
 	}
 	services, _ := tree["services"].(map[string]any)
@@ -2530,6 +2883,15 @@ func extendedServiceFromFile(where, name, path, target string, lookup varLookup,
 		return nil, fmt.Errorf("%s: service %q extends %q of %s, and that file does not define it — name a service %s defines, or remove extends:", where, name, target, path, path)
 	}
 	base := deepCopyTree(svc).(map[string]any)
+	// An infinity or a NaN in what docker compose takes of this file: the service, as
+	// it is once its own extends is resolved. The rest of the file it does not read.
+	if at := nonFiniteInService(base, "services."+target); at != "" {
+		err := fmt.Errorf("compose file %s: %s is a number docker compose cannot read — infinity and NaN cannot go into its model; quote it to keep it a string", path, at)
+		if values == nil {
+			return nil, err
+		}
+		*values = append(*values, err)
+	}
 	rebasePaths(base, filepath.Dir(path))
 	return base, nil
 }
@@ -2618,13 +2980,13 @@ func relativeHostPath(s string) bool {
 // tree comes back re-marshalled only when something was resolved, so a
 // file with no such service keeps its positions for the failures that
 // name a line (a file with one has been checked as written already).
-func resolveSameFileExtends(doc interpolated, tags []mergeTag, where, projectDir string, lookup varLookup) (*interpolated, error) {
+func resolveSameFileExtends(doc interpolated, tags []mergeTag, where, projectDir string, lookup varLookup, values *[]error) (*interpolated, error) {
 	var tree map[string]any
 	if err := doc.into(&tree); err != nil {
 		return nil, nil // the decode below says so in its own words
 	}
 	markServiceTags(tree, tags)
-	touched, err := resolveExtendsInTree(where, projectDir, tree, lookup)
+	touched, err := resolveExtendsInTree(where, projectDir, tree, lookup, values)
 	unmarkServiceTags(tree)
 	if err != nil || !touched {
 		return nil, err
@@ -2814,7 +3176,7 @@ func checkDeclKeys(path, kind string, decls *yaml.Node) error {
 // the first alone and say nothing. A leading `---` or a `...` at the end is one
 // document. An alias to an earlier document's anchor is not carried across: the
 // document that has one is refused by the reader as an unknown anchor.
-func splitDocuments(path string, raw []byte) ([][]byte, error) {
+func splitDocuments(path string, raw []byte, values *[]error) ([][]byte, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(raw))
 	var starts []int // the line the content of each document begins on
 	var notMapping []int
@@ -2844,8 +3206,21 @@ func splitDocuments(path string, raw []byte) ([][]byte, error) {
 		return [][]byte{raw}, nil
 	}
 	if len(notMapping) > 0 {
-		return nil, fmt.Errorf("compose file %s: document %d (between two `---`, or after the last one) is empty or not a mapping — docker compose refuses it too (`top-level object must be a mapping`); remove the extra `---`",
+		refusal := fmt.Errorf("compose file %s: document %d (between two `---`, or after the last one) is empty or not a mapping — docker compose refuses it too (`top-level object must be a mapping`); remove the extra `---`",
 			path, notMapping[0])
+		// A trailing `---` after the one document the file holds is let go, and only
+		// where the caller takes a project down (#1475): a release before 0.38.0 read
+		// the first document and no other (measured, v0.37.0: a second document with
+		// a `services:` of its own started nothing of it), so the project it started
+		// from such a file is the first document's, and that is the file read here.
+		// Where a second mapping follows, the documents are merged as 0.38.0 reads
+		// them and the file is refused as before, as is an empty one in the middle.
+		trailing := values != nil && notMapping[0] == 2 && len(notMapping) == n-1
+		if !trailing {
+			return nil, refusal
+		}
+		*values = append(*values, refusal)
+		return [][]byte{raw}, nil // the one mapping document; the rest is nothing to read
 	}
 	lines := bytes.SplitAfter(raw, []byte("\n"))
 	// A document begins at the `---` line before its content (the content may be
@@ -2880,8 +3255,8 @@ func splitDocuments(path string, raw []byte) ([][]byte, error) {
 // read with: they are read as one document, and a file of several is refused
 // rather than read as its first alone (the top-level files are merged, see
 // splitDocuments).
-func checkOneDocument(path string, raw []byte) error {
-	docs, err := splitDocuments(path, raw)
+func checkOneDocument(path string, raw []byte, values *[]error) error {
+	docs, err := splitDocuments(path, raw, values)
 	if err != nil {
 		return err
 	}
@@ -3079,7 +3454,7 @@ func loadUnit(path, projectDir string, scope envScope, earlier map[string]any, s
 		}
 		return nil, nil, nil, fmt.Errorf("reading compose file: %w", err)
 	}
-	if err := checkOneDocument(path, raw); err != nil {
+	if err := checkOneDocument(path, raw, scope.values); err != nil {
 		return nil, nil, nil, err
 	}
 	return loadUnitRaw(path, raw, projectDir, scope, earlier, stack)
@@ -3149,6 +3524,7 @@ func loadUnitRaw(path string, raw []byte, projectDir string, scope envScope, ear
 			if err != nil {
 				return nil, nil, nil, fmt.Errorf("compose file %s: include: %w", path, err)
 			}
+			sub.values = scope.values
 			if scope.faults != nil && sub.faults != nil {
 				// A name the included project's `.env` refuses is kept with this
 				// project's own — the same commands are to be stopped or let go on —
@@ -3209,7 +3585,7 @@ func loadUnitRaw(path string, raw []byte, projectDir string, scope envScope, ear
 			before = mergeMap(deepCopyTree(earlier).(map[string]any), group, "")
 		}
 	}
-	if err := validateOne(path, one, before); err != nil {
+	if err := validateOne(path, one, before, scope.values, ""); err != nil {
 		return nil, nil, nil, err
 	}
 	if err := liftExternalNames(path, m, before); err != nil {
@@ -3250,7 +3626,7 @@ func loadUnitRaw(path string, raw []byte, projectDir string, scope envScope, ear
 	// includes — is what it extends, and an earlier file's version of the
 	// extending service is what this file's resolved version goes over.
 	markServiceTags(m, tags)
-	_, err = resolveExtendsInTree(path, projectDir, m, scope.lookup())
+	_, err = resolveExtendsInTree(path, projectDir, m, scope.lookup(), scope.values)
 	unmarkServiceTags(m)
 	if err != nil {
 		return nil, nil, nil, err

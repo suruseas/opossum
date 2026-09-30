@@ -149,6 +149,16 @@ sudo container system dns create opossum
 Use a different name with `--dns-domain <name>` (and create that name instead).
 Remove it later with `sudo container system dns delete opossum`.
 
+## New to Docker Compose?
+
+If you have never used `docker compose`, or you are starting from an empty
+directory rather than an existing file, read
+[Getting started](docs/getting-started.md): it takes you from a ready machine to
+a web server and a database running together, and stopped again with its containers, network and data removed. To have
+an AI agent do it for you, hand it [`AGENTS.md`](AGENTS.md) and describe what you
+want running — its ["Starting from nothing"](AGENTS.md#starting-from-nothing)
+section is written for exactly that.
+
 ## Quickstart (coming from `docker compose`)
 
 opossum reads your existing `compose.yaml` / `docker-compose.yml` **as-is** — no

@@ -95,6 +95,13 @@ type envScope struct {
 	// service's `env_file:`, which is read only by the commands that start or print
 	// a service.
 	faults *[]error
+
+	// values, when not nil, is where the first refusal of a value docker compose
+	// reads as another kind — a string that is not a number, one outside a key's
+	// bounds, a count below zero — is recorded instead of failing the read
+	// (LoadFilesEnvDirSoft). It is for the commands that take a project down: an
+	// earlier opossum passed such a value on, and a project may be running on it.
+	values *[]error
 }
 
 // firstFault is the first name a `.env` line refused, or nil.

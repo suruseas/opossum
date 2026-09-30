@@ -107,7 +107,9 @@ exists, skip to Quickstart above; this section is for writing the first one.)
 opossum doctor
 ```
 
-`doctor` is read-only and never starts anything; it reports what it finds under
+`doctor` changes nothing in the project and never starts the system (its
+network check does pull a small `alpine` image and run one throwaway container);
+it reports what it finds under
 ✅/⚠️/❌, one check per line, and skips the checks after `runtime` if that one
 fails (there is nothing further to check against a system that isn't
 answering). A ❌ on

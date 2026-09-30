@@ -280,6 +280,21 @@ var contract = []struct {
 		{argv: []string{"delete", "--force", "NAME"}},
 		{argv: []string{"kill", "NAME"}, rc: 1, has: `notFound: "container with ID NAME not found"`},
 	}},
+	// `run` of a name already there refuses, whether that container is
+	// running or stopped — the same sentence either way (measured on 1.4.1,
+	// #962). Before this every fake silently replaced the first container, a
+	// call opossum never makes deliberately (a genuine replace always deletes
+	// first) — so this asks a question nothing exercised until now. Once
+	// deleted, the name is free.
+	{"run of a name already there refuses, running or stopped; once deleted it is free", nil, []step{
+		{argv: []string{"run", "-d", "--name", "NAME", "alpine"}},
+		{argv: []string{"run", "-d", "--name", "NAME", "alpine"}, rc: 1, has: "container with id NAME already exists"},
+		{argv: []string{"stop", "NAME"}},
+		{argv: []string{"run", "-d", "--name", "NAME", "alpine"}, rc: 1, has: "container with id NAME already exists"},
+		{argv: []string{"delete", "--force", "NAME"}},
+		{argv: []string{"run", "-d", "--name", "NAME", "alpine"}},
+		{argv: []string{"inspect", "NAME"}, has: `"state":"running"`},
+	}},
 	{"a stopped container is deleted the way down and destroy delete it: stop, then delete", nil, []step{
 		{argv: []string{"run", "-d", "--name", "NAME", "alpine"}},
 		{argv: []string{"stop", "NAME"}},
@@ -304,6 +319,14 @@ var contract = []struct {
 		{argv: []string{"run", "-d", "-v", "vol1:/d", "--name", "NAME", "alpine"}},
 		{argv: []string{"volume", "delete", "vol1"}},
 		{argv: []string{"volume", "delete", "vol1"}, rc: 1, has: `failed to delete one or more volumes`, lacks: "not found"},
+	}},
+	// `rm` is `delete`'s alias on 1.4.1 — the same answer either spelling (#962).
+	// opossum itself only ever issues `delete`, so this checks a spelling
+	// nothing here depends on, not a caller's behaviour.
+	{"volume rm is delete's alias: the same answer either spelling", nil, []step{
+		{argv: []string{"run", "-d", "-v", "vol1:/d", "--name", "NAME", "alpine"}},
+		{argv: []string{"volume", "rm", "vol1"}},
+		{argv: []string{"volume", "rm", "vol1"}, rc: 1, has: `failed to delete one or more volumes`, lacks: "not found"},
 	}},
 	// The runtime and docker compose keep names apart that differ only by `.`
 	// and `_`: `demo_.hid` and `demo__hid` are two volumes. A fake that folded

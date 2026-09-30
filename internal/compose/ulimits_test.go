@@ -72,7 +72,7 @@ func TestUlimitsReadAliasesAndMergeKeys(t *testing.T) {
 // in a list wins over a later one, a merged source's own `<<:` is followed,
 // and a source that is not a mapping is refused.
 func TestUlimitsMergeKeysFollowYamlPrecedence(t *testing.T) {
-	head := "x-a: &a {nofile: 1, nproc: 1}\nx-b: &b {nofile: 2, stack: 2}\nx-base: &base {nofile: 100, core: 100}\nx-mid: &mid {nofile: 200, <<: *base}\nx-n: &n 5\nx-l: &l [*a, *b]\nx-badmid: &badmid {nofile: 3, <<: *n}\n"
+	head := "x-a: &a {nofile: 1, nproc: 1}\nx-b: &b {nofile: 2, stack: 2}\nx-base: &base {nofile: 100, core: 100}\nx-mid: &mid {nofile: 200, <<: *base}\nx-n: &n 5\nx-l: &l [*a, *b]\n"
 	for _, tc := range []struct{ name, ulimits, want string }{
 		{"a local key before the merge key still wins", "{nproc: 10, <<: *a}", "nofile=1 nproc=10"},
 		{"a local key after the merge key wins", "{<<: *a, nproc: 10}", "nofile=1 nproc=10"},
@@ -90,6 +90,10 @@ func TestUlimitsMergeKeysFollowYamlPrecedence(t *testing.T) {
 			}
 		})
 	}
+	// A merge source that is not a mapping is refused by the decode of the block that
+	// holds it (a top-level block that holds one is refused by the whole-file check, #1529,
+	// so this anchor is written only here, where the ulimits it is merged into come first).
+	head += "x-badmid: &badmid {nofile: 3, <<: *n}\n"
 	for _, tc := range []struct{ name, ulimits string }{
 		{"a scalar source", "{<<: *n}"},
 		{"a list holding a scalar", "{<<: [*a, 7]}"},
@@ -106,7 +110,10 @@ func TestUlimitsMergeKeysFollowYamlPrecedence(t *testing.T) {
 
 func TestShmSizeAndUlimitsRefusals(t *testing.T) {
 	for _, tc := range []struct{ name, body, want string }{
-		{"shm_size that is not a size", "services:\n  web:\n    image: a\n    shm_size: big\n", "shm_size \"big\" is not a size"},
+		// A string that is not a byte size at all is refused by the cast check (#1366), before
+		// opossum's own decode; the two rows after it are sizes docker compose reads and
+		// opossum cannot act on, so they are still its own refusal.
+		{"shm_size that is not a size", "services:\n  web:\n    image: a\n    shm_size: big\n", "shm_size \"big\" does not read as a byte size"},
 		{"shm_size that rounds to nothing", "services:\n  web:\n    image: a\n    shm_size: \"0.5\"\n", "shm_size \"0.5\" is not a size"},
 		{"shm_size of zero", "services:\n  web:\n    image: a\n    shm_size: 0\n", "shm_size \"0\" is not a size"},
 		{"a mapping hard that is not a number", "services:\n  web:\n    image: a\n    ulimits:\n      nofile: {soft: 1, hard: abc}\n", "ulimits nofile.hard must be a non-negative whole number"},

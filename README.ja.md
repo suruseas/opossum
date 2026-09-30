@@ -110,6 +110,10 @@ sudo container system dns create opossum
 
 別の名前を使いたい場合は、その名前で作成して `--dns-domain <name>` を指定します。不要になったら `sudo container system dns delete opossum` で削除できます。
 
+## Docker Compose を使ったことがない方へ
+
+`docker compose` を使ったことがない、または既存の file ではなく空のディレクトリから始める場合は、[Getting started](docs/getting-started.md)（英語）をどうぞ。準備の整った状態から、web サーバとデータベースを一緒に動かし、止めてコンテナ・ネットワーク・データを消すところまでを順に説明しています。AI エージェントに任せる場合は [`AGENTS.md`](AGENTS.md) を渡し、動かしたいものを言葉で伝えてください。その ["Starting from nothing"](AGENTS.md#starting-from-nothing) の節がそのために書かれています。
+
 ## クイックスタート（`docker compose` から来た人向け）
 
 opossum は既存の `compose.yaml` / `docker-compose.yml` を **そのまま** 読みます。変換も専用ファイルも要りません。Docker Desktop からの乗り換えなら、イメージはすでにビルド済みのはずなので、それを再利用して Apple のビルダー（コールドスタートで遅い）を回避するのが最速です：

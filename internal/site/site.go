@@ -36,6 +36,7 @@ const RepoURL = "https://github.com/suruseas/opossum"
 // a contributor procedure, not something a person searching for "docker compose
 // on Apple container" should land on.
 var Pages = []string{
+	"getting-started",
 	"compatibility",
 	"networking",
 	"troubleshooting",
