@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // #1366, stage 2 (the cast layer): heldToTheSchema's `number|string` and
@@ -1091,6 +1092,231 @@ func TestTheFieldsOfALongFormPortAreTheKindsDockerComposeReads(t *testing.T) {
 			t.Errorf("want the third entry's name refused as ports[2].name, got %v", err)
 		}
 	})
+}
+
+// In a file that is only extended from, `deploy.replicas` is asked for less of a service
+// docker compose does not take (#1553; measured, v5.5.1, `config -q`, 50 forms): a string that
+// is no whole number (`"two"`, `""`) is refused there as everywhere, and `1.5`, `true`, `~`, a
+// list and a mapping are not. The service the extends names, and the services of that file it
+// extends in turn (`extends: c`, a map with a service and no file), are asked for all of it.
+func TestReplicasOfAServiceDockerDoesNotTakeIsAskedForLess(t *testing.T) {
+	const svc = "services:\n  b:\n    image: alpine\n"
+	shapes := map[string]func(v string) string{
+		"another service": func(v string) string {
+			return svc + "  other:\n    image: alpine\n    deploy:\n      replicas: " + v + "\n"
+		},
+		"the named service": func(v string) string {
+			return "services:\n  b:\n    image: alpine\n    deploy:\n      replicas: " + v + "\n"
+		},
+		"a service it extends": func(v string) string {
+			return "services:\n  b:\n    image: alpine\n    extends: c\n  c:\n    image: alpine\n    deploy:\n      replicas: " + v + "\n"
+		},
+		"a service it extends, two away": func(v string) string {
+			return "services:\n  b:\n    image: alpine\n    extends: c\n  c:\n    extends: {service: d}\n  d:\n    image: alpine\n    deploy:\n      replicas: " + v + "\n"
+		},
+		// A `file:` names another file's service, even when the same name is also a service of
+		// this file: this file's is not taken (`t` here, with a bad value, is docker's to leave).
+		"a service whose name a file-bearing extends also uses": func(v string) string {
+			return "services:\n  b:\n    extends: {file: c.yaml, service: t}\n  t:\n    image: alpine\n    deploy:\n      replicas: " + v + "\n"
+		},
+		"another service beside a chain": func(v string) string {
+			return "services:\n  b:\n    image: alpine\n    extends: c\n  c:\n    image: alpine\n  other:\n    image: alpine\n    deploy:\n      replicas: " + v + "\n"
+		},
+	}
+	for _, tc := range []struct {
+		shape, value string
+		refuse       bool
+	}{
+		{"another service", `"two"`, true}, {"another service", `""`, true},
+		{"another service", "1.5", false}, {"another service", "true", false}, {"another service", "~", false},
+		{"another service", "[2]", false}, {"another service", "{a: 1}", false}, {"another service", "2", false},
+		{"the named service", `"two"`, true}, {"the named service", "1.5", true}, {"the named service", "true", true},
+		{"the named service", "~", true}, {"the named service", "[2]", true}, {"the named service", "2", false},
+		{"a service it extends", "true", true}, {"a service it extends", "1.5", true}, {"a service it extends", "2", false},
+		{"a service it extends, two away", "true", true}, {"a service it extends, two away", `"two"`, true},
+		{"a service it extends, two away", "2", false},
+		{"a service whose name a file-bearing extends also uses", "1.5", false},
+		{"a service whose name a file-bearing extends also uses", "true", false},
+		{"a service whose name a file-bearing extends also uses", `"two"`, true},
+		{"another service beside a chain", "true", false}, {"another service beside a chain", "[2]", false},
+		{"another service beside a chain", `"two"`, true},
+	} {
+		t.Run(tc.shape+" "+tc.value, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "base.yaml"), []byte(shapes[tc.shape](tc.value)), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "c.yaml"), []byte("services:\n  t:\n    image: alpine\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			main := filepath.Join(dir, "compose.yaml")
+			if err := os.WriteFile(main, []byte("services:\n  w2:\n    extends: {file: base.yaml, service: b}\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Load(main)
+			if tc.refuse && (err == nil || !strings.Contains(err.Error(), "deploy.replicas must be a whole number")) {
+				t.Errorf("docker compose refuses this, got err=%v", err)
+			}
+			if !tc.refuse && err != nil {
+				t.Errorf("docker compose reads this, and it was refused: %v", err)
+			}
+		})
+	}
+}
+
+// In a file that is only extended from, a service docker compose does not take is asked for less
+// of what v0.40.0 added to the casts and bounds (#1559; measured, v5.5.1, `config -q`, the 7 forms
+// that regressed and the ones that must still be refused there): a byte size or a duration that
+// reads as none, the bounds of a number written as a string, and a name of no characters are read
+// there by nobody; a string that reads as no integer, boolean or number is refused as everywhere.
+// The service the extends names, and the ones it extends in turn, are asked for all of it.
+func TestWhatV040AddedToCastsAndBoundsIsAskedForLessOfAServiceDockerDoesNotTake(t *testing.T) {
+	for _, tc := range []struct {
+		name, service  string
+		untakenRefused bool // docker compose refuses this in a service it does not take, too
+	}{
+		{"stop_grace_period: abc", "    stop_grace_period: abc\n", false},
+		{"mem_reservation: 1x", "    mem_reservation: \"1x\"\n", false},
+		{"shm_size: abc", "    shm_size: abc\n", false},
+		{"memswap_limit: 1x", "    memswap_limit: \"1x\"\n", false},
+		{"cpu_percent: 150", "    cpu_percent: \"150\"\n", false},
+		{"oom_score_adj: 2000", "    oom_score_adj: \"2000\"\n", false},
+		{"cpu_count: -5", "    cpu_count: \"-5\"\n", false},
+		{"sysctls: an empty name", "    sysctls:\n      \"\": 1\n", false},
+		{"annotations: an empty name", "    annotations:\n      \"\": a\n", false},
+		{"cpu_percent: 1.5", "    cpu_percent: \"1.5\"\n", false},
+		{"cpu_percent: abc", "    cpu_percent: abc\n", true},
+		{"scale: two", "    scale: two\n", true},
+		{"privileged: 7", "    privileged: \"7\"\n", true},
+		{"pids_limit: abc", "    pids_limit: abc\n", true},
+	} {
+		for _, role := range []struct {
+			name   string
+			file   func(bad string) string
+			refuse func(untakenRefused bool) bool
+		}{
+			{"another service", func(bad string) string {
+				return "services:\n  b:\n    image: alpine\n  other:\n    image: alpine\n" + bad
+			}, func(u bool) bool { return u }},
+			{"the named service", func(bad string) string { return "services:\n  b:\n    image: alpine\n" + bad }, func(bool) bool { return true }},
+			{"a service it extends", func(bad string) string {
+				return "services:\n  b:\n    image: alpine\n    extends: c\n  c:\n    image: alpine\n" + bad
+			}, func(bool) bool { return true }},
+		} {
+			t.Run(tc.name+", "+role.name, func(t *testing.T) {
+				dir := t.TempDir()
+				if err := os.WriteFile(filepath.Join(dir, "base.yaml"), []byte(role.file(tc.service)), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				main := filepath.Join(dir, "compose.yaml")
+				if err := os.WriteFile(main, []byte("services:\n  w2:\n    extends: {file: base.yaml, service: b}\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				_, err := Load(main)
+				if want := role.refuse(tc.untakenRefused); want && err == nil {
+					t.Errorf("docker compose refuses this here, and it was read")
+				} else if !want && err != nil {
+					t.Errorf("docker compose reads this here, and it was refused: %v", err)
+				}
+			})
+		}
+	}
+}
+
+// In a file that is only extended from, a service docker compose does not take is asked for less
+// of what v0.40.0 added (#1541; measured, v5.5.1, `config -q`, 48 forms): `deploy.mode` and a port's
+// `mode` that are no string, a long port's `name` and `app_protocol` that are no string, its
+// `host_ip` and `protocol` that are null, and its `published` as a float, a list or a mapping are
+// all read there; a short port entry that is a float is refused there as anywhere. The service the
+// extends names, and the ones it extends in turn, are asked for all of it.
+func TestWhatV040AddedIsAskedForLessOfAServiceDockerDoesNotTake(t *testing.T) {
+	for _, tc := range []struct{ name, service string }{
+		{"deploy.mode", "    deploy:\n      mode: 1\n"},
+		{"ports[].mode", "    ports:\n      - target: 80\n        mode: 1\n"},
+		{"ports[].name", "    ports:\n      - target: 80\n        name: 1\n"},
+		{"ports[].app_protocol", "    ports:\n      - target: 80\n        app_protocol: 1\n"},
+		{"ports[].host_ip", "    ports:\n      - target: 80\n        host_ip: ~\n"},
+		{"ports[].protocol", "    ports:\n      - target: 80\n        protocol: ~\n"},
+		{"ports[].published list", "    ports:\n      - target: 80\n        published: [1]\n"},
+		{"ports[].published mapping", "    ports:\n      - target: 80\n        published: {a: 1}\n"},
+		{"ports[].published float", "    ports:\n      - target: 80\n        published: !!float 8080\n"},
+	} {
+		for _, role := range []struct {
+			name   string
+			file   func(bad string) string
+			refuse bool
+		}{
+			{"another service", func(bad string) string {
+				return "services:\n  b:\n    image: alpine\n  other:\n    image: alpine\n" + bad
+			}, false},
+			{"the named service", func(bad string) string { return "services:\n  b:\n    image: alpine\n" + bad }, true},
+			{"a service it extends", func(bad string) string {
+				return "services:\n  b:\n    image: alpine\n    extends: c\n  c:\n    image: alpine\n" + bad
+			}, true},
+			{"a service it extends, two away", func(bad string) string {
+				return "services:\n  b:\n    image: alpine\n    extends: c\n  c:\n    extends: {service: d}\n  d:\n    image: alpine\n" + bad
+			}, true},
+			{"another service, beside a chain", func(bad string) string {
+				return "services:\n  b:\n    image: alpine\n    extends: c\n  c:\n    image: alpine\n  other:\n    image: alpine\n" + bad
+			}, false},
+		} {
+			t.Run(tc.name+", "+role.name, func(t *testing.T) {
+				dir := t.TempDir()
+				body := role.file(tc.service) // for "a service it extends" the value sits under c, which b extends
+				if err := os.WriteFile(filepath.Join(dir, "base.yaml"), []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				main := filepath.Join(dir, "compose.yaml")
+				if err := os.WriteFile(main, []byte("services:\n  w2:\n    extends: {file: base.yaml, service: b}\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				_, err := Load(main)
+				if role.refuse && err == nil {
+					t.Errorf("docker compose refuses this (the service is taken), and it was read")
+				}
+				if !role.refuse && err != nil {
+					t.Errorf("docker compose reads this (the service is not taken), and it was refused: %v", err)
+				}
+			})
+		}
+	}
+	t.Run("a short entry that is a float, in a service that is not taken", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "base.yaml"), []byte("services:\n  b:\n    image: alpine\n  other:\n    image: alpine\n    ports: [!!float 80]\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		main := filepath.Join(dir, "compose.yaml")
+		if err := os.WriteFile(main, []byte("services:\n  w2:\n    extends: {file: base.yaml, service: b}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(main); err == nil {
+			t.Errorf("docker compose refuses a short port that is a float in any service, and it was read")
+		}
+	})
+}
+
+// Services of an extended file that extend each other are refused (or read past by a take-down)
+// without the walk of the chain that decides which services are taken going round for ever.
+func TestAnExtendsLoopInAnExtendedFileEndsTheWalkOfItsChain(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "base.yaml"), []byte("services:\n  b:\n    extends: c\n  c:\n    extends: b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	main := filepath.Join(dir, "compose.yaml")
+	if err := os.WriteFile(main, []byte("services:\n  w2:\n    extends: {file: base.yaml, service: b}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = Load(main)
+		_, _ = LoadFilesEnvDirSoft([]string{main}, nil, "")
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the walk of an extends chain that loops did not end")
+	}
 }
 
 // `deploy.replicas` reads as a whole number (#1467; measured, v5.5.1, `config -q`, 26 forms):

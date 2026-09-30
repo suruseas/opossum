@@ -2240,7 +2240,7 @@ func validateOne(path string, one interpolated, earlier map[string]any, values *
 		Services map[string]any `yaml:"services"`
 	}
 	if err := doc.Decode(&generic); err == nil {
-		if err := checkServiceShapes(path, generic.Services, values); err != nil {
+		if err := checkServiceShapes(path, generic.Services, values, only); err != nil {
 			return err
 		}
 	}

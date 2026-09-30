@@ -416,6 +416,31 @@ func wholeNumber(v any) (int64, bool) {
 	return 0, false
 }
 
+// takenServices is the services of a file that is only extended from (`only` is the one
+// `extends: {file: …, service: only}` names) that docker compose takes: that service, and the
+// services of the same file it extends in turn (`extends: c`, or a map with a service and no
+// file), as far as the chain runs. Nil when the file is read whole.
+func takenServices(services map[string]any, only string) map[string]bool {
+	if only == "" {
+		return nil
+	}
+	taken := map[string]bool{}
+	for name := only; name != "" && !taken[name]; {
+		taken[name] = true
+		svc, _ := services[name].(map[string]any)
+		name = ""
+		switch e := svc["extends"].(type) {
+		case string:
+			name = e
+		case map[string]any:
+			if _, hasFile := e["file"]; !hasFile {
+				name, _ = e["service"].(string)
+			}
+		}
+	}
+	return taken
+}
+
 // checkServiceShapes refuses a service key whose value is not what docker compose
 // takes for it. Only the keys the schema gives a shape are looked at: a key it
 // does not know is the business of the check that says which keys a service may
@@ -431,7 +456,7 @@ func wholeNumber(v any) (int64, bool) {
 // cpuPercentMismatch: the `Minimum`/`Maximum` check on this node only ever
 // sees a native number, never a string that castOK's sibling has confirmed
 // reads as one.
-func checkServiceShapes(path string, services map[string]any, values *[]error) error {
+func checkServiceShapes(path string, services map[string]any, values *[]error, only string) error {
 	spec, err := loadServiceSpec()
 	if err != nil {
 		return err
@@ -447,12 +472,18 @@ func checkServiceShapes(path string, services map[string]any, values *[]error) e
 		*values = append(*values, err)
 		return nil
 	}
+	taken := takenServices(services, only)
 	names := make([]string, 0, len(services))
 	for name := range services {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	for _, name := range names {
+		// In a file that is only extended from, a service docker compose does not take is
+		// asked for less: its `deploy.replicas` is refused only when it is a string that does
+		// not read as a whole number (#1553; measured, v5.5.1: `"two"` and `""` are, `1.5`,
+		// `true`, `~`, a list and a mapping are not, there).
+		notTaken := taken != nil && !taken[name]
 		svc, ok := services[name].(map[string]any)
 		if !ok {
 			continue
@@ -467,18 +498,18 @@ func checkServiceShapes(path string, services map[string]any, values *[]error) e
 			// refused by docker compose, which reads an entry as a string or an integer
 			// (#1526); its text is a port, so the loader's own reading let it through.
 			if k == "ports" {
-				if err := portFloats(path, "services."+name+".ports", svc[k], fault); err != nil {
+				if err := portFloats(path, "services."+name+".ports", svc[k], notTaken, fault); err != nil {
 					return err
 				}
 			}
 			if k == "ports" {
-				if err := portFieldKinds(path, "services."+name+".ports", svc[k], fault); err != nil {
+				if err := portFieldKinds(path, "services."+name+".ports", svc[k], notTaken, fault); err != nil {
 					return err
 				}
 			}
 			// A `mode` that is not the string docker compose reads in `ports[].mode` and
 			// `deploy.mode` (#1533; measured, v5.5.1).
-			if err := modeKinds(path, "services."+name+"."+k, k, svc[k], fault); err != nil {
+			if err := modeKinds(path, "services."+name+"."+k, k, svc[k], notTaken, fault); err != nil {
 				return err
 			}
 			node := spec.Properties[k]
@@ -493,7 +524,13 @@ func checkServiceShapes(path string, services map[string]any, values *[]error) e
 					return err
 				}
 			}
-			if msg := node.mismatch(svc[k], where); msg != "" {
+			// A name of no characters, in a service docker compose does not take of a file that
+			// is only extended from, is not asked for (#1559; measured, v5.5.1).
+			shaped := svc[k]
+			if notTaken {
+				shaped = withoutEmptyName(shaped)
+			}
+			if msg := node.mismatch(shaped, where); msg != "" {
 				if err := fault(fmt.Errorf("compose file %s: %s", path, msg)); err != nil {
 					return err
 				}
@@ -501,14 +538,19 @@ func checkServiceShapes(path string, services map[string]any, values *[]error) e
 			// The shape above took the string on the strength of its kind's
 			// string branch; this asks whether docker compose can actually
 			// read it into the kind that branch exists for (#1366).
-			if kind, ok := castKeys[k]; ok {
+			// In a service docker compose does not take, a byte size or a duration is not read
+			// (`stop_grace_period: abc`, `shm_size: abc`), nor are the bounds of the number a string
+			// reads into (`oom_score_adj: "2000"`, `cpu_count: "-5"`, `cpu_percent: "150"`); a string
+			// that reads as no integer, boolean or number is refused there as everywhere
+			// (`scale: two`, `privileged: "7"`, `cpu_percent: abc`) (#1559; measured, v5.5.1).
+			if kind, ok := castKeys[k]; ok && !(notTaken && (kind == "bytes" || kind == "duration")) {
 				if s, isString := svc[k].(string); isString && !castOK(kind, s) {
 					if err := fault(fmt.Errorf("compose file %s: %s %q does not read as %s",
 						path, where, s, castKindNames[kind])); err != nil {
 						return err
 					}
 				}
-				if s, isString := svc[k].(string); isString && kind == "int" {
+				if s, isString := svc[k].(string); isString && kind == "int" && !notTaken {
 					if msg := intBoundMismatch(node, s, where); msg != "" {
 						if err := fault(fmt.Errorf("compose file %s: %s", path, msg)); err != nil {
 							return err
@@ -520,7 +562,11 @@ func checkServiceShapes(path string, services map[string]any, values *[]error) e
 			// bool or int, so it is asked here rather than through castOK.
 			if k == "cpu_percent" {
 				if s, isString := svc[k].(string); isString {
-					if msg := cpuPercentMismatch(node, s, where); msg != "" {
+					msg := cpuPercentMismatch(node, s, where)
+					if notTaken && !strings.Contains(msg, "does not read as a number") {
+						msg = ""
+					}
+					if msg != "" {
 						if err := fault(fmt.Errorf("compose file %s: %s", path, msg)); err != nil {
 							return err
 						}
@@ -759,7 +805,12 @@ func dedupe(in []string) []string {
 // long-form entry whose `published` is one. A float the loader reads as a string
 // (`2.5`) is refused before this by the port's own reading; what comes here is the
 // float whose text is a port.
-func portFloats(path, where string, list any, fault func(error) error) error {
+// A service docker compose does not take of a file that is only extended from (notTaken) is asked
+// for less by portFloats, portFieldKinds and modeKinds (#1541; measured, v5.5.1, 48 forms): a short
+// entry that is a float is refused there as everywhere, and the rest — a long entry's `published`
+// as a float, list or mapping, its `name`, `app_protocol`, `host_ip` and `protocol` of another
+// kind, and every `mode` — is left, where docker compose does not read it.
+func portFloats(path, where string, list any, notTaken bool, fault func(error) error) error {
 	entries, _ := list.([]any)
 	say := func(at string, f float64) error {
 		text := strconv.FormatFloat(f, 'f', -1, 64)
@@ -772,6 +823,9 @@ func portFloats(path, where string, list any, fault func(error) error) error {
 				return err
 			}
 		case map[string]any:
+			if notTaken {
+				continue
+			}
 			if f, ok := v["published"].(float64); ok {
 				if err := say(fmt.Sprintf("[%d].published", i), f); err != nil {
 					return err
@@ -789,7 +843,7 @@ func portFloats(path, where string, list any, fault func(error) error) error {
 // entries is not asked here: docker compose refuses one that is no whole number and no
 // octal string only after the files are merged, so a later `-f` file that replaces or resets
 // it makes the file it was in fine there (#1544).
-func modeKinds(path, where, key string, v any, fault func(error) error) error {
+func modeKinds(path, where, key string, v any, notTaken bool, fault func(error) error) error {
 	say := func(at, want string, got any) error {
 		return fault(fmt.Errorf("compose file %s: %s%s.mode must be %s, and this is %s", path, where, at, want, describeYAMLValue(got)))
 	}
@@ -800,12 +854,12 @@ func modeKinds(path, where, key string, v any, fault func(error) error) error {
 			// 2, "2", 2.0 and !!float 2 do; "two", "", "1e2", "0x2", 1.5, true, null, a list and a
 			// mapping do not — refused in the file that writes them, as a later `-f` that replaces
 			// the value does not help there.
-			if replicas, present := m["replicas"]; present && !replicasReadable(replicas) {
+			if replicas, present := m["replicas"]; present && !replicasReadable(replicas) && !(notTaken && !isString(replicas)) {
 				if err := fault(fmt.Errorf("compose file %s: %s.replicas must be a whole number, and this is %s", path, where, describeYAMLValue(replicas))); err != nil {
 					return err
 				}
 			}
-			if mode, present := m["mode"]; present {
+			if mode, present := m["mode"]; present && !notTaken {
 				if _, isString := mode.(string); !isString {
 					return say("", "a string (`replicated` or `global`)", mode)
 				}
@@ -818,7 +872,7 @@ func modeKinds(path, where, key string, v any, fault func(error) error) error {
 			if !ok {
 				continue
 			}
-			if mode, present := m["mode"]; present {
+			if mode, present := m["mode"]; present && !notTaken {
 				if _, isString := mode.(string); !isString {
 					if err := say(fmt.Sprintf("[%d]", i), "a string (`host` or `ingress`)", mode); err != nil {
 						return err
@@ -856,7 +910,10 @@ func describeYAMLValue(v any) string {
 // number, a bool, a null, a float and a list are refused), `host_ip` and `protocol` are
 // strings (a null is refused; another kind is refused by the port's own reading), and
 // `published` is a string or a whole number (a list or a mapping is refused).
-func portFieldKinds(path, where string, list any, fault func(error) error) error {
+func portFieldKinds(path, where string, list any, notTaken bool, fault func(error) error) error {
+	if notTaken {
+		return nil
+	}
 	entries, _ := list.([]any)
 	for i, e := range entries {
 		m, ok := e.(map[string]any)
@@ -904,4 +961,25 @@ func replicasReadable(v any) bool {
 		return err == nil
 	}
 	return false
+}
+
+func isString(v any) bool { _, ok := v.(string); return ok }
+
+// withoutEmptyName is v without the entry a name of no characters gives it, when v is a mapping
+// (a copy: v itself is left as it is).
+func withoutEmptyName(v any) any {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return v
+	}
+	if _, has := m[""]; !has {
+		return v
+	}
+	c := make(map[string]any, len(m))
+	for k, x := range m {
+		if k != "" {
+			c[k] = x
+		}
+	}
+	return c
 }

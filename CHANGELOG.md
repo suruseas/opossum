@@ -6,6 +6,29 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.40.1] - 2026-10-01
+
+### Fixed
+
+- A file that another service `extends` from is no longer refused for a `deploy.mode` or a
+  port `mode` that is not a string, a port `name` or `app_protocol` that is not a string, a
+  `host_ip` or `protocol` that is null (`~`), or a `published` that is a list, a mapping or a
+  `!!float` (`!!float 8080`), in a service that is not the one taken (nor one it extends in
+  turn): docker compose reads none of those there. The service taken is still asked for all
+  of it, and a short port entry that is a float is still refused anywhere.
+- A file that another service `extends` from is no longer refused for a `deploy.replicas`
+  of `1.5`, `true`, an empty value, a list or a mapping in a service that is not the one
+  taken (nor one it extends in turn): docker compose reads only the services it takes of
+  such a file, and asks the others for a whole number only when it is written as a string
+  (`"two"`, `""`). The service taken is still asked for it all.
+- A file that another service `extends` from is no longer refused for a byte size or a
+  duration that reads as none (`stop_grace_period: abc`, `shm_size: abc`,
+  `mem_reservation: "1x"`), for a number written as a string that is out of bounds
+  (`oom_score_adj: "2000"`, `cpu_count: "-5"`, `cpu_percent: "150"`), or for a name of no
+  characters (`sysctls: {"": 1}`), in a service that is not the one taken (nor one it extends
+  in turn): docker compose reads none of those there. The service taken is still asked for all
+  of it, and a string that reads as no integer, boolean or number is still refused anywhere.
+
 ## [0.40.0] - 2026-09-30
 
 ### Added
@@ -2652,7 +2675,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.40.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.40.1...HEAD
+[0.40.1]: https://github.com/suruseas/opossum/compare/v0.40.0...v0.40.1
 [0.40.0]: https://github.com/suruseas/opossum/compare/v0.39.0...v0.40.0
 [0.39.0]: https://github.com/suruseas/opossum/compare/v0.38.0...v0.39.0
 [0.38.0]: https://github.com/suruseas/opossum/compare/v0.37.0...v0.38.0
