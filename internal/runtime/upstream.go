@@ -45,6 +45,9 @@ var UpstreamWordings = []UpstreamWording{
 	{Site: "isImageRefusedLine", Wording: `: "HTTP request to `},
 	{Site: "isImageRefusedLine", Wording: " failed with response: "},
 	{Site: "isImageRefusedLine", Wording: "/manifests/"},
+	// The runtime's closing line for a build the builder ran out of resources for: its kind,
+	// read from the line's first byte.
+	{Site: "isResourceExhaustedLine", Wording: "Error: resourceExhausted: "},
 	// One predicate, two rows in the table (volumes and images): both cite
 	// resourceInUse, which is where the match is.
 	{Site: "resourceInUse", Wording: "in use"},

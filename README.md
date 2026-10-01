@@ -74,7 +74,7 @@ the lighter thing to leave installed. [Full method and caveats →](docs/benchma
 
 - macOS 26+ on Apple silicon
 - [`container`](https://github.com/apple/container) installed, started
-  (`container system start`), and on `PATH` — verified against `container` 1.4.1
+  (`container system start`), and on `PATH` — verified against `container` 1.5.0
 - Go 1.25+ (to build)
 
 ## Install

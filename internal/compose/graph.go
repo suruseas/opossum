@@ -76,7 +76,9 @@ func (p *Project) StartupOrderReading(read []string) ([]string, error) {
 // stuck running with no way back down through opossum (#1093). docker
 // compose does not refuse for its own commands of that kind either, given
 // `-p` and left to discover the file (measured on v5.5.1: `ps`, `images`,
-// `logs`, `stop`, `kill`, `down`, `restart`, `stats` all go through; `up`,
+// `logs`, `stop`, `kill`, `down`, `restart`, `stats` all go through, and so
+// does opossum's own `stats --host`, which has no docker compose command to measure and rests
+// on `stats` and on this rule; `up`,
 // `run`, `pull`, `build` and `config --services` still refuse, and so does
 // StartupOrderReading above, which serves them). opossum's own `import`,
 // `start`, `volumes` and `watch` stay refused too, for the same reason as

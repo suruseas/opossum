@@ -494,6 +494,9 @@ func checkServiceShapes(path string, services map[string]any, values *[]error, o
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
+			if notTaken && readAsItIsWhereNotTaken[k] {
+				continue
+			}
 			// A port written as a float (`!!float 80`, or `published: !!float 8080`) is
 			// refused by docker compose, which reads an entry as a string or an integer
 			// (#1526); its text is a port, so the loader's own reading let it through.
@@ -511,6 +514,33 @@ func checkServiceShapes(path string, services map[string]any, values *[]error, o
 			// `deploy.mode` (#1533; measured, v5.5.1).
 			if err := modeKinds(path, "services."+name+"."+k, k, svc[k], notTaken, fault); err != nil {
 				return err
+			}
+			// `cpus` is a key opossum reads itself, which a service docker compose does not take
+			// is not asked: docker compose still casts it there, with strconv.ParseFloat as it is,
+			// and refuses a string that does not read (`cpus: abc`, `"0x2"`, `" 2"`, `"_1"`, `"1__0"`;
+			// `"1_0"`, `"1e2"`, `"inf"` read) (#1566; measured, v5.5.1). A service taken is read by
+			// the decode.
+			if k == "cpus" && notTaken {
+				if str, isString := svc[k].(string); isString {
+					if _, err := strconv.ParseFloat(str, 64); err != nil {
+						if err := fault(fmt.Errorf("compose file %s: services.%s.cpus %q does not read as a number", path, name, str)); err != nil {
+							return err
+						}
+					}
+				}
+			}
+			// A key of these blocks written with nothing after it, where the schema gives it no null
+			// (`deploy: {labels: ~}`, `build: {network: ~}`, `healthcheck: {disable: ~}`, a network's
+			// `aliases: ~`): docker compose refuses it in the file that writes it. A file that is only
+			// extended from is not asked: docker compose merges the extending service over it before it
+			// asks, so a null the extender writes a value over is read (#1583, #1592, #1598; measured,
+			// v5.5.1).
+			if nullChecked[k] && only == "" {
+				if msg := spec.Properties[k].nothingWhereNoneIsTaken(svc[k], "services."+name+"."+k, 0, false); msg != "" {
+					if err := fault(fmt.Errorf("compose file %s: %s", path, msg)); err != nil {
+						return err
+					}
+				}
 			}
 			node := spec.Properties[k]
 			if node == nil || !heldToTheSchema[k] {
@@ -538,12 +568,15 @@ func checkServiceShapes(path string, services map[string]any, values *[]error, o
 			// The shape above took the string on the strength of its kind's
 			// string branch; this asks whether docker compose can actually
 			// read it into the kind that branch exists for (#1366).
-			// In a service docker compose does not take, a byte size or a duration is not read
-			// (`stop_grace_period: abc`, `shm_size: abc`), nor are the bounds of the number a string
-			// reads into (`oom_score_adj: "2000"`, `cpu_count: "-5"`, `cpu_percent: "150"`); a string
-			// that reads as no integer, boolean or number is refused there as everywhere
-			// (`scale: two`, `privileged: "7"`, `cpu_percent: abc`) (#1559; measured, v5.5.1).
-			if kind, ok := castKeys[k]; ok && !(notTaken && (kind == "bytes" || kind == "duration")) {
+			// In a service docker compose does not take, a string that reads as no integer or
+			// boolean for the keys that cast one, and a `cpu_percent` that reads as no number, is
+			// refused there as everywhere (`scale: two`, `privileged: "7"`, `cpu_percent: abc`), and
+			// the bounds of the number a string reads into are not (`oom_score_adj: "2000"`,
+			// `cpu_count: "-5"`, `cpu_percent: "150"`). The byte sizes, the duration and `attach` are
+			// among the keys it asks nothing of there (readAsItIsWhereNotTaken, above), so none of
+			// them reaches this. `cpus` is cast just above, for a service not taken only (#1559,
+			// #1571; measured, v5.5.1).
+			if kind, ok := castKeys[k]; ok {
 				if s, isString := svc[k].(string); isString && !castOK(kind, s) {
 					if err := fault(fmt.Errorf("compose file %s: %s %q does not read as %s",
 						path, where, s, castKindNames[kind])); err != nil {
@@ -576,6 +609,134 @@ func checkServiceShapes(path string, services map[string]any, values *[]error, o
 		}
 	}
 	return nil
+}
+
+// readAsItIsWhereNotTaken are the service keys docker compose asks nothing of in a service it does
+// not take (a service of a file that is only extended from, which the extending service does not
+// name): measured, v5.5.1, `config -q`, for each of the keys below at every place the schema gives it,
+// with a number, a null, a list, a mapping, a word, `true`, a quoted number and a float, in a service
+// taken and one not — taken refuses what the schema does not take, and not taken reads all of it.
+// The other keys of a service are read into a type before docker compose knows whether the service
+// is taken (`ports`, `volumes`, `build`, `depends_on`, `env_file`, the numbers and booleans it casts,
+// and what the file reads by its own tags), so a value of the wrong kind in those is refused there
+// as everywhere.
+var readAsItIsWhereNotTaken = map[string]bool{
+	"attach": true, "blkio_config": true, "cgroup": true, "cgroup_parent": true, "command": true,
+	"container_name": true, "cpuset": true, "credential_spec": true, "device_cgroup_rules": true,
+	"domainname": true, "entrypoint": true, "external_links": true, "extra_hosts": true,
+	"group_add": true, "hostname": true, "image": true, "ipc": true, "isolation": true,
+	"logging": true, "mac_address": true, "mem_limit": true, "mem_reservation": true,
+	"mem_swappiness": true, "memswap_limit": true, "network_mode": true, "pid": true,
+	"platform": true, "post_start": true, "pre_start": true, "pre_stop": true, "provider": true,
+	"pull_policy": true, "pull_refresh_after": true, "restart": true, "runtime": true,
+	"security_opt": true, "shm_size": true, "stop_grace_period": true, "stop_signal": true,
+	"storage_opt": true, "use_api_socket": true, "user": true, "userns_mode": true, "uts": true,
+	"volumes_from": true, "working_dir": true,
+}
+
+// nullChecked are the service keys whose blocks are read into a typed shape by the decode,
+// which passes a key of them that holds nothing: asked here, by the schema.
+var nullChecked = map[string]bool{"deploy": true, "build": true, "healthcheck": true, "networks": true, "depends_on": true}
+
+// nothingWhereNoneIsTaken says where v, a mapping, holds a key with nothing after it that
+// the node gives no null — at any depth, through the branches of a oneOf that take a
+// mapping — or "" when it holds none. A list is not looked into, and a key the node does not
+// name is the business of the check of unknown keys.
+//
+// contexts says that v is the `additional_contexts` of a build: known from where the walk came
+// down, not from how where is spelt — a network or a dependency can be named
+// `x.build.additional_contexts` and is only a name (#1616).
+func (n *specNode) nothingWhereNoneIsTaken(v any, where string, depth int, contexts bool) string {
+	if n == nil {
+		return ""
+	}
+	if m, ok := v.(map[any]any); ok {
+		conv := make(map[string]any, len(m))
+		for k, x := range m {
+			conv[fmt.Sprint(k)] = x
+		}
+		v = conv
+	}
+	m, ok := v.(map[string]any)
+	if !ok {
+		return ""
+	}
+	branches := n.objectBranches()
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		var child *specNode
+		for _, b := range branches {
+			if child = b.child(k); child != nil {
+				break
+			}
+		}
+		if child == nil {
+			continue
+		}
+		if m[k] == nil {
+			// A dependency with nothing after its name reads as `service_started`, and an
+			// `additional_contexts` with nothing after it names no context: read so before the
+			// schema was asked, and still (docker compose refuses both; a known difference).
+			readPast := (depth == 0 && strings.HasSuffix(where, ".depends_on")) ||
+				(depth == 0 && strings.HasSuffix(where, ".build") && k == "additional_contexts")
+			// The schema takes a null entry of `additional_contexts`; docker compose does not.
+			entry := contexts
+			if (!child.takesNull() || entry) && !readPast {
+				return where + "." + k + " has nothing after it — write the value, or remove the key"
+			}
+			continue
+		}
+		below := depth == 0 && strings.HasSuffix(where, ".build") && k == "additional_contexts"
+		if msg := child.nothingWhereNoneIsTaken(m[k], where+"."+k, depth+1, below); msg != "" {
+			return msg
+		}
+	}
+	return ""
+}
+
+// objectBranches is the node and the branches of its oneOf that take a mapping.
+func (n *specNode) objectBranches() []*specNode {
+	var out []*specNode
+	if len(n.Properties) > 0 || len(n.pats) > 0 || n.Additional != nil {
+		out = append(out, n)
+	}
+	for _, o := range n.OneOf {
+		out = append(out, o.objectBranches()...)
+	}
+	return out
+}
+
+// child is the node for the key k of a mapping this node takes: a named property, or the
+// first pattern it matches, or the one every other key takes.
+func (n *specNode) child(k string) *specNode {
+	if c := n.Properties[k]; c != nil {
+		return c
+	}
+	for _, p := range n.pats {
+		if p.re.MatchString(k) {
+			return p.node
+		}
+	}
+	return n.Additional
+}
+
+// takesNull reports whether the node, or a branch of its oneOf, is given null.
+func (n *specNode) takesNull() bool {
+	for _, k := range n.kinds {
+		if k == "null" {
+			return true
+		}
+	}
+	for _, o := range n.OneOf {
+		if o.takesNull() {
+			return true
+		}
+	}
+	return len(n.kinds) == 0 && len(n.OneOf) == 0
 }
 
 // mismatch says how v is not what the node takes, or "" when it is.
@@ -953,8 +1114,13 @@ func portFieldKinds(path, where string, list any, notTaken bool, fault func(erro
 func replicasReadable(v any) bool {
 	switch x := v.(type) {
 	case int, int64, uint64:
+		// `int64` is a branch yaml.v3 does not return on a 64-bit build, and `uint64` (a value past
+		// int64) is refused by its bound (checkModelBounds) before this is asked; both stay so that
+		// this reads an integer of any width.
 		return true
 	case float64:
+		// The guard against an infinity and a NaN is one nothing reaches today: checkNonFiniteNumbers
+		// refuses `.inf` and `.nan` first (#1507). It stays so that this reads a float on its own.
 		return !math.IsNaN(x) && !math.IsInf(x, 0) && x == math.Trunc(x)
 	case string:
 		_, err := strconv.ParseInt(x, 10, 64)

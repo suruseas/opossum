@@ -46,6 +46,15 @@ func TestACycleAmongActiveServicesNoLongerStopsCommandsThatOnlyActOnWhatIsAlread
 		{"stats", func(o *orchestrator.Orchestrator) error {
 			return o.Stats(nil, orchestrator.StatsOptions{NoStream: true})
 		}},
+		// `stats --host` has no docker compose counterpart. Its grounds are `docker compose
+		// stats` (goes on through such a cycle, measured on v5.5.1) and opossum's rule that a
+		// command that only reads what is already there goes on (#1430).
+		{"stats --host", func(o *orchestrator.Orchestrator) error { return o.StatsHost(nil) }},
+		// Named, `stats --host` never read the cycle (both resolvers go the same way with a
+		// name): this row pins what already held, and is not what the change is about.
+		{"stats --host, a service named", func(o *orchestrator.Orchestrator) error {
+			return o.StatsHost([]string{"web"})
+		}},
 		{"destroy", func(o *orchestrator.Orchestrator) error {
 			_, err := o.DestroyPlanFor(false, false, false)
 			return err
@@ -94,5 +103,32 @@ func TestACycleAmongActiveServicesStillStopsCommandsThatStartSomething(t *testin
 				t.Errorf("want the cycle refused, got: %v", err)
 			}
 		})
+	}
+}
+
+// `stats --host` goes on through a cycle AND prints the table (#1430): every service once, in
+// a fixed order. A run that went on and printed nothing would pass the row above (which reads
+// only the error), so this one reads what was printed.
+func TestStatsHostPrintsEveryServiceOnceThroughACycle(t *testing.T) {
+	rt, _ := fakeShim(t)
+	var out bytes.Buffer
+	o := orchestrator.New(cycledProject(), rt, "opossum", &out)
+	if err := o.StatsHost(nil); err != nil {
+		t.Fatalf("stats --host through a cycle: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "SERVICE") || !strings.Contains(got, "HOST FOOTPRINT") {
+		t.Errorf("want the table's header, got:\n%s", got)
+	}
+	for _, name := range []string{"plain", "plain2", "web"} {
+		rows := 0
+		for _, line := range strings.Split(got, "\n") {
+			if f := strings.Fields(line); len(f) > 0 && f[0] == name {
+				rows++
+			}
+		}
+		if rows != 1 {
+			t.Errorf("service %s has %d rows, want 1:\n%s", name, rows, got)
+		}
 	}
 }

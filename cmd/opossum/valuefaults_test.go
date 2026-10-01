@@ -243,6 +243,11 @@ func TestAValueFaultInAnExtendedFileDoesNotStopATakeDown(t *testing.T) {
 	// file, is at fault — the file is read for the whole of it.
 	write("base-sib.yaml", "services:\n  basesvc:\n    image: web\n  sibling:\n    image: web\n    pids_limit: \"x\"\n")
 	siblingOnly := write("compose-sib.yaml", "name: demo\nservices:\n  web:\n    extends:\n      file: base-sib.yaml\n      service: basesvc\n")
+	// A `cpus` that does not read as a number, in a service nothing extends (#1566, #1579):
+	// the fault a take-down goes on past for the four commands alike.
+	write("base-cpus.yaml", "services:\n  basesvc:\n    image: web\n  sibling:\n    image: web\n    cpus: abc\n")
+	untakenCpus := write("compose-cpus.yaml", "name: demo\nservices:\n  web:\n    extends:\n      file: base-cpus.yaml\n      service: basesvc\n")
+	const untakenCpusFault = `services.sibling.cpus "abc" does not read as a number`
 	// An infinity in the service it takes, once that service's own extends is resolved
 	// (#1510): the service is `basesvc` here, and it holds it through its own chain.
 	write("base-inf.yaml", "services:\n  basesvc:\n    image: web\n    extends: chained\n  chained:\n    image: web\n    x-a: .inf\n")
@@ -263,6 +268,10 @@ func TestAValueFaultInAnExtendedFileDoesNotStopATakeDown(t *testing.T) {
 		{"down, through a chain of extends", viaChain, []string{"down"}, basesvcFault},
 		{"down, an infinity in the service it takes", infinity, []string{"down"}, infinityFault},
 		{"kill, an infinity in the service it takes", infinity, []string{"kill"}, infinityFault},
+		{"down, a cpus of a service nothing extends", untakenCpus, []string{"down"}, untakenCpusFault},
+		{"stop, a cpus of a service nothing extends", untakenCpus, []string{"stop"}, untakenCpusFault},
+		{"kill, a cpus of a service nothing extends", untakenCpus, []string{"kill"}, untakenCpusFault},
+		{"destroy, a cpus of a service nothing extends", untakenCpus, []string{"destroy", "--force"}, untakenCpusFault},
 		{"down, a fault only in a service nothing extends", siblingOnly, []string{"down"}, `services.sibling.pids_limit "x" does not read as an integer`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -828,5 +837,35 @@ func TestAFloatTagThatIsNoFloatInAnExtendedOrIncludedFileIsRefusedByEveryCommand
 				}
 			})
 		}
+	}
+}
+
+// A key the first file writes with nothing after it, where no file gives it a value, is
+// refused by the commands that take a project down as by any other: they go on past what a
+// later file's override holds (an earlier opossum took it as "not given"), not past a first
+// file's own mistake, which docker compose refuses and which every release before refused
+// too (#1597).
+func TestAFirstFilesBareKeyStopsATakeDownAsAnyOtherCommand(t *testing.T) {
+	fakeShim(t)
+	dir := t.TempDir()
+	first := filepath.Join(dir, "s1.yml")
+	later := filepath.Join(dir, "s0.yml")
+	if err := os.WriteFile(first, []byte("name: demo\nservices:\n  web:\n    image: web\n    networks: ~\nnetworks:\n  n: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(later, []byte("services:\n  web:\n    image: web\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range [][]string{{"stop"}, {"kill"}, {"down"}, {"destroy", "--force"}} {
+		t.Run(command[0], func(t *testing.T) {
+			t.Setenv("STATE_DIR", t.TempDir())
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			if _, err := run(t, "-f", first, "-f", later, "config"); err == nil {
+				t.Fatalf("config should refuse the first file's bare networks")
+			}
+			if _, err := run(t, append([]string{"-f", first, "-f", later}, command...)...); err == nil {
+				t.Errorf("%s should refuse a bare key of the first file, and went on", command[0])
+			}
+		})
 	}
 }

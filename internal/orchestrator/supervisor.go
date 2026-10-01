@@ -96,7 +96,7 @@ func SupervisorPID(project string) int {
 	}
 	// No token means the file can't be tied to a process, and StopSupervisor
 	// escalates to SIGKILL — so it is treated as stale rather than acted on.
-	if started == "" || processStartedAt(pid) != started {
+	if started == "" || !sameProcess(pid, started) {
 		return 0
 	}
 	return pid
@@ -119,15 +119,65 @@ func parsePidFile(s string) (pid int, started string, ok bool) {
 	return n, started, true
 }
 
-// processStartedAt returns a stable per-process token (its start time as `ps`
-// reports it), or "" when it can't be read. Two processes with the same pid at
-// different times will not share one.
+// processStartedAt returns a stable per-process token, or "" when it can't be read. Two
+// processes with the same pid at different times will not share one. Where /proc has the
+// process it is its start time in clock ticks since boot, which does not move; otherwise it is
+// the start time as `ps` reports it. `ps` computes that from the boot time plus the start
+// tick, so on a machine whose clock is being corrected (WSL2) the same process reads one
+// second apart on two calls, and a claim written with one reading did not match the next
+// (#1610).
 func processStartedAt(pid int) string {
+	if ticks := procStartTicks(pid); ticks != "" {
+		return procTokenPrefix + ticks
+	}
+	return psStartedAt(pid)
+}
+
+// procTokenPrefix marks a token taken from /proc, so that a pid file written by a version
+// that used `ps` (no prefix) is still compared with `ps`.
+const procTokenPrefix = "proc-"
+
+// procRoot is where /proc is, behind a seam a test can point elsewhere.
+var procRoot = "/proc"
+
+// procStartTicks reads field 22 (starttime) of /proc/<pid>/stat, or "" when there is none.
+// The command name (field 2) is in parentheses and may hold spaces and parentheses itself,
+// so the fields are counted from the last ")".
+func procStartTicks(pid int) string {
+	b, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return ""
+	}
+	s := string(b)
+	i := strings.LastIndex(s, ")")
+	if i < 0 {
+		return ""
+	}
+	rest := strings.Fields(s[i+1:]) // rest[0] is field 3 (state)
+	if len(rest) < 20 {
+		return ""
+	}
+	return rest[19]
+}
+
+// psStartedAt is the start time as `ps` reports it, or "".
+func psStartedAt(pid int) string {
 	out, err := exec.Command("ps", "-o", "lstart=", "-p", strconv.Itoa(pid)).Output()
 	if err != nil {
 		return ""
 	}
 	return strings.Join(strings.Fields(string(out)), "-")
+}
+
+// sameProcess reports whether the token in a pid file is the one the process has now. A
+// token is read the way it was written.
+func sameProcess(pid int, started string) bool {
+	if strings.HasPrefix(started, procTokenPrefix) {
+		// No tick now (the process has no /proc entry) matches nothing, not a token that is only the prefix.
+		ticks := procStartTicks(pid)
+		return ticks != "" && procTokenPrefix+ticks == started
+	}
+	return psStartedAt(pid) == started
 }
 
 // processAlive reports whether a pid is a live process. Signal 0 performs the

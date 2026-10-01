@@ -274,7 +274,7 @@ string, `interval`/`timeout`/`retries`/`start_period`, and either spelling of of
 to wire for an agent — each `svc`/`svc:port`/`svc:port/path` (reached by name) or
 `name=url`; opossum generates a `.mcp.json` and mounts it at `/run/opossum/mcp.json`,
 pass it with `claude --mcp-config`; HTTP transport only), `${VAR}` interpolation
-(`${VAR:-default}`, `${VAR:?required}`, `$$`, nested `${A:-${B}}`, multi-line via a
+(`${VAR:-default}`, `${VAR:?required}`, `${VAR:+word}`/`${VAR+word}`, `$$`, nested `${A:-${B}}`, multi-line via a
 YAML `\`-continuation). YAML anchors + merge keys (`<<: *anchor`) resolve.
 Interpolation runs on the **raw text before YAML parsing** (so it reaches every
 field, including `x-` and block scalars) — a side effect is that a `${…}` in a
@@ -712,7 +712,7 @@ list; codes are add-only and never change meaning.
   the default network wedged (no code — it's a runtime state). Test `container run
   --rm alpine ping -c1 1.1.1.1`; if it fails, `container system stop && container
   system start`. `opossum doctor` checks this.
-- **build hangs / `Unavailable`/`EOF` on a heavy image** → the shared builder VM (no
+- **build hangs / `Unavailable`/`EOF` or `resourceExhausted`/`cannot allocate memory` on a heavy image** → the shared builder VM (no
   code — a runtime resource issue) is starved (default 2 CPU / 2 GB). `container
   builder start --cpus 4 --memory 8g`, and shrink the context with `.dockerignore`.
 - **build fails with `no space left on device`** → the host volume is out of disk (no

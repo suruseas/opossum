@@ -66,14 +66,20 @@ const NetworkModeNone = "none"
 
 // Service is a single service definition.
 type Service struct {
-	Name        string      `yaml:"-"`
-	Image       string      `yaml:"image"`
-	Platform    string      `yaml:"platform"` // e.g. linux/amd64; runs via Rosetta on Apple silicon
-	Build       *Build      `yaml:"build"`
-	Command     Command     `yaml:"command"`
-	Entrypoint  Command     `yaml:"entrypoint"`
-	Environment Environment `yaml:"environment"`
-	EnvFile     EnvFiles    `yaml:"env_file"`
+	Name       string  `yaml:"-"`
+	Image      string  `yaml:"image"`
+	Platform   string  `yaml:"platform"` // e.g. linux/amd64; runs via Rosetta on Apple silicon
+	Build      *Build  `yaml:"build"`
+	Command    Command `yaml:"command"`
+	Entrypoint Command `yaml:"entrypoint"`
+	// EntrypointCleared is set when the service writes `entrypoint: []` (or a string that
+	// splits into nothing, `""`) after the merges: docker compose reads that as "no entrypoint
+	// at all", which takes the image's own away, where a service that writes none leaves the
+	// image's in place. Entrypoint is empty in both, so this is what tells them apart
+	// (#1620). A null (`entrypoint: ~`) is neither: it removes the key.
+	EntrypointCleared bool        `yaml:"-"`
+	Environment       Environment `yaml:"environment"`
+	EnvFile           EnvFiles    `yaml:"env_file"`
 	// envFileErr holds why this service's env_file entries could not be read,
 	// when they could not. Loading records it here instead of failing, because
 	// a project is not broken by a service nobody is running: docker resolves
@@ -999,6 +1005,8 @@ func (s *Service) UnmarshalYAML(value *yaml.Node) error {
 	if len(s.Tmpfs) > 1 {
 		s.Tmpfs = collapseTmpfsEntries(s.Tmpfs)
 	}
+
+	s.EntrypointCleared = len(s.Entrypoint) == 0 && entrypointWrittenEmpty(value)
 
 	// The spellings `group_add` was written in, for the refusals to name (the
 	// decoder reads a number to its decimal, so `0x10` is `16` by then).
@@ -3057,6 +3065,23 @@ func (v *VolumesFrom) UnmarshalYAML(value *yaml.Node) error {
 // named twice). What the runtime can take of the list is decided where the
 // service is started (see Orchestrator.checkGroupAdd).
 type GroupAdd []string
+
+// entrypointWrittenEmpty reports whether the service writes an `entrypoint` that is a list or
+// a string — not a null, not nothing. The caller has the entrypoint the decoder read, so a list
+// or a string that is empty there is an entrypoint written empty. It reads the same node the
+// decoder read, through an alias and a merge key as the decoder does.
+func entrypointWrittenEmpty(service *yaml.Node) bool {
+	var fields map[string]yaml.Node
+	if service.Decode(&fields) != nil {
+		return false
+	}
+	node, ok := fields["entrypoint"]
+	if !ok {
+		return false
+	}
+	n := unalias(&node)
+	return n.Kind == yaml.SequenceNode || (n.Kind == yaml.ScalarNode && n.ShortTag() != "!!null")
+}
 
 // writtenGroupAdd is the service's `group_add` entries as the file spells
 // them, or nil when the service writes none. It reads the same node the

@@ -510,6 +510,85 @@ func TestUpPassesEntrypoint(t *testing.T) {
 	}
 }
 
+// `entrypoint: []` takes the image's ENTRYPOINT away (#1620): `up` makes the command's first word
+// the entrypoint, which is what `container run` can do to replace it.
+func TestUpRunsTheCommandInPlaceOfAClearedEntrypoint(t *testing.T) {
+	rt, log := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"web": {
+			Image:             "web:latest",
+			EntrypointCleared: true,
+			Command:           compose.Command{"echo", "hi"},
+		},
+	})
+	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
+	if err := o.Up(true); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	want := "run -d --name web.demo.opossum --network=demo-net --dns-domain opossum --dns-search demo.opossum " +
+		"--label=opossum.project=demo --entrypoint=echo web:latest hi"
+	if !hasLine(log(), want) {
+		t.Errorf("expected the command in place of the entrypoint, got %v", log())
+	}
+}
+
+// The same for a one-off: `run web` with a command takes it in place of the entrypoint.
+func TestRunRunsTheCommandInPlaceOfAClearedEntrypoint(t *testing.T) {
+	rt, log := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"web": {Image: "web:latest", EntrypointCleared: true},
+	})
+	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
+	if err := o.RunOneOff("web", []string{"echo", "hi"}, orchestrator.RunOneOffOptions{Rm: true}); err != nil {
+		t.Fatalf("RunOneOff: %v", err)
+	}
+	found := false
+	for _, l := range log() {
+		if strings.HasPrefix(l, "run ") && strings.Contains(l, "--entrypoint=echo web:latest hi") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected the one-off to run the command in place of the entrypoint, got %v", log())
+	}
+}
+
+// Taking the image's entrypoint away is a change to the container: a service that already runs
+// is recreated, not left running the entrypoint it was started with.
+func TestUpRecreatesWhenTheEntrypointIsCleared(t *testing.T) {
+	rt, log := fakeShim(t)
+	svc := &compose.Service{Image: "web:latest", Command: compose.Command{"serve"}}
+	p := project("demo", map[string]*compose.Service{"web": svc})
+	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
+	if err := o.Up(true); err != nil {
+		t.Fatalf("first up: %v", err)
+	}
+	svc.EntrypointCleared = true
+	if err := o.Up(true); err != nil {
+		t.Fatalf("second up: %v", err)
+	}
+	if n := countLines(log(), "--name web.demo.opossum"); n != 2 {
+		t.Errorf("clearing the entrypoint should recreate the container, want 2 runs got %d", n)
+	}
+}
+
+// A service that does not clear its entrypoint keeps the hash it had, so an upgrade does not
+// recreate what is running.
+func TestAnUnclearedEntrypointDoesNotChangeTheConfigHash(t *testing.T) {
+	rt, log := fakeShim(t)
+	svc := &compose.Service{Image: "web:latest", Command: compose.Command{"serve"}}
+	p := project("demo", map[string]*compose.Service{"web": svc})
+	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
+	for i := 0; i < 2; i++ {
+		if err := o.Up(true); err != nil {
+			t.Fatalf("up %d: %v", i+1, err)
+		}
+	}
+	if n := countLines(log(), "--name web.demo.opossum"); n != 1 {
+		t.Errorf("an unchanged service should not be recreated, want 1 run got %d", n)
+	}
+}
+
 // Ignored service fields don't affect startup, so `up` never warns per field by
 // default — but silence let agents cargo-cult invalid config, so a one-line note
 // points at `opossum config`. --verbose still gives the full per-field warning.

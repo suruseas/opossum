@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -171,4 +172,70 @@ func TestBuildNoHintOnPlainFailure(t *testing.T) {
 	if strings.Contains(err.Error(), "hint:") {
 		t.Errorf("no hint expected for an ordinary build failure, got: %v", err)
 	}
+}
+
+// The runtime's closing line for a build the builder ran out of resources for, as 1.5.0 wrote
+// it (a `RUN tail /dev/zero`, #1619): the hint for resources has to come with it.
+const resourceExhaustedClosing = `Error: resourceExhausted: "failed to solve: ResourceExhausted: process "/bin/sh -c tail /dev/zero" did not complete successfully: cannot allocate memory"`
+
+func TestTheResourceExhaustedClosingLineGetsTheResourceHint(t *testing.T) {
+	hasResourceHint := func(h string) bool { return strings.Contains(h, "start --cpus 4 --memory 8g") }
+	// The step's own line, which the builder writes before the runtime's closing line.
+	stepLine := `#5 ERROR: process "/bin/sh -c tail /dev/zero" did not complete successfully: cannot allocate memory`
+	for _, tc := range []struct {
+		name   string
+		writes []string
+		want   bool
+	}{
+		{"the closing line", []string{stepLine + "\n------\n" + resourceExhaustedClosing + "\n"}, true},
+		{"the closing line with no newline at its end", []string{stepLine + "\n" + resourceExhaustedClosing}, true},
+		{"the closing line split across two writes", []string{resourceExhaustedClosing[:30], resourceExhaustedClosing[30:] + "\n"}, true},
+		{"the step's line alone, which a step that fails for another reason can also write", []string{stepLine + "\n"}, false},
+		{"the words in a step's own output", []string{"#5 0.2 cannot allocate memory\n#5 0.2 Error: resourceExhausted: something\n"}, false},
+		{"the kind behind the builder's prefix", []string{`#5 0.045 Error: resourceExhausted: "x"` + "\n"}, false},
+		{"another kind", []string{`Error: unknown: "failed to solve: process "/bin/sh -c false" did not complete successfully: exit code: 1"` + "\n"}, false},
+		// One row for each way the line's start can be read too loosely.
+		{"the kind behind the builder's prefix, in two writes", []string{"#5 0.2 ", "Error: resourceExhausted: x\n"}, false},
+		{"the kind behind spaces", []string{"  Error: resourceExhausted: x\n"}, false},
+		{"the kind in other letters", []string{"Error: resourceexhausted: x\n"}, false},
+		{"a kind that only starts with it", []string{"Error: resourceExhaustedFoo: x\n"}, false},
+		// A step's command can be long, and the closing line quotes all of it.
+		{"a closing line longer than a line is held", []string{`Error: resourceExhausted: "failed to solve: process "/bin/sh -c ` + strings.Repeat("x", 5000) + `" did not complete successfully: cannot allocate memory"` + "\n"}, true},
+		{"a line that long which is not it", []string{`Error: unknown: "failed to solve: process "/bin/sh -c ` + strings.Repeat("x", 5000) + `" did not complete successfully: cannot allocate memory"` + "\n"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := &buildErrorDetector{}
+			for _, w := range tc.writes {
+				d.Write([]byte(w))
+			}
+			if got := hasResourceHint(d.hint("opossum up")); got != tc.want {
+				t.Errorf("resource hint = %v, want %v for %q", got, tc.want, tc.writes)
+			}
+		})
+	}
+	t.Run("a full disk outranks it", func(t *testing.T) {
+		d := &buildErrorDetector{}
+		d.Write([]byte("no space left on device\n" + resourceExhaustedClosing + "\n"))
+		if h := d.hint("opossum up"); !strings.Contains(h, "ran out of disk space") {
+			t.Errorf("the disk hint should win, got: %q", h)
+		}
+	})
+	t.Run("through a build, as the runtime wrote it", func(t *testing.T) {
+		// Read out of the capture and replayed on stderr, which is where the runtime writes all
+		// of a build's output: a retyped row on stdout would pass with the stream a real build
+		// uses left unread.
+		raw, err := os.ReadFile("../../testdata/error-wordings/build-resource-exhausted-150.txt")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, after, ok := strings.Cut(string(raw), "--- stderr ---\n")
+		if !ok || !strings.Contains(after, resourceExhaustedClosing) {
+			t.Fatalf("the capture has no stderr section ending in the closing line: %q", after)
+		}
+		r := replayBuild(t, after)
+		berr := r.Build(BuildOptions{Tag: "x:1", Context: t.TempDir()})
+		if berr == nil || !strings.Contains(berr.Error(), "start --cpus 4 --memory 8g") {
+			t.Errorf("the build error should carry the resource hint, got: %v", berr)
+		}
+	})
 }

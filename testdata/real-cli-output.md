@@ -5,13 +5,27 @@ stdout+stderr と exit code の golden。`testdata/fake-container.sh` はこれ�
 返し、`internal/runtime/runtime_test.go` の忠実性 eval はこの文字列を各パーサに流して
 整合を確認する。**CLI 更新時はここを再採取して同期すること。**
 
-**最終検証: 2026-09-09 / `container CLI version 1.4.1`（Homebrew formula `1.4.1`）。**
-パーサが読むコマンドを実機で採り直した（生出力は `~/opossum-dogfood/results/v141-recapture/`、78 ファイル、
-`capture.sh` で採り `compare.sh` で 1.3.1 の同名ファイルと比べる。1.3.1 の分は `v131-recapture/`、68 ファイル。
+**最終検証: 2026-10-01 / `container CLI version 1.5.0`（Homebrew formula `1.5.0`）。**
+1.5.0 では、パーサが読むコマンドを実機で採り直した（生出力は `~/opossum-dogfood/results/v150-recapture/`、72 ファイル、
+1.4.1 と同じ範囲）。**採り直したのは 1.4.1 の節の一部で、それ以外の節は 1.4.1（または初出の版）の採取のまま**
+（下の「1.4.1 → 1.5.0 で変わったもの」に、1.5.0 で変わったものと未測定の節を挙げる）。
+1.4.1 の採取は 2026-09-09（生出力は `~/opossum-dogfood/results/v141-recapture/`、78 ファイル、`capture.sh` で採り
+`compare.sh` で 1.3.1 の同名ファイルと比べる。1.3.1 の分は `v131-recapture/`、68 ファイル。
 各ファイルは `$ <コマンド>` → `--- exit code:` → `--- stdout ---` → `--- stderr ---` の形）。各節に
 付いている古い採取日は、その記述が**最初に**確かめられた日。**1.4.1 で引き直していない節**は下の索引に
 名指ししてある。「DNS 解決の挙動」の前半と `stats` の `--format` は 2026-09-05 に 1.3.1 で引いた
 （末尾の「公開文書の実機主張」の節）。
+
+**1.4.1 → 1.5.0 で変わったもの（索引・挙動の変化なし、文言のみ）**：
+- 70 ファイルで exit code の変化は 0 件。JSON の key の消失も無い。`make real-conformance` の 3 本は PASS
+- `container images ls`（複数形）の文言が `Plugin 'container-images' not found.` から
+  `Error: unknown command 'images'` に変わった（exit 64 は同じ）。`container --help` から `PLUGINS:` 節が消えた
+  （公式 1.5.0 の #2311・#2309）。opossum はどちらにも依存しない（`doctor` は単数の `image ls` を使う）
+- 棚卸し（1.4.1 の値と同じ）：並行起動は直列のまま（1 本 0.71 秒・4 本同時 2.9 秒）、`stop` は同期（5.35 秒、1.4.1 は
+  5.22 秒）・rc 0、exit code は取れない、不在の名前の `stop`・`delete`・`volume delete`・`network delete` は rc 1
+- **1.5.0 でも未測定**：下の「1.4.1 で引き直していない節」（rosetta・arm64 の無い image・`port-attempt`・build 失敗の
+  3 群ほか）、`dns create` のあとの外向き通信の修正（公式 #2256）、entrypoint が空の image に `command:` を渡す形の前後差
+  （公式 #2296）
 
 **1.3.1 → 1.4.1 で変わったもの（索引）**：
 - `system status`：表のまま行が増え、名前が変わった——`appRoot`/`installRoot`/`logRoot` は `paths.*` に、
@@ -25,7 +39,7 @@ stdout+stderr と exit code の golden。`testdata/fake-container.sh` はこれ�
 - `container --help` に `clean`（`Clean one or more running containers`、`container clean [<container-ids> ...]`）が増えた。opossum は使わない
 - 文言は同じ：`container not found: <name>`・`network not found: <name>`・`image not found: <ref>`・
   `stats` の `no such container: <name>`（exit 1、呼び出し全体が失敗）・volume in use の 2 行・
-  `images ls`（複数形）の `Plugin 'container-images' not found.`（exit 64）・`run` の exit code 伝播（0/3）
+  `images ls`（複数形）の `Plugin 'container-images' not found.`（exit 64。**1.5.0 では `unknown command 'images'` に変わった**・exit 64 は同じ）・`run` の exit code 伝播（0/3）
 - **1.4.1 で引き直していない節**：`run --platform`（rosetta・arm64 の無い image）、`port-attempt`（53・loopback）、
   `OPSM-103/107/201` の再現、`row6–9`（build の cache/resource/disk-full・volume in use via opossum）、
   DNS spike（複数 project の分離）、`builder status`（running 側）、`parser-ps-mixed`、`net-after-restart`。
@@ -44,7 +58,7 @@ stdout+stderr と exit code の golden。`testdata/fake-container.sh` はこれ�
   失敗する**（1.2.2 は黙って飛ばしていた）。stopped は今も飛ばして exit 0。→ opossum は
   存在するコンテナだけを渡す（`createdContainers`）
 - `run --platform` の失敗2文言は両方健在だが、引き金が入れ替わった（下の節）
-- `container images ls`（複数形）は 1.3.1 で `Plugin 'container-images' not found.`・exit 64。単数の
+- `container images ls`（複数形）は 1.3.1 で `Plugin 'container-images' not found.`・exit 64（1.5.0 は `unknown command 'images'`・exit 64）。単数の
   `image ls` を使う（`doctor` の案内文を直した）。**1.2.2 で通っていたかは測っていない**（比較対象が消えていた）
 - 更新直後、コンテナ側のネットワークが全滅した（egress・コンテナ間・DNS。CLI 自身の pull は
   ホスト側なので通る）。`opossum doctor` が `network containers can't reach the internet` で
@@ -429,6 +443,7 @@ HOST FOOTPRINT が黙って `—`／上流はホストのコマンド）。
 | 6 | build（cache 破損） | `buildhint.go` | `unable to read root manifest` | `raw:build-cache-path-only-131.txt` | `unverified` |
 | 7 | build（resource） | 同上 | `rpc error: code = Unavailable` | `raw:build-resource-path-only-131.txt` | `unverified` |
 | 8 | build（disk full） | 同上 | `No space left on device` | `raw:build-disk-full-131.txt` | `unverified` |
+| 7b | build（resource・実際の文言） | `buildhint.go` `isResourceExhaustedLine` | `Error: resourceExhausted: ` | `raw:build-resource-exhausted-150.txt` | `raw:build-resource-exhausted-150.txt` |
 | 8b | build（registry が image を断る） | `buildhint.go` `isImageRefusedLine` | `Error: ` `: "HTTP request to ` ` failed with response: ` `/manifests/` | `raw:build-image-refused-141.txt` | `raw:build-image-refused-141.txt`（`/manifests/` のみ。`/blobs/` は unverified） |
 | 9 | volume の削除警告 | `runtime.go` `resourceInUse` | `in use` | `raw:volume-in-use-via-opossum-131.txt` | `raw:volume-in-use-131.txt` |
 | 10 | image の削除警告 | `runtime.go` `DeleteImage` 経由の `resourceInUse` | `in use` | `path-tried:image-in-use-not-reached-131.txt` | `unverified` |

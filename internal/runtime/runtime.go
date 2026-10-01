@@ -754,6 +754,72 @@ func (r *Runtime) ImageLabels(ref string) (map[string]string, bool) {
 	return labels, true
 }
 
+// ImageCmd returns the command an image runs when none is given (its CMD), and whether the
+// image could be asked at all — see ImageEnv, whose rule it follows: an image that declares no
+// CMD answers with nil and ok true, and the first variant that declares one answers for all of
+// them.
+func (r *Runtime) ImageCmd(ref string) ([]string, bool) {
+	out, _, err := r.captureSplitQuery("image", "inspect", ref)
+	if err != nil {
+		return nil, false
+	}
+	var images []struct {
+		Variants []struct {
+			Config struct {
+				Config struct {
+					Cmd []string `json:"Cmd"`
+				} `json:"config"`
+			} `json:"config"`
+		} `json:"variants"`
+	}
+	if err := json.Unmarshal([]byte(out), &images); err != nil {
+		return nil, false
+	}
+	for _, img := range images {
+		for _, v := range img.Variants {
+			if len(v.Config.Config.Cmd) > 0 {
+				return v.Config.Config.Cmd, true
+			}
+		}
+	}
+	return nil, true
+}
+
+// commandToRunWithoutEntrypoint is what a service with `entrypoint: []` runs: its command, or,
+// with none, its image's CMD. An image that is not here yet is pulled first, as `run` would
+// pull it, so that its CMD can be read. docker refuses what has neither ("no command
+// specified"), and so does this, rather than start the image's own ENTRYPOINT that the service
+// asked to be rid of.
+func (r *Runtime) commandToRunWithoutEntrypoint(o RunOptions) ([]string, error) {
+	if len(o.Command) > 0 {
+		if o.Command[0] == "" {
+			// `--entrypoint=` with nothing after the `=` takes the image's place on the line
+			// (container 1.5.0), so an empty first word cannot be made the entrypoint.
+			return nil, fmt.Errorf("`entrypoint: []` makes the first word of the command the entrypoint, and that word is empty — write the program to run")
+		}
+		return o.Command, nil
+	}
+	cmd, ok := r.ImageCmd(o.Image)
+	if !ok {
+		if err := r.Pull(o.Image); err != nil {
+			return nil, err
+		}
+		cmd, ok = r.ImageCmd(o.Image)
+	}
+	if !ok && r.DryRun {
+		// A plan does not pull (the pull is only recorded), so the image is still not here to
+		// be asked: what it would run is not known yet, and is not a fault of the file.
+		return []string{"<the command of " + o.Image + ">"}, nil
+	}
+	if !ok {
+		return nil, fmt.Errorf("`entrypoint: []` takes the image's entrypoint away, and %s has no command that can be read to run instead — write a `command:`", o.Image)
+	}
+	if len(cmd) == 0 {
+		return nil, fmt.Errorf("`entrypoint: []` takes the image's entrypoint away, and neither the service nor %s names a command to run instead — write a `command:`", o.Image)
+	}
+	return cmd, nil
+}
+
 // DeleteImage removes an image, best-effort (--force ignores a missing image),
 // for `down --rmi`.
 func (r *Runtime) DeleteImage(ref string) {
@@ -1237,10 +1303,16 @@ type RunOptions struct {
 	Tmpfs      []string // --tmpfs mount targets
 	Command    []string
 	Entrypoint []string // overrides the image ENTRYPOINT (--entrypoint + positional args)
-	Labels     []string // key=value labels (-l)
-	Memory     string   // -m memory limit (e.g. "512M")
-	CPUs       string   // -c CPU count (integer)
-	Detach     bool
+	// EntrypointCleared says the service writes `entrypoint: []`: the image's ENTRYPOINT is taken
+	// away and the command (or, with none, the image's CMD) is what runs. `container run`
+	// has no way to say that — an empty --entrypoint does not remove it (container 1.5.0), and
+	// the joined form with an empty value takes the image's place — so the command's first word
+	// is made the entrypoint, which does replace it (#1620). Entrypoint is empty with it.
+	EntrypointCleared bool
+	Labels            []string // key=value labels (-l)
+	Memory            string   // -m memory limit (e.g. "512M")
+	CPUs              string   // -c CPU count (integer)
+	Detach            bool
 	// Interactive (-i) keeps the container's stdin connected to ours. Foreground
 	// one-off runs set it so piped input reaches the process — without it the
 	// child sees an immediate EOF, which breaks stdin-driven tools (e.g. an MCP
@@ -1394,15 +1466,23 @@ func (r *Runtime) Run(o RunOptions) error {
 	// `container run --entrypoint` takes only the executable, so entrypoint args
 	// past the first go positional (before the command) — the container then runs
 	// entrypoint ++ command.
-	if len(o.Entrypoint) > 0 {
+	entrypoint, command := o.Entrypoint, o.Command
+	if o.EntrypointCleared && len(entrypoint) == 0 {
+		words, err := r.commandToRunWithoutEntrypoint(o)
+		if err != nil {
+			return err
+		}
+		entrypoint, command = words[:1], words[1:]
+	}
+	if len(entrypoint) > 0 {
 		// Same reason as --user above: an `entrypoint:` can start with "-".
-		args = append(args, "--entrypoint="+o.Entrypoint[0])
+		args = append(args, "--entrypoint="+entrypoint[0])
 	}
 	args = append(args, o.Image)
-	if len(o.Entrypoint) > 1 {
-		args = append(args, o.Entrypoint[1:]...)
+	if len(entrypoint) > 1 {
+		args = append(args, entrypoint[1:]...)
 	}
-	args = append(args, o.Command...)
+	args = append(args, command...)
 	if o.Detach {
 		// A detached `run` returns quickly (it just starts the container), so
 		// capturing its stderr is cheap — and lets a caller decode a cryptic

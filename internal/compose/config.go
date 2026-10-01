@@ -115,11 +115,14 @@ func labelMap(labels []string) map[string]string {
 }
 
 type configService struct {
-	Image       string               `yaml:"image,omitempty"`
-	Platform    string               `yaml:"platform,omitempty"`
-	Build       *configBuild         `yaml:"build,omitempty"`
-	Command     []string             `yaml:"command,omitempty"`
-	Entrypoint  []string             `yaml:"entrypoint,omitempty"`
+	Image    string       `yaml:"image,omitempty"`
+	Platform string       `yaml:"platform,omitempty"`
+	Build    *configBuild `yaml:"build,omitempty"`
+	Command  []string     `yaml:"command,omitempty"`
+	// Entrypoint is the entrypoint's words, or an empty list when the service writes
+	// `entrypoint: []` — held as an any, since omitempty drops an empty slice and what docker
+	// compose prints for it is the `[]` (#1620).
+	Entrypoint  any                  `yaml:"entrypoint,omitempty"`
 	Environment []string             `yaml:"environment,omitempty"`
 	Ports       []string             `yaml:"ports,omitempty"`
 	Restart     string               `yaml:"restart,omitempty"`
@@ -196,7 +199,7 @@ func RenderConfig(p *Project) (string, error) {
 			Image:       svc.Image,
 			Platform:    svc.Platform,
 			Command:     svc.Command,
-			Entrypoint:  svc.Entrypoint,
+			Entrypoint:  entrypointForConfig(svc),
 			Environment: ResolveBareNames(env, os.LookupEnv, true),
 			Ports:       svc.Ports,
 			Restart:     svc.Restart,
@@ -465,4 +468,16 @@ func volumesWithNoCopy(svc *Service) []string {
 		out = append(out, v+":nocopy")
 	}
 	return out
+}
+
+// entrypointForConfig is what the rendered config shows for the service's entrypoint: its
+// words, `[]` when the service writes it empty, and nothing otherwise.
+func entrypointForConfig(svc *Service) any {
+	switch {
+	case len(svc.Entrypoint) > 0:
+		return []string(svc.Entrypoint)
+	case svc.EntrypointCleared:
+		return []string{}
+	}
+	return nil
 }

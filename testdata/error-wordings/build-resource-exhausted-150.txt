@@ -1,0 +1,33 @@
+$ container --version
+container CLI version 1.5.0
+
+# Taken 2026-10-01 by asking the runtime directly: `container build -t <tag> <dir>` over a two-line
+# Dockerfile (`FROM alpine:3`, `RUN tail /dev/zero`), which takes all the memory the builder has.
+# Exit 1, all output on stderr. The kind in the closing line is `resourceExhausted`; the words after
+# it are the step's own (`cannot allocate memory`).
+
+$ container build -t inu150-bres:test bres
+--- exit code: 1
+--- stdout ---
+--- stderr ---
+#1 [resolver] fetching image...docker.io/library/alpine:3
+#1 DONE 0.0s
+
+#2 [internal] load build definition from Dockerfile
+#2 transferring dockerfile: 68B done
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 198B done
+#3 DONE 0.0s
+
+#4 oci-layout://docker.io/library/alpine:3@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+#4 resolve docker.io/library/alpine:3@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b done
+#4 CACHED
+
+#5 [linux/arm64 1/2] RUN tail /dev/zero
+#5 ERROR: process "/bin/sh -c tail /dev/zero" did not complete successfully: cannot allocate memory
+------
+ > [linux/arm64 1/2] RUN tail /dev/zero:
+------
+Error: resourceExhausted: "failed to solve: ResourceExhausted: process "/bin/sh -c tail /dev/zero" did not complete successfully: cannot allocate memory"

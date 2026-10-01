@@ -2200,6 +2200,7 @@ func validateOne(path string, one interpolated, earlier map[string]any, values *
 		}
 		doc = &parsed
 	}
+	asRead := doc
 	if err := checkTopLevel(path, documentRoot(doc), earlier, override); err != nil {
 		return err
 	}
@@ -2207,13 +2208,27 @@ func validateOne(path string, one interpolated, earlier map[string]any, values *
 		return err
 	}
 	if override {
-		doc = withoutNotGiven(doc)
+		doc = withoutNotGivenBacked(doc, earlier)
 	} else {
 		doc = withoutNotGivenInExtending(doc)
 	}
+	doc = withoutUntakenResources(doc, only)
 	var f composeFile
 	if err := doc.Decode(&f); err != nil {
-		return decodeErr(path, asWritten, blameService(interpolated{node: doc, raw: one.raw}, err))
+		refusal := decodeErr(path, asWritten, blameService(interpolated{node: doc, raw: one.raw}, err))
+		if values == nil || !override {
+			return refusal
+		}
+		// Taking a project down reads what an earlier opossum started on, and that opossum
+		// took a key with nothing after it in a later file as "not given" wherever it stood
+		// (#1589): the refusal is kept for what reports the faults, and the file is read as
+		// it was.
+		*values = append(*values, refusal)
+		doc = withoutNotGiven(asRead)
+		f = composeFile{}
+		if err := doc.Decode(&f); err != nil {
+			return decodeErr(path, asWritten, blameService(interpolated{node: doc, raw: one.raw}, err))
+		}
 	}
 	// The decode has answered for the blocks it reads into a typed shape; what it
 	// took as it came is asked now, so that nothing is said twice.
@@ -2686,7 +2701,7 @@ func documentRoot(doc *yaml.Node) *yaml.Node {
 // compose resolves it: what a file extends is what that file defines.
 // Reports whether anything was resolved.
 func resolveExtendsInTree(where, projectDir string, tree map[string]any, lookup varLookup, values *[]error) (bool, error) {
-	return resolveExtends(where, projectDir, tree, lookup, nil, values)
+	return resolveExtends(where, projectDir, tree, lookup, nil, values, "")
 }
 
 // extendsID names one service of one file on the resolution stack, so that
@@ -2697,7 +2712,13 @@ func extendsID(where, name string) string { return where + "#" + name }
 // resolved, which a service of another file joins. stack entries are
 // extendsIDs; the cycle message shows the names, with the file where it
 // is not this one.
-func resolveExtends(where, projectDir string, tree map[string]any, lookup varLookup, stack []string, values *[]error) (bool, error) {
+//
+// `only`, when it is not empty, is the one service of this file that is taken (the file was reached
+// by another service's `extends: {file: …, service: only}`): its extends is resolved, and the
+// chain of services it extends in turn, and no other service of the file — docker compose reads
+// the rest of the file for nothing but its own errors, and a service that extends a file that is
+// missing, or this file again, is not its business there (#1561, #1516).
+func resolveExtends(where, projectDir string, tree map[string]any, lookup varLookup, stack []string, values *[]error, only string) (bool, error) {
 	services, _ := tree["services"].(map[string]any)
 	touched := false
 	done := map[string]bool{}
@@ -2815,6 +2836,12 @@ func resolveExtends(where, projectDir string, tree map[string]any, lookup varLoo
 		touched = true
 		return nil
 	}
+	if only != "" {
+		if err := resolve(only, stack); err != nil {
+			return false, err
+		}
+		return touched, nil
+	}
 	names := make([]string, 0, len(services))
 	for name := range services {
 		names = append(names, name)
@@ -2874,7 +2901,7 @@ func extendedServiceFromFile(where, name, path, target string, lookup varLookup,
 	// measured: a/two.yml → b/near.yml → c/far.yml reads a/b/c/far.yml,
 	// where the first hop from a -f file counts from the project
 	// directory).
-	if _, err := resolveExtends(path, filepath.Dir(path), tree, lookup, stack, values); err != nil {
+	if _, err := resolveExtends(path, filepath.Dir(path), tree, lookup, stack, values, target); err != nil {
 		return nil, err
 	}
 	services, _ := tree["services"].(map[string]any)
@@ -3733,6 +3760,194 @@ func withoutNotGiven(n *yaml.Node) *yaml.Node {
 		}
 	}
 	return &out
+}
+
+// withoutNotGivenBacked is withoutNotGiven for a later file, with one difference
+// inside a service: a key written with nothing after it is "not given" only where an
+// earlier file gave that key a value. Where none did there is nothing for the key
+// to fall back on, and docker compose refuses the file (measured, v5.5.1: `dns: ~`,
+// `deploy: {mode: ~}` and some forty more keys, rc 1 with no earlier value and rc 0
+// with one), so the key stays and is asked as it is in a single file (#1562).
+func withoutNotGivenBacked(doc *yaml.Node, earlier map[string]any) *yaml.Node {
+	root := documentRoot(doc)
+	if root == nil || root.Kind != yaml.MappingNode {
+		return withoutNotGiven(doc)
+	}
+	services, _ := earlier["services"].(map[string]any)
+	newRoot := withoutNotGiven(root)
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value != "services" || root.Content[i+1].Kind != yaml.MappingNode {
+			continue
+		}
+		written := root.Content[i+1]
+		kept := make([]*yaml.Node, 0, len(written.Content))
+		for j := 0; j+1 < len(written.Content); j += 2 {
+			name, svc := written.Content[j], written.Content[j+1]
+			if isNothing(svc) {
+				continue
+			}
+			// (`extends` read through an alias and a merge key too: `<<: *e`.)
+			if _, extends := nestedNode(*svc, "extends"); extends {
+				// What the extended service gives backs a key too, and is resolved later:
+				// such a service is read as it always was, every nothing "not given".
+				kept = append(kept, name, withoutNotGiven(svc))
+				continue
+			}
+			before, _ := services[name.Value].(map[string]any)
+			kept = append(kept, name, prunedBacked(svc, before, nil))
+		}
+		for k := 0; k+1 < len(newRoot.Content); k += 2 {
+			if newRoot.Content[k].Value == "services" {
+				m := *newRoot.Content[k+1]
+				m.Content = kept
+				newRoot.Content[k+1] = &m
+			}
+		}
+	}
+	if root == doc {
+		return newRoot
+	}
+	out := *doc
+	out.Content = []*yaml.Node{newRoot}
+	return &out
+}
+
+// prunedBacked prunes the nothings of a mapping that an earlier value backs, and
+// leaves the ones that nothing backs where they are.
+func prunedBacked(n *yaml.Node, before map[string]any, path []string) *yaml.Node {
+	if n.Kind != yaml.MappingNode {
+		return withoutNotGiven(n)
+	}
+	out := *n
+	out.Content = make([]*yaml.Node, 0, len(n.Content))
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		k, v := n.Content[i], n.Content[i+1]
+		backing, backed := before[k.Value]
+		backed = backed && backing != nil
+		if backed {
+			backing = longFormOfShort(k.Value, backing)
+		}
+		here := append(append([]string(nil), path...), k.Value)
+		switch {
+		case isNothing(v):
+			if backed && !refusedOverAValue(here) {
+				continue
+			}
+			out.Content = append(out.Content, k, v)
+		case backed:
+			sub, _ := backing.(map[string]any)
+			out.Content = append(out.Content, k, prunedBacked(v, sub, here))
+		default:
+			out.Content = append(out.Content, k, prunedBacked(v, nil, here))
+		}
+	}
+	return &out
+}
+
+// withoutUntakenResources copies a file that is only extended from (`only` names the
+// service taken) without the `deploy.resources` of the services docker compose does not
+// take: it reads none of it there, and a value of the wrong kind in it (`limits: abc`,
+// `limits: {cpus: true}`, `reservations: {memory: ~}`) passes (measured, v5.5.1, 84 forms of
+// `resources` for a service taken and one not) — where it refuses the same in a service
+// taken (#1581). A file read whole is returned as it is.
+func withoutUntakenResources(doc *yaml.Node, only string) *yaml.Node {
+	if only == "" {
+		return doc
+	}
+	root := documentRoot(doc)
+	if root == nil || root.Kind != yaml.MappingNode {
+		return doc
+	}
+	var generic struct {
+		Services map[string]any `yaml:"services"`
+	}
+	if err := doc.Decode(&generic); err != nil {
+		return doc
+	}
+	taken := takenServices(generic.Services, only)
+	newRoot := copyMapping(root)
+	changed := false
+	for i := 0; i+1 < len(newRoot.Content); i += 2 {
+		if newRoot.Content[i].Value != "services" || newRoot.Content[i+1].Kind != yaml.MappingNode {
+			continue
+		}
+		services := copyMapping(newRoot.Content[i+1])
+		for j := 0; j+1 < len(services.Content); j += 2 {
+			svc := services.Content[j+1]
+			if taken[services.Content[j].Value] || svc.Kind != yaml.MappingNode {
+				continue
+			}
+			for k := 0; k+1 < len(svc.Content); k += 2 {
+				deploy := svc.Content[k+1]
+				if svc.Content[k].Value != "deploy" || deploy.Kind != yaml.MappingNode || !hasKey(deploy, "resources") {
+					continue
+				}
+				kept := copyMapping(deploy)
+				kept.Content = kept.Content[:0]
+				for m := 0; m+1 < len(deploy.Content); m += 2 {
+					if deploy.Content[m].Value != "resources" {
+						kept.Content = append(kept.Content, deploy.Content[m], deploy.Content[m+1])
+					}
+				}
+				svcCopy := copyMapping(svc)
+				svcCopy.Content[k+1] = kept
+				services.Content[j+1] = svcCopy
+				svc = svcCopy
+				changed = true
+			}
+		}
+		newRoot.Content[i+1] = services
+	}
+	if !changed {
+		return doc
+	}
+	if root == doc {
+		return newRoot
+	}
+	out := *doc
+	out.Content = []*yaml.Node{newRoot}
+	return &out
+}
+
+// refusedOverAValue names the keys of a service that docker compose refuses with
+// nothing after them even where an earlier file gave the key a value (measured, v5.5.1,
+// `config -q`, 119 keys of a service, nested ones included): `depends_on`, `logging` and
+// `networks` as a whole, `healthcheck.test`, `logging.driver`, and each entry of
+// `ulimits`. Every other key measured is "not given" there (#1589; `models` and an `extra_hosts` entry are refused by docker compose whatever an earlier file holds, and are not asked here).
+func refusedOverAValue(path []string) bool {
+	switch len(path) {
+	case 1:
+		return path[0] == "depends_on" || path[0] == "logging" || path[0] == "networks"
+	case 2:
+		return (path[0] == "healthcheck" && path[1] == "test") || (path[0] == "logging" && path[1] == "driver") || path[0] == "ulimits"
+	}
+	return false
+}
+
+// longFormOfShort is what an earlier file's short form says in the long form a later
+// file may write a field of: a dependency listed by name has its condition
+// (`depends_on: [db]` is `{db: {condition: service_started}}`), and a build given as
+// a path has its context (`build: .` is `{context: .}`). Measured, v5.5.1: a later
+// `condition: ~` or `context: ~` over either is "not given" (rc 0).
+func longFormOfShort(key string, backing any) any {
+	switch b := backing.(type) {
+	case []any:
+		if key != "depends_on" {
+			return backing
+		}
+		long := make(map[string]any, len(b))
+		for _, name := range b {
+			if s, ok := name.(string); ok {
+				long[s] = map[string]any{"condition": "service_started"}
+			}
+		}
+		return long
+	case string:
+		if key == "build" {
+			return map[string]any{"context": b}
+		}
+	}
+	return backing
 }
 
 // isNothing reports a value written with nothing after the key, through an

@@ -247,6 +247,9 @@ func configHash(o runtime.RunOptions) string {
 	write(o.Command...)
 	write("entrypoint")
 	write(o.Entrypoint...)
+	if o.EntrypointCleared {
+		write("entrypoint-cleared")
+	}
 	// Only contribute when set, so existing services keep their hash and aren't
 	// recreated on upgrade — but toggling any of these does recreate.
 	if o.MacAddress != "" {
@@ -1812,8 +1815,8 @@ func (o *Orchestrator) startupOrder() ([]string, error) {
 
 // startupOrderTolerant is startupOrder without the cycle refusal — for
 // commands that only act on containers already there (ps, images, logs,
-// stop, kill, down, destroy, and the whole-project path of restart and
-// stats): they do not start anything in dependency order, so a cycle in the
+// stop, kill, down, destroy, and the whole-project path of restart, stats
+// and stats --host): they do not start anything in dependency order, so a cycle in the
 // file must not also leave a project they could otherwise act on stuck
 // (#1093). up, run and config still go through startupOrder.
 func (o *Orchestrator) startupOrderTolerant() ([]string, error) {
@@ -2472,34 +2475,35 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 			env = append(append([]string(nil), env...), "OPOSSUM_MCP_CONFIG="+mcpMountTarget)
 		}
 		runOpts := runtime.RunOptions{
-			Name:       cname,
-			Image:      image,
-			Platform:   svc.Platform,
-			Networks:   svcNets,
-			DNSDomain:  dnsDomain,
-			DNSSearch:  dnsSearch,
-			MacAddress: svc.MacAddress,
-			Env:        env,
-			Ports:      svc.Ports,
-			Volumes:    vols,
-			Tmpfs:      tmpfsMounts(svc.Tmpfs),
-			Command:    svc.Command,
-			Entrypoint: svc.Entrypoint,
-			Labels:     append(append([]string(nil), svc.Labels...), projectLabel+"="+o.Project.Name),
-			Memory:     mem,
-			CPUs:       cpu,
-			Detach:     detach,
-			SSH:        svc.SSH,
-			User:       svc.User,
-			WorkingDir: svc.WorkingDir,
-			Init:       svc.Init,
-			ReadOnly:   svc.ReadOnly,
-			TTY:        svc.TTY,
-			GID:        gidOf(svc),
-			ShmSize:    string(svc.ShmSize),
-			Ulimits:    svc.Ulimits.Args(),
-			CapAdd:     svc.CapAdd,
-			CapDrop:    svc.CapDrop,
+			Name:              cname,
+			Image:             image,
+			Platform:          svc.Platform,
+			Networks:          svcNets,
+			DNSDomain:         dnsDomain,
+			DNSSearch:         dnsSearch,
+			MacAddress:        svc.MacAddress,
+			Env:               env,
+			Ports:             svc.Ports,
+			Volumes:           vols,
+			Tmpfs:             tmpfsMounts(svc.Tmpfs),
+			Command:           svc.Command,
+			Entrypoint:        svc.Entrypoint,
+			EntrypointCleared: svc.EntrypointCleared,
+			Labels:            append(append([]string(nil), svc.Labels...), projectLabel+"="+o.Project.Name),
+			Memory:            mem,
+			CPUs:              cpu,
+			Detach:            detach,
+			SSH:               svc.SSH,
+			User:              svc.User,
+			WorkingDir:        svc.WorkingDir,
+			Init:              svc.Init,
+			ReadOnly:          svc.ReadOnly,
+			TTY:               svc.TTY,
+			GID:               gidOf(svc),
+			ShmSize:           string(svc.ShmSize),
+			Ulimits:           svc.Ulimits.Args(),
+			CapAdd:            svc.CapAdd,
+			CapDrop:           svc.CapDrop,
 		}
 		hash := configHash(runOpts)
 		runOpts.Labels = append(runOpts.Labels, configHashLabel+"="+hash)
@@ -7214,13 +7218,13 @@ func (o *Orchestrator) resolveServices(services []string) ([]string, error) {
 }
 
 // resolveServicesTolerant is resolveServices for the commands that only touch
-// containers already there — logs, stop, kill, restart and stats — which do
+// containers already there — logs, stop, kill, restart, stats and stats --host — which do
 // not start anything in dependency order, so a cycle among the active
 // services is not theirs to refuse over when given no names (#1093; docker
 // compose does not refuse for these either, given `-p` and left to discover
 // the file, measured on v5.5.1). pull and build still refuse (docker compose
 // does too, measured); import still refuses too, though it has no docker
-// compose equivalent to measure against. Unlike the other five, a build
+// compose equivalent to measure against. Unlike the others, a build
 // service's image is something these bring into being, close enough to
 // starting something that the same reasoning does not carry over — and that
 // was measured, not assumed, for pull and build.
@@ -7665,22 +7669,23 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 		env = append(append([]string(nil), env...), "OPOSSUM_MCP_CONFIG="+mcpMountTarget)
 	}
 	runErr := o.rt.Run(runtime.RunOptions{
-		Name:       cname,
-		Image:      image,
-		Platform:   svc.Platform,
-		Networks:   svcNets,
-		DNSDomain:  dnsDomain,
-		DNSSearch:  dnsSearch,
-		MacAddress: svc.MacAddress,
-		Env:        env,
-		Volumes:    vols,
-		Tmpfs:      tmpfsMounts(svc.Tmpfs),
-		Command:    cmd,
-		Entrypoint: svc.Entrypoint,
-		Labels:     append(append([]string(nil), svc.Labels...), projectLabel+"="+o.Project.Name),
-		Memory:     mem,
-		CPUs:       cpu,
-		Detach:     false, // foreground / attached
+		Name:              cname,
+		Image:             image,
+		Platform:          svc.Platform,
+		Networks:          svcNets,
+		DNSDomain:         dnsDomain,
+		DNSSearch:         dnsSearch,
+		MacAddress:        svc.MacAddress,
+		Env:               env,
+		Volumes:           vols,
+		Tmpfs:             tmpfsMounts(svc.Tmpfs),
+		Command:           cmd,
+		Entrypoint:        svc.Entrypoint,
+		EntrypointCleared: svc.EntrypointCleared,
+		Labels:            append(append([]string(nil), svc.Labels...), projectLabel+"="+o.Project.Name),
+		Memory:            mem,
+		CPUs:              cpu,
+		Detach:            false, // foreground / attached
 		// Keep stdin connected (docker compose run parity): piped input must
 		// reach the process, so stdin-driven tools (e.g. MCP servers speaking
 		// JSON-RPC over stdio) work as one-offs.

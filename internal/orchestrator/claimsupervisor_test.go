@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -18,7 +19,9 @@ func TestClaimsMadeAtOnceHaveOneWinner(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	const rounds = 300
 	bad := 0
+	var firstErr atomic.Value // the first error of a round that was not "already supervised"
 	for round := 0; round < rounds; round++ {
+		firstErr.Store("")
 		project := "claim" + string(rune('a'+round%26)) + string(rune('a'+round/26))
 		var wins int32
 		var wg sync.WaitGroup
@@ -30,6 +33,8 @@ func TestClaimsMadeAtOnceHaveOneWinner(t *testing.T) {
 				<-start
 				if err := ClaimSupervisor(project); err == nil {
 					atomic.AddInt32(&wins, 1)
+				} else if !ErrAlreadySupervised(err) {
+					firstErr.CompareAndSwap("", err.Error())
 				}
 			}()
 		}
@@ -37,6 +42,13 @@ func TestClaimsMadeAtOnceHaveOneWinner(t *testing.T) {
 		wg.Wait()
 		if wins != 1 {
 			bad++
+			if bad == 1 {
+				t.Logf("round %d (%s): %d claims won; the others said: %v", round, project, wins, firstErr.Load())
+				if pidFile, err := supervisorPidFile(project); err == nil {
+					b, rerr := os.ReadFile(pidFile)
+					t.Logf("its pid file (%v): %q; its token now is %q; SupervisorPID = %d", rerr, b, processStartedAt(os.Getpid()), SupervisorPID(project))
+				}
+			}
 		}
 	}
 	if bad > 0 {
@@ -206,5 +218,163 @@ func TestAReaderNeverSeesAClaimHalfWritten(t *testing.T) {
 	wg.Wait()
 	if n := atomic.LoadInt32(&torn); n > 0 {
 		t.Errorf("a reader saw a claim that was not whole %d times", n)
+	}
+}
+
+// usePsReading puts a `ps` on PATH that answers with the next of the given start times on each
+// call, and a /proc with no such process (so a token comes from `ps`), or, with procStat set,
+// a /proc whose stat file for this process says so.
+func usePsReading(t *testing.T, procStat string, readings ...string) {
+	t.Helper()
+	proc := t.TempDir()
+	if procStat != "" {
+		dir := filepath.Join(proc, strconv.Itoa(os.Getpid()))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "stat"), []byte(procStat), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := procRoot
+	procRoot = proc
+	t.Cleanup(func() { procRoot = old })
+	bin := t.TempDir()
+	count := filepath.Join(t.TempDir(), "count")
+	script := "#!/bin/sh\nn=$(cat " + count + " 2>/dev/null || echo 0)\necho $((n+1)) > " + count + "\ncase $n in\n"
+	for i, r := range readings {
+		script += strconv.Itoa(i) + ") echo '" + r + "';;\n"
+	}
+	script += "*) echo '" + readings[len(readings)-1] + "';;\nesac\n"
+	if err := os.WriteFile(filepath.Join(bin, "ps"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// The start time `ps` gives for one process can move by a second between two calls (a
+// clock being corrected: the boot time it is counted from moves), and a claim must not read
+// its own holder as gone because of it (#1610). A /proc stat file does not move, and the
+// token comes from it where it is. Each row makes two claims one after the other.
+func TestAMovingStartTimeDoesNotLetASecondClaimTakeTheFirst(t *testing.T) {
+	// a stat line whose command name holds spaces and parentheses; field 22 is 123456.
+	stat := "4242 (a) b (c d) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 123456 24 25\n"
+	cases := []struct {
+		name     string
+		procStat string
+		ps       []string
+	}{
+		{"from /proc, whatever ps says", stat, []string{"Thu Oct 1 17:46:22 2026", "Thu Oct 1 17:46:23 2026", "Thu Oct 1 17:46:21 2026"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			usePsReading(t, c.procStat, c.ps...)
+			if err := ClaimSupervisor("moving"); err != nil {
+				t.Fatalf("the first claim: %v", err)
+			}
+			if err := ClaimSupervisor("moving"); !ErrAlreadySupervised(err) {
+				t.Fatalf("the second claim = %v, want it refused as already supervised", err)
+			}
+		})
+	}
+}
+
+// The token is field 22 counted from the last ")" of the line.
+func TestTheProcTokenIsFieldTwentyTwo(t *testing.T) {
+	usePsReading(t, "1 (x) y) z (w) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 777 24\n", "unused")
+	if got, want := processStartedAt(os.Getpid()), "proc-"; got != want+"777" {
+		t.Fatalf("processStartedAt = %q, want %q", got, want+"777")
+	}
+}
+
+// A pid file a version that used `ps` wrote (no prefix) is still read with `ps`, so a running
+// supervisor of that version is still found by this one.
+func TestAPidFileFromBeforeTheProcTokenIsReadWithPs(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	usePsReading(t, "", "Thu Oct 1 17:46:22 2026")
+	pidFile, err := supervisorPidFile("legacy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(pidFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	line := strconv.Itoa(os.Getpid()) + " Thu-Oct-1-17:46:22-2026\n"
+	if err := os.WriteFile(pidFile, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := SupervisorPID("legacy"); got != os.Getpid() {
+		t.Fatalf("SupervisorPID = %d, want %d", got, os.Getpid())
+	}
+}
+
+// A stat line too short to have a start tick, or with no ")", gives no /proc token (and is no
+// panic): the token then comes from `ps`.
+func TestAShortProcStatFallsBackToPs(t *testing.T) {
+	for name, stat := range map[string]string{
+		"too few fields": "1 (x) S 1 2 3\n",
+		"no parenthesis": "1 x S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 777 24 25\n",
+		"empty":          "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			usePsReading(t, stat, "Thu Oct 1 17:46:22 2026")
+			if got, want := processStartedAt(os.Getpid()), "Thu-Oct-1-17:46:22-2026"; got != want {
+				t.Fatalf("processStartedAt = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// A pid file whose /proc token is not the one the process has now is not that process: the
+// pid was reused. Read as held, StopSupervisor would signal a process that is not ours. One
+// row per way a token can wrongly match.
+func TestAProcTokenThatIsNotTheProcessesIsAReusedPid(t *testing.T) {
+	stat := "1 (x) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 123456 24 25\n"
+	for name, token := range map[string]string{
+		"another tick":                "proc-1",
+		"a prefix of the tick":        "proc-12345",
+		"the tick with a tail":        "proc-1234567",
+		"no tick at all":              "proc-",
+		"the same tick without a tag": "123456",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			usePsReading(t, stat, "Thu Oct 1 17:46:22 2026")
+			writePidFile(t, "reused", strconv.Itoa(os.Getpid())+" "+token+"\n")
+			if got := SupervisorPID("reused"); got != 0 {
+				t.Fatalf("SupervisorPID = %d for the token %q, want 0 (not the process)", got, token)
+			}
+		})
+	}
+	t.Run("the token it has", func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		usePsReading(t, stat, "Thu Oct 1 17:46:22 2026")
+		writePidFile(t, "same", strconv.Itoa(os.Getpid())+" proc-123456\n")
+		if got := SupervisorPID("same"); got != os.Getpid() {
+			t.Fatalf("SupervisorPID = %d, want %d", got, os.Getpid())
+		}
+	})
+	t.Run("no stat for the process", func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		usePsReading(t, "", "Thu Oct 1 17:46:22 2026")
+		writePidFile(t, "gone", strconv.Itoa(os.Getpid())+" proc-\n")
+		if got := SupervisorPID("gone"); got != 0 {
+			t.Fatalf("SupervisorPID = %d for a proc token with no /proc entry, want 0", got)
+		}
+	})
+}
+
+func writePidFile(t *testing.T, project, content string) {
+	t.Helper()
+	pidFile, err := supervisorPidFile(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(pidFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pidFile, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }

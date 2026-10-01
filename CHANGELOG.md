@@ -6,6 +6,53 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.41.0] - 2026-10-01
+
+### Changed
+
+- Checked against Apple `container` 1.5.0 on a real runtime: `up`, `ps`, `images`, `doctor`, `down` and `config` behave as on 1.4.1, with no exit code changes and no JSON keys gone. The only wording change opossum could see is `container images ls` (plural) now saying `unknown command 'images'`, which opossum does not rely on. The README and the compatibility notes now name 1.5.0 as the verified version.
+
+### Fixed
+
+- `opossum stats --host` no longer refuses a file whose active services form a
+  `depends_on` cycle: like `stats`, it only reads containers that are already there.
+  `up`, `run` and the other commands that put the services in order still refuse it.
+- In a file that is only extended from, a service that docker compose does not take is no longer refused for a value of the wrong kind in the keys docker compose asks nothing of there — `hostname`, `container_name`, `use_api_socket`, `attach`, `logging`, `blkio_config`, `extra_hosts`, `security_opt` and some thirty more: docker compose reads them as they are. The keys it reads into a type before it knows whether a service is taken (`ports`, `volumes`, `build`, `depends_on`, `env_file`, the numbers and booleans it casts) are still asked there, a few keys the loader reads itself (`command`, `image`, `user`, …) are still refused for a value of the wrong kind, and nothing changes for the service that is taken.
+- When a service extends a service of another file (`extends: {file: …, service: …}`),
+  only that service, and the services of the same file it extends in turn, are now read
+  for their own `extends`. A file that names itself as the file to extend from
+  (`extends: {file: compose.yaml, service: base}` inside `compose.yaml`) is no longer
+  refused as a cycle, and another service of the extended file may extend a file that is
+  missing, a service that is not there, or a file holding a number docker compose cannot
+  read (`.inf`): docker compose reads none of that. A cycle in the taken chain, and a
+  taken chain that runs into a missing file or service, are still refused.
+- A key a later `-f` file writes with nothing after it (`dns:`, `hostname: ~`,
+  `deploy: {mode: ~}` …) is refused when no earlier file gave that key a value, as
+  docker compose refuses it. Where an earlier file did give one, the key is still read
+  as "not given" and the earlier value stands — except for `depends_on`, `logging` and
+  `networks`, and for `healthcheck.test`, `logging.driver` and each entry of `ulimits`,
+  which docker compose refuses there too and so does opossum. Stopping, killing and taking
+  a project down still read such a file and warn.
+- `attach` written as a string that reads as no boolean (`attach: "7"`, `attach: abc`) on a service that docker compose does not take from a file only extended from is no longer refused; docker compose reads it there. It is still refused on the service that is taken and on the services it extends in turn, as before.
+- A file that another service `extends` from is now refused for a `cpus` that reads as no
+  number (`cpus: abc`, `"0x2"`, `" 2"`) in a service that is not the one taken, as docker
+  compose refuses it there; `cpus: "1e2"` and `"1_0"` read, there and everywhere.
+- A file that another file extends from is no longer refused for a value of the wrong
+  kind in the `deploy.resources` of a service that is not the one taken (`limits: abc`,
+  `limits: {cpus: true}`, `reservations: {memory: ~}` …): docker compose reads none of it
+  there. The service taken, and the services it extends in turn, keep their checks.
+- A key of a service's `deploy`, `build`, `healthcheck`, `networks` entry or `depends_on`
+  entry written with nothing after it (`deploy: {labels: }`, `build: {network: }`,
+  `healthcheck: {disable: }`, a network's `aliases:`) is now refused where docker compose
+  refuses it, in a single file as in a later one with no earlier value for it. A label, a build
+  argument and a network entry with nothing after them are still read, as docker compose reads
+  them. Stopping, killing and taking a project down still read such a file and warn.
+- On Linux, a project's watching supervisor is now recognised by its start tick from `/proc` rather than the start time `ps` prints. On a machine whose clock is being corrected (WSL2, for one) that time can read one second apart for the same process, which made a second supervisor take a live claim over as if it were stale.
+- A build that fails because the builder ran out of memory (`Error: resourceExhausted: …`, as Apple `container` 1.5.0 reports it) now gets the hint about giving the builder more resources. Before, only the generic line about importing from Docker was printed: the hint matched other wordings (`rpc error: code = Unavailable`, `error reading from server: EOF`), not this one.
+- `config` now prints `entrypoint: []` for a service that writes an empty entrypoint (`entrypoint: []` or `entrypoint: ""`), as docker compose does. It used to leave the key out, so the printed file did not say that the image's own entrypoint was meant to be taken away. A later file's empty entrypoint over an earlier one's words, an alias of an empty list, a merge key and an `extends` of a service that writes one are read the same way; a null still removes the key.
+- `entrypoint: []` (or `""`) now takes the image's own ENTRYPOINT away when the service is started or run, as docker compose does. It used to be ignored, so the image's entrypoint ran with the command after it. `container run` has no way to say "no entrypoint" (an empty `--entrypoint` leaves the image's in place, measured on `container` 1.5.0), so opossum makes the command's first word the entrypoint — or, when the service has no `command`, the first word of the image's own CMD, pulling the image first if it is not here yet to read it. A service with neither is refused, as docker compose refuses it. A running service that writes `entrypoint: []` — one that was started by an earlier version too — is recreated on the next `up`. A command whose first word is empty is refused. `entrypoint: [""]` (a list of one empty word) is not this: it is passed on as it is, and the service does not start, because `container` 1.5.0 reads an empty `--entrypoint=` as taking the next word on the line for its value.
+- `${VAR:+word}` and `${VAR+word}` — "word when the variable is set" — are now read, as docker compose reads them; they were refused as `invalid variable name`. `${VAR:+word}` gives the word when `VAR` is set and not empty and nothing otherwise, `${VAR+word}` when `VAR` is set at all (even to nothing); the word may itself hold `${…}` references and is read only when it is taken, so a `${F:?…}` in it asks for `F` only then. A line such as `command: ["serve", "${TLS:+--tls}"]` loads.
+
 ## [0.40.1] - 2026-10-01
 
 ### Fixed
@@ -2675,7 +2722,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.40.1...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.41.0...HEAD
+[0.41.0]: https://github.com/suruseas/opossum/compare/v0.40.1...v0.41.0
 [0.40.1]: https://github.com/suruseas/opossum/compare/v0.40.0...v0.40.1
 [0.40.0]: https://github.com/suruseas/opossum/compare/v0.39.0...v0.40.0
 [0.39.0]: https://github.com/suruseas/opossum/compare/v0.38.0...v0.39.0

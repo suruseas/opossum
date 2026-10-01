@@ -27,7 +27,9 @@ resources (2 CPUs / 2 GB). Since each running service is its own VM too, a heavy
 build can starve.
 
 - **A build is very slow, runs out of memory, or fails with `Unavailable` /
-  `EOF`** (e.g. a large multi-stage image, or a big `apt-get install`): give the
+  `EOF` or `resourceExhausted` / `cannot allocate memory`** (e.g. a large
+  multi-stage image, or a big `apt-get install`; `container` 1.5.0 ends a build
+  that took all the builder's memory with `Error: resourceExhausted: …`): give the
   builder more resources. It's a shared VM, so this is a one-time setup, not
   per-project.
   ```sh

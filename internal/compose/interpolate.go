@@ -996,11 +996,11 @@ func foldLineContinuations(expr string) string {
 }
 
 // expandBraced resolves the inside of a `${...}` reference. A default value (the
-// argument of `:-`/`-`/`:?`/`?`) is itself interpolated, so a nested reference in
+// argument of `:-`/`-`/`:?`/`?`/`:+`/`+`) is itself interpolated, so a nested reference in
 // the default (`${A:-${B:-x}}`) resolves too.
 func expandBraced(expr string, lookup varLookup) (string, error) {
 	expr = foldLineContinuations(expr)
-	// Find the operator (:-, -, :?, ?) separating name from the argument. Scan only
+	// Find the operator (:-, -, :?, ?, :+, +) separating name from the argument. Scan only
 	// up to the first nested `${…}` so an operator inside a nested default isn't
 	// mistaken for this reference's operator.
 	for idx := 0; idx < len(expr); idx++ {
@@ -1008,7 +1008,7 @@ func expandBraced(expr string, lookup varLookup) (string, error) {
 			break // the rest is a nested reference; this one has no operator before it
 		}
 		ch := expr[idx]
-		if ch == '-' || ch == '?' {
+		if ch == '-' || ch == '?' || ch == '+' {
 			name := expr[:idx]
 			colon := false
 			if idx > 0 && expr[idx-1] == ':' {
@@ -1026,6 +1026,16 @@ func expandBraced(expr string, lookup varLookup) (string, error) {
 					return interpolateStr(arg, lookup) // resolve nested refs in the default
 				}
 				return val, nil
+			}
+			if ch == '+' {
+				// The other way round: the word is what the variable being set (and, with the
+				// colon, not empty) gives, and nothing is what it being missing gives. The word
+				// is only read when it is taken, so a `${F:?…}` in it is only asked then — as
+				// docker compose does (measured, v5.5.1).
+				if missing {
+					return "", nil
+				}
+				return interpolateStr(arg, lookup)
 			}
 			// ch == '?': required
 			if missing {

@@ -130,10 +130,13 @@ func pidFlags(pids []string) []string {
 // the Mac. The host column is host-derived and approximate (see HostFootprinter);
 // a service whose VM can't be mapped shows "—" rather than failing the command.
 func (o *Orchestrator) StatsHost(services []string) error {
-	// Unlike Stats, this stays on resolveServices (strict): it is opossum's
-	// own command, with no docker compose equivalent to measure a tolerant
-	// split against, so #1093's reasoning is not applied here on a guess.
-	targets, err := o.resolveServices(services)
+	// Like Stats, this only reads what is already there, so a cycle among the active
+	// services does not stop it (#1430). It has no docker compose counterpart to measure
+	// this against, so the grounds are two, and kept apart: the nearest command,
+	// `docker compose stats`, goes on through such a cycle (measured, v5.5.1, with `-p` and
+	// with or without `-f`, bare and with a service named), and opossum's own rule that a
+	// command that only reads containers already there goes on (#1093).
+	targets, err := o.resolveServicesTolerant(services)
 	if err != nil {
 		return err
 	}

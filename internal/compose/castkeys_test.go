@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -1187,7 +1188,11 @@ func TestWhatV040AddedToCastsAndBoundsIsAskedForLessOfAServiceDockerDoesNotTake(
 		{"cpu_percent: 1.5", "    cpu_percent: \"1.5\"\n", false},
 		{"cpu_percent: abc", "    cpu_percent: abc\n", true},
 		{"scale: two", "    scale: two\n", true},
+		{"attach: 7", "    attach: \"7\"\n", false},
+		{"attach: abc", "    attach: abc\n", false},
 		{"privileged: 7", "    privileged: \"7\"\n", true},
+		{"oom_kill_disable: 7", "    oom_kill_disable: \"7\"\n", true},
+		{"stdin_open: abc", "    stdin_open: abc\n", true},
 		{"pids_limit: abc", "    pids_limit: abc\n", true},
 	} {
 		for _, role := range []struct {
@@ -1333,6 +1338,12 @@ func TestDeployReplicasReadsAsAWholeNumber(t *testing.T) {
 		{"2", false}, {`"2"`, false}, {"2.0", false}, {"!!float 2", false}, {"0", false}, {`"0"`, false},
 		{"99999999999999999999", false}, {`"+2"`, false}, {"1e2", false},
 		{`"3000000000"`, false}, {`"9223372036854775807"`, false}, // past 32 bits, within int64
+		// YAML's other spellings of a whole number, and strings that are not one (#1555; 14 forms
+		// measured against docker compose v5.5.1): 0o2, 2_0, +2, 02, -0, 0b10, 1_000 and the strings
+		// "02" and "-0" are read; "2.0", "2 ", a full-width "３", 0o8 and "0o2" as a string are not.
+		{"0o2", false}, {"2_0", false}, {"+2", false}, {"02", false}, {"-0", false}, {"0b10", false},
+		{`"02"`, false}, {`"-0"`, false}, {"1_000", false},
+		{`"2.0"`, true}, {`"2 "`, true}, {`"３"`, true}, {"0o8", true}, {`"0o2"`, true},
 		{`"two"`, true}, {`""`, true}, {`"1e2"`, true}, {"0x2", false}, {`"0x2"`, true}, {`"1_0"`, true}, {`" 2"`, true},
 		{"1.5", true}, {"true", true}, {"~", true}, {"[2]", true}, {"{a: 1}", true},
 		{`"99999999999999999999"`, true},
@@ -1654,4 +1665,233 @@ func TestStartsWithBang(t *testing.T) {
 			}
 		})
 	}
+}
+
+// withoutEmptyName gives back a copy: the mapping it is given keeps its entry of no characters, so
+// what the caller reads next (the service's own value, asked again as a taken service would be)
+// is what was written (#1568).
+func TestWithoutEmptyNameLeavesItsArgumentAlone(t *testing.T) {
+	in := map[string]any{"": 1, "a": 2}
+	out, _ := withoutEmptyName(in).(map[string]any)
+	if _, has := out[""]; has || out["a"] != 2 {
+		t.Errorf("withoutEmptyName(%v) = %v, want the entry of no characters gone and the rest kept", in, out)
+	}
+	if _, has := in[""]; !has || len(in) != 2 {
+		t.Errorf("the mapping given was changed to %v, want it left as it was", in)
+	}
+	plain := map[string]any{"a": 2}
+	if got, _ := withoutEmptyName(plain).(map[string]any); len(got) != 1 || got["a"] != 2 {
+		t.Errorf("a mapping with no such entry came back as %v", got)
+	}
+	if got := withoutEmptyName("text"); got != "text" {
+		t.Errorf("a value that is no mapping came back as %v", got)
+	}
+}
+
+// In a file that is only extended from, what is read of a service is what the extends takes: the
+// named service and the chain it extends in turn. A service of that file that extends a file that
+// is missing, a service that is not there, a service that extends it back, or this very file again
+// is not read for its extends (#1561, #1516; measured, v5.5.1, `config -q`, 11 forms); the named
+// one, and the chain it runs into, are, and a cycle among them is refused as before.
+func TestOnlyTheTakenChainOfAnExtendedFileHasItsExtendsResolved(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		files  map[string]string // the first is the file read; the others sit beside it
+		refuse bool
+		why    string // what the refusal says, when it refuses
+	}{
+		{"this file, named as itself", map[string]string{"compose.yaml": "services:\n  c:\n    image: alpine\n  a:\n    extends: {file: compose.yaml, service: c}\n"}, false, ""},
+		{"this file, named with ./", map[string]string{"compose.yaml": "services:\n  c:\n    image: alpine\n  a:\n    extends: {file: ./compose.yaml, service: c}\n"}, false, ""},
+		{"this file, two steps", map[string]string{"compose.yaml": "services:\n  c:\n    image: alpine\n  b:\n    extends: {file: compose.yaml, service: c}\n  a:\n    extends: {file: compose.yaml, service: b}\n"}, false, ""},
+		{"this file, a cycle of two", map[string]string{"compose.yaml": "services:\n  a:\n    extends: {file: compose.yaml, service: b}\n  b:\n    extends: {file: compose.yaml, service: a}\n"}, true, "extends forms a cycle"},
+		{"this file, a service that extends itself", map[string]string{"compose.yaml": "services:\n  a:\n    extends: {file: compose.yaml, service: a}\n"}, true, "extends forms a cycle"},
+		{"a service not taken extends a missing file", map[string]string{
+			"compose.yaml": "services:\n  w:\n    extends: {file: base.yaml, service: b}\n",
+			"base.yaml":    "services:\n  b:\n    image: alpine\n  other:\n    extends: {file: nope.yaml, service: x}\n"}, false, ""},
+		{"a service not taken extends a service that is not there", map[string]string{
+			"compose.yaml": "services:\n  w:\n    extends: {file: base.yaml, service: b}\n",
+			"base.yaml":    "services:\n  b:\n    image: alpine\n  other:\n    extends: nothing\n"}, false, ""},
+		{"services not taken that extend each other", map[string]string{
+			"compose.yaml": "services:\n  w:\n    extends: {file: base.yaml, service: b}\n",
+			"base.yaml":    "services:\n  b:\n    image: alpine\n  p:\n    extends: q\n  q:\n    extends: p\n"}, false, ""},
+		{"a service not taken extends a file with an infinity", map[string]string{
+			"compose.yaml": "services:\n  w:\n    extends: {file: base.yaml, service: b}\n",
+			"base.yaml":    "services:\n  b:\n    image: alpine\n  other:\n    extends: {file: c.yaml, service: cc}\n",
+			"c.yaml":       "services:\n  cc:\n    image: alpine\n    x-a: .inf\n"}, false, ""},
+		// Two files down: compose.yaml takes `b` of base.yaml, which takes `m` of mid.yaml; the
+		// services of mid.yaml that are not taken are not read for their extends either (#1575).
+		{"a service not taken, two files down, extends a missing file", map[string]string{
+			"compose.yaml": "services:\n  w:\n    extends: {file: base.yaml, service: b}\n",
+			"base.yaml":    "services:\n  b:\n    extends: {file: mid.yaml, service: m}\n",
+			"mid.yaml":     "services:\n  m:\n    image: alpine\n  other:\n    extends: {file: nope.yaml, service: x}\n"}, false, ""},
+		{"services not taken, two files down, that extend each other", map[string]string{
+			"compose.yaml": "services:\n  w:\n    extends: {file: base.yaml, service: b}\n",
+			"base.yaml":    "services:\n  b:\n    extends: {file: mid.yaml, service: m}\n",
+			"mid.yaml":     "services:\n  m:\n    image: alpine\n  p:\n    extends: q\n  q:\n    extends: p\n"}, false, ""},
+		{"a service not taken, two files down, extends a file with an infinity", map[string]string{
+			"compose.yaml": "services:\n  w:\n    extends: {file: base.yaml, service: b}\n",
+			"base.yaml":    "services:\n  b:\n    extends: {file: mid.yaml, service: m}\n",
+			"mid.yaml":     "services:\n  m:\n    image: alpine\n  other:\n    extends: {file: c.yaml, service: cc}\n",
+			"c.yaml":       "services:\n  cc:\n    image: alpine\n    x-a: .inf\n"}, false, ""},
+		{"the taken service, two files down, extends a missing file", map[string]string{
+			"compose.yaml": "services:\n  w:\n    extends: {file: base.yaml, service: b}\n",
+			"base.yaml":    "services:\n  b:\n    extends: {file: mid.yaml, service: m}\n",
+			"mid.yaml":     "services:\n  m:\n    extends: {file: nope.yaml, service: x}\n"}, true, "cannot be read"},
+		{"the taken service extends a missing file", map[string]string{
+			"compose.yaml": "services:\n  w:\n    extends: {file: base.yaml, service: b}\n",
+			"base.yaml":    "services:\n  b:\n    extends: {file: nope.yaml, service: x}\n"}, true, "cannot be read"},
+		{"the taken chain runs into a service that is not there", map[string]string{
+			"compose.yaml": "services:\n  w:\n    extends: {file: base.yaml, service: b}\n",
+			"base.yaml":    "services:\n  b:\n    extends: c\n  c:\n    extends: nothing\n"}, true, "does not define"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			names := make([]string, 0, len(tc.files))
+			for n := range tc.files {
+				names = append(names, n)
+			}
+			sort.Strings(names)
+			for _, n := range names {
+				if err := os.WriteFile(filepath.Join(dir, n), []byte(tc.files[n]), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, err := Load(filepath.Join(dir, "compose.yaml"))
+			if tc.refuse && (err == nil || !strings.Contains(err.Error(), tc.why)) {
+				t.Errorf("docker compose refuses this (%q), got err=%v", tc.why, err)
+			}
+			if !tc.refuse && err != nil {
+				t.Errorf("docker compose reads this, and it was refused: %v", err)
+			}
+		})
+	}
+}
+
+// `cpus` of a service docker compose does not take is cast there, by strconv.ParseFloat as it is: a
+// string that does not read is refused, underscores and all (#1566; measured, v5.5.1, `config -q`, 13 forms),
+// and one that reads is not. The service taken is read by the decode, as before.
+func TestCpusOfAServiceDockerDoesNotTakeIsCast(t *testing.T) {
+	for _, tc := range []struct {
+		value  string
+		refuse bool
+	}{
+		{`"abc"`, true}, {`""`, true}, {`"0x2"`, true}, {`" 2"`, true},
+		{`"_1"`, true}, {`"1_"`, true}, {`"1__0"`, true}, {`"1_.5"`, true}, {`"in_f"`, true},
+		{`"1.5"`, false}, {`"1e2"`, false}, {`"1_0"`, false}, {`"1e1_0"`, false}, {`"0x1_0p2"`, false},
+		{`"inf"`, false}, {`"NaN"`, false}, {`".5"`, false}, {`"0"`, false}, {"2", false}, {"1.5", false},
+		{`"1e39"`, false}, // past float32, inside float64: docker reads it with bitSize 64 (#1580)
+		{"true", false},   // a bool is left to the decode, which a service not taken does not go through
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "base.yaml"), []byte("services:\n  b:\n    image: alpine\n  other:\n    image: alpine\n    cpus: "+tc.value+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			main := filepath.Join(dir, "compose.yaml")
+			if err := os.WriteFile(main, []byte("services:\n  w2:\n    extends: {file: base.yaml, service: b}\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Load(main)
+			// `""` is refused by the check of a blank `cpus` (said in its own words, for a service of
+			// any file), which comes before this one.
+			want := "services.other.cpus"
+			if tc.value == `""` {
+				want = "cpus is blank"
+			}
+			if tc.refuse && (err == nil || !strings.Contains(err.Error(), want)) {
+				t.Errorf("docker compose refuses this, want %q in the refusal, got err=%v", want, err)
+			}
+			if !tc.refuse && err != nil {
+				t.Errorf("docker compose reads this, and it was refused: %v", err)
+			}
+		})
+	}
+}
+
+// `deploy.resources` of a service docker compose does not take is not read: a value of the
+// wrong kind in it passes there (#1581; measured, v5.5.1, 84 forms), where the same value in
+// a service taken is refused. The service taken, and the ones of its chain in the same file,
+// keep their refusals.
+func TestResourcesOfAServiceDockerDoesNotTakeAreNotAsked(t *testing.T) {
+	paths := map[string]string{
+		"limits.cpus": "limits: {cpus: %s}", "reservations.cpus": "reservations: {cpus: %s}",
+		"limits.memory": "limits: {memory: %s}", "reservations.memory": "reservations: {memory: %s}",
+		"limits": "limits: %s", "resources": "",
+	}
+	load := func(t *testing.T, base string) error {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "base.yaml"), []byte(base), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		main := filepath.Join(dir, "compose.yaml")
+		if err := os.WriteFile(main, []byte("services:\n  web:\n    extends: {file: base.yaml, service: b}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := Load(main)
+		return err
+	}
+	resources := func(path, value string) string {
+		if path == "resources" {
+			return "      resources: " + value + "\n"
+		}
+		return "      resources:\n        " + strings.Replace(paths[path], "%s", value, 1) + "\n"
+	}
+	for path := range paths {
+		for _, value := range []string{`""`, "true", "~", "[1]", "{a: 1}"} {
+			t.Run("not taken, "+path+": "+value, func(t *testing.T) {
+				if err := load(t, "services:\n  b:\n    image: alpine\n  other:\n    image: alpine\n    deploy:\n"+resources(path, value)); err != nil {
+					t.Errorf("docker compose reads this, and it was refused: %v", err)
+				}
+			})
+		}
+	}
+	// Every service not taken is read so, not only the first: the fault is in the second of two,
+	// and `resources` is not the first key of a `deploy` (#1604).
+	t.Run("not taken, the second of two services and a deploy whose resources is not first", func(t *testing.T) {
+		if err := load(t, "services:\n  b:\n    image: alpine\n  first:\n    image: alpine\n    deploy:\n      resources:\n        limits: {cpus: true}\n  other:\n    image: alpine\n    deploy:\n      replicas: 2\n      resources:\n        limits: {cpus: true}\n"); err != nil {
+			t.Errorf("docker compose reads none of the resources of a service it does not take, and it was refused: %v", err)
+		}
+	})
+	// A service not taken keeps the rest of its `deploy`: only `resources` is left unread.
+	t.Run("not taken, a replicas that is not a number beside resources", func(t *testing.T) {
+		err := load(t, "services:\n  b:\n    image: alpine\n  other:\n    image: alpine\n    deploy:\n      resources: {}\n      replicas: abc\n")
+		if err == nil {
+			t.Errorf("docker compose refuses a replicas of abc in a service it does not take, and it was read")
+		}
+	})
+	// The refusal of a service taken names the file the reader wrote and the service in it,
+	// which is where the line is: a file read whole (an include, the first file) is asked as it
+	// is, and the extended file's service is asked there, not after the merge as `web`.
+	for _, tc := range []struct{ name, base, service string }{
+		{"taken, limits.cpus: true", "services:\n  b:\n    image: alpine\n    deploy:\n" + resources("limits.cpus", "true"), `service "b"`},
+		{"taken, limits.memory: []", "services:\n  b:\n    image: alpine\n    deploy:\n" + resources("limits.memory", "[1]"), `service "b"`},
+		{"taken, limits: abc", "services:\n  b:\n    image: alpine\n    deploy:\n" + resources("limits", "abc"), `service "b"`},
+		{"taken, resources: true", "services:\n  b:\n    image: alpine\n    deploy:\n" + resources("resources", "true"), `service "b"`},
+		{"taken by a chain of two, limits.cpus: true", "services:\n  b:\n    extends: c\n  c:\n    extends: d\n  d:\n    image: alpine\n    deploy:\n" + resources("limits.cpus", "true"), `service "d"`},
+		{"taken by the chain of the one extended, limits.cpus: true", "services:\n  b:\n    extends: c\n  c:\n    image: alpine\n    deploy:\n" + resources("limits.cpus", "true"), `service "c"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := load(t, tc.base)
+			if err == nil {
+				t.Fatalf("docker compose refuses this service, which it takes, and it was read")
+			}
+			if !strings.Contains(err.Error(), "base.yaml") || !strings.Contains(err.Error(), tc.service) {
+				t.Errorf("the refusal should name base.yaml and %s, got: %v", tc.service, err)
+			}
+		})
+	}
+	t.Run("a file read whole is asked as it is, and names itself", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "inc.yaml"), []byte("services:\n  inc:\n    image: alpine\n    deploy:\n"+resources("limits.cpus", "true")), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		main := filepath.Join(dir, "compose.yaml")
+		if err := os.WriteFile(main, []byte("include:\n  - inc.yaml\nservices:\n  web:\n    image: alpine\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := Load(main)
+		if err == nil || !strings.Contains(err.Error(), "inc.yaml") || !strings.Contains(err.Error(), `service "inc"`) {
+			t.Errorf("the refusal should name inc.yaml and service \"inc\", got: %v", err)
+		}
+	})
 }

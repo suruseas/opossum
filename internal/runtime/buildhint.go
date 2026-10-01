@@ -131,6 +131,20 @@ func isImageRefusedLine(line string) bool {
 	return strings.Contains(request, " failed with response: ") && strings.Contains(request, "/manifests/")
 }
 
+// isResourceExhaustedLine reports whether line — one whole line of build output — is the
+// runtime's closing line for a build the builder ran out of resources for: `Error:
+// resourceExhausted: "failed to solve: ResourceExhausted: process … did not complete
+// successfully: cannot allocate memory"`, measured on 1.5.0 (a `RUN` that takes all the
+// memory). The kind is what the runtime says the failure is, so it is the kind that is read:
+// the words after it are the step's own (`cannot allocate memory` is what a step that
+// allocates too much gets, and a step can print them for itself). Read from the line's first
+// byte, as isImageRefusedLine is: the builder shows the same words again with its own prefix
+// in front, and a step that prints `Error: resourceExhausted: …` is shown behind its step
+// number.
+func isResourceExhaustedLine(line string) bool {
+	return strings.HasPrefix(line, "Error: resourceExhausted: ")
+}
+
 func (d *buildErrorDetector) Write(p []byte) (int, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -166,6 +180,11 @@ func (d *buildErrorDetector) readLines(p []byte) {
 			continue
 		}
 		if len(d.line) == maxHeldLine {
+			// The runtime's closing line for a failed step quotes the step's whole command, so
+			// it can be longer than what is held; its kind is at its start, which is held.
+			if isResourceExhaustedLine(string(d.line)) {
+				d.resourceExhausted = true
+			}
 			d.line, d.longLine = d.line[:0], true
 			continue
 		}
@@ -175,6 +194,9 @@ func (d *buildErrorDetector) readLines(p []byte) {
 
 // endLine reads the line being held and starts the next one.
 func (d *buildErrorDetector) endLine() {
+	if !d.longLine && isResourceExhaustedLine(string(d.line)) {
+		d.resourceExhausted = true
+	}
 	if !d.longLine && isImageRefusedLine(string(d.line)) {
 		d.imageRefused = true
 		d.refusedLine = string(d.line)
