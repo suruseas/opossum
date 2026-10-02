@@ -174,6 +174,73 @@ case "$1" in
     esac
     ;;
   build)   echo "built image" ;;
+  image)
+    # What the real CLI refuses before it does anything (container 1.5.0, testdata/real-cli-output.md):
+    # a subcommand it does not have is rc 64, and so is a subcommand that needs an image or a reference
+    # and is given none; `delete` with none is rc 1. `ls`, `prune` and `load` need no argument.
+    case "$2" in
+      ''|inspect|tag|save|pull|push|delete|rm|list|ls|load|prune) ;;
+      *) printf "Error: Unexpected argument '%s'\nUsage: container image [--debug] <subcommand>\n" "$2" >&2; exit 64 ;;
+    esac
+    if [ -n "$2" ] && [ -z "$3" ]; then
+      case "$2" in
+        inspect) printf "Error: Missing expected argument '<images> ...'\n" >&2; exit 64 ;;
+        tag)     printf "Error: Missing expected argument '<source>'\n" >&2; exit 64 ;;
+        save)    printf "Error: Missing expected argument '<references> ...'\n" >&2; exit 64 ;;
+        pull)    printf "Error: Missing expected argument '<reference>'\n" >&2; exit 64 ;;
+        delete|rm) printf 'Error: no images specified and --all not supplied\n' >&2; exit 1 ;;
+      esac
+    fi
+    # `load` reads an archive from its standard input (opossum's `docker image save | container image
+    # load`), and the real CLI refuses one with nothing in it (container 1.5.0): rc 1, nothing loaded.
+    # With `-i`/`--input` (`--input=<path>` too) it reads a file, which this does not look at. Two
+    # simplifications, neither in internal/shimcontract because the real CLI answers otherwise: any
+    # non-empty input is taken (the real CLI refuses what is no tar: rc 1, `unable to open the
+    # archive, code -30`), and a file named by `-i` is taken whether or not it is there (the real CLI
+    # says `file does not exist`, rc 1).
+    if [ "$2" = load ]; then
+      case " $* " in
+        *" -i "*|*" --input "*|*" --input="*) ;;
+        *) if [ "$(cat | wc -c | tr -d ' ')" = 0 ]; then
+             printf 'Error: failed to extract archive: no entries found in archive\n' >&2; exit 1
+           fi ;;
+      esac
+    fi
+    # An image named in $IMAGE_ABSENT is not there, and the real CLI refuses what is asked of it
+    # (container 1.5.0, testdata/real-cli-output.md): `inspect`, `tag` (its source), `save` and `push`
+    # (the last argument) and a `delete` without `--force` are rc 1; `delete --force` of it is rc 0.
+    absent_image() { for m in ${IMAGE_ABSENT:-}; do [ "$1" = "$m" ] && return 0; done; return 1; }
+    ref=$(last "$@")
+    case "$2" in
+      inspect) if absent_image "$3"; then printf 'Error: image not found: %s\n' "$3" >&2; exit 1; fi ;;
+      tag) if absent_image "$3"; then printf 'Error: image with reference %s\n' "$3" >&2; exit 1; fi ;;
+      push) if absent_image "$ref"; then printf 'Error: image with reference %s\n' "$ref" >&2; exit 1; fi ;;
+      save) if absent_image "$ref"; then
+          printf 'failed to get image for reference %s: notFound: "image with reference %s"\nError: failed to save image(s)\n' "$ref" "$ref" >&2; exit 1
+        fi ;;
+      delete|rm)
+        case " $* " in
+          *" --force "*) ;;
+          *) if absent_image "$ref"; then printf 'Error: failed to delete one or more images: ["%s"]\n' "$ref" >&2; exit 1; fi ;;
+        esac ;;
+    esac
+    case "$2" in
+      inspect)
+        # $IMAGE_CMD gives an image its CMD (#1635), as `ref=word,word` entries separated by
+        # spaces (no space or quote in a word), in the real shape: one variant without a CMD (an
+        # attestation, what a multi-platform image answers) and the variant that has it
+        # (`variants[].config.config.Cmd`, the form testdata/image-inspect/ records). An image
+        # not named there answers nothing, as before.
+        for e in ${IMAGE_CMD:-}; do
+          [ "${e%%=*}" = "$3" ] || continue
+          words=$(printf '%s' "${e#*=}" | awk -F, '{ for (i = 1; i <= NF; i++) printf "%s\"%s\"", (i > 1 ? "," : ""), $i }')
+          printf '[{"variants":[{"config":{"config":{}}},{"config":{"config":{"Cmd":[%s]}}}]}]\n' "$words"
+          exit 0
+        done ;;
+      # The rest of what the real CLI has answers nothing here, as it did before: it is not
+      # "an unknown command", which is what this used to print for them all.
+      *) ;;
+    esac ;;
   run)
     # A `--name` container 1.4.1 would not create is refused before anything is
     # recorded (testdata/real-cli-output.md). The flags are read up to the image
@@ -321,6 +388,19 @@ case "$1" in
     done
     prev=
     for a in "$@"; do
+      # A named volume `-v NAME:/target` is made by the run, as the real runtime makes one; a path
+      # (a bind) is not. $INSPECT_STRICT asks `volume delete` of a name nothing made to be refused.
+      if [ "$prev" = -v ]; then
+        case "$a" in
+          *:*)
+            vsrc=${a%%:*}
+            case "$vsrc" in
+              ''|/*|.*|'~'*) ;;
+              *) m=$(marker volseen "$vsrc"); if [ -n "$m" ]; then : > "$m"; fi
+                 m=$(marker volgone "$vsrc"); if [ -n "$m" ]; then rm -f "$m"; fi ;;
+            esac ;;
+        esac
+      fi
       if [ "$prev" = --name ]; then
         m=$(marker gone "$a"); if [ -n "$m" ]; then rm -f "$m"; fi
         m=$(marker stopped "$a"); if [ -n "$m" ]; then rm -f "$m"; fi
@@ -409,6 +489,15 @@ case "$1" in
     ;;
   volume)
     if [ "$2" = delete ] || [ "$2" = rm ]; then
+      # $INSPECT_STRICT: a volume nothing here made is not one the runtime has, and the real CLI
+      # refuses to delete it (container 1.4.1, testdata/real-cli-output.md); without it every name
+      # is taken to be there (#1551).
+      if [ -n "${INSPECT_STRICT:-}" ]; then
+        s=$(marker volseen "$3")
+        if [ -n "$s" ] && [ ! -e "$s" ]; then
+          echo "Error: failed to delete one or more volumes: [\"$3\"]" >&2; exit 1
+        fi
+      fi
       g=$(marker volgone "$3")
       if [ -n "$g" ] && [ -e "$g" ]; then
         echo "Error: failed to delete one or more volumes: [\"$3\"]" >&2; exit 1
@@ -448,6 +537,13 @@ case "$1" in
     done
     g=$(marker gone "$2")
     if [ -n "$g" ] && [ -e "$g" ]; then echo "Error: container not found: $2" >&2; exit 1; fi
+    # $INSPECT_STRICT: a name nothing here ran is not a container the runtime has, as the real CLI
+    # answers for one it has never seen (container 1.4.1, testdata/real-cli-output.md); without it
+    # every name is taken to be there (#1551).
+    if [ -n "${INSPECT_STRICT:-}" ]; then
+      c=$(marker created "$2")
+      if [ -n "$c" ] && [ ! -e "$c" ]; then echo "Error: container not found: $2" >&2; exit 1; fi
+    fi
     state=running
     s=$(marker stopped "$2"); if [ -n "$s" ] && [ -e "$s" ]; then state=stopped; fi
     # Mirror the real `container inspect` shape: the interface address lives

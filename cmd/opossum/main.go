@@ -661,10 +661,18 @@ func downCmd() *cobra.Command {
 			// must not be reachable only when the compose file still parses. Deleting
 			// or renaming the file would otherwise strand a process the user has no
 			// opossum command to remove.
+			earlyStopped := ""
 			if name := projectNameWithoutCompose(); name != "" {
 				stopped, attempted := stopSupervisorFn(name)
 				reportSupervisorStop(cmd.ErrOrStderr(), stopped, attempted, "opossum: stopped the restart supervisor")
 				orchestrator.ClearWatched(name)
+				// Only a stop that could not be confirmed is not asked again: its pid file is still
+				// there, so asking again would wait the budget out a second time. One that stopped
+				// it, or found none, leaves `Down` to ask under the lock it takes, which is what
+				// stops a supervisor an `up` in another terminal started in between.
+				if attempted && !stopped {
+					earlyStopped = name
+				}
 			}
 			if err != nil {
 				// A file that cannot be read is no reason to leave what it started
@@ -681,6 +689,12 @@ func downCmd() *cobra.Command {
 				return err
 			}
 			noteFormerName(o, cmd.ErrOrStderr())
+			// The supervisor of the project this name stands for has been asked to stop above and could
+			// not be confirmed gone, and that said; `Down` does not wait for it a second time. It asks
+			// for a project of another name — the one the file gives, where the guess above was the
+			// directory's — and for one the first ask found stopped or absent (#1406).
+			o.SetSupervisorStopper(stopSupervisorFn)
+			o.NoteSupervisorHandled(earlyStopped)
 			return o.Down(volumes, rmi, removeOrphans)
 		},
 	}

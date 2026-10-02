@@ -337,6 +337,34 @@ $ container image delete --force nonexistent:none   # --force で不在を無視
 `image delete --force <ref>`（best-effort、不在/使用中は無言でスキップ、コンテナ削除後に実行）。
 サブコマンド名は `image {inspect,delete}`（`delete` は `rm` エイリアスあり、`list` は `ls`）。
 
+## `container image` の下の subcommand（初出 2026-10-02、container 1.5.0・#1472）
+fake の `image` が何を寛容に通しているかを決めるための採取。存在しない image（`neko1472-nothere:1`）と
+存在しない file だけを使い、何も作らず・消していない。opossum が打つのは `delete`・`inspect`・`load`・`pull`・`save`・`tag`。
+
+| 打ったもの | rc | 出力（stdout と stderr） |
+|---|---|---|
+| `image inspect <不在>` | 1 | `Error: image not found: <ref>` |
+| `image inspect`（引数なし） | 64 | `Error: Missing expected argument '<images> ...'`＋`Usage: container image inspect …` |
+| `image delete <不在>` | 1 | `Error: failed to delete one or more images: ["<ref>"]` |
+| `image delete --force <不在>` | 0 | 空 |
+| `image delete`（引数なし） | 1 | `Error: no images specified and --all not supplied` |
+| `image tag <不在> <target>` | 1 | `Error: image with reference <source>` |
+| `image tag`（引数なし） | 64 | `Error: Missing expected argument '<source>'` |
+| `image save -o <file> <不在>` | 1 | `failed to get image for reference <ref>: notFound: "image with reference <ref>"`＋`Error: failed to save image(s)`（file は作られない） |
+| `image save`（引数なし） | 64 | `Error: Missing expected argument '<references> ...'` |
+| `image load -i <不在の file>` | 1 | `file does not exist: ["path": <path>]` |
+| `image load`（stdin が空） | 1 | `Error: failed to extract archive: no entries found in archive` |
+| `image pull <名前解決できない host の ref>` | 1 | 進捗 `[1/2] Fetching image …` を出し続けたあと失敗 |
+| `image pull`（引数なし） | 64 | `Error: Missing expected argument '<reference>'` |
+| `image push <不在>` | 1 | `Error: image with reference <ref>` |
+| `image bogus`（知らない subcommand） | 64 | `Error: Unexpected argument 'bogus'`＋`Usage: container image [--debug] <subcommand>` |
+
+見分けどころ：**不在の image に対する `inspect`・`delete`・`tag`・`save`・`push` は全部 rc 1**で、文言は 4 通り
+（`image not found`・`failed to delete one or more images`・`image with reference`・`notFound`）。引数が足りないときは
+rc 64（`delete` だけ rc 1）。`--force` だけが不在の delete を rc 0 にする（opossum の `DeleteImage` が使う形）。
+fake 3 本は `inspect` の在る・無い（`IMAGE_ABSENT`・消した印）以外、`image` の下を全部 rc 0 で通す（shell は
+`fake-container: unknown command image` を出して rc 0）。
+
 ## `container run --platform <p> [--rosetta]`  （#130 compose `platform:` の根拠 / 2026-07-06 実機採取）
 `container run --help` に **`--platform <platform>`**（マルチプラットフォーム image 用）、**`--rosetta`**（コンテナ内 x86-64 エミュ有効化）、`-a/--arch`（既定 arm64）が存在。amd64 専用 image は arm64 既定だと失敗するが、`--platform linux/amd64 --rosetta` で起動可能:
 ```

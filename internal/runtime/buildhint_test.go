@@ -199,9 +199,10 @@ func TestTheResourceExhaustedClosingLineGetsTheResourceHint(t *testing.T) {
 		{"the kind behind spaces", []string{"  Error: resourceExhausted: x\n"}, false},
 		{"the kind in other letters", []string{"Error: resourceexhausted: x\n"}, false},
 		{"a kind that only starts with it", []string{"Error: resourceExhaustedFoo: x\n"}, false},
-		// A step's command can be long, and the closing line quotes all of it.
-		{"a closing line longer than a line is held", []string{`Error: resourceExhausted: "failed to solve: process "/bin/sh -c ` + strings.Repeat("x", 5000) + `" did not complete successfully: cannot allocate memory"` + "\n"}, true},
-		{"a line that long which is not it", []string{`Error: unknown: "failed to solve: process "/bin/sh -c ` + strings.Repeat("x", 5000) + `" did not complete successfully: cannot allocate memory"` + "\n"}, false},
+		// A step's command can be long, and the closing line quotes all of it. The command is as long
+		// as the bound, so the line is longer than what is held whatever the bound is.
+		{"a closing line longer than a line is held", []string{`Error: resourceExhausted: "failed to solve: process "/bin/sh -c ` + strings.Repeat("x", maxHeldLine) + `" did not complete successfully: cannot allocate memory"` + "\n"}, true},
+		{"a line that long which is not it", []string{`Error: unknown: "failed to solve: process "/bin/sh -c ` + strings.Repeat("x", maxHeldLine) + `" did not complete successfully: cannot allocate memory"` + "\n"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d := &buildErrorDetector{}

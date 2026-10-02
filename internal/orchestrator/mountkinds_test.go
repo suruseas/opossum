@@ -28,7 +28,7 @@ import (
 // The boundaries the judgement answers, one row each (docker compose's rule:
 // a source starting with `/`, `.` or `~` is a path, the rest a volume name):
 // `/…` · `./…` · `../…` · `.` · `..` · `.hidden` · `.hidden/sub` · `..hidden`
-// · `~` · `~/…` · empty source · bare target · long-form bind · long-form
+// · `~` · `~/…` · bare target · long-form bind · long-form
 // volume · tmpfs · a declared name with a mode / nocopy · external. (`~name`
 // never reaches a run: the loader refuses it.)
 func TestAMountRunsAsWhatItLoadedAs(t *testing.T) {
@@ -57,7 +57,6 @@ func TestAMountRunsAsWhatItLoadedAs(t *testing.T) {
 		{"a name starting with two dots", "..hidden:/y", "-v {dir}/..hidden:/y", "{dir}/..hidden"},
 		{"a long-form bind", "{type: bind, source: ./lb, target: /lb}", "-v {dir}/lb:/lb", "{dir}/lb"},
 		{"an anonymous volume", "/anon", "-v demo_web_anon_", ""},
-		{"an anonymous volume written with an empty source", ":/es", "-v demo_web_es_", ""},
 		{"a long-form anonymous volume", "{type: volume, target: /la}", "-v demo_web_la_", ""},
 		{"a tmpfs", "{type: tmpfs, target: /t}", "--tmpfs=/t", ""},
 		{"a declared volume with a mode", "good:/g:ro", "-v demo_good:/g:ro", ""},

@@ -56,6 +56,7 @@ func TestDestroyPlanLeavesAServiceContainerWithNoProjectLabel(t *testing.T) {
 	rt, _ := fakeShim(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	setShimEnv(rt, "INSPECT_PROJECT=demo", "INSPECT_UNLABELED=web.demo.opossum")
+	strictContainers(t, rt, "web.demo.opossum", "db.demo.opossum")
 	p := project("demo", map[string]*compose.Service{"web": {Image: "web"}, "db": {Image: "db"}})
 	plan, err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).DestroyPlanFor(false, false, false)
 	if err != nil {
@@ -106,6 +107,7 @@ func TestDestroyPlanKeepImages(t *testing.T) {
 	// Keep supervisor state out of the developer's real ~/.local/state.
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	setShimEnv(rt, "INSPECT_PROJECT=demo")
+	strictContainers(t, rt, "db.demo.opossum")
 	p := project("demo", map[string]*compose.Service{"db": {Image: "postgres:16"}})
 	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
 
@@ -536,6 +538,7 @@ func TestDestroyReportsAContainerTheRuntimeCannotBeAskedAbout(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	setShimEnv(rt, "INSPECT_PROJECT=demo", "STATE_DIR="+t.TempDir(),
 		"NETWORK_ABSENT=demo-net", "IMAGE_ABSENT=web", "VOLUME_LS=NAME")
+	strictContainers(t, rt, "web.demo.opossum")
 	p := project("demo", map[string]*compose.Service{"web": {Image: "web"}})
 	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
 	plan, err := o.DestroyPlanFor(false, false, false)
@@ -564,6 +567,7 @@ func TestDestroySaysBothWhatIsLeftAndWhatCouldNotBeAskedAbout(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	setShimEnv(rt, "INSPECT_PROJECT=demo", "STATE_DIR="+t.TempDir(),
 		"IMAGE_ABSENT=web db", "VOLUME_LS=NAME", "NETWORK_DELETE_STICKY=demo-net")
+	strictContainers(t, rt, "web.demo.opossum", "db.demo.opossum")
 	p := project("demo", map[string]*compose.Service{"web": {Image: "web"}, "db": {Image: "db"}})
 	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
 	plan, err := o.DestroyPlanFor(false, false, false)

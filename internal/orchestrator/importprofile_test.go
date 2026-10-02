@@ -23,7 +23,7 @@ import (
 // compose v5.5.1: only the active services, and naming one activates it.
 func TestImportFollowsTheProfilesTheWayBuildAndPullDo(t *testing.T) {
 	docker := filepath.Join(t.TempDir(), "docker")
-	if err := os.WriteFile(docker, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\nprintf archive\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	newProject := func() *compose.Project {
@@ -95,7 +95,7 @@ func TestImportWithEveryBuildServiceGatedSaysThereIsNothingToImport(t *testing.T
 	// The same fake docker as above, so that a guard that is gone fails on what the
 	// runtime was asked to do here and not on whatever the host's docker holds.
 	docker := filepath.Join(t.TempDir(), "docker")
-	if err := os.WriteFile(docker, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\nprintf archive\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	rt.DockerBin = docker

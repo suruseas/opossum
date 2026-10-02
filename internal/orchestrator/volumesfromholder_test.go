@@ -55,8 +55,11 @@ func TestAServiceIsNotStartedBesideAHolderThatIsNot(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			rt, log := fakeShim(t)
 			if !tc.holderThere {
+				strictContainers(t, rt)
 				setShimEnv(rt, "INSPECT_ABSENT=b.demo.opossum a.demo.opossum")
 			} else {
+				// The holder's container is one an earlier up made; a's is not there yet.
+				strictContainers(t, rt, "b.demo.opossum")
 				setShimEnv(rt, "INSPECT_ABSENT=a.demo.opossum")
 			}
 			o := orchestrator.New(holderProject(tc.gated, tc.ref, tc.dep), rt, "opossum", &bytes.Buffer{})
@@ -92,6 +95,7 @@ func TestARebuildOfABorrowerLeavesItsRunningHolderAlone(t *testing.T) {
 		"b": {Image: "alpine:3.20", Volumes: []string{"bv:/b"}},
 	})
 	rt, log := fakeShim(t)
+	strictContainers(t, rt, "b.demo.opossum") // the running holder; a has none yet
 	setShimEnv(rt, "INSPECT_ABSENT=a.demo.opossum")
 	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
 	if err := o.RebuildServiceForTest("a"); err != nil {

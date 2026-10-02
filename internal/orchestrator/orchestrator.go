@@ -45,6 +45,10 @@ const buildServiceLabel = "opossum.service"
 
 // Orchestrator drives a single project.
 type Orchestrator struct {
+	// stopSupervisor asks the restart supervisor of a project to stop; nil is StopSupervisor.
+	// supervisorHandled is the project whose supervisor the command has already asked (#1406).
+	stopSupervisor    func(project string) (stopped, attempted bool)
+	supervisorHandled string
 	// imageEnvs remembers what each image declared, so planning an overlay asks the
 	// runtime once per image rather than once per mount it considers.
 	imageEnvs map[string]map[string]string
@@ -187,6 +191,17 @@ func (o *Orchestrator) upDependenciesOf(service string, deps []string) error {
 func (o *Orchestrator) SetUpOptions(forceRecreate, build, noBuild, removeOrphans, fromDocker bool) {
 	o.up = upOptions{forceRecreate: forceRecreate, build: build, noBuild: noBuild, removeOrphans: removeOrphans, fromDocker: fromDocker}
 }
+
+// SetSupervisorStopper replaces how a stop of the restart supervisor is asked (StopSupervisor), for
+// a caller that asked it before the project was loaded and wants the same one asked here.
+func (o *Orchestrator) SetSupervisorStopper(f func(project string) (stopped, attempted bool)) {
+	o.stopSupervisor = f
+}
+
+// NoteSupervisorHandled says the command has already asked the supervisor of the project of this
+// name to stop and said what came of it, so taking the project down does not ask it again. A
+// project of another name is still asked.
+func (o *Orchestrator) NoteSupervisorHandled(project string) { o.supervisorHandled = project }
 
 // SetDryRun switches `up` to plan-only mode: it resolves the whole project and
 // prints what it would do — the startup order, the recreate/skip decisions, and
@@ -2489,6 +2504,7 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 			Command:           svc.Command,
 			Entrypoint:        svc.Entrypoint,
 			EntrypointCleared: svc.EntrypointCleared,
+			ImageIsBuilt:      svc.Build != nil,
 			Labels:            append(append([]string(nil), svc.Labels...), projectLabel+"="+o.Project.Name),
 			Memory:            mem,
 			CPUs:              cpu,
@@ -7682,6 +7698,7 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 		Command:           cmd,
 		Entrypoint:        svc.Entrypoint,
 		EntrypointCleared: svc.EntrypointCleared,
+		ImageIsBuilt:      svc.Build != nil,
 		Labels:            append(append([]string(nil), svc.Labels...), projectLabel+"="+o.Project.Name),
 		Memory:            mem,
 		CPUs:              cpu,

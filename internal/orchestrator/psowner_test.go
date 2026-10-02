@@ -55,6 +55,13 @@ func TestPsListsOnlyThisProjectsContainers(t *testing.T) {
 			t.Run(tc.name+"/"+format, func(t *testing.T) {
 				rt, _ := fakeShim(t)
 				setShimEnv(rt, tc.env...)
+				// Both services' containers exist, under the names this row's domain gives them
+				// (bare when it is empty); what each answers about its owner is the row's env.
+				made := []string{"db", "web"}
+				if tc.domain != "" {
+					made = []string{"db.demo." + tc.domain, "web.demo." + tc.domain}
+				}
+				strictContainers(t, rt, made...)
 				p := project("demo", map[string]*compose.Service{
 					"db":  {Image: "postgres:16"},
 					"web": {Image: "web:latest", DependsOn: compose.DependsOn{{Name: "db"}}},
@@ -126,6 +133,7 @@ func TestPortRefusesAContainerThatIsNotThisProjects(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rt, _ := fakeShim(t)
+			strictContainers(t, rt, "web.demo.opossum")
 			setShimEnv(rt, tc.env...)
 			var out bytes.Buffer
 			err := orchestrator.New(project("demo", map[string]*compose.Service{"web": {Image: "web:latest", Ports: []string{"8080:80"}}}), rt, "opossum", &out).Port("web", 80, "tcp")

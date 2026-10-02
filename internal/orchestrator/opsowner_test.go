@@ -105,6 +105,8 @@ func TestServiceCommandsLeaveContainersThatAreNotThisProjects(t *testing.T) {
 					targets = []string{name("web")}
 				}
 				rt, log := fakeShim(t)
+				// All three have a container; what each answers about its owner is the row's env.
+				strictContainers(t, rt, name("web"), name("cache"), name("db"))
 				setShimEnv(rt, tc.env...)
 				p := project("demo", map[string]*compose.Service{
 					"db":    {Image: "postgres:16"},
@@ -201,6 +203,7 @@ func TestCopyRefusesAContainerThatIsNotThisProjects(t *testing.T) {
 	for _, tc := range rows {
 		t.Run(tc.name, func(t *testing.T) {
 			rt, log := fakeShim(t)
+			strictContainers(t, rt, "web.demo.opossum", "db.demo.opossum")
 			setShimEnv(rt, tc.env...)
 			p := project("demo", map[string]*compose.Service{"web": {Image: "web:latest"}, "db": {Image: "postgres:16"}})
 			err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Copy(tc.src, tc.dst)
@@ -232,6 +235,7 @@ func TestCopyRefusesAContainerThatIsNotThisProjects(t *testing.T) {
 // start would leave this project's service stopped.
 func TestRestartAsksOnceAndStartsWhatItStopped(t *testing.T) {
 	rt, log := fakeShim(t)
+	strictContainers(t, rt, "db.demo.opossum", "web.demo.opossum")
 	setShimEnv(rt, "INSPECT_PROJECT=demo", "INSPECT_FAIL_ONCE_STOP_ASKED=web.demo.opossum")
 	p := project("demo", map[string]*compose.Service{
 		"db":  {Image: "postgres:16"},
@@ -267,6 +271,11 @@ func TestExecRefusesAContainerThatIsNotThisProjects(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rt, log := fakeShim(t)
+			web := "web.demo." + tc.domain
+			if tc.domain == "" {
+				web = "web"
+			}
+			strictContainers(t, rt, web)
 			setShimEnv(rt, tc.env...)
 			p := project("demo", map[string]*compose.Service{"web": {Image: "web:latest"}})
 			err := orchestrator.New(p, rt, tc.domain, &bytes.Buffer{}).Exec("web", []string{"true"}, runtime.ExecOptions{})

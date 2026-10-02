@@ -461,11 +461,22 @@ func StopSupervisor(project string) (stopped, attempted bool) {
 // the floor: asked, but not confirmed stopped (#1401). Shared by Down and Destroy,
 // which do this identically before touching anything else.
 func (o *Orchestrator) stopSupervisorAndReport() {
-	if stopped, attempted := StopSupervisor(o.Project.Name); stopped {
+	// A supervisor the command already asked to stop under this very name, and could not confirm
+	// gone, is not asked again: its pid file is still there, so a second ask would wait out the whole
+	// budget a second time and say the same thing twice (#1406). A name that differs — the file named
+	// the project, where the command went by the directory's — is another supervisor's, and is asked.
+	if o.supervisorHandled != "" && o.supervisorHandled == o.Project.Name {
+		return
+	}
+	stop := o.stopSupervisor
+	if stop == nil {
+		stop = StopSupervisor
+	}
+	if stopped, attempted := stop(o.Project.Name); stopped {
 		o.logf("Stopped the restart supervisor\n")
 	} else if attempted {
 		// "opossum: " matches the prefix cmd/opossum's own two call sites for
-		// this same notice already use (the early stop in `down`/`destroy`,
+		// this same notice already use (the early stop in `down`,
 		// and `up`'s replace path) — this one differs only in landing on
 		// whatever writer the caller gave this Orchestrator (o.out), since it
 		// has no writer of its own dedicated to warnings the way cmd's stderr

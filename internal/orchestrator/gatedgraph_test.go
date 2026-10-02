@@ -359,6 +359,9 @@ func runReadOrTakeDown(t *testing.T, cmd, body string, profileOn bool, want stri
 	t.Helper()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	rt, log := fakeShim(t)
+	// web is the service these commands work from: it has a container, which is what a naming `stop`
+	// or `kill` reads its own dependency for (docs/compatibility.md, the `depends_on` row).
+	strictContainers(t, rt, "web.demo.opossum")
 	proj, loadErr := loadProject(t, body)
 	if loadErr != nil {
 		// Reading the file is where an ungated undefined dependency

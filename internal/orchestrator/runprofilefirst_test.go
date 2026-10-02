@@ -54,6 +54,9 @@ func TestADependencyBehindAnInactiveProfileIsRefusedFirst(t *testing.T) {
 				t.Run(name, func(t *testing.T) {
 					rt, log := fakeShim(t)
 					if tc.env != "" {
+						// The row's env says the one-off's name is held by a container that is not this
+						// project's: one the runtime has.
+						strictContainers(t, rt, tc.service+"-run.demo.opossum")
 						setShimEnv(rt, tc.env)
 					}
 					proj := loadTmpfsProject(t, body(withDep))

@@ -15,12 +15,12 @@ import (
 // image-only services; an unknown service errors.
 func TestImportBuildServicesOnly(t *testing.T) {
 	rt, calls := fakeShim(t)
-	// A fake docker that succeeds but writes nothing (the shared fake container
-	// shim doesn't drain stdin; the real save→load byte flow is covered in the
-	// runtime test). This test checks the orchestration: which services, and the
-	// docker ref chosen for each.
+	// A fake docker that succeeds and writes a few bytes, as `docker image save` writes an
+	// archive: the fake container's `image load` refuses an empty one, as the real CLI does
+	// (#1660). The real save→load byte flow is covered in the runtime test. This test checks
+	// the orchestration: which services, and the docker ref chosen for each.
 	docker := filepath.Join(t.TempDir(), "docker")
-	if err := os.WriteFile(docker, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\nprintf archive\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	rt.DockerBin = docker
@@ -58,7 +58,7 @@ func TestUpFromDockerImportsInsteadOfBuilding(t *testing.T) {
 	rt, calls := fakeShim(t)
 	setShimEnv(rt, "IMAGE_ABSENT=pj-web:latest") // not present, so up would otherwise build
 	docker := filepath.Join(t.TempDir(), "docker")
-	if err := os.WriteFile(docker, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\nprintf archive\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	rt.DockerBin = docker
@@ -82,6 +82,29 @@ func TestUpFromDockerImportsInsteadOfBuilding(t *testing.T) {
 	}
 }
 
+// A docker that writes nothing (its `image save` failed, or the image is not there) leaves the
+// load with an empty archive, which the real CLI refuses; the import fails with the load's error
+// and nothing is built in its place (#1660). The fake container's `image load` answers the same.
+func TestUpFromDockerFailsWhenDockerWritesNothingToLoad(t *testing.T) {
+	rt, calls := fakeShim(t)
+	setShimEnv(rt, "IMAGE_ABSENT=pj-web:latest")
+	docker := filepath.Join(t.TempDir(), "docker")
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rt.DockerBin = docker
+	p := project("pj", map[string]*compose.Service{"web": {Build: &compose.Build{Context: "."}}})
+	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
+	o.SetUpOptions(false, false, false, false, true) // --from-docker-compose
+	err := o.Up(true)
+	if err == nil || !strings.Contains(err.Error(), "into Apple container failed") {
+		t.Fatalf("want the import to fail with the load's error, got: %v", err)
+	}
+	if got := strings.Join(calls(), "\n"); strings.Contains(got, "build --progress") {
+		t.Errorf("a failed import should not fall back to a build; calls: %s", got)
+	}
+}
+
 // For a build+`image:` service, `up --from-docker-compose` imports the Docker `image:`
 // ref (how Docker tags it), not the built tag. The Import() path covers this;
 // this guards the identical branch in the up path.
@@ -91,7 +114,7 @@ func TestUpFromDockerUsesImageRefForBuildImageService(t *testing.T) {
 	// here yet, so `up` brings it over. It used to look for `pj-api:latest`.
 	setShimEnv(rt, "IMAGE_ABSENT=myco/api:9")
 	docker := filepath.Join(t.TempDir(), "docker")
-	if err := os.WriteFile(docker, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\nprintf archive\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	rt.DockerBin = docker

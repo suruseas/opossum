@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // servicespec.json is the shape of a service as docker compose v5.5.1 checks it,
@@ -510,6 +512,18 @@ func checkServiceShapes(path string, services map[string]any, values *[]error, o
 					return err
 				}
 			}
+			// A short mount with an empty first section (`:/b`, `:ro`) or an empty last one
+			// (`/a:/b:`), which docker compose refuses (`empty section between colons`) in the file
+			// that writes it — a later file that writes over it does not make it fine — in a
+			// service taken and in one that is not (#1637; measured, v5.5.1). An earlier opossum
+			// started such a project (the runtime takes the empty source as an anonymous volume),
+			// so it is asked here, where taking a project down warns and goes on, and not in the
+			// decode, which it does not.
+			if k == "volumes" {
+				if err := emptyMountSections(path, "services."+name+".volumes", svc[k], fault); err != nil {
+					return err
+				}
+			}
 			// A `mode` that is not the string docker compose reads in `ports[].mode` and
 			// `deploy.mode` (#1533; measured, v5.5.1).
 			if err := modeKinds(path, "services."+name+"."+k, k, svc[k], notTaken, fault); err != nil {
@@ -997,6 +1011,42 @@ func portFloats(path, where string, list any, notTaken bool, fault func(error) e
 	return nil
 }
 
+// emptyMountSections asks the short mounts of a `volumes` list for an empty first section or an
+// empty last one, which docker compose refuses as an empty section between colons: `:/b`,
+// `:/b:ro`, `:ro` and `/a:/b:` (a bare `:` is read, and so is a one-byte section after a leading
+// colon, `:a` and `:1`). A middle section of one letter (`/a:a:`, `/a:é:`, `/a:字:`) is read as
+// well, docker compose taking it for a Windows drive; one that is a digit or a symbol (`/a:1:`,
+// `/a:_:`) is refused (measured, v5.5.1: a single rune of a Unicode letter, as unicode.IsLetter
+// has it, and a letter with a combining mark after it is two runes). What is between the colons
+// is the business of shortMountFields, in the decode.
+func emptyMountSections(path, where string, v any, fault func(error) error) error {
+	list, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	for i, item := range list {
+		entry, ok := item.(string)
+		if !ok {
+			continue
+		}
+		fields := strings.Split(entry, ":")
+		switch {
+		// A one-letter middle section is what docker compose takes for a Windows drive (`/a:a:` is
+		// read there), which this does not follow, and does not refuse for it either; `:a` is read
+		// there at one byte, whatever it is (`:1`, `:.`), and refused at two (`:é`).
+		case len(fields) == 2 && fields[0] == "" && len(fields[1]) > 1, len(fields) == 3 && fields[0] == "" && fields[1] != "":
+			if err := fault(fmt.Errorf("compose file %s: %s entry %d of %d: %q has nothing before its first colon — a short mount is SOURCE:TARGET or SOURCE:TARGET:MODE, and docker compose refuses an empty section between colons; a source that comes from a variable is empty when the variable is not set", path, where, i+1, len(list), entry)); err != nil {
+				return err
+			}
+		case len(fields) == 3 && fields[0] != "" && fields[1] != "" && !isDriveLetter(fields[1]) && fields[2] == "":
+			if err := fault(fmt.Errorf("compose file %s: %s entry %d of %d: %q has nothing after its second colon — write SOURCE:TARGET, or a mode after it (SOURCE:TARGET:ro); docker compose refuses an empty section between colons", path, where, i+1, len(list), entry)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // modeKinds asks the `mode` of a service's `ports` entries and of its `deploy` for a string,
 // the kind docker compose reads there (`host`, `ingress`; `replicated`, `global`): a number,
 // a bool, a null, a list and a mapping are refused, in the file that writes them, as docker
@@ -1148,4 +1198,11 @@ func withoutEmptyName(v any) any {
 		}
 	}
 	return c
+}
+
+// isDriveLetter says whether a section is one rune that is a letter, which docker compose takes
+// for a Windows drive: `é`, `Ω` and `字` are, `1`, `_` and a letter with a combining mark are not.
+func isDriveLetter(section string) bool {
+	r, size := utf8.DecodeRuneInString(section)
+	return size == len(section) && unicode.IsLetter(r)
 }

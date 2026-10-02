@@ -449,6 +449,38 @@ func fakeShim(t *testing.T) func() []string {
 	}
 }
 
+// strictContainers makes the fake answer as the real CLI does for a name it has never seen
+// (rc 1, `container not found`) and then makes the containers a test stands on, by running them
+// here, so that every container the test relies on is one the runtime has (#1551). The default fake
+// answers that any name is a running container; a test that says what exists runs this after
+// fakeShim and STATE_DIR, and the names it lists are all that exists.
+func strictContainers(t *testing.T, names ...string) {
+	t.Helper()
+	// The fake remembers what was run in STATE_DIR, and without one it records nothing and does not
+	// look: the knob would be set and do nothing, and the test would pass on "every name is there".
+	if os.Getenv("STATE_DIR") == "" {
+		t.Fatal("strictContainers needs STATE_DIR set first: the fake remembers the containers it ran there")
+	}
+	t.Setenv("INSPECT_STRICT", "1")
+	for _, n := range names {
+		// Not into FAKE_LOG: what the runtime was asked is what the command under test asked, and
+		// making the fixture is not that.
+		// The label a container opossum made carries: the project its <service>.<project>.<domain>
+		// spelling names. A run without one is recorded as a container with no owner, which
+		// the commands that check ownership before acting leave alone.
+		args := []string{"run", "-d", "--name", n}
+		if parts := strings.Split(n, "."); len(parts) >= 3 {
+			args = append(args, "--label=opossum.project="+parts[len(parts)-2])
+		}
+		cmd := exec.Command(fakeShimBin, append(args, "alpine")...)
+		cmd.Env = append(os.Environ(), "FAKE_LOG=")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("making container %s in the fake: %v\n%s", n, err, out)
+		}
+	}
+}
+
 // TestVerboseFlagAccepted checks the global --verbose flag parses and is wired
 // through to a working run (the command trace itself goes to stderr; the
 // runtime package owns that behavior).
@@ -4110,6 +4142,7 @@ func TestDestroyRemovesOpossumsThingsAndNothingElse(t *testing.T) {
 	t.Setenv("STATE_DIR", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("INSPECT_PROJECT", "dstry")
+	strictContainers(t, "web.dstry.opossum", "db.dstry.opossum", "db-run.dstry.opossum")
 	t.Setenv("VOLUME_LS", "NAME\ndstry_data")
 	dir := destroyProject(t, "name: dstry\nservices:\n"+
 		"  web:\n    build: .\n    volumes:\n      - data:/var/lib/data\n"+
@@ -4254,6 +4287,7 @@ func TestDestroyPromptConfirmedRemoves(t *testing.T) {
 	t.Setenv("STATE_DIR", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("INSPECT_PROJECT", "yep")
+	strictContainers(t, "web.yep.opossum", "web-run.yep.opossum")
 	dir := destroyProject(t, "name: yep\nservices:\n  web:\n    image: web\n")
 	t.Chdir(dir)
 	orig := stdinIsTerminal
@@ -4435,6 +4469,7 @@ func TestDestroyPlanListsEverythingItWillRemove(t *testing.T) {
 	t.Setenv("STATE_DIR", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("INSPECT_PROJECT", "plan")
+	strictContainers(t, "web.plan.opossum", "db.plan.opossum")
 	t.Setenv("VOLUME_LS", "NAME\nplan_data")
 	dir := destroyProject(t, "name: plan\nservices:\n"+
 		"  web:\n    build: .\n    volumes:\n      - data:/d\n"+
@@ -4509,6 +4544,7 @@ func TestDestroyPromptDefaultsToNo(t *testing.T) {
 			t.Setenv("STATE_DIR", t.TempDir()) // so the shim remembers what was deleted
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
 			t.Setenv("INSPECT_PROJECT", "ask")
+			strictContainers(t, "web.ask.opossum")
 			dir := destroyProject(t, "name: ask\nservices:\n  web:\n    image: web\n")
 			t.Chdir(dir)
 			orig := stdinIsTerminal
@@ -4562,6 +4598,7 @@ func TestDestroyRemovesRunLeftovers(t *testing.T) {
 	t.Setenv("STATE_DIR", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("INSPECT_PROJECT", "leftover")
+	strictContainers(t, "web.leftover.opossum", "web-run.leftover.opossum")
 	dir := destroyProject(t, "name: leftover\nservices:\n  web:\n    image: web\n")
 	t.Chdir(dir)
 
@@ -4854,6 +4891,7 @@ func TestDestroyKeepLocalRemovesOnlyRuntimeObjects(t *testing.T) {
 	t.Setenv("STATE_DIR", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("INSPECT_PROJECT", "other")
+	strictContainers(t, "web.other.opossum", "web-run.other.opossum")
 	dir := destroyProject(t, "name: mine\nservices:\n  web:\n    image: web\n")
 	t.Chdir(dir)
 
@@ -4879,6 +4917,7 @@ func TestDestroyDoesNotRefuseWhenTheComposeFileNamesTheProject(t *testing.T) {
 	t.Setenv("STATE_DIR", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("INSPECT_PROJECT", "named")
+	strictContainers(t, "web.named.opossum", "web-run.named.opossum")
 	// The directory is a random temp name; the compose file calls the project "named".
 	dir := destroyProject(t, "name: named\nservices:\n  web:\n    image: web\n")
 	t.Chdir(dir)
@@ -5009,6 +5048,7 @@ func TestDestroyDoesNotRefuseWhenThereAreNoLocalFilesToProtect(t *testing.T) {
 	state := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", state)
 	t.Setenv("INSPECT_PROJECT", "other")
+	strictContainers(t, "web.other.opossum", "web-run.other.opossum")
 	// A supervisor state directory exists for the *named* project: it is keyed by
 	// name, not by this directory, so it must not count as a local file.
 	if err := os.MkdirAll(filepath.Join(state, "opossum", "other"), 0o755); err != nil {
@@ -5046,6 +5086,7 @@ func TestDestroyKeepLocalWorksWhenThereIsSomethingLocalToKeep(t *testing.T) {
 	state := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", state)
 	t.Setenv("INSPECT_PROJECT", "other")
+	strictContainers(t, "web.other.opossum", "web-run.other.opossum")
 	if err := os.MkdirAll(filepath.Join(state, "opossum", "other"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -5101,6 +5142,7 @@ func TestDestroyPlanIsWhatItSaysItIs(t *testing.T) {
 	t.Setenv("STATE_DIR", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("INSPECT_PROJECT", "named")
+	strictContainers(t, "web-run.named.opossum", "web.named.opossum")
 	dir := destroyProject(t, "name: named\nservices:\n  web:\n    image: web\n")
 	t.Chdir(dir)
 

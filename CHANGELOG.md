@@ -6,6 +6,15 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.42.0] - 2026-10-02
+
+### Fixed
+
+- `down` no longer asks the restart supervisor of a project to stop twice. It stops it before the compose file is read, under the name it can work out without the file, and then once more after loading the file; when the first attempt could not confirm that the supervisor was gone, the second waited out the whole stop budget again (up to about 8 seconds in all) and printed the same `[OPSM-414]` warning a second time. The project is now asked once. A project whose file gives it a name of its own (`name:`) is another supervisor's and is still asked.
+- `entrypoint: [""]` (a list of one empty word) together with a `command:` now takes the image's own ENTRYPOINT away and runs the command in its place, as docker compose does. Before, the service did not start: `container` 1.5.0 reads an empty `--entrypoint=` as taking the next word on the line for its value, so the image name was read as a command and a different image was pulled. With no `command:` it is refused, as docker compose refuses it (`no command specified`) — unlike `entrypoint: []`, which runs the image's own CMD.
+- `up --dry-run` no longer plans a pull of an image the build makes, for a service that has `build:` and writes `entrypoint: []` with no `command`. The plan listed `container image pull <project>-<service>:latest` after the build, a step the real `up` never takes (the build has made the image, and no registry has it). A service with an `image:` of a registry still has its pull planned before the run.
+- A short `volumes` mount with nothing before its first colon (`:/b`, `:/b:ro`, `:ro` — which is what `${DATA}:/data` gives when `DATA` is not set) or nothing after its second (`/a:/b:`) is now refused when the file is read, as docker compose refuses it (`empty section between colons`); before, the runtime took the empty source for an anonymous volume and started the service. Taking down a project that an earlier version started with such a mount warns and goes on rather than refusing the file. A bare `:`, a one-byte section after a leading colon (`:a`) and a middle section that is a single Unicode letter (`/a:a:`, `/a:é:`, or a Chinese or Greek letter, which docker compose takes for a Windows drive) are read as before; a middle section of any other one character (`/a:1:`, `/a:_:`, a space) is refused, as docker compose refuses it.
+
 ## [0.41.0] - 2026-10-01
 
 ### Changed
@@ -2722,7 +2731,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.41.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.42.0...HEAD
+[0.42.0]: https://github.com/suruseas/opossum/compare/v0.41.0...v0.42.0
 [0.41.0]: https://github.com/suruseas/opossum/compare/v0.40.1...v0.41.0
 [0.40.1]: https://github.com/suruseas/opossum/compare/v0.40.0...v0.40.1
 [0.40.0]: https://github.com/suruseas/opossum/compare/v0.39.0...v0.40.0

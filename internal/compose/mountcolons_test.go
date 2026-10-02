@@ -42,11 +42,11 @@ func TestAShortMountIsReadAsSourceTargetMode(t *testing.T) {
 		{"./src:", `volumes entry 1 of 1: "./src:" has no target after its colon — a short mount is SOURCE:TARGET, so write the path in the container (` + "`./src:/app`" + `)`},
 		{"/abs:", `volumes entry 1 of 1: "/abs:" has no target after its colon`},
 		{"hh:", `volumes entry 1 of 1: "hh:" has no target after its colon — a short mount is SOURCE:TARGET, so write the path in the container (` + "`hh:/app`" + `)`},
-		// The bare `:` is the one entry docker accepts, so it loads; and an empty
-		// source is a difference already written down in docs/compatibility.md,
-		// which this does not change.
+		// The bare `:` is the one entry docker accepts, so it loads. An empty source
+		// before a target is refused, as docker compose refuses it (`empty section
+		// between colons`, v5.5.1) — in the shape check, which taking a project
+		// down goes on past, and not in the decode this table asks.
 		{":", ""},
-		{":/y", ""},
 	} {
 		t.Run(tc.entry, func(t *testing.T) {
 			_, err := Load(writeTemp(t, "services:\n  web:\n    image: alpine\n    volumes:\n      - "+strconv.Quote(tc.entry)+"\n"+decl))

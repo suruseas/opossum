@@ -14,6 +14,14 @@ import (
 //
 // The keys are written out here rather than read from readAsItIsWhereNotTaken: a key taken out of
 // the map would take its own subtest with it, and a gap would go unnoticed.
+//
+// Twelve keys of the set are not in this table, and taking one out of the set turns nothing red:
+// `command`, `entrypoint`, `group_add`, `image`, `mac_address`, `mem_limit`, `network_mode`,
+// `platform`, `restart`, `user`, `volumes_from` and `working_dir`. They are not held to the schema,
+// so the shape check never asked anything of them, and the loader's own decode refuses a value of
+// the wrong kind in a service that is not taken as in one that is (docker compose reads it there):
+// the set names what docker compose asks nothing of, and for these the difference is the loader's,
+// not this check's.
 func TestWhatDockerComposeAsksNothingOfInAServiceItDoesNotTake(t *testing.T) {
 	for _, tc := range []struct{ key, wrong string }{
 		{"attach", `1`},
@@ -83,7 +91,9 @@ func TestWhatDockerComposeAsksNothingOfInAServiceItDoesNotTake(t *testing.T) {
 // among those it is asked nothing of by mistake is caught here where the loader's own decode does
 // not refuse the value first (for `build`, `configs`, `depends_on`, `env_file`, `init`, `read_only`,
 // `secrets`, `tty`, `ulimits` and `volumes` it does, so a key put among them wrongly changes nothing
-// a file can show).
+// a file can show). `ports` is here with a value the decode does not refuse (a port written as a
+// float, which docker compose refuses in a service that is not taken as well), so that it is held
+// to this: a number as a whole (`ports: 1`) is refused by the decode first.
 func TestWhatDockerComposeReadsIntoATypeIsStillAskedInAServiceItDoesNotTake(t *testing.T) {
 	for _, tc := range []struct{ key, wrong string }{
 		{"build", `1`},
@@ -105,7 +115,7 @@ func TestWhatDockerComposeReadsIntoATypeIsStillAskedInAServiceItDoesNotTake(t *t
 		{"oom_kill_disable", `abc`},
 		{"oom_score_adj", `abc`},
 		{"pids_limit", `abc`},
-		{"ports", `1`},
+		{"ports", `[!!float 80]`},
 		{"privileged", `abc`},
 		{"read_only", `abc`},
 		{"scale", `abc`},

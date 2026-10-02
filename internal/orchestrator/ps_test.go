@@ -15,6 +15,7 @@ import (
 // encoding/json — the reader of `--format json` is a program.
 func TestPsRendersJSON(t *testing.T) {
 	rt, _ := fakeShim(t)
+	strictContainerWith(t, rt, "db.demo.opossum", "-p", "8080:8080")
 	p := project("demo", map[string]*compose.Service{
 		"db": {Image: "postgres:16"},
 	})

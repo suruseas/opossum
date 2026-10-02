@@ -126,6 +126,7 @@ func TestEveryCommandAgreesOnABuiltImagesName(t *testing.T) {
 		})
 		t.Run(nb.shape+"/ps", func(t *testing.T) {
 			rt, _ := fakeShim(t)
+			strictContainers(t, rt, "web.demo.opossum")
 			var out bytes.Buffer
 			if err := orchestrator.New(namedProject(nb.svc), rt, "opossum", &out).Ps(orchestrator.PsOptions{Format: "json"}); err != nil {
 				t.Fatal(err)
@@ -401,7 +402,7 @@ func TestAnImageIsBroughtOverFromDockerUnderItsOwnName(t *testing.T) {
 				setShimEnv(rt, "IMAGE_ABSENT="+nb.want+" "+oldName)
 				asked := filepath.Join(t.TempDir(), "docker-argv")
 				docker := filepath.Join(t.TempDir(), "docker")
-				script := "#!/bin/sh\necho \"$@\" >> " + asked + "\nexit 0\n"
+				script := "#!/bin/sh\necho \"$@\" >> " + asked + "\nprintf archive\nexit 0\n"
 				if err := os.WriteFile(docker, []byte(script), 0o755); err != nil {
 					t.Fatal(err)
 				}

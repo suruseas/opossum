@@ -72,6 +72,7 @@ func TestLogsFollowAContainerThatHasWrittenNothing(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
 			rt, log := fakeShim(t)
 			setShimEnv(rt, tc.env...)
+			strictContainers(t, rt, "web.demo.opossum", "x.demo.opossum")
 			out := &lockedBuffer{}
 			o := orchestrator.New(project("demo", map[string]*compose.Service{"web": {Image: "alpine:3.20"}, "x": {Image: "alpine:3.20"}}), rt, "opossum", out)
 			done := make(chan error, 1)
@@ -130,6 +131,7 @@ func TestLogsFollowOfAnEmptyLogEndsOnSIGTERMWithoutAskingAgain(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	rt, log := fakeShim(t)
 	setShimEnv(rt, "LOGS_EMPTY=web.demo.opossum", "LOGS_EMPTY_AFTER=3000", "LOGS_SLEEP=10")
+	strictContainers(t, rt, "web.demo.opossum")
 	trace := &lockedBuffer{}
 	rt.Verbose, rt.Trace = true, trace
 	o := orchestrator.New(project("demo", map[string]*compose.Service{"web": {Image: "alpine:3.20"}}), rt, "opossum", &lockedBuffer{})
@@ -166,6 +168,7 @@ func TestLogsFollowOfAnEmptyLogAskedAgainEndsOnSIGTERM(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	rt, log := fakeShim(t)
 	setShimEnv(rt, "LOGS_EMPTY=web.demo.opossum", "LOGS_SLEEP=60")
+	strictContainers(t, rt, "web.demo.opossum")
 	o := orchestrator.New(project("demo", map[string]*compose.Service{"web": {Image: "alpine:3.20"}}), rt, "opossum", &lockedBuffer{})
 	sentAt := make(chan time.Time, 1)
 	go func() {

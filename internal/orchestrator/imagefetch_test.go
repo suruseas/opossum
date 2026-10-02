@@ -307,6 +307,10 @@ func TestWhatIsToldAsAnImageFailure(t *testing.T) {
 				setShimEnv(rt, "INSPECT_FAIL=web.demo.opossum")
 			case !tc.madeIt:
 				setShimEnv(rt, "INSPECT_ABSENT=web.demo.opossum")
+			default:
+				// madeIt: the container is one the runtime has, which the fake would otherwise say
+				// of any name.
+				strictContainers(t, rt, "web.demo.opossum")
 			}
 			body := "services:\n  web:\n    image: alpine:3.20\n"
 			if tc.built {

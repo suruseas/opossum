@@ -55,15 +55,14 @@ type step struct {
 // container name; OTHER is a second container in the same state that nothing
 // in the scenario touches.
 //
-// Not in the table yet, and known to be wrong: a name never run or created at
-// all. Every fake answers `inspect <never-seen>` as a running container where
-// the real CLI exits 1 with `container not found` — the opposite answer, on the
-// very question opossum uses to tell "not there" from "could not be asked" —
-// and lets `volume delete <never-seen>` succeed where the real CLI fails. Many
-// tests lean on the first (a test that needs absence sets INSPECT_ABSENT), so
-// fixing it means counting them first; it is tracked as an open item, not a
-// choice. The table pins what a fake does after it has been told something:
-// deleted, stopped, started.
+// Held back behind a knob, and known to be wrong without it: a name never run or created at
+// all. By default every fake answers `inspect <never-seen>` as a running container where the
+// real CLI exits 1 with `container not found` — the opposite answer, on the very question
+// opossum uses to tell "not there" from "could not be asked" — and lets `volume delete
+// <never-seen>` succeed where the real CLI fails. Many tests lean on the first (14 tests of
+// cmd/opossum, 55 subtests, with the answer changed outright; counted in #1551), so the default
+// is kept and $INSPECT_STRICT turns the real answer on; the table pins it with the knob set.
+// The table pins what a fake does after it has been told something: deleted, stopped, started.
 var contract = []struct {
 	name  string
 	env   []string
@@ -669,7 +668,92 @@ func init() {
 	}{"every letter and digit is taken first and later in a volume name, and after each flag that takes no value", nil, steps})
 }
 
-func TestEveryFakeAnswersTheContract(t *testing.T) {
+func init() {
+	// An image that is given a CMD answers `image inspect` with it in the real shape (#1635):
+	// `variants[].config.config.Cmd`, after a variant that declares none, which is what a
+	// multi-platform image answers (testdata/image-inspect/two-variants-second-declares-workdir.json
+	// is one); what is held is the path the CMD is read from, not what the other variants hold. opossum reads the CMD of an image for `entrypoint: []` with no command, so a fake that
+	// does not answer it turns that path into a refusal in every smoke.
+	contract = append(contract, struct {
+		name  string
+		env   []string
+		steps []step
+	}{"an image given a CMD answers image inspect with it, in the variant that has it", []string{"IMAGE_CMD=img:1=postgres,-c,x"}, []step{
+		{argv: []string{"image", "inspect", "img:1"}, rc: 0, has: `{"config":{"config":{"Cmd":["postgres","-c","x"]}}}`},
+	}})
+}
+
+func init() {
+	// What `container image` refuses before it does anything (container 1.5.0, testdata/real-cli-output.md,
+	// #1472): a subcommand it does not have is rc 64, a subcommand that needs an image or a reference
+	// and is given none is rc 64, and `delete` with none is rc 1. What is given its argument, or needs
+	// none, is not refused. A fake that took any of these for a success would let a call that is
+	// malformed pass every test that only looks for success.
+	contract = append(contract, struct {
+		name  string
+		env   []string
+		steps []step
+	}{"image refuses an unknown subcommand and a missing argument, and nothing else", nil, []step{
+		{argv: []string{"image", "bogus"}, rc: 64, has: "Error: Unexpected argument 'bogus'"},
+		{argv: []string{"image", "inspect"}, rc: 64, has: "Error: Missing expected argument '<images> ...'"},
+		{argv: []string{"image", "tag"}, rc: 64, has: "Error: Missing expected argument '<source>'"},
+		{argv: []string{"image", "save"}, rc: 64, has: "Error: Missing expected argument '<references> ...'"},
+		{argv: []string{"image", "pull"}, rc: 64, has: "Error: Missing expected argument '<reference>'"},
+		{argv: []string{"image", "delete"}, rc: 1, has: "Error: no images specified and --all not supplied"},
+		{argv: []string{"image", "rm"}, rc: 1, has: "Error: no images specified and --all not supplied"},
+		{argv: []string{"image", "delete", "--force", "img:1"}, rc: 0, lacks: "Error"},
+		{argv: []string{"image", "pull", "img:1"}, rc: 0, lacks: "Error"},
+		{argv: []string{"image", "tag", "img:1", "img:2"}, rc: 0, lacks: "Error"},
+		{argv: []string{"image", "ls"}, rc: 0, lacks: "Unexpected argument"},
+		{argv: []string{"image", "prune"}, rc: 0, lacks: "Unexpected argument"},
+	}})
+}
+
+func init() {
+	// What the real CLI refuses of an image that is not there (container 1.5.0, testdata/real-cli-output.md,
+	// #1472): `inspect`, `tag` (its source), `save`, `push` and a `delete` without `--force` are rc 1, each
+	// in its own words, and `delete --force` is rc 0. An image is not there when $IMAGE_ABSENT names it; one
+	// it does not name is. A fake that took any of these for a success would let a path that asks for an
+	// image that is gone, and goes on, pass every test that only looks for success.
+	contract = append(contract, struct {
+		name  string
+		env   []string
+		steps []step
+	}{"an image that is not there is refused by inspect, tag, save, push and delete without --force", []string{"IMAGE_ABSENT=gone:1"}, []step{
+		{argv: []string{"image", "inspect", "gone:1"}, rc: 1, has: "Error: image not found: gone:1"},
+		{argv: []string{"image", "tag", "gone:1", "other:2"}, rc: 1, has: "Error: image with reference gone:1"},
+		{argv: []string{"image", "push", "gone:1"}, rc: 1, has: "Error: image with reference gone:1"},
+		{argv: []string{"image", "save", "-o", "gone.tar", "gone:1"}, rc: 1, has: "Error: failed to save image(s)"},
+		{argv: []string{"image", "save", "-o", "gone.tar", "gone:1"}, rc: 1, has: `notFound: "image with reference gone:1"`},
+		{argv: []string{"image", "delete", "gone:1"}, rc: 1, has: `Error: failed to delete one or more images: ["gone:1"]`},
+		{argv: []string{"image", "rm", "gone:1"}, rc: 1, has: `failed to delete one or more images`},
+		{argv: []string{"image", "delete", "--force", "gone:1"}, rc: 0, lacks: "Error"},
+		{argv: []string{"image", "tag", "here:1", "other:2"}, rc: 0, lacks: "Error"},
+		{argv: []string{"image", "push", "here:1"}, rc: 0, lacks: "Error"},
+		{argv: []string{"image", "save", "-o", "here.tar", "here:1"}, rc: 0, lacks: "Error"},
+		{argv: []string{"image", "delete", "here:1"}, rc: 0, lacks: "Error"},
+	}})
+}
+
+func init() {
+	// `container image load` reads an archive from its standard input (opossum's `docker image save |
+	// container image load`), and the real CLI refuses one with nothing in it (container 1.5.0,
+	// testdata/real-cli-output.md, #1660): rc 1, `failed to extract archive: no entries found in archive`.
+	// A fake that took an empty archive for a success would let an import whose docker side wrote nothing
+	// pass every test that only looks for the load's success. Nothing here feeds the fake an archive, so
+	// the step is the empty one; the runner gives a command no input.
+	contract = append(contract, struct {
+		name  string
+		env   []string
+		steps []step
+	}{"image load refuses an archive that has nothing in it", nil, []step{
+		{argv: []string{"image", "load"}, rc: 1, has: "Error: failed to extract archive: no entries found in archive"},
+	}})
+}
+
+// buildFakes builds the three fakes and returns each one's path by name.
+func buildFakes(t *testing.T) map[string]string {
+	t.Helper()
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatal(err)
@@ -693,6 +777,85 @@ func TestEveryFakeAnswersTheContract(t *testing.T) {
 	if a, b := digest(t, fakes["cmd/opossum/testdata/fakeshim"]), digest(t, fakes["internal/orchestrator/testdata/fakeshim"]); a == b {
 		t.Fatalf("the two Go fakes built to the same binary — one of them is not being checked")
 	}
+	return fakes
+}
+
+// What the fakes take for `image load` where the real CLI answers otherwise, so that it is not a row
+// of the contract (#1660): any non-empty input is an archive (the real CLI refuses what is no tar —
+// rc 1, `unable to open the archive, code -30`), and `-i`/`--input` is a file they do not look at
+// (the real CLI says `file does not exist`, rc 1, for one that is not there). They are held here so
+// that the three fakes keep taking them — an import test feeds a fake docker's bytes to the fake
+// container's load — and so that a fake that refuses every load, or reads a `--input=<path>` for its
+// standard input, is seen.
+func TestEveryFakeLoadsWhatItIsGivenToLoad(t *testing.T) {
+	for fake, path := range buildFakes(t) {
+		for _, tc := range []struct {
+			name  string
+			argv  []string
+			stdin string
+		}{
+			{"a non-empty archive on the standard input", []string{"image", "load"}, "archive"},
+			{"a file named by -i", []string{"image", "load", "-i", "x.tar"}, ""},
+			{"a file named by --input", []string{"image", "load", "--input", "x.tar"}, ""},
+			{"a file named by --input=", []string{"image", "load", "--input=x.tar"}, ""},
+		} {
+			t.Run(fake+"/"+tc.name, func(t *testing.T) {
+				cmd := exec.Command(path, tc.argv...)
+				cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME"),
+					"STATE_DIR=" + t.TempDir(), "FAKE_LOG=" + filepath.Join(t.TempDir(), "calls.log")}
+				cmd.Stdin = strings.NewReader(tc.stdin)
+				if out, err := cmd.CombinedOutput(); err != nil || strings.Contains(string(out), "Error") {
+					t.Errorf("%v with %q on its standard input: want it taken, got %v\n%s", tc.argv, tc.stdin, err, out)
+				}
+			})
+		}
+	}
+}
+
+func init() {
+	// With $INSPECT_STRICT a name nothing here ran is not a container the runtime has (container 1.4.1,
+	// testdata/real-cli-output.md, #1551): `inspect` is rc 1 with `container not found`, as it is for
+	// one that was deleted. A name that was run is there; one deleted since is not.
+	contract = append(contract, struct {
+		name  string
+		env   []string
+		steps []step
+	}{"with INSPECT_STRICT a name nothing ran is not a container, and one that was run is", []string{"INSPECT_STRICT=1"}, []step{
+		{argv: []string{"inspect", "OTHER"}, rc: 1, has: "Error: container not found: probe.other.opossum"},
+		{argv: []string{"inspect", "NAME"}, rc: 1, has: "Error: container not found: probe.demo.opossum"},
+		{argv: []string{"run", "-d", "--name", "NAME", "alpine"}, rc: 0},
+		{argv: []string{"inspect", "NAME"}, rc: 0, lacks: "Error"},
+		{argv: []string{"inspect", "OTHER"}, rc: 1, has: "Error: container not found: probe.other.opossum"},
+		{argv: []string{"delete", "--force", "NAME"}, rc: 0},
+		{argv: []string{"inspect", "NAME"}, rc: 1, has: "Error: container not found: probe.demo.opossum"},
+	}})
+}
+
+func init() {
+	// With $INSPECT_STRICT a volume nothing here made is not one the runtime has (container 1.4.1,
+	// testdata/real-cli-output.md, #1551): `volume delete` of it is rc 1, `failed to delete one or more
+	// volumes: ["<name>"]`, as it is for one deleted already. A volume a `run -v NAME:/x` made is there to
+	// delete, once; a path in the source (a bind) makes none.
+	contract = append(contract, struct {
+		name  string
+		env   []string
+		steps []step
+	}{"with INSPECT_STRICT a volume nothing made cannot be deleted, and one a run made can, once", []string{"INSPECT_STRICT=1"}, []step{
+		{argv: []string{"volume", "delete", "neverseen"}, rc: 1, has: `Error: failed to delete one or more volumes: ["neverseen"]`},
+		{argv: []string{"volume", "rm", "neverseen"}, rc: 1, has: `failed to delete one or more volumes`},
+		{argv: []string{"run", "-d", "--name", "NAME", "-v", "madeone:/data", "alpine"}, rc: 0},
+		{argv: []string{"volume", "delete", "madeone"}, rc: 0, lacks: "Error"},
+		{argv: []string{"volume", "delete", "madeone"}, rc: 1, has: `Error: failed to delete one or more volumes: ["madeone"]`},
+		// Made again by another run, it is there to delete again.
+		{argv: []string{"run", "-d", "--name", "probe.third.opossum", "-v", "madeone:/data", "alpine"}, rc: 0},
+		{argv: []string{"volume", "delete", "madeone"}, rc: 0, lacks: "Error"},
+		{argv: []string{"run", "-d", "--name", "OTHER", "-v", "/abs/path:/data", "alpine"}, rc: 0},
+		{argv: []string{"volume", "delete", "/abs/path"}, rc: 1, has: `failed to delete one or more volumes`},
+	}})
+}
+
+func TestEveryFakeAnswersTheContract(t *testing.T) {
+	fakes := buildFakes(t)
 	for fake, path := range fakes {
 		for _, sc := range contract {
 			t.Run(fake+"/"+sc.name, func(t *testing.T) {

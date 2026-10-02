@@ -152,7 +152,7 @@ func TestAMountOfAnUndeclaredNamedVolumeIsRefused(t *testing.T) {
 	// rule: a source starting with `/`, `.` or `~` is a path, the rest is a
 	// volume name): `/…` · `./…` · `../…` · `.` · `..` · `.hidden` ·
 	// `.hidden/sub` · `..hidden` · `~` · `~/…` · (`~name` refused above) ·
-	// empty source · bare target · long-form bind · long-form volume · tmpfs ·
+	// bare target · long-form bind · long-form volume · tmpfs ·
 	// a declared name with a mode / nocopy · external · (undeclared refused above).
 	for _, tc := range []struct{ name, item string }{
 		{"a relative host path", "./x:/y"},
@@ -167,7 +167,6 @@ func TestAMountOfAnUndeclaredNamedVolumeIsRefused(t *testing.T) {
 		{"a name starting with two dots", "..hidden:/y"},
 		{"a long-form bind", "{type: bind, source: ./lb, target: /lb}"},
 		{"an anonymous volume", "/anon"},
-		{"an anonymous volume written with an empty source", ":/es"},
 		{"a long-form anonymous volume", "{type: volume, target: /la}"},
 		{"a tmpfs", "{type: tmpfs, target: /t}"},
 		{"a declared volume with a mode", "good:/g:ro"},

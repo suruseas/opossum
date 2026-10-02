@@ -104,6 +104,11 @@ func TestAClearedEntrypointRunsTheCommandInItsPlace(t *testing.T) {
 			wantRun: "run --name w --entrypoint=postgres img", wantInspec: true, wantPull: true,
 		},
 		{
+			name: "no command and the image is made by a build here: it is never pulled, and one that cannot be read is told as it is", cmdJSON: `["postgres"]`, here: false,
+			options:    RunOptions{Name: "w", Image: "img", EntrypointCleared: true, ImageIsBuilt: true},
+			wantInspec: true, wantErr: "has no command that can be read",
+		},
+		{
 			name: "no command and an image with no CMD", cmdJSON: `null`, here: true,
 			options:    RunOptions{Name: "w", Image: "img", EntrypointCleared: true},
 			wantInspec: true, wantErr: "neither the service nor img names a command",
@@ -112,6 +117,46 @@ func TestAClearedEntrypointRunsTheCommandInItsPlace(t *testing.T) {
 			name: "an entrypoint the service writes wins over the mark", cmdJSON: `["postgres"]`, here: true,
 			options: RunOptions{Name: "w", Image: "img", EntrypointCleared: true, Entrypoint: []string{"/app/run", "--serve"}, Command: []string{"-c"}},
 			wantRun: "run --name w --entrypoint=/app/run img --serve -c",
+		},
+		{
+			name: "an entrypoint of one empty word is read as cleared: the command in its place", cmdJSON: `["nginx"]`, here: true,
+			options: RunOptions{Name: "w", Image: "img", Entrypoint: []string{""}, Command: []string{"echo", "hi"}},
+			wantRun: "run --name w --entrypoint=echo img hi",
+		},
+		{
+			name: "an entrypoint of one empty word and no command is refused, as docker refuses it, whatever the image CMD", cmdJSON: `["postgres","-c","x"]`, here: true,
+			options: RunOptions{Name: "w", Image: "img", Entrypoint: []string{""}},
+			wantErr: "has no `command:` to run instead",
+		},
+		{
+			name: "an entrypoint of one empty word and a command whose first word is empty is refused", cmdJSON: `["postgres"]`, here: true,
+			options: RunOptions{Name: "w", Image: "img", Entrypoint: []string{""}, Command: []string{"", "x"}},
+			wantErr: "that word is empty", // the same refusal `[]` has
+		},
+		{
+			name: "an entrypoint of one word is not cleared", cmdJSON: `["postgres"]`, here: true,
+			options: RunOptions{Name: "w", Image: "img", Entrypoint: []string{"x"}, Command: []string{"y"}},
+			wantRun: "run --name w --entrypoint=x img y",
+		},
+		{
+			name: "an entrypoint of one word and no command is run as it is", cmdJSON: `["postgres"]`, here: true,
+			options: RunOptions{Name: "w", Image: "img", Entrypoint: []string{"x"}},
+			wantRun: "run --name w --entrypoint=x img",
+		},
+		{
+			name: "an entrypoint of one empty word and a command of one word", cmdJSON: `["postgres"]`, here: true,
+			options: RunOptions{Name: "w", Image: "img", Entrypoint: []string{""}, Command: []string{"echo"}},
+			wantRun: "run --name w --entrypoint=echo img",
+		},
+		{
+			name: "an entrypoint of two words whose last is empty is not the one-empty-word form", cmdJSON: `["postgres"]`, here: true,
+			options: RunOptions{Name: "w", Image: "img", Entrypoint: []string{"x", ""}, Command: []string{"y"}},
+			wantRun: "run --name w --entrypoint=x img  y",
+		},
+		{
+			name: "an entrypoint of two words whose first is empty is not the one-empty-word form (the line it gives is a known fault, #1651)", cmdJSON: `["postgres"]`, here: true,
+			options: RunOptions{Name: "w", Image: "img", Entrypoint: []string{"", "x"}, Command: []string{"y"}},
+			wantRun: "run --name w --entrypoint= img x y",
 		},
 		{
 			name: "not cleared: the image is not asked", cmdJSON: `["postgres"]`, here: true,
@@ -188,13 +233,41 @@ func TestADryRunPlansAClearedEntrypointOfAnImageThatIsNotHereYet(t *testing.T) {
 	if s.runLine() != "" {
 		t.Errorf("a dry run made a run: %q", s.runLine())
 	}
-	var planned bool
-	for _, l := range s.rt.Plan {
+	pull, run := -1, -1
+	for i, l := range s.rt.Plan {
+		if l == "image pull img" {
+			pull = i
+		}
 		if strings.HasPrefix(l, "run ") && strings.Contains(l, "--entrypoint=<the command of img> img") {
-			planned = true
+			run = i
 		}
 	}
-	if !planned {
+	if run < 0 {
+		t.Errorf("the plan should hold the run, got %q", s.rt.Plan)
+	}
+	if pull < 0 || pull > run {
+		t.Errorf("the plan should pull img before the run (pull at %d, run at %d), got %q", pull, run, s.rt.Plan)
+	}
+}
+
+// The image of a service with `build:` is made by the build that comes before the run, and no
+// registry has it: the plan holds the run with the placeholder and no pull of it (#1634).
+func TestADryRunDoesNotPlanAPullOfAnImageABuildMakes(t *testing.T) {
+	s := newClearedShim(t, `["postgres"]`, false)
+	s.rt.DryRun = true
+	if err := s.rt.Run(RunOptions{Name: "w", Image: "img", EntrypointCleared: true, ImageIsBuilt: true}); err != nil {
+		t.Fatalf("Run in a dry run: %v", err)
+	}
+	var run bool
+	for _, l := range s.rt.Plan {
+		if strings.HasPrefix(l, "image pull") {
+			t.Errorf("the plan pulls an image a build makes: %q", l)
+		}
+		if strings.HasPrefix(l, "run ") && strings.Contains(l, "--entrypoint=<the command of img> img") {
+			run = true
+		}
+	}
+	if !run {
 		t.Errorf("the plan should hold the run, got %q", s.rt.Plan)
 	}
 }

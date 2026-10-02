@@ -54,6 +54,7 @@ func TestLogsAndStatsReadOnlyThisProjectsContainers(t *testing.T) {
 	for _, k := range kinds {
 		t.Run("logs/"+k.name, func(t *testing.T) {
 			rt, log := fakeShim(t)
+			strictContainers(t, rt, "db.demo.opossum", "web.demo.opossum")
 			setShimEnv(rt, k.env)
 			var out bytes.Buffer
 			var err error
@@ -78,6 +79,7 @@ func TestLogsAndStatsReadOnlyThisProjectsContainers(t *testing.T) {
 		// prefix width (one more than "cache-1", not "web-1").
 		t.Run("logs --follow/"+k.name, func(t *testing.T) {
 			rt, log := fakeShim(t)
+			strictContainers(t, rt, "db.demo.opossum", "web.demo.opossum", "cache.demo.opossum")
 			setShimEnv(rt, k.env)
 			p := newP()
 			p.Services["cache"] = &compose.Service{Image: "cache:latest"}
@@ -99,6 +101,7 @@ func TestLogsAndStatsReadOnlyThisProjectsContainers(t *testing.T) {
 		})
 		t.Run("stats/"+k.name, func(t *testing.T) {
 			rt, log := fakeShim(t)
+			strictContainers(t, rt, "db.demo.opossum", "web.demo.opossum")
 			setShimEnv(rt, k.env)
 			var out bytes.Buffer
 			var err error
@@ -116,6 +119,7 @@ func TestLogsAndStatsReadOnlyThisProjectsContainers(t *testing.T) {
 		})
 		t.Run("stats --format json/"+k.name, func(t *testing.T) {
 			rt, _ := fakeShim(t)
+			strictContainers(t, rt, "db.demo.opossum", "web.demo.opossum")
 			setShimEnv(rt, k.env)
 			var out bytes.Buffer
 			var err error
@@ -132,6 +136,7 @@ func TestLogsAndStatsReadOnlyThisProjectsContainers(t *testing.T) {
 		// footprint is this project's to show.
 		t.Run("stats --host/"+k.name, func(t *testing.T) {
 			rt, log := fakeShim(t)
+			strictContainers(t, rt, "db.demo.opossum", "web.demo.opossum")
 			setShimEnv(rt, k.env)
 			var out bytes.Buffer
 			var err error
@@ -176,6 +181,7 @@ func TestLogsAndStatsReadOnlyThisProjectsContainers(t *testing.T) {
 	for _, c := range commands {
 		t.Run(c.name+"/every container someone else's", func(t *testing.T) {
 			rt, log := fakeShim(t)
+			strictContainers(t, rt, "db.demo.opossum", "web.demo.opossum")
 			setShimEnv(rt, "INSPECT_UNLABELED=web.demo.opossum", "INSPECT_OWNER=db.demo.opossum=otherproj")
 			var out bytes.Buffer
 			var err error
@@ -195,6 +201,7 @@ func TestLogsAndStatsReadOnlyThisProjectsContainers(t *testing.T) {
 		})
 		t.Run(c.name+"/every container unanswered", func(t *testing.T) {
 			rt, log := fakeShim(t)
+			strictContainers(t, rt, "db.demo.opossum", "web.demo.opossum")
 			setShimEnv(rt, "INSPECT_FAIL=web.demo.opossum db.demo.opossum")
 			var out bytes.Buffer
 			var err error
@@ -215,6 +222,7 @@ func TestLogsAndStatsReadOnlyThisProjectsContainers(t *testing.T) {
 	// about: the table is its header alone, and the exit is non-zero.
 	t.Run("opossum ps/every container unanswered", func(t *testing.T) {
 		rt, _ := fakeShim(t)
+		strictContainers(t, rt, "db.demo.opossum", "web.demo.opossum")
 		setShimEnv(rt, "INSPECT_FAIL=web.demo.opossum db.demo.opossum")
 		var out bytes.Buffer
 		var err error
@@ -231,6 +239,7 @@ func TestLogsAndStatsReadOnlyThisProjectsContainers(t *testing.T) {
 	// nothing — not even `[]` — as docker compose v5.5.0 prints nothing.
 	t.Run("opossum stats --format json/every container someone else's", func(t *testing.T) {
 		rt, log := fakeShim(t)
+		strictContainers(t, rt, "db.demo.opossum", "web.demo.opossum")
 		setShimEnv(rt, "INSPECT_UNLABELED=web.demo.opossum", "INSPECT_OWNER=db.demo.opossum=otherproj")
 		var out bytes.Buffer
 		var err error
@@ -247,6 +256,7 @@ func TestLogsAndStatsReadOnlyThisProjectsContainers(t *testing.T) {
 	unansweredWeb := "so they were left: web.demo.opossum"
 	t.Run("logs: a failing read beside an unanswered container", func(t *testing.T) {
 		rt, _ := fakeShim(t)
+		strictContainers(t, rt, "db.demo.opossum", "web.demo.opossum")
 		setShimEnv(rt, "INSPECT_FAIL=web.demo.opossum", "LOGS_FAIL=db.demo.opossum")
 		var err error
 		_ = stderrOf(t, func() {
@@ -260,6 +270,7 @@ func TestLogsAndStatsReadOnlyThisProjectsContainers(t *testing.T) {
 	})
 	t.Run("logs --follow: every stream failing beside an unanswered container", func(t *testing.T) {
 		rt, _ := fakeShim(t)
+		strictContainers(t, rt, "db.demo.opossum", "web.demo.opossum", "cache.demo.opossum")
 		setShimEnv(rt, "INSPECT_FAIL=web.demo.opossum", "LOGS_FAIL=db.demo.opossum cache.demo.opossum")
 		p := newP()
 		p.Services["cache"] = &compose.Service{Image: "cache:latest"}
@@ -276,6 +287,7 @@ func TestLogsAndStatsReadOnlyThisProjectsContainers(t *testing.T) {
 	for _, format := range []string{"", "json"} {
 		t.Run("stats --format "+format+": a failing snapshot beside an unanswered container", func(t *testing.T) {
 			rt, _ := fakeShim(t)
+			strictContainers(t, rt, "db.demo.opossum", "web.demo.opossum")
 			setShimEnv(rt, "INSPECT_FAIL=web.demo.opossum", "STATS_FAIL=1")
 			var err error
 			_ = stderrOf(t, func() {
@@ -294,6 +306,7 @@ func TestLogsAndStatsReadOnlyThisProjectsContainers(t *testing.T) {
 	// once (docker compose v5.5.0 prints `logs web web` once).
 	t.Run("logs db db web web: each once", func(t *testing.T) {
 		rt, log := fakeShim(t)
+		strictContainers(t, rt, "db.demo.opossum", "web.demo.opossum")
 		setShimEnv(rt, "INSPECT_FAIL=web.demo.opossum")
 		var err error
 		_ = stderrOf(t, func() {
@@ -311,6 +324,7 @@ func TestLogsAndStatsReadOnlyThisProjectsContainers(t *testing.T) {
 	// order services are read in is the order they were named.
 	t.Run("logs web db web: web first, each once", func(t *testing.T) {
 		rt, log := fakeShim(t)
+		strictContainers(t, rt, "db.demo.opossum", "web.demo.opossum")
 		var err error
 		_ = stderrOf(t, func() {
 			err = orchestrator.New(newP(), rt, "opossum", &bytes.Buffer{}).Logs([]string{"web", "db", "web"}, runtime.LogsOptions{})
@@ -336,6 +350,7 @@ func TestLogsAndStatsReadOnlyThisProjectsContainers(t *testing.T) {
 	// about.
 	t.Run("stats: own service never started, the other unanswered", func(t *testing.T) {
 		rt, _ := fakeShim(t)
+		strictContainers(t, rt, "web.demo.opossum")
 		setShimEnv(rt, "INSPECT_ABSENT=db.demo.opossum", "INSPECT_FAIL=web.demo.opossum")
 		var err error
 		_ = stderrOf(t, func() {
@@ -351,6 +366,7 @@ func TestLogsAndStatsReadOnlyThisProjectsContainers(t *testing.T) {
 	// Bare names (--dns-domain ""): the same reading, by the bare name.
 	t.Run("logs with bare names", func(t *testing.T) {
 		rt, log := fakeShim(t)
+		strictContainers(t, rt, "db", "web")
 		setShimEnv(rt, "INSPECT_PROJECT=demo", "INSPECT_UNLABELED=db")
 		var out bytes.Buffer
 		var err error
@@ -368,6 +384,7 @@ func TestLogsAndStatsReadOnlyThisProjectsContainers(t *testing.T) {
 	// This project's own: read as before, nothing said.
 	t.Run("this project's own", func(t *testing.T) {
 		rt, log := fakeShim(t)
+		strictContainers(t, rt, "db.demo.opossum", "web.demo.opossum")
 		var out bytes.Buffer
 		var err error
 		stderr := stderrOf(t, func() { err = orchestrator.New(newP(), rt, "opossum", &out).Logs(nil, runtime.LogsOptions{}) })

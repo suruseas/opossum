@@ -67,6 +67,7 @@ func TestStatsJSONHasNoRowForAStoppedService(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			rt, _ := fakeShim(t)
 			setShimEnv(rt, tc.env)
+			strictContainers(t, rt, "web.demo.opossum", "db.demo.opossum")
 			var out bytes.Buffer
 			if err := orchestrator.New(p(), rt, "opossum", &out).Stats(nil, orchestrator.StatsOptions{NoStream: true, Format: "json"}); err != nil {
 				t.Fatalf("Stats: %v", err)
@@ -103,6 +104,7 @@ func TestPsJSONLeavesWhatIsNotThereEmpty(t *testing.T) {
 // A service named twice is one service: one row.
 func TestStatsJSONNamesAServiceOnce(t *testing.T) {
 	rt, _ := fakeShim(t)
+	strictContainers(t, rt, "web.demo.opossum")
 	p := project("demo", map[string]*compose.Service{"web": {Image: "web:latest"}})
 	var out bytes.Buffer
 	if err := orchestrator.New(p, rt, "opossum", &out).Stats([]string{"web", "web"}, orchestrator.StatsOptions{NoStream: true, Format: "json"}); err != nil {
@@ -133,6 +135,7 @@ func TestStatsJSONRowsFollowTheServices(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rt, _ := fakeShim(t)
+			strictContainers(t, rt, "a.demo.opossum", "z.demo.opossum")
 			var out bytes.Buffer
 			if err := orchestrator.New(p(), rt, "opossum", &out).Stats(tc.named, orchestrator.StatsOptions{NoStream: true, Format: "json"}); err != nil {
 				t.Fatalf("Stats: %v", err)

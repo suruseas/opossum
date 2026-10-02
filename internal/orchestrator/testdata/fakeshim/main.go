@@ -11,7 +11,7 @@
 // RUN_FAIL_STDERR, RUN_FAIL_THEN_INSPECT_FAIL, RUN_FAIL_MAKES_NOTHING,
 // RUN_HANG, RUN_DIE_SIGNAL, RUN_EXISTS[_WORDING|_HASH], RUN_EXISTS_ANY, HEALTH_*,
 // VOLUME_* (VOLUME_DELETE_STICKY, VOLUME_LS_FAIL_FROM among them), LS_*,
-// IMAGE_ABSENT, IMAGE_LABELS, INSPECT_HANG_WHILE, INSPECT_ANSWERED, INSPECT_GATE,
+// IMAGE_ABSENT, IMAGE_CMD, IMAGE_LABELS, INSPECT_HANG_WHILE, INSPECT_ANSWERED, INSPECT_GATE,
 // LOGS_EMPTY[_AFTER], LOGS_FAIL_N, LOGS_DRIP[_AFTER|_INTERVAL], LOGS_SLEEP, LOGS_SELF_INT,
 // LOGS_TEXT, STOP_THEN_SLEEP_MS, START_THEN_SLEEP_MS, SLOW_ONLY),
 // so tests need no t.Setenv and stay
@@ -263,6 +263,15 @@ func run(args []string) int {
 		// Gone until something creates it again (see the `run` case).
 		if dir := os.Getenv("STATE_DIR"); dir != "" {
 			if _, err := os.Stat(gonePath(dir, arg(1))); err == nil {
+				fmt.Fprintf(os.Stderr, "Error: container not found: %s\n", arg(1))
+				return 1
+			}
+		}
+		// $INSPECT_STRICT: a name nothing here ran is not a container the runtime has, as the real
+		// CLI answers for one it has never seen (container 1.4.1, testdata/real-cli-output.md);
+		// without it every name is taken to be there (#1551).
+		if dir := os.Getenv("STATE_DIR"); dir != "" && os.Getenv("INSPECT_STRICT") != "" {
+			if _, err := os.Stat(createdPath(dir, arg(1))); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: container not found: %s\n", arg(1))
 				return 1
 			}
@@ -565,6 +574,9 @@ func run(args []string) int {
 					// un-gone it), with whatever hash and ports were recorded earlier.
 					if dir := os.Getenv("STATE_DIR"); dir != "" {
 						_ = os.Remove(gonePath(dir, taken))
+						// ...and it is a container the runtime has, as one that took the name is: a
+						// strict inspect (INSPECT_STRICT) finds it rather than answering not found.
+						_ = os.WriteFile(createdPath(dir, taken), []byte("1"), 0o644)
 						// What the holder was made with, if the test says: a hash of its
 						// own, or "none" for a container made by hand (no opossum labels).
 						// Unset, the holder inspects with whatever the earlier run recorded —
@@ -1007,6 +1019,16 @@ func run(args []string) int {
 						absent = append(absent, `"`+v+`"`)
 						continue
 					}
+					// $INSPECT_STRICT: a volume nothing here made, and $VOLUME_LS does not list, is not
+					// one the runtime has, and the real CLI refuses to delete it (container 1.4.1,
+					// testdata/real-cli-output.md); without it a name never seen is let through (#1551).
+					if os.Getenv("INSPECT_STRICT") != "" {
+						_, madeErr := os.Stat(volumePath(dir, v))
+						if madeErr != nil && !slices.Contains(strings.Fields(os.Getenv("VOLUME_LS")), v) && !slices.Contains(volumeNamesOfTable(os.Getenv("VOLUME_LS_TABLE")), v) {
+							absent = append(absent, `"`+v+`"`)
+							continue
+						}
+					}
 					os.Remove(volumePath(dir, v))
 					_ = os.WriteFile(goneVolumePath(dir, v), []byte(v), 0o644)
 				}
@@ -1192,9 +1214,19 @@ func run(args []string) int {
 		}
 
 	case "image":
+		if rc := refuseImageArguments(arg); rc != 0 {
+			return rc
+		}
+		if rc := refuseAbsentImage(args); rc != 0 {
+			return rc
+		}
+		if rc := refuseEmptyLoad(args); rc != 0 {
+			return rc
+		}
 		if arg(1) == "inspect" {
 			for _, m := range strings.Fields(os.Getenv("IMAGE_ABSENT")) {
 				if arg(2) == m {
+					fmt.Fprintf(os.Stderr, "Error: image not found: %s\n", arg(2))
 					return 1
 				}
 			}
@@ -1208,6 +1240,13 @@ func run(args []string) int {
 			for _, l := range imageLabels(arg(2)) {
 				k, v, _ := strings.Cut(l, "=")
 				parts = append(parts, fmt.Sprintf("%q:%q", k, v))
+			}
+			if cmd := imageCmd(arg(2)); cmd != nil {
+				// $IMAGE_CMD (#1635): the real shape of an image with a CMD, a variant that has none
+				// (an attestation) before the one that has it.
+				words, _ := json.Marshal(cmd)
+				fmt.Printf(`[{"variants":[{"config":{"config":{"Labels":{%s}}}},{"config":{"config":{"Cmd":%s}}}]}]`+"\n", strings.Join(parts, ","), words)
+				return 0
 			}
 			fmt.Printf(`[{"variants":[{"config":{"config":{"Labels":{%s}}}}]}]`+"\n", strings.Join(parts, ","))
 		}
@@ -1338,6 +1377,18 @@ func networkLabels(name string) ([]string, bool) {
 		}
 	}
 	return nil, false
+}
+
+// imageCmd is the CMD $IMAGE_CMD gives ref (#1635), as `ref=word,word` entries separated by
+// spaces, or nil for an image not named there.
+func imageCmd(ref string) []string {
+	for _, entry := range strings.Fields(os.Getenv("IMAGE_CMD")) {
+		r, rest, _ := strings.Cut(entry, "=")
+		if r == ref && rest != "" {
+			return strings.Split(rest, ",")
+		}
+	}
+	return nil
 }
 
 // imageLabels are the labels $IMAGE_LABELS gives ref (#1126), or nil if it
@@ -1692,4 +1743,122 @@ func publishCount(side string) int {
 		return 1
 	}
 	return b - a + 1
+}
+
+// refuseImageArguments answers what the real CLI refuses before it does anything (container 1.5.0,
+// testdata/real-cli-output.md): a subcommand it does not have is rc 64, and so is a subcommand that
+// needs an image or a reference and is given none; `delete` with none is rc 1. `ls`, `prune` and
+// `load` need no argument. It returns 0 for what is not refused. The shim in cmd/opossum/testdata
+// and the shell one answer the same (internal/shimcontract).
+func refuseImageArguments(arg func(int) string) int {
+	sub := arg(1)
+	switch sub {
+	case "", "inspect", "tag", "save", "pull", "push", "delete", "rm", "list", "ls", "load", "prune":
+	default:
+		fmt.Fprintf(os.Stderr, "Error: Unexpected argument '%s'\nUsage: container image [--debug] <subcommand>\n", sub)
+		return 64
+	}
+	if sub == "" || arg(2) != "" {
+		return 0
+	}
+	switch sub {
+	case "inspect":
+		fmt.Fprintln(os.Stderr, "Error: Missing expected argument '<images> ...'")
+		return 64
+	case "tag":
+		fmt.Fprintln(os.Stderr, "Error: Missing expected argument '<source>'")
+		return 64
+	case "save":
+		fmt.Fprintln(os.Stderr, "Error: Missing expected argument '<references> ...'")
+		return 64
+	case "pull":
+		fmt.Fprintln(os.Stderr, "Error: Missing expected argument '<reference>'")
+		return 64
+	case "delete", "rm":
+		fmt.Fprintln(os.Stderr, "Error: no images specified and --all not supplied")
+		return 1
+	}
+	return 0
+}
+
+// refuseAbsentImage answers what the real CLI refuses of an image that is not there (container 1.5.0,
+// testdata/real-cli-output.md): `tag` (its source), `save` and `push` (the last argument) and a
+// `delete` without `--force` are rc 1; `delete --force` of it is rc 0. An image is not there when
+// $IMAGE_ABSENT names it (`inspect` of it is answered below). It returns 0 for what is not refused.
+func refuseAbsentImage(args []string) int {
+	if len(args) < 3 {
+		return 0
+	}
+	absent := func(ref string) bool {
+		for _, m := range strings.Fields(os.Getenv("IMAGE_ABSENT")) {
+			if ref == m {
+				return true
+			}
+		}
+		return false
+	}
+	last := args[len(args)-1]
+	switch args[1] {
+	case "tag":
+		if absent(args[2]) {
+			fmt.Fprintf(os.Stderr, "Error: image with reference %s\n", args[2])
+			return 1
+		}
+	case "push":
+		if absent(last) {
+			fmt.Fprintf(os.Stderr, "Error: image with reference %s\n", last)
+			return 1
+		}
+	case "save":
+		if absent(last) {
+			fmt.Fprintf(os.Stderr, "failed to get image for reference %s: notFound: \"image with reference %s\"\nError: failed to save image(s)\n", last, last)
+			return 1
+		}
+	case "delete", "rm":
+		for _, a := range args[2:] {
+			if a == "--force" {
+				return 0
+			}
+		}
+		if absent(last) {
+			fmt.Fprintf(os.Stderr, "Error: failed to delete one or more images: [\"%s\"]\n", last)
+			return 1
+		}
+	}
+	return 0
+}
+
+// refuseEmptyLoad answers what the real CLI does with an archive that has nothing in it (container
+// 1.5.0, testdata/real-cli-output.md): `load` reads it from its standard input (opossum's `docker
+// image save | container image load`) and refuses an empty one, rc 1. With `-i`/`--input` it reads a
+// file (`--input=<path>` too), which this does not look at. Two simplifications, neither in
+// internal/shimcontract because the real CLI answers otherwise: any non-empty input is taken (the real
+// CLI refuses what is no tar: rc 1, `unable to open the archive, code -30`), and a file named by `-i`
+// is taken whether or not it is there (the real CLI says `file does not exist`, rc 1). It returns 0 for what is not refused.
+func refuseEmptyLoad(args []string) int {
+	if len(args) < 2 || args[1] != "load" {
+		return 0
+	}
+	for _, a := range args[2:] {
+		if a == "-i" || a == "--input" || strings.HasPrefix(a, "--input=") {
+			return 0
+		}
+	}
+	if b, _ := io.ReadAll(os.Stdin); len(b) == 0 {
+		fmt.Fprintln(os.Stderr, "Error: failed to extract archive: no entries found in archive")
+		return 1
+	}
+	return 0
+}
+
+// volumeNamesOfTable are the names in the first column of a $VOLUME_LS_TABLE: its header row
+// (NAME) is not one.
+func volumeNamesOfTable(table string) []string {
+	var names []string
+	for _, line := range strings.Split(table, "\n") {
+		if f := strings.Fields(line); len(f) > 0 && f[0] != "NAME" {
+			names = append(names, f[0])
+		}
+	}
+	return names
 }

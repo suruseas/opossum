@@ -48,6 +48,7 @@ func TestACommandOverTheWholeProjectPassesByAServiceWithNoContainer(t *testing.T
 			// Only web has a container: the fake answers `inspect` for it and
 			// says the other is absent.
 			setShimEnv(rt, "INSPECT_ABSENT=debug.demo.opossum")
+			strictContainers(t, rt, "web.demo.opossum")
 			proj, err := loadProject(t, body)
 			if err != nil {
 				t.Fatal(err)

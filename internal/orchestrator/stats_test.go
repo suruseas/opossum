@@ -16,6 +16,7 @@ import (
 // and match containers back to services itself.
 func TestStatsRendersJSON(t *testing.T) {
 	rt, _ := fakeShim(t)
+	strictContainers(t, rt, "web.demo.opossum")
 	p := project("demo", map[string]*compose.Service{
 		"web": {Image: "web:latest"},
 	})

@@ -97,6 +97,49 @@ func setShimEnv(rt *runtime.Runtime, kv ...string) {
 	rt.Env = append(rt.Env, kv...)
 }
 
+// strictContainers makes the fake answer as the real CLI does for a name it has never seen (rc 1,
+// `container not found`) and then makes the containers a test stands on, by running them in the
+// fake that rt drives, so that every container the test relies on is one the runtime has (#1551).
+// The default fake says any name is a running container; a test that says what exists calls this,
+// and the names it lists are all that exists. The fake remembers what was run in rt's STATE_DIR,
+// which fakeShim sets. Each is run with the project label its <service>.<project>.<domain> name
+// carries, as a container opossum made has it: one run without is recorded as owned by nobody, and
+// the commands that check the owner before acting leave it alone.
+func strictContainers(t *testing.T, rt *runtime.Runtime, names ...string) {
+	t.Helper()
+	for _, n := range names {
+		strictContainerWith(t, rt, n)
+	}
+}
+
+// strictContainerWith is strictContainers for one name, run with extra `run` arguments: the
+// `-p 8080:8080` that makes the fake's inspect show the port the container publishes, as the
+// real runtime shows the ones it was run with.
+func strictContainerWith(t *testing.T, rt *runtime.Runtime, n string, extra ...string) {
+	t.Helper()
+	have := false
+	for _, kv := range rt.Env {
+		if strings.HasPrefix(kv, "STATE_DIR=") {
+			have = true
+		}
+	}
+	if !have {
+		t.Fatal("strictContainers needs the shim's STATE_DIR: the fake remembers the containers it ran there")
+	}
+	setShimEnv(rt, "INSPECT_STRICT=1")
+	args := []string{"run", "-d", "--name", n}
+	if parts := strings.Split(n, "."); len(parts) >= 3 {
+		args = append(args, "--label=opossum.project="+parts[len(parts)-2])
+	}
+	args = append(args, extra...)
+	cmd := exec.Command(fakeShimBin, append(args, "alpine")...)
+	// Not into the log: what the runtime was asked is what the command under test asked.
+	cmd.Env = append(append([]string(nil), rt.Env...), "FAKE_LOG=")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("making container %s in the fake: %v\n%s", n, err, out)
+	}
+}
+
 // project builds a Project literal directly so evals control every field without
 // YAML/path resolution noise.
 // testBaseDir is a throwaway compose base directory shared by the tests, so that
@@ -1054,6 +1097,7 @@ func TestBuildAndPullSelectByServiceKind(t *testing.T) {
 
 func TestStartInOrderAndKillInReverse(t *testing.T) {
 	rt, log := fakeShim(t)
+	strictContainers(t, rt, "db.demo.opossum", "web.demo.opossum")
 	p := project("demo", map[string]*compose.Service{
 		"db":  {Image: "postgres:16"},
 		"web": {Image: "web:latest", DependsOn: compose.DependsOn{{Name: "db"}}},
@@ -1069,6 +1113,7 @@ func TestStartInOrderAndKillInReverse(t *testing.T) {
 	}
 
 	rt2, log2 := fakeShim(t)
+	strictContainers(t, rt2, "db.demo.opossum", "web.demo.opossum")
 	o2 := orchestrator.New(p, rt2, "opossum", &bytes.Buffer{})
 	if err := o2.Kill(nil, "TERM"); err != nil {
 		t.Fatalf("Kill: %v", err)
@@ -1298,6 +1343,7 @@ func TestExecRejectsUnknownServiceAndEmptyCommand(t *testing.T) {
 
 func TestStopStopsInReverseWithoutRemoving(t *testing.T) {
 	rt, log := fakeShim(t)
+	strictContainers(t, rt, "db.demo.opossum", "web.demo.opossum")
 	p := project("demo", map[string]*compose.Service{
 		"db":  {Image: "postgres:16"},
 		"web": {Image: "web:latest", DependsOn: compose.DependsOn{{Name: "db"}}},
@@ -1322,6 +1368,7 @@ func TestStopStopsInReverseWithoutRemoving(t *testing.T) {
 
 func TestStopNamedOnly(t *testing.T) {
 	rt, log := fakeShim(t)
+	strictContainers(t, rt, "db.demo.opossum", "web.demo.opossum")
 	p := project("demo", map[string]*compose.Service{
 		"db":  {Image: "postgres:16"},
 		"web": {Image: "web:latest"},
@@ -1338,6 +1385,7 @@ func TestStopNamedOnly(t *testing.T) {
 
 func TestRestartStopsThenStarts(t *testing.T) {
 	rt, log := fakeShim(t)
+	strictContainers(t, rt, "db.demo.opossum", "web.demo.opossum")
 	p := project("demo", map[string]*compose.Service{
 		"db":  {Image: "postgres:16"},
 		"web": {Image: "web:latest", DependsOn: compose.DependsOn{{Name: "db"}}},
@@ -1383,6 +1431,7 @@ func TestRestartStopsThenStarts(t *testing.T) {
 // it stops and starts them in is the dependency order all the same.
 func TestRestartStopsThenStartsAgainstTheAlphabet(t *testing.T) {
 	rt, log := fakeShim(t)
+	strictContainers(t, rt, "zdb.demo.opossum", "app.demo.opossum")
 	p := project("demo", map[string]*compose.Service{
 		"zdb": {Image: "postgres:16"},
 		"app": {Image: "web:latest", DependsOn: compose.DependsOn{{Name: "zdb"}}},
@@ -2096,6 +2145,7 @@ func TestStatsInvokesContainerStats(t *testing.T) {
 
 	// No services + --no-stream: one `stats --no-stream` over all project containers.
 	rt, log := fakeShim(t)
+	strictContainers(t, rt, "web.demo.opossum", "db.demo.opossum")
 	if err := orchestrator.New(newP(), rt, "opossum", &bytes.Buffer{}).Stats(nil, orchestrator.StatsOptions{NoStream: true}); err != nil {
 		t.Fatalf("Stats: %v", err)
 	}
@@ -2111,6 +2161,7 @@ func TestStatsInvokesContainerStats(t *testing.T) {
 
 	// A named service, streaming (default): no --no-stream, only that container.
 	rt2, log2 := fakeShim(t)
+	strictContainers(t, rt2, "web.demo.opossum", "db.demo.opossum")
 	if err := orchestrator.New(newP(), rt2, "opossum", &bytes.Buffer{}).Stats([]string{"web"}, orchestrator.StatsOptions{NoStream: false}); err != nil {
 		t.Fatalf("Stats: %v", err)
 	}
@@ -2149,6 +2200,7 @@ func TestUpPrintsHostAddrForPublishedPorts(t *testing.T) {
 
 func TestPsReportsInspectedIP(t *testing.T) {
 	rt, _ := fakeShim(t)
+	strictContainerWith(t, rt, "db.demo.opossum", "-p", "8080:8080")
 	p := project("demo", map[string]*compose.Service{
 		"db": {Image: "postgres:16"},
 	})
@@ -2274,6 +2326,7 @@ func TestPsShowsStoppedWhenExistsButNotRunning(t *testing.T) {
 	// not "absent" — the two are different situations.
 	rt, _ := fakeShim(t)
 	setShimEnv(rt, "INSPECT_STATE=stopped")
+	strictContainers(t, rt, "db.demo.opossum")
 	p := project("demo", map[string]*compose.Service{"db": {Image: "postgres:16"}})
 	var out bytes.Buffer
 	if err := orchestrator.New(p, rt, "opossum", &out).Ps(orchestrator.PsOptions{}); err != nil {
@@ -3068,6 +3121,8 @@ func TestUpLeavesAContainerWhoseOwnerCannotBeReadAlone(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rt, log := fakeShim(t)
+			// Both services have a container from an earlier up; what each answers about its owner is the row's env.
+			strictContainers(t, rt, "db.demo.opossum", "web.demo.opossum")
 			setShimEnv(rt, tc.env...)
 			p := project("demo", map[string]*compose.Service{
 				"db":  {Image: "postgres:16"},
@@ -3100,6 +3155,7 @@ func TestUpLeavesAContainerWhoseOwnerCannotBeReadAlone(t *testing.T) {
 
 func TestUpRefusesForeignProjectContainer(t *testing.T) {
 	rt, log := fakeShim(t)
+	strictContainers(t, rt, "db.demo.opossum")
 	setShimEnv(rt, "INSPECT_PROJECT=otherproj") // db.demo.opossum is owned by another project
 	p := project("demo", map[string]*compose.Service{
 		"db": {Image: "postgres:16"},
@@ -3209,6 +3265,7 @@ func TestUpNoArgsStartsAll(t *testing.T) {
 
 func TestLogsAllServicesInOrder(t *testing.T) {
 	rt, log := fakeShim(t)
+	strictContainers(t, rt, "db.demo.opossum", "web.demo.opossum")
 	p := project("demo", map[string]*compose.Service{
 		"db":  {Image: "postgres:16"},
 		"web": {Image: "web:latest", DependsOn: compose.DependsOn{{Name: "db"}}},
@@ -3236,6 +3293,7 @@ func TestLogsAllServicesInOrder(t *testing.T) {
 
 func TestLogsSelectedServiceWithFollow(t *testing.T) {
 	rt, log := fakeShim(t)
+	strictContainers(t, rt, "db.demo.opossum", "web.demo.opossum")
 	p := project("demo", map[string]*compose.Service{
 		"db":  {Image: "postgres:16"},
 		"web": {Image: "web:latest"},
@@ -3259,6 +3317,7 @@ func TestLogsSelectedServiceWithFollow(t *testing.T) {
 // each line prefixed with the service name (#148).
 func TestLogsFollowMultipleMultiplexed(t *testing.T) {
 	rt, _ := fakeShim(t)
+	strictContainers(t, rt, "web.demo.opossum", "api.demo.opossum")
 	p := project("demo", map[string]*compose.Service{
 		"web": {Image: "web:latest"},
 		"api": {Image: "api:latest"}, // same length as web
@@ -3357,6 +3416,7 @@ func (f fakeFootprinter) Footprints() map[string]int64 { return f }
 // renders an em dash for any it can't map — never failing.
 func TestStatsHost(t *testing.T) {
 	rt, _ := fakeShim(t)
+	strictContainers(t, rt, "web.demo.opossum", "db.demo.opossum", "cache.demo.opossum")
 	p := project("demo", map[string]*compose.Service{
 		"web":   {Image: "web:latest"},
 		"db":    {Image: "db:latest"},
@@ -4337,6 +4397,8 @@ func TestStillSupervised(t *testing.T) {
 	// `unasked` is a service the runtime cannot answer about: not gone, so
 	// still supervised — dropping it would end its supervision over an outage.
 	setShimEnv(rt, "INSPECT_ABSENT=gone.demo.opossum", "INSPECT_FAIL=unasked.demo.opossum")
+	// The ones the runtime has: web and unasked. gone has none, which is the point of its row.
+	strictContainers(t, rt, "web.demo.opossum", "unasked.demo.opossum")
 	p := project("demo", map[string]*compose.Service{
 		"web":     {Image: "web", Restart: "always"},
 		"gone":    {Image: "g", Restart: "always"},

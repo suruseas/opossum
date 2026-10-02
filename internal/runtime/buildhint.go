@@ -33,7 +33,10 @@ type buildErrorDetector struct {
 
 // maxHeldLine bounds how much of one line is kept. The runtime's refusal is a
 // few hundred bytes (a registry URL and a reason); a step can write a line of
-// any length, and none of that is the line looked for.
+// any length, and nearly none of that is a line looked for. The exception is
+// the runtime's closing line for a failed step, which quotes the step's whole
+// command and so can be longer than the bound: its kind is at its start, which
+// is held, and readLines reads it there.
 const maxHeldLine = 4096
 
 // ErrBuildImageRefused is what a failed Build reports, through errors.Is, when

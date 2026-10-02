@@ -21,6 +21,7 @@ import (
 func TestARestartWaitingForAnotherLeavesAnEarlierStopStanding(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	rt, _ := fakeShim(t)
+	strictContainers(t, rt, "web.demo.opossum", "db.demo.opossum")
 	setShimEnv(rt, "STOP_THEN_SLEEP_MS=2000")
 	proj := project("demo", map[string]*compose.Service{"web": {Image: "alpine:3.20"}, "db": {Image: "alpine:3.20"}})
 	newO := func() *orchestrator.Orchestrator { return orchestrator.New(proj, rt, "opossum", &bytes.Buffer{}) }

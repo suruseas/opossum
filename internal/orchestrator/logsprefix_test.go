@@ -73,6 +73,7 @@ func TestLogsPrefixEveryLineAsDockerComposeWritesThem(t *testing.T) {
 	for _, tc := range rows {
 		t.Run(tc.name, func(t *testing.T) {
 			rt, _ := fakeShim(t)
+			strictContainers(t, rt, "x.demo.opossum", "database.demo.opossum", "web.demo.opossum")
 			if tc.text != "" {
 				setShimEnv(rt, "LOGS_TEXT="+tc.text)
 			}
@@ -109,6 +110,7 @@ func TestLogsSayTheRuntimesFailureOnStderr(t *testing.T) {
 		services := tc.services
 		t.Run(strings.Join(services, " ")+map[bool]string{false: "", true: " --follow"}[tc.follow], func(t *testing.T) {
 			rt, log := fakeShim(t)
+			strictContainers(t, rt, "web.demo.opossum", "x.demo.opossum")
 			setShimEnv(rt, "LOGS_FAIL=web.demo.opossum")
 			p := project("demo", map[string]*compose.Service{"web": {Image: "alpine:3.20"}, "x": {Image: "alpine:3.20"}})
 			var out bytes.Buffer
@@ -141,6 +143,7 @@ func TestLogsPrefixWidthLeavesOutAServiceNotShown(t *testing.T) {
 	for _, follow := range []bool{false, true} {
 		t.Run(map[bool]string{false: "logs", true: "logs --follow"}[follow], func(t *testing.T) {
 			rt, _ := fakeShim(t)
+			strictContainers(t, rt, "db.demo.opossum", "web.demo.opossum", "database.demo.opossum")
 			setShimEnv(rt, "INSPECT_OWNER=database.demo.opossum=otherproj")
 			p := project("demo", map[string]*compose.Service{
 				"db":       {Image: "alpine:3.20"},
@@ -214,6 +217,7 @@ func TestLogsEndQuietlyOnCtrlC(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rt, log := fakeShim(t)
+			strictContainers(t, rt, "web.demo.opossum", "db.demo.opossum", "x.demo.opossum")
 			// The stream stays open, as a long read does, so the cancel comes
 			// while the first service is read.
 			setShimEnv(rt, "LOGS_SLEEP=30")
@@ -256,6 +260,7 @@ func TestLogsEndQuietlyOnCtrlC(t *testing.T) {
 	// refuses (`context canceled`). That is the interrupt too.
 	t.Run("between two streams", func(t *testing.T) {
 		rt, log := fakeShim(t)
+		strictContainers(t, rt, "web.demo.opossum", "x.demo.opossum")
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		rt.Verbose = true
@@ -348,6 +353,7 @@ func TestLogsReadTheRuntimeEndingJustBeforeTheCtrlCAsTheInterrupt(t *testing.T) 
 				signal.Notify(held, syscall.SIGINT)
 				defer signal.Stop(held)
 				rt, log := fakeShim(t)
+				strictContainers(t, rt, "web.demo.opossum", "db.demo.opossum", "x.demo.opossum")
 				setShimEnv(rt, "LOGS_SLEEP=30", "LOGS_SELF_INT="+strconv.Itoa(int(2*grace/time.Millisecond)))
 				p := project("demo", map[string]*compose.Service{"web": {Image: "alpine:3.20"}, "db": {Image: "alpine:3.20"}, "x": {Image: "alpine:3.20"}})
 				// 100 ms after the runtime has ended of the Ctrl-C it was given.

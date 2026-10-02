@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -345,6 +346,14 @@ func TestLogsFollowEndsWhenTheContainerDoes(t *testing.T) {
 				// takes at least stream. What each row takes is in the log below.
 				setShimEnv(rt, "LOGS_SLEEP="+strconv.Itoa(int(stream/time.Second)), "INSPECT_FAIL_WHILE="+filepath.Join(t.TempDir(), "not-answering"))
 				setShimEnv(rt, tc.env...)
+				// Every service the row follows has a container the runtime has: made before the row's own
+				// `before` stops one, and before the clock below starts.
+				var made []string
+				for svc := range tc.services {
+					made = append(made, svc+".demo.opossum")
+				}
+				sort.Strings(made)
+				strictContainers(t, rt, made...)
 				if tc.before != nil {
 					tc.before(rt)
 				}
@@ -507,6 +516,7 @@ func TestLogsFollowSIGTERMDoesNotWaitForTheRuntimeToAnswer(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
 			rt, log := fakeShim(t)
+			strictContainers(t, rt, "web.demo.opossum")
 			dir := t.TempDir()
 			hang, answered := filepath.Join(dir, "hang"), filepath.Join(dir, "answered")
 			env := []string{"LOGS_SLEEP=30", "INSPECT_HANG_WHILE=" + hang, "INSPECT_ANSWERED=" + answered}
@@ -637,6 +647,11 @@ func TestLogsFollowStartsNoLookOnceTheFollowIsOver(t *testing.T) {
 			t.Run(k.name+"/round "+strconv.Itoa(round), func(t *testing.T) {
 				t.Setenv("XDG_STATE_HOME", t.TempDir())
 				rt, _ := fakeShim(t)
+				var made []string
+				for i := 0; i < k.services; i++ {
+					made = append(made, "web"+strconv.Itoa(i)+".demo.opossum")
+				}
+				strictContainers(t, rt, made...)
 				gate, dir := t.TempDir(), t.TempDir()
 				answered := filepath.Join(dir, "answered")
 				env := []string{"LOGS_SLEEP=30", "INSPECT_GATE=" + gate, "INSPECT_ANSWERED=" + answered}

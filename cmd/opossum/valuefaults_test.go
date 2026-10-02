@@ -95,6 +95,7 @@ func TestValueFaultsAreRefusedButDoNotStopATakeDown(t *testing.T) {
 					readLog := fakeShim(t)
 					t.Setenv("STATE_DIR", t.TempDir())
 					t.Setenv("XDG_STATE_HOME", t.TempDir())
+					strictContainers(t, "web.demo.opossum")
 					stdout, stderr, err := runSplit(t, append([]string{"-f", compose}, td.args...)...)
 					if err != nil {
 						t.Fatalf("want the command to go on, got %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
@@ -278,6 +279,7 @@ func TestAValueFaultInAnExtendedFileDoesNotStopATakeDown(t *testing.T) {
 			readLog := fakeShim(t)
 			t.Setenv("STATE_DIR", t.TempDir())
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			strictContainers(t, "web.demo.opossum")
 			if _, err := run(t, "-f", tc.file, "config"); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("config should refuse %q, got %v", tc.want, err)
 			}
@@ -367,6 +369,7 @@ func TestAFileFaultAnEarlierVersionTookDoesNotStopATakeDown(t *testing.T) {
 					readLog := fakeShim(t)
 					t.Setenv("STATE_DIR", t.TempDir())
 					t.Setenv("XDG_STATE_HOME", t.TempDir())
+					strictContainers(t, "web.demo.opossum")
 					stdout, stderr, err := runSplit(t, append([]string{"-f", compose}, td.args...)...)
 					if err != nil {
 						t.Fatalf("want the command to go on, got %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
@@ -766,8 +769,11 @@ func TestDownThatAsksForTheNameDoesNotStopASupervisor(t *testing.T) {
 	if _, _, err := runSplit(t, "-f", disagree, "-p", "given", "down"); err != nil {
 		t.Fatalf("down -p given should go on, got %v", err)
 	}
-	if len(stopped) != 1 || stopped[0] != "given" {
-		t.Errorf("want the supervisor of the named project stopped, saw %v", stopped)
+	// The early stop asks for the named project, and `Down` asks again under the lock it takes
+	// when the first ask stopped it (the same seam, so both are seen): both are for the named
+	// project, and none is for the directory's, which is what this is about.
+	if strings.Join(stopped, ",") != "given,given" {
+		t.Errorf("want the supervisor of the named project asked by the early stop and again by Down, saw %v", stopped)
 	}
 	// A file that cannot be read: its supervisor is still stopped.
 	stopped = nil

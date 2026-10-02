@@ -53,6 +53,7 @@ func TestCommandsRefuseMountsDockerComposeRefuses(t *testing.T) {
 			readLog := fakeShim(t)
 			t.Setenv("STATE_DIR", t.TempDir())
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			strictContainers(t, "web.demo.opossum")
 			stdout, stderr, err := runSplit(t, append([]string{"-f", compose}, tc.args...)...)
 			if err != nil {
 				t.Fatalf("want the command to go on, got %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
@@ -182,6 +183,7 @@ func TestCommandsRefuseMountsDockerComposeRefuses(t *testing.T) {
 				readLog := fakeShim(t)
 				t.Setenv("STATE_DIR", t.TempDir())
 				t.Setenv("XDG_STATE_HOME", t.TempDir())
+				strictContainers(t, "web.demo.opossum")
 				_, stderr, err := runSplit(t, append([]string{"-f", gated}, tc.args...)...)
 				if err != nil {
 					t.Fatalf("want the command to go on, got %v\nstderr:\n%s", err, stderr)

@@ -787,9 +787,9 @@ func (r *Runtime) ImageCmd(ref string) ([]string, bool) {
 
 // commandToRunWithoutEntrypoint is what a service with `entrypoint: []` runs: its command, or,
 // with none, its image's CMD. An image that is not here yet is pulled first, as `run` would
-// pull it, so that its CMD can be read. docker refuses what has neither ("no command
-// specified"), and so does this, rather than start the image's own ENTRYPOINT that the service
-// asked to be rid of.
+// pull it, so that its CMD can be read — unless a build here made it (ImageIsBuilt), which is no
+// image of any registry. docker refuses what has neither ("no command specified"), and so does
+// this, rather than start the image's own ENTRYPOINT that the service asked to be rid of.
 func (r *Runtime) commandToRunWithoutEntrypoint(o RunOptions) ([]string, error) {
 	if len(o.Command) > 0 {
 		if o.Command[0] == "" {
@@ -800,7 +800,7 @@ func (r *Runtime) commandToRunWithoutEntrypoint(o RunOptions) ([]string, error) 
 		return o.Command, nil
 	}
 	cmd, ok := r.ImageCmd(o.Image)
-	if !ok {
+	if !ok && !o.ImageIsBuilt {
 		if err := r.Pull(o.Image); err != nil {
 			return nil, err
 		}
@@ -1309,10 +1309,14 @@ type RunOptions struct {
 	// the joined form with an empty value takes the image's place — so the command's first word
 	// is made the entrypoint, which does replace it (#1620). Entrypoint is empty with it.
 	EntrypointCleared bool
-	Labels            []string // key=value labels (-l)
-	Memory            string   // -m memory limit (e.g. "512M")
-	CPUs              string   // -c CPU count (integer)
-	Detach            bool
+	// ImageIsBuilt says the image is one a build here made (the service has `build:`), so it is
+	// not in any registry to pull: reading its CMD for a cleared entrypoint never pulls it, and a
+	// plan does not list a pull of it (#1634).
+	ImageIsBuilt bool
+	Labels       []string // key=value labels (-l)
+	Memory       string   // -m memory limit (e.g. "512M")
+	CPUs         string   // -c CPU count (integer)
+	Detach       bool
 	// Interactive (-i) keeps the container's stdin connected to ours. Foreground
 	// one-off runs set it so piped input reaches the process — without it the
 	// child sees an immediate EOF, which breaks stdin-driven tools (e.g. an MCP
@@ -1467,7 +1471,15 @@ func (r *Runtime) Run(o RunOptions) error {
 	// past the first go positional (before the command) — the container then runs
 	// entrypoint ++ command.
 	entrypoint, command := o.Entrypoint, o.Command
-	if o.EntrypointCleared && len(entrypoint) == 0 {
+	// `entrypoint: [""]` (one empty word) takes the image's ENTRYPOINT away as `[]` does, but only
+	// with a command to run in its place: with none, docker refuses it ("no command specified")
+	// where it starts the image's CMD for `[]`. Passed on as `--entrypoint=`, the empty value
+	// would take the image's place on the line (container 1.5.0) (#1626).
+	emptyWord := len(entrypoint) == 1 && entrypoint[0] == ""
+	if emptyWord && len(o.Command) == 0 {
+		return fmt.Errorf("`entrypoint: [\"\"]` takes the image's entrypoint away, and the service has no `command:` to run instead — docker compose refuses it too (no command specified); write a `command:`")
+	}
+	if (o.EntrypointCleared && len(entrypoint) == 0) || emptyWord {
 		words, err := r.commandToRunWithoutEntrypoint(o)
 		if err != nil {
 			return err

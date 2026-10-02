@@ -159,6 +159,11 @@ func TestDownLeavesContainersThatAreNotThisProjects(t *testing.T) {
 			runs := []string{name("web-run"), name("cache-run"), name("db-run")}
 			rt, log := fakeShim(t)
 			setShimEnv(rt, tc.env...)
+			// Every container the teardown asks about is one the runtime has. Whose it is, is what the
+			// knobs in env say (INSPECT_PROJECT, INSPECT_OWNER, INSPECT_UNLABELED); where none names one,
+			// the project its <service>.<project>.<domain> name carries, which is the label it is run
+			// with here and was what the fake worked out from the name before.
+			strictContainers(t, rt, append(slices.Clone(all), runs...)...)
 			p := project("demo", map[string]*compose.Service{
 				"db":    {Image: "postgres:16"},
 				"cache": {Image: "redis:7", DependsOn: compose.DependsOn{{Name: "db"}}},
@@ -243,6 +248,10 @@ func TestDownFinishesTheTeardownBeforeSayingWhatItLeft(t *testing.T) {
 			rt, log := fakeShim(t)
 			setShimEnv(rt, "INSPECT_PROJECT=demo", tc.env,
 				"LS_CONTAINERS=web.demo.opossum db.demo.opossum old.demo.opossum", "LS_PROJECT=demo")
+			// old.demo.opossum is in the listing, so it is a container the runtime has: `down` removes it by
+			// what `ls` says and asks nothing about it today, but a fake that listed it and answered "not
+			// found" to an inspect would be a runtime that does not exist.
+			strictContainers(t, rt, "web.demo.opossum", "db.demo.opossum", "old.demo.opossum")
 			p := project("demo", map[string]*compose.Service{
 				"db":  {Image: "postgres:16", Volumes: []string{"pgdata:/var/lib/postgresql/data"}},
 				"web": {Build: &compose.Build{Context: "."}, DependsOn: compose.DependsOn{{Name: "db"}}},
@@ -315,6 +324,7 @@ func TestRunRefusesAOneOffNameThatIsNotThisProjects(t *testing.T) {
 			t.Run(tc.name+", "+sh.name, func(t *testing.T) {
 				rt, log := fakeShim(t)
 				setShimEnv(rt, tc.env...)
+				strictContainers(t, rt, "web-run.demo.opossum")
 				svcs := sh.svcs()
 				// An audited run snapshots the workspace bound at working_dir before
 				// it starts anything; the refusal must come before that too, or the
