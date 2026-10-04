@@ -111,6 +111,42 @@ func TestLogsFollowEndsWhenTheContainerDoes(t *testing.T) {
 	}
 	plain := func() *compose.Service { return &compose.Service{Image: "alpine:3.20"} }
 	restarting := func() *compose.Service { return &compose.Service{Image: "alpine:3.20", Restart: "always"} }
+	// shimLog is the running row's fake runtime's invocation log. The watcher looks at each followed
+	// container with an `inspect` that the log counts, so a row can wait for the looks it needs
+	// rather than for a time that a slow `inspect` outruns (#1716).
+	var shimLog func() []string
+	inspects := func(services ...string) int {
+		n := 0
+		for _, svc := range services {
+			n += countLines(shimLog(), "inspect "+svc+".demo.opossum")
+		}
+		return n
+	}
+	// rowT is the running row's *testing.T, for the helpers the rows' closures call.
+	var rowT *testing.T
+	// waitForInspects waits until each service has been looked at n more times than base says (a
+	// map of the counts taken earlier): n looks begun are n−1 whole ones, each of which has answered
+	// and been counted by the watcher before the next was begun. It says so, and goes on, if that
+	// does not happen in a while (a watcher that is not looking, or a runtime so slow that the
+	// follow could not have ended in the time the rows allow).
+	waitForInspects := func(base map[string]int, n int) {
+		deadline := time.Now().Add(3 * time.Second)
+		for svc, was := range base {
+			for inspects(svc) < was+n && time.Now().Before(deadline) {
+				time.Sleep(10 * time.Millisecond)
+			}
+			if got := inspects(svc) - was; got < n {
+				rowT.Errorf("the watcher looked at %s %d times in 3 s, want %d: the row's premise (it was seen running, or stopped) does not hold", svc, got, n)
+			}
+		}
+	}
+	looksNow := func(services ...string) map[string]int {
+		m := map[string]int{}
+		for _, svc := range services {
+			m[svc] = inspects(svc)
+		}
+		return m
+	}
 	rows := []row{
 		{"stopped while followed", map[string]*compose.Service{"web": plain()}, []string{"web"}, nil,
 			func(rt *runtime.Runtime) { rt.Stop("web.demo.opossum") }, true, []string{"web-1"}, false, nil, "", 0, false, false, false, 0, false},
@@ -139,28 +175,33 @@ func TestLogsFollowEndsWhenTheContainerDoes(t *testing.T) {
 				time.Sleep(100 * time.Millisecond)
 				rt.Start("web.demo.opossum")
 			}},
-		// Bounds LogsExitSettle (300 ms in this test) tighter than the row
-		// above and "a plain stop with the same long gap" below do: their
-		// 100 ms and 800 ms both sit outside a doubled settle (600 ms) too,
-		// so neither tells it from the real one. 250 ms is what a halved
-		// settle (150 ms) needs to tell apart — stoppedSince only lands on
-		// the poll after the stop (up to LogsExitPoll late) and ending still
-		// waits for one more idle poll past it, so a gap right at half of
-		// settle is not enough margin for that mutation to turn this red
-		// (measured: 150 ms here passed under a halved settle too).
+		// Bound LogsExitSettle (two seconds in these rows, SETTLE_MS) from both sides, with margins a slow
+		// `inspect` does not eat: a gap of 1400 ms is what a halved settle (1000 ms) ends on and the real
+		// one does not; a gap of 3600 ms is what the real one ends on and a doubled settle (4000 ms)
+		// does not. The follow has to see the container stopped a settle long after a poll found it
+		// stopped, and before it is started again, and each poll waits for its `inspect`: with 150 ms to
+		// spare (a gap of 450 ms over a settle of 300) a slow `inspect` let the container be started again
+		// before the second look, and the follow ran to the end of its stream (#1701, four times in CI; the
+		// row below with a gap of 800 ms, 500 to spare, failed twice). With the `inspect` of every look
+		// after the stop held back by D, the over row below passes up to D of about 800 ms (the old ones
+		// failed from 100 and 450 ms). A settle of 1.5 times the real one is no longer told apart (the
+		// old gap of 450 ms was under it): a gap that clear of a slow `inspect` and under 1.5 settles
+		// would need a settle of four seconds.
 		{name: "stopped and started again, a gap under settle", services: map[string]*compose.Service{"web": plain()}, follow: []string{"web"},
 			during: func(rt *runtime.Runtime) {
 				rt.Stop("web.demo.opossum")
-				time.Sleep(250 * time.Millisecond)
+				time.Sleep(1400 * time.Millisecond)
 				rt.Start("web.demo.opossum")
-			}},
-		// …one and a half times it is, before the container is started again.
+			}, env: []string{"SETTLE_MS=2000"}},
+		// A plain stop and start after a gap longer than the settle is the end, and it is said (the
+		// rows with an `opossum restart` marker below keep the follow going over the same kind of
+		// gap).
 		{name: "stopped and started again, a gap over settle", services: map[string]*compose.Service{"web": plain()}, follow: []string{"web"},
 			during: func(rt *runtime.Runtime) {
 				rt.Stop("web.demo.opossum")
-				time.Sleep(450 * time.Millisecond)
+				time.Sleep(3600 * time.Millisecond)
 				rt.Start("web.demo.opossum")
-			}, ended: true, exited: []string{"web-1"}},
+			}, env: []string{"SETTLE_MS=2000", "LOGS_SLEEP=6"}, ended: true, exited: []string{"web-1"}, within: 5000 * time.Millisecond},
 		// What the runtime still hands over after the container has ended
 		// comes before `exited`, not cut off. (The drips are timed from the
 		// follow's start, one row's under way at the stop and the other's
@@ -177,7 +218,7 @@ func TestLogsFollowEndsWhenTheContainerDoes(t *testing.T) {
 		// seen running at once, so the stop counts.
 		{name: "stopped before the first tick", services: map[string]*compose.Service{"web": plain()}, follow: []string{"web"},
 			during: func(rt *runtime.Runtime) { rt.Stop("web.demo.opossum") }, ended: true, exited: []string{"web-1"},
-			poll: 500 * time.Millisecond, at0: true},
+			poll: time.Second, at0: true, env: []string{"LOGS_SLEEP=6"}, within: 5000 * time.Millisecond},
 		// Two restarts a second apart, each a moment's gap: neither is the end.
 		{name: "restarted twice", services: map[string]*compose.Service{"web": plain()}, follow: []string{"web"},
 			during: func(rt *runtime.Runtime) {
@@ -259,13 +300,6 @@ func TestLogsFollowEndsWhenTheContainerDoes(t *testing.T) {
 		// `restart: "no"` is no policy: watched as any other.
 		{name: "restart: no", services: map[string]*compose.Service{"web": {Image: "alpine:3.20", Restart: "no"}}, follow: []string{"web"},
 			during: func(rt *runtime.Runtime) { rt.Stop("web.demo.opossum") }, ended: true, exited: []string{"web-1"}},
-		// The same long gap by a plain stop and start is the end, and it is said.
-		{name: "a plain stop with the same long gap", services: map[string]*compose.Service{"web": plain()}, follow: []string{"web"},
-			during: func(rt *runtime.Runtime) {
-				rt.Stop("web.demo.opossum")
-				time.Sleep(800 * time.Millisecond)
-				rt.Start("web.demo.opossum")
-			}, env: []string{"STOP_THEN_SLEEP_MS=0"}, ended: true, exited: []string{"web-1"}},
 		// Not answering while the container stops, then answering again: the
 		// end is counted from the answers, not lost.
 		{name: "the runtime not answering while it stops, then answering", services: map[string]*compose.Service{"web": plain()}, follow: []string{"web"},
@@ -280,7 +314,10 @@ func TestLogsFollowEndsWhenTheContainerDoes(t *testing.T) {
 				rt.Stop("web.demo.opossum")
 				time.Sleep(10 * orchestrator.LogsExitPoll)
 				os.Remove(marker)
-			}, ended: true, exited: []string{"web-1"}},
+				// Three looks after the marker goes (the first sees it stopped, the one after
+				// the settle ends it) each take as long as a slow `inspect` does: the end is
+				// given room for that, with the stream kept open past it (#1716).
+			}, env: []string{"LOGS_SLEEP=6"}, ended: true, exited: []string{"web-1"}, within: 5000 * time.Millisecond},
 		// The gap was already under way, seen and answerable, before the runtime
 		// stopped answering at all: the settle counts from then, not from when it
 		// starts answering again. (The marker in the row above goes up before the
@@ -289,7 +326,11 @@ func TestLogsFollowEndsWhenTheContainerDoes(t *testing.T) {
 		{name: "the runtime not answering long after it was seen stopped", services: map[string]*compose.Service{"web": plain()}, follow: []string{"web"},
 			during: func(rt *runtime.Runtime) {
 				rt.Stop("web.demo.opossum")
-				time.Sleep(2 * orchestrator.LogsExitPoll) // seen stopped and answerable at least once
+				// Seen stopped and answerable at least once: two looks begun after the stop, the first of
+				// which read the state after it and has answered — not two polls' time, which a slow
+				// `inspect` outruns. (The look's own `now` may be taken before the stop returns, which
+				// only makes the count a few milliseconds earlier.)
+				waitForInspects(looksNow("web"), 2)
 				marker := ""
 				for _, kv := range rt.Env {
 					if f, ok := strings.CutPrefix(kv, "INSPECT_FAIL_WHILE="); ok {
@@ -297,15 +338,16 @@ func TestLogsFollowEndsWhenTheContainerDoes(t *testing.T) {
 					}
 				}
 				os.WriteFile(marker, nil, 0o644)
-				time.Sleep(700 * time.Millisecond) // longer than settle: a reset here would show
+				time.Sleep(2000 * time.Millisecond) // longer than the settle (SETTLE_MS): a reset here would show
 				os.Remove(marker)
 				// Measured from here, not from the follow's start (which the
-				// wait for the first line and the eight polls before during
-				// runs make too noisy a clock for a bound this tight): a reset
-				// needs a whole settle plus a drain more than the real code
-				// does once the runtime answers again.
-				expectExitedWithin("web-1", 200*time.Millisecond)
-			}, ended: true, exited: []string{"web-1"}},
+				// wait for the first line and the looks before during runs make
+				// too noisy a clock for a bound this tight): a reset needs a whole
+				// settle (1500 ms) more than the real code does once the runtime
+				// answers again — two looks and a drain, which a slow `inspect`
+				// stretches (about 450 ms each is what 1000 ms holds).
+				expectExitedWithin("web-1", 1000*time.Millisecond)
+			}, env: []string{"SETTLE_MS=1500", "LOGS_SLEEP=6"}, ended: true, exited: []string{"web-1"}, within: 5000 * time.Millisecond},
 		// The runtime not answering while followed is not the container's
 		// end: the follow goes on (docker compose knows from its events).
 		{"the runtime not answering while followed", map[string]*compose.Service{"web": plain()}, []string{"web"}, nil,
@@ -339,7 +381,8 @@ func TestLogsFollowEndsWhenTheContainerDoes(t *testing.T) {
 		for _, noPrefix := range variants {
 			t.Run(tc.name+map[bool]string{false: "", true: ", --no-log-prefix"}[noPrefix], func(t *testing.T) {
 				t.Setenv("XDG_STATE_HOME", t.TempDir())
-				rt, _ := fakeShim(t)
+				rt, log := fakeShim(t)
+				shimLog, rowT = log, t
 				// The stream stays open for stream, where the row does not say
 				// (LOGS_SLEEP): a follow that ends on the container's end is over
 				// within `within`, and one that goes on until its streams end
@@ -361,6 +404,22 @@ func TestLogsFollowEndsWhenTheContainerDoes(t *testing.T) {
 					saved := orchestrator.LogsExitPoll
 					orchestrator.LogsExitPoll = tc.poll
 					defer func() { orchestrator.LogsExitPoll = saved }()
+				}
+				// A row that bounds the settle says its own (SETTLE_MS in env, read here and not by the
+				// fake): the rows that tell a halved or a doubled settle from the real one keep their
+				// gaps within a few hundred milliseconds of it, and a CI machine's `inspect` is
+				// slow enough to eat that (see the rows' comment), so they run with a settle of two
+				// seconds and margins to match.
+				for _, e := range tc.env {
+					if n, ok := strings.CutPrefix(e, "SETTLE_MS="); ok {
+						ms, err := strconv.Atoi(n)
+						if err != nil {
+							t.Fatal(err)
+						}
+						saved := orchestrator.LogsExitSettle
+						orchestrator.LogsExitSettle = time.Duration(ms) * time.Millisecond
+						defer func() { orchestrator.LogsExitSettle = saved }()
+					}
 				}
 				var out interface {
 					Write([]byte) (int, error)
@@ -399,6 +458,28 @@ func TestLogsFollowEndsWhenTheContainerDoes(t *testing.T) {
 						time.Sleep(10 * time.Millisecond)
 					}
 				}
+				// The services the follow watches: not one with a `restart:` policy, and none without --follow.
+				var watched []string
+				for _, name := range tc.follow {
+					if r := tc.services[name].Restart; !tc.noFollow && (r == "" || r == "no") {
+						watched = append(watched, name)
+					}
+				}
+				// A row that acts once the first look has answered counts the answers: the runtime is run
+				// through a script that notes each `inspect` when it is over, because the shim logs a
+				// look when it begins and reads the state a moment after.
+				var answeredLooks func() int
+				if tc.at0 {
+					dir := t.TempDir()
+					noted := filepath.Join(dir, "answered")
+					wrap := filepath.Join(dir, "container")
+					script := "#!/bin/sh\n" + shellQuote(rt.Bin) + " \"$@\"\nrc=$?\nif [ \"$1\" = inspect ]; then echo >> " + shellQuote(noted) + "; fi\nexit $rc\n"
+					if err := os.WriteFile(wrap, []byte(script), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					rt.Bin = wrap
+					answeredLooks = func() int { b, _ := os.ReadFile(noted); return strings.Count(string(b), "\n") }
+				}
 				done := make(chan error, 1)
 				start := time.Now()
 				go func() {
@@ -409,8 +490,35 @@ func TestLogsFollowEndsWhenTheContainerDoes(t *testing.T) {
 				for i := 0; i < 200 && strings.Count(out.String(), "log-line") < len(tc.follow); i++ {
 					time.Sleep(10 * time.Millisecond)
 				}
-				if !tc.at0 {
+				if tc.at0 {
+					// As soon as the lines are written, but after the first look has answered: a look reads
+					// the state when the runtime is asked, and a slow `inspect` that held the first one back
+					// past the stop would read it stopped, never having seen it running — a container found
+					// stopped is followed on, as it is meant to be (#1716). The poll of this row is long, so
+					// the stop is still before the second look.
+					//
+					// And the look is made at once, not at the first tick: a watcher that began by waiting a
+					// poll would read it after the stop here (poll/2 is the room a slow `inspect` has).
+					//
+					// Each watched service is looked at twice before that: once to choose what to follow
+					// (the project's own containers), once by the watcher.
+					want := 2 * len(watched)
+					first := time.Now().Add(orchestrator.LogsExitPoll / 2)
+					for answeredLooks() < want && time.Now().Before(first) {
+						time.Sleep(10 * time.Millisecond)
+					}
+					if n := answeredLooks(); n < want {
+						t.Errorf("%d of %d inspects had answered within half a poll (%v) of the follow's start: the watcher's first look is made at once, not after a tick", n, want, orchestrator.LogsExitPoll/2)
+					}
+				} else {
+					// Under way: eight polls' time, which the rows with a timed drip count on — and, where
+					// a slow `inspect` outruns that, until each watched service has been looked at
+					// twice since the lines were written (the first look answered: it was seen running).
+					// A service with a `restart:` policy is not watched, and nothing is without --follow:
+					// those wait the time only.
+					looks := looksNow(watched...)
 					time.Sleep(8 * orchestrator.LogsExitPoll)
+					waitForInspects(looks, 2)
 				}
 				if tc.during != nil {
 					tc.during(rt)
@@ -778,3 +886,6 @@ func sortedCopy(s []string) []string {
 	}
 	return c
 }
+
+// shellQuote single-quotes s for a /bin/sh script.
+func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }

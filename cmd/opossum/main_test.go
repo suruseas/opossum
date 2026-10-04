@@ -434,6 +434,11 @@ func fakeShim(t *testing.T) func() []string {
 	t.Setenv("OPOSSUM_CONTAINER_BIN", fakeShimBin)
 	t.Setenv("FAKE_LOG", logPath)
 	t.Setenv("INSPECT_PROJECT_FROM_NAME", "1")
+	// A name nothing here ran is not a container the runtime has, as the real CLI answers for one it
+	// has never seen. The fake remembers what ran in STATE_DIR (and without one does not look), so
+	// both are set here; a test that says what exists calls strictContainers (#1551).
+	t.Setenv("STATE_DIR", dir)
+	t.Setenv("INSPECT_STRICT", "1")
 	// `up` watches each service for a second before calling it started. These evals
 	// drive the real binary, so the only way to reach that setting is the
 	// environment — and paying it in ~40 of them added 43s of pure sleep to a suite
@@ -456,28 +461,40 @@ func fakeShim(t *testing.T) func() []string {
 // fakeShim and STATE_DIR, and the names it lists are all that exists.
 func strictContainers(t *testing.T, names ...string) {
 	t.Helper()
+	for _, n := range names {
+		strictContainerWith(t, n)
+	}
+}
+
+// strictContainerWith is strictContainers for one name, run with extra `run` arguments: the
+// `-p 8080:80` that makes the fake's inspect show the port the container publishes, as the real
+// runtime shows the ones it was run with.
+func strictContainerWith(t *testing.T, n string, extra ...string) {
+	t.Helper()
 	// The fake remembers what was run in STATE_DIR, and without one it records nothing and does not
 	// look: the knob would be set and do nothing, and the test would pass on "every name is there".
 	if os.Getenv("STATE_DIR") == "" {
 		t.Fatal("strictContainers needs STATE_DIR set first: the fake remembers the containers it ran there")
 	}
+	// Already set by fakeShim, so a test that went through it gets nothing from this line: it is
+	// here for one that set STATE_DIR itself and did not, and would otherwise run its containers
+	// into a fake that is not strict.
 	t.Setenv("INSPECT_STRICT", "1")
-	for _, n := range names {
-		// Not into FAKE_LOG: what the runtime was asked is what the command under test asked, and
-		// making the fixture is not that.
-		// The label a container opossum made carries: the project its <service>.<project>.<domain>
-		// spelling names. A run without one is recorded as a container with no owner, which
-		// the commands that check ownership before acting leave alone.
-		args := []string{"run", "-d", "--name", n}
-		if parts := strings.Split(n, "."); len(parts) >= 3 {
-			args = append(args, "--label=opossum.project="+parts[len(parts)-2])
-		}
-		cmd := exec.Command(fakeShimBin, append(args, "alpine")...)
-		cmd.Env = append(os.Environ(), "FAKE_LOG=")
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("making container %s in the fake: %v\n%s", n, err, out)
-		}
+	// Not into FAKE_LOG: what the runtime was asked is what the command under test asked, and
+	// making the fixture is not that.
+	// The label a container opossum made carries: the project its <service>.<project>.<domain>
+	// spelling names. A run without one is recorded as a container with no owner, which
+	// the commands that check ownership before acting leave alone.
+	args := []string{"run", "-d", "--name", n}
+	if parts := strings.Split(n, "."); len(parts) >= 3 {
+		args = append(args, "--label=opossum.project="+parts[len(parts)-2])
+	}
+	args = append(args, extra...)
+	cmd := exec.Command(fakeShimBin, append(args, "alpine")...)
+	cmd.Env = append(os.Environ(), "FAKE_LOG=")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("making container %s in the fake: %v\n%s", n, err, out)
 	}
 }
 
@@ -602,6 +619,7 @@ services:
 
 func TestRestartCLI(t *testing.T) {
 	readLog := fakeShim(t)
+	strictContainers(t, "db.demo.opossum")
 	compose := writeCompose(t, `
 name: demo
 services:
@@ -656,6 +674,7 @@ services:
 
 func TestPsCLI(t *testing.T) {
 	fakeShim(t)
+	strictContainerWith(t, "web.demo.opossum", "-p", "8080:80")
 	compose := writeCompose(t, `
 name: demo
 services:
@@ -677,6 +696,7 @@ services:
 func TestPortCLI(t *testing.T) {
 	// The shim's inspect publishes 80 -> 0.0.0.0:8080/tcp.
 	readLog := fakeShim(t)
+	strictContainerWith(t, "web.demo.opossum", "-p", "8080:80")
 	compose := writeCompose(t, `
 name: demo
 services:
@@ -1082,6 +1102,7 @@ func TestTheTableAndTheFailureGoToDifferentPlaces(t *testing.T) {
 // `_` and `-`), and the image reference, which can, is what this holds.
 func TestATableIsOneRowPerService(t *testing.T) {
 	fakeShim(t)
+	strictContainers(t, "web.demo.opossum")
 	// A tab and a carriage return as well as a newline: a tab is read as the
 	// column separator, so a name carrying one takes a column that is not its
 	// own, and a carriage return moves the cursor back over the row already
@@ -1130,6 +1151,7 @@ func TestATableIsOneRowPerService(t *testing.T) {
 
 func TestStopCLI(t *testing.T) {
 	readLog := fakeShim(t)
+	strictContainers(t, "db.demo.opossum")
 	compose := writeCompose(t, `
 name: demo
 services:
@@ -1150,6 +1172,7 @@ services:
 
 func TestLogsCLI(t *testing.T) {
 	readLog := fakeShim(t)
+	strictContainers(t, "db.demo.opossum")
 	compose := writeCompose(t, `
 name: demo
 services:
@@ -1168,6 +1191,7 @@ services:
 // the line carries the service prefix.
 func TestLogsCLINoLogPrefix(t *testing.T) {
 	fakeShim(t)
+	strictContainers(t, "db.demo.opossum")
 	compose := writeCompose(t, `
 name: demo
 services:
@@ -1210,6 +1234,7 @@ func TestLogsCLIExits130OnCtrlC(t *testing.T) {
 		for _, args := range [][]string{{"logs", "--follow", "db"}, {"logs", "--follow", "db", "web"}, {"logs", "db", "web"}} {
 			t.Run(sig.String()+"/"+strings.Join(args, " "), func(t *testing.T) {
 				fakeShim(t)
+				strictContainers(t, "db.demo.opossum", "web.demo.opossum")
 				t.Setenv("LOGS_SLEEP", "30")
 				compose := writeCompose(t, `
 name: demo
@@ -1268,6 +1293,7 @@ services:
 
 func TestProjectNameDefaultsToDirectory(t *testing.T) {
 	fakeShim(t)
+	strictContainers(t, "db.myproj.opossum")
 	// No `name:` and no -p: the project name comes from the compose file's dir.
 	dir := filepath.Join(t.TempDir(), "MyProj")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -2534,6 +2560,7 @@ func TestBuildCLI(t *testing.T) {
 
 func TestKillCLIWithSignal(t *testing.T) {
 	readLog := fakeShim(t)
+	strictContainers(t, "web.demo.opossum")
 	compose := writeCompose(t, "name: demo\nservices:\n  web:\n    image: web:latest\n")
 	if _, err := run(t, "-f", compose, "kill", "-s", "TERM"); err != nil {
 		t.Fatalf("kill: %v", err)
@@ -2545,6 +2572,7 @@ func TestKillCLIWithSignal(t *testing.T) {
 
 func TestExecCLIPassesCommandFlags(t *testing.T) {
 	readLog := fakeShim(t)
+	strictContainers(t, "web.demo.opossum")
 	compose := writeCompose(t, "name: demo\nservices:\n  web:\n    image: web:latest\n")
 	// `-la` after the service must reach the exec'd command, not be parsed by opossum.
 	if _, err := run(t, "-f", compose, "exec", "web", "ls", "-la"); err != nil {
@@ -2557,6 +2585,7 @@ func TestExecCLIPassesCommandFlags(t *testing.T) {
 
 func TestExecCLIInteractiveFlags(t *testing.T) {
 	readLog := fakeShim(t)
+	strictContainers(t, "web.demo.opossum")
 	compose := writeCompose(t, "name: demo\nservices:\n  web:\n    image: web:latest\n")
 	// -it before the service are opossum's exec flags.
 	if _, err := run(t, "-f", compose, "exec", "-it", "web", "sh"); err != nil {
@@ -2569,6 +2598,7 @@ func TestExecCLIInteractiveFlags(t *testing.T) {
 
 func TestDiscoversDockerComposeFileWithoutFlag(t *testing.T) {
 	fakeShim(t)
+	strictContainers(t, "db.demo.opossum")
 	// A directory with only a docker-compose.yml — no -f given.
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "docker-compose.yml"),
@@ -2749,6 +2779,7 @@ func TestPullCLI(t *testing.T) {
 
 func TestStatsCLI(t *testing.T) {
 	readLog := fakeShim(t)
+	strictContainers(t, "web.demo.opossum")
 	compose := writeCompose(t, "name: demo\nservices:\n  web:\n    image: web:latest\n")
 	if _, err := run(t, "-f", compose, "stats", "--no-stream"); err != nil {
 		t.Fatalf("stats: %v", err)
@@ -2764,6 +2795,7 @@ func TestStatsCLI(t *testing.T) {
 // it: the CLI asks only for the containers that exist.
 func TestStatsLeavesOutAServiceThatWasNeverStartedCLI(t *testing.T) {
 	readLog := fakeShim(t)
+	strictContainers(t, "web.demo.opossum")
 	t.Setenv("INSPECT_ABSENT", "db.demo.opossum")
 	compose := writeCompose(t, "name: demo\nservices:\n  web:\n    image: web:latest\n  db:\n    image: db:latest\n")
 	if _, err := run(t, "-f", compose, "stats", "--no-stream"); err != nil {
@@ -6658,6 +6690,7 @@ func TestDoctorReportsTheNetworksNothingIsRunningOn(t *testing.T) {
 // next door got a test of its own; this is the one the tests actually drive.
 func TestTheShimHonoursTheListingFlags(t *testing.T) {
 	fakeShim(t)
+	strictContainers(t, "web")
 	const doc = `[{"configuration":{"id":"cache.proj.opossum","networks":[{"network":"proj-net"}]},` +
 		`"status":{"networks":[],"state":"stopped"}},` +
 		`{"configuration":{"id":"web.live.opossum","networks":[{"network":"live-net"}]},` +

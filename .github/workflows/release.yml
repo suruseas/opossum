@@ -15,10 +15,10 @@ jobs:
   goreleaser:
     runs-on: macos-latest # darwin build target
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # full history so GoReleaser sees the tag
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
       # The GitHub Release body is this version's CHANGELOG.md section, with an
@@ -117,7 +117,7 @@ jobs:
           go run ./cmd/changelog check "$RUNNER_TEMP/release-notes.md" || exit 1
           echo "--- release notes ($(wc -l < "$RUNNER_TEMP/release-notes.md") lines) ---"
           cat "$RUNNER_TEMP/release-notes.md"
-      - uses: goreleaser/goreleaser-action@v6
+      - uses: goreleaser/goreleaser-action@v7
         with:
           version: "~> v2"
           args: release --clean --release-notes=${{ runner.temp }}/release-notes.md

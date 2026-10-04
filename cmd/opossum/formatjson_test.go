@@ -20,6 +20,8 @@ func tableRows(out string) [][]string {
 // --format json, carrying what the table carries for the same project.
 func TestFormatJSONCLI(t *testing.T) {
 	readLog := fakeShim(t)
+	strictContainerWith(t, "web.demo.opossum", "-p", "8080:80")
+	strictContainerWith(t, "db.demo.opossum", "-p", "8080:80")
 	t.Setenv("IMAGE_ABSENT", "db:latest")
 	compose := writeCompose(t, "name: demo\nservices:\n  web:\n    image: web:latest\n  db:\n    image: db:latest\n")
 

@@ -53,7 +53,7 @@ marker() {
 }
 # is_there NAME: whether a container of this name is there as far as this fake
 # is concerned — one named in $INSPECT_ABSENT was never made, one the delete
-# case marked gone is no longer there. Both answers have to reach every
+# case marked gone is no longer there (and with $INSPECT_STRICT, one nothing ran is not). Both answers have to reach every
 # command, not only `inspect`: a fake that says "no such container" to one
 # question and hands logs to the next lets a command that should have passed
 # the service by look as though it worked (#1096).
@@ -63,6 +63,12 @@ is_there() {
   done
   g=$(marker gone "$1")
   if [ -n "$g" ] && [ -e "$g" ]; then return 1; fi
+  # $INSPECT_STRICT: a name nothing here ran is not a container the runtime has, for start, logs,
+  # exec and kill as for inspect (#1551).
+  if [ -n "${INSPECT_STRICT:-}" ]; then
+    c=$(marker created "$1")
+    if [ -n "$c" ] && [ ! -e "$c" ]; then return 1; fi
+  fi
   return 0
 }
 # last argument
@@ -451,6 +457,14 @@ case "$1" in
     if [ -n "$g" ] && [ -e "$g" ]; then
       echo "Error: internalError: \"failed to stop container\" (cause: \"notFound: \"container with ID $n not found\"\")" >&2; exit 1
     fi
+    # $INSPECT_STRICT: a name nothing here ran is not a container the runtime has, for stop as for
+    # inspect (#1551).
+    if [ -n "${INSPECT_STRICT:-}" ]; then
+      c=$(marker created "$n")
+      if [ -n "$c" ] && [ ! -e "$c" ]; then
+        echo "Error: internalError: \"failed to stop container\" (cause: \"notFound: \"container with ID $n not found\"\")" >&2; exit 1
+      fi
+    fi
     s=$(marker stopped "$n"); if [ -n "$s" ]; then : > "$s"; fi
     ;;
   start)
@@ -483,9 +497,15 @@ case "$1" in
     if [ -n "$g" ] && [ -e "$g" ]; then
       echo "Error: internalError: \"failed to delete container\" (cause: \"notFound: \"container with ID $n not found\"\")" >&2; exit 1
     fi
+    # $INSPECT_STRICT: a name nothing here ran is not a container the runtime has, for delete as for
+    # inspect (#1551).
+    c=$(marker created "$n")
+    if [ -n "${INSPECT_STRICT:-}" ] && [ -n "$c" ] && [ ! -e "$c" ]; then
+      echo "Error: internalError: \"failed to delete container\" (cause: \"notFound: \"container with ID $n not found\"\")" >&2; exit 1
+    fi
     if [ -n "$g" ]; then : > "$g"; fi
     s=$(marker stopped "$n"); if [ -n "$s" ]; then rm -f "$s"; fi
-    c=$(marker created "$n"); if [ -n "$c" ]; then rm -f "$c"; fi
+    if [ -n "$c" ]; then rm -f "$c"; fi
     ;;
   volume)
     if [ "$2" = delete ] || [ "$2" = rm ]; then
@@ -510,8 +530,16 @@ case "$1" in
   # (1.4.1: `Error: get failed: container <name> not found`) — a healthcheck
   # probe against a container that vanished mid-probe must see a failure.
   exec)
-    if ! is_there "$2"; then
-      printf 'Error: get failed: container %s not found\n' "$2" >&2; exit 1
+    # The container is the first argument that is not a flag (`exec -t NAME ...`; a flag that takes a
+    # value is not read — the runtime does not make one).
+    n=; skip=1
+    for a in "$@"; do
+      if [ "$skip" = 1 ]; then skip=0; continue; fi
+      case "$a" in -*) continue ;; esac
+      n=$a; break
+    done
+    if [ -n "$n" ] && ! is_there "$n"; then
+      printf 'Error: get failed: container %s not found\n' "$n" >&2; exit 1
     fi ;;   # otherwise: succeed (exit 0 = healthy)
   system)
     # `system dns list`: header + one domain per line, matching the real CLI.
@@ -591,7 +619,13 @@ JSON
     # nothing is shown for the ones that do (stats-absent-only.txt). Stopped
     # ones are skipped quietly. Otherwise the table's header, as passthrough.
     shift
+    # The names are the arguments that are not a flag (--no-stream, --format json): with
+    # $INSPECT_STRICT a flag read as a name is one nothing ran (#1551).
+    prev=
     for a in "$@"; do
+      case "$a" in -*) prev=$a; continue ;; esac
+      [ "$a" = json ] && [ "$prev" = --format ] && { prev=$a; continue; }
+      prev=$a
       is_there "$a" || { echo "Error: no such container: $a" >&2; exit 1; }
     done
     echo "Container ID  Cpu %    Memory Usage         Net Rx/Tx            Block I/O            Pids"

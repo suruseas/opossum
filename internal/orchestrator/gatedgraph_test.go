@@ -261,18 +261,13 @@ func TestAGatedFaultDoesNotStopTheCommandsThatReadOrTakeDown(t *testing.T) {
 	// the names as the whole answer and build no order — which is what
 	// decides whether a cycle is read. The rows are both sides of that.
 	readsNoOrderWhenNamed := map[string]bool{"stop web": true, "logs web": true, "restart web": true}
-	// #1385: unlike logs web and restart web, stop web (and kill, untested by
-	// this table — it has no "kill web" row) now also checks the named
-	// service's own dependency once a container exists for it to act on, the
-	// same way up already does (checkProjectLoads); the fake shim answers
-	// every Inspect this table makes as though web already has one (its
-	// default), so this table exercises that half of #1385, not the "no
-	// container yet" half (covered by namedteardowndeps_test.go instead).
-	// This only reopens the one row where web's own depends_on names a gated
-	// service directly (halfGated) — the other fixtures' gated fault sits on
-	// other/zed, not on web, so stop web still does not read it (checked
-	// below, not by naming — see #1094's own remap above).
-	checksOwnGatedDepWhenNamed := map[string]bool{"stop web": true}
+	// #1385, #1431: unlike restart web, stop web (and kill, untested by this table — it has no
+	// "kill web" row), logs web and start web check the named service's own dependency, whether or
+	// not a container exists for it, the same way up already does (checkProjectLoads). This only
+	// reopens the one row where web's own depends_on names a gated service directly (halfGated) —
+	// the other fixtures' gated fault sits on other/zed, not on web, so these still do not read it
+	// (checked below, not by naming — see #1094's own remap above).
+	checksOwnGatedDepWhenNamed := map[string]bool{"stop web": true, "logs web": true, "start web": true}
 	// #1093: with no service named, these no longer refuse a cycle among the
 	// active services either — they only touch containers already there, so
 	// docker compose does not refuse them for it given `-p` and left to
@@ -359,8 +354,8 @@ func runReadOrTakeDown(t *testing.T, cmd, body string, profileOn bool, want stri
 	t.Helper()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	rt, log := fakeShim(t)
-	// web is the service these commands work from: it has a container, which is what a naming `stop`
-	// or `kill` reads its own dependency for (docs/compatibility.md, the `depends_on` row).
+	// web is the service these commands work from: it has a container (a naming `stop`, `kill`, `logs` or
+	// `start` reads its own dependency whether or not it has one, docs/compatibility.md, the `depends_on` row).
 	strictContainers(t, rt, "web.demo.opossum")
 	proj, loadErr := loadProject(t, body)
 	if loadErr != nil {

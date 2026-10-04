@@ -154,9 +154,29 @@ func TestAClearedEntrypointRunsTheCommandInItsPlace(t *testing.T) {
 			wantRun: "run --name w --entrypoint=x img  y",
 		},
 		{
-			name: "an entrypoint of two words whose first is empty is not the one-empty-word form (the line it gives is a known fault, #1651)", cmdJSON: `["postgres"]`, here: true,
+			name: "an entrypoint of two words whose first is empty is refused: docker cannot start it either", cmdJSON: `["postgres"]`, here: true,
 			options: RunOptions{Name: "w", Image: "img", Entrypoint: []string{"", "x"}, Command: []string{"y"}},
-			wantRun: "run --name w --entrypoint= img x y",
+			wantErr: "starts with an empty word",
+		},
+		{
+			name: "an empty first word and an image's name after it is refused before the image is looked up", cmdJSON: `["postgres"]`, here: true,
+			options: RunOptions{Name: "w", Image: "img", Entrypoint: []string{"", "alpine", "sh"}},
+			wantErr: "starts with an empty word",
+		},
+		{
+			name: "an empty first word is refused before the image is pulled, when the image is not here", cmdJSON: `["postgres"]`, here: false,
+			options: RunOptions{Name: "w", Image: "img", Entrypoint: []string{"", "x"}, Command: []string{"y"}},
+			wantErr: "starts with an empty word",
+		},
+		{
+			name: "an empty first word is refused with no command too", cmdJSON: `["postgres"]`, here: true,
+			options: RunOptions{Name: "w", Image: "img", Entrypoint: []string{"", "-c", "echo hi"}},
+			wantErr: "starts with an empty word",
+		},
+		{
+			name: "two empty words are refused: the first is empty", cmdJSON: `["postgres"]`, here: true,
+			options: RunOptions{Name: "w", Image: "img", Entrypoint: []string{"", ""}, Command: []string{"y"}},
+			wantErr: "starts with an empty word",
 		},
 		{
 			name: "not cleared: the image is not asked", cmdJSON: `["postgres"]`, here: true,
@@ -282,6 +302,36 @@ func TestAClearedEntrypointRefusesACommandWhoseFirstWordIsEmpty(t *testing.T) {
 	}
 	if s.runLine() != "" {
 		t.Errorf("a run was made: %q", s.runLine())
+	}
+}
+
+// `entrypoint: ["", "x"]` names no program, and a dry run refuses it as the real run does: docker
+// compose's dry run passes it, and a plan that held a run of it would be one that cannot be carried
+// out (#1700). The refusal comes before anything is planned, so the plan holds no run of it.
+func TestADryRunRefusesAnEntrypointWhoseFirstWordIsEmpty(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		options RunOptions
+	}{
+		{"with a command", RunOptions{Name: "w", Image: "img", Entrypoint: []string{"", "x"}, Command: []string{"y"}}},
+		{"with no command", RunOptions{Name: "w", Image: "img", Entrypoint: []string{"", "x"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newClearedShim(t, `["postgres"]`, true)
+			s.rt.DryRun = true
+			err := s.rt.Run(tc.options)
+			if err == nil || !strings.Contains(err.Error(), "starts with an empty word") {
+				t.Fatalf("Run in a dry run = %v, want the refusal of the empty first word", err)
+			}
+			for _, l := range s.rt.Plan {
+				if strings.HasPrefix(l, "run ") {
+					t.Errorf("the plan holds a run of it: %q", s.rt.Plan)
+				}
+			}
+			if s.runLine() != "" {
+				t.Errorf("a dry run made a run: %q", s.runLine())
+			}
+		})
 	}
 }
 

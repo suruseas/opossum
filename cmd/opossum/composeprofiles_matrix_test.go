@@ -328,6 +328,7 @@ func aServiceAProfileEnablesIsSupervised(t *testing.T, dotenv string, args []str
 // an earlier version started is in fact reached was measured on the runtime.
 func TestPsAndDownDoNotGoByTheActiveProfiles(t *testing.T) {
 	log := fakeShim(t)
+	strictContainers(t, "sa.proj.opossum", "sb.proj.opossum")
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	dir := filepath.Join(t.TempDir(), "proj")
 	if err := os.MkdirAll(dir, 0o755); err != nil {

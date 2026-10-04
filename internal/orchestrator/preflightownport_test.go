@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -148,14 +149,31 @@ func freeBelowSpan(t *testing.T, held, holderPort int) int {
 	return freeBelowPort(t, held)
 }
 
+// freeBelowPort asks the way the check of a port does too (a bare or `0.0.0.0` entry binds the IPv4
+// wildcard, TCP and UDP alike): a listener on 127.0.0.1 alone says "free" for a port that an
+// outgoing connection from another address of the machine is using, and the wildcard then
+// refuses it (#1719).
 func freeBelowPort(t *testing.T, held int) int {
 	t.Helper()
 	for p := held - 1; p > held-64 && p > 1024; p-- {
-		l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", p))
-		if err == nil {
-			l.Close()
-			return p
+		// 127.0.0.1 too: on macOS the wildcard binds beside a listener of 127.0.0.1, and a row
+		// whose holder listens there is about a port someone holds.
+		loop, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", p))
+		if err != nil {
+			continue
 		}
+		loop.Close() // before the wildcard: on Linux the two overlap
+		l, err := net.Listen("tcp4", fmt.Sprintf(":%d", p))
+		if err != nil {
+			continue
+		}
+		c, err := net.ListenPacket("udp4", fmt.Sprintf(":%d", p))
+		l.Close()
+		if err != nil {
+			continue
+		}
+		c.Close()
+		return p
 	}
 	t.Fatalf("no free port in the 63 under %d", held)
 	return 0
@@ -725,4 +743,66 @@ func TestTheAskedPortIsUnderTheHoldersWholeSpan(t *testing.T) {
 	if got := freeBelowSpan(t, held, 0); got >= held {
 		t.Errorf("freeBelowSpan(%d, 0) = %d, want a port under held", held, got)
 	}
+}
+
+// A row about UDP is just as much about a port someone holds: the number under the one the row
+// holds can be a UDP listener's.
+func TestFreeBelowSkipsAUDPPortSomeoneIsHolding(t *testing.T) {
+	holder, err := net.ListenPacket("udp4", ":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Close()
+	taken := holder.LocalAddr().(*net.UDPAddr).Port
+	if got := freeBelow(t, taken+1); got == taken {
+		t.Fatalf("freeBelow(%d) = %d, which a UDP listener holds", taken+1, got)
+	}
+}
+
+// A port that an outgoing connection is using as its source port (an address of the machine that
+// is not 127.0.0.1) can be listened on at 127.0.0.1 and cannot be listened on at the wildcard:
+// the connection's socket was not made with SO_REUSEADDR and `0.0.0.0` overlaps its address. The
+// check of `a`'s own port binds the wildcard (IPv4), so a port picked by listening on 127.0.0.1
+// alone can be one the check finds in use — for as long as the connection lives, which is why
+// the retry of the row above came back to the same port three times in 0.07 s (#1719; the
+// runner holds long-lived connections of its own). A port the helper picks is one the wildcard
+// accepts.
+func TestFreeBelowPicksAPortTheWildcardAccepts(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("127.0.0.2 is a loopback address on Linux only")
+	}
+	server, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	go func() {
+		for {
+			c, err := server.Accept()
+			if err != nil {
+				return
+			}
+			defer c.Close()
+		}
+	}()
+	held := server.Addr().(*net.TCPAddr).Port + 100
+	want := freeBelow(t, held) // the port the helper would pick, before anything holds it
+	conn, err := (&net.Dialer{LocalAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.2"), Port: want}}).Dial("tcp", server.Addr().String())
+	if err != nil {
+		t.Skipf("cannot make a connection from 127.0.0.2:%d: %v", want, err)
+	}
+	defer conn.Close()
+	if l, err := net.Listen("tcp4", fmt.Sprintf(":%d", want)); err == nil {
+		l.Close()
+		t.Skipf("the wildcard binds %d though a connection uses it: this kernel does not make the difference", want)
+	}
+	got := freeBelow(t, held)
+	if got == want {
+		t.Fatalf("freeBelow(%d) = %d, which an outgoing connection holds and the wildcard will not bind", held, got)
+	}
+	l, err := net.Listen("tcp4", fmt.Sprintf(":%d", got))
+	if err != nil {
+		t.Fatalf("freeBelow(%d) = %d, which the wildcard will not bind: %v", held, got, err)
+	}
+	l.Close()
 }

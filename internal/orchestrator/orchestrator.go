@@ -1630,15 +1630,22 @@ func (o *Orchestrator) checkProjectLoads(named map[string]bool, canName bool) er
 	return o.cycleAmong(active)
 }
 
-// checkNamedTeardownDeps refuses a named `stop`/`kill` when one of the
-// services it names already has a container here to act on and depends
-// directly on one the file does not define, or on another gated-inactive
-// service (#1385): docker compose refuses the same way once it too has
-// something there to resolve the dependency for (measured, v5.5.1). A named
-// service with no container yet is not this run's business either way — an
-// earlier opossum never started it over the bad dependency, and refusing
-// here would take away the only way to touch what already exists for the
-// others.
+// checkNamedDeps refuses a named `stop`, `kill`, `logs` or `start` when one of the services it
+// names depends directly on one the file does not define, or on another gated-inactive
+// service (#1385, #1431): docker compose reads the file for these four the same way and
+// refuses over the named service's own dependency whether or not a container exists for it
+// (measured, v5.5.1, with the file read — `docker compose stop broken` in the file's directory, with
+// `-f`, or with `-p` and `-f` together; given a project name by COMPOSE_PROJECT_NAME or by `-p` with no
+// `-f` it does not read the file at all and goes on). `restart`, `exec` and `port` do not read it, there or here. docker compose
+// also follows a gated dependency's own dependencies (a(g) -> b(g) -> nosuch refuses); this does
+// not, and reads the named service's own ones only. An earlier opossum checked only a named service that
+// already had a container, on a reading that docker compose refused only then — a mix of
+// measurements, some of them made with `-p` alone — and `logs` and `start` not at all.
+//
+// A dependency written `required: false` is not a fault whatever it points at (measured, v5.5.1:
+// an undefined one and a gated-inactive one both go on for all four) when the named service is a
+// gated one that only its name enables; an undefined one of a service the run reads without the
+// name (no `profiles:`, or its profile turned on) is refused whatever `required` says.
 //
 // This only checks the named services' own direct dependencies — not the
 // whole active project the way checkProjectLoads does for `up` and `build`:
@@ -1659,25 +1666,29 @@ func (o *Orchestrator) checkProjectLoads(named map[string]bool, canName bool) er
 // set up does). Unlike checkProjectLoads, this does not walk a transitive
 // chain (a named service's dependency's own dependency) or check
 // checkVolumesFromRefs — neither was part of the fault #1385 is about, and
-// narrower is safer here given the above. An Inspect the runtime cannot
-// answer (Unknown) is treated as "no container" and skipped, the same
-// conservative default worksOn uses elsewhere in this file.
-func (o *Orchestrator) checkNamedTeardownDeps(services []string) error {
+// narrower is safer here given the above.
+func (o *Orchestrator) checkNamedDeps(services []string) error {
 	named := namedSet(services)
 	active := o.activeServices(named)
 	for _, name := range services {
-		if !o.rt.Inspect(o.containerName(name)).Exists {
-			continue
-		}
-		for _, dep := range o.Project.Services[name].DependsOn {
-			if _, ok := o.Project.Services[dep.Name]; !ok {
+		svc := o.Project.Services[name]
+		for _, dep := range svc.DependsOn {
+			// An undefined dependency is refused whatever `required` says wherever the service is
+			// one the run reads without being named: no `profiles:`, or a profile turned on by
+			// `--profile` or COMPOSE_PROFILES (measured, v5.5.1: all of the four refuse then). A
+			// gated service that only the name enables has its optional (required: false)
+			// dependency left alone, undefined or behind a profile that is not active: docker
+			// compose goes on for these four commands (measured).
+			if _, ok := o.Project.Services[dep.Name]; !ok && (!dep.Optional || o.enabled(name, nil)) {
 				return fmt.Errorf("service %q depends on unknown service %q — define %q under services: or remove it from depends_on", name, dep.Name, dep.Name)
 			}
-			// An optional (required: false) dependency behind a profile that
-			// is not active is not a fault (same as validateProfileDeps and
-			// checkProjectLoads) — up does not refuse it, so stop/kill must
-			// not either.
-			if !active[dep.Name] && !dep.Optional {
+			// An optional dependency behind a profile that is not active is not a fault either
+			// (same as validateProfileDeps and checkProjectLoads) — up does not refuse it, so
+			// none of these may.
+			if dep.Optional {
+				continue
+			}
+			if !active[dep.Name] {
 				return gatedDependencyRefusal(name, dep.Name, true)
 			}
 		}
@@ -2639,6 +2650,12 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 						return diagnosed
 					}
 				}
+				// opossum's own refusal of the file, made before the runtime was asked to run
+				// anything: the job did not exit, and there is no output above to check.
+				var refused *runtime.Refusal
+				if errors.As(err, &refused) {
+					return fmt.Errorf("starting service %q: %w", name, err)
+				}
 				return fmt.Errorf("service %q did not complete successfully: %w\n"+
 					"  it's a run-to-completion dependency (a service_completed_successfully target) that exited non-zero — check its output above, or run it directly with `opossum run %s`", name, err, name)
 			}
@@ -2683,7 +2700,12 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 			// exited leaves a stopped one. A detached run's text is the runtime's
 			// alone, so it keeps every diagnosis.
 			var decoded error
-			if !detach && !madeNothing {
+			var refused *runtime.Refusal
+			if errors.As(err, &refused) {
+				// opossum's own refusal of the file, made before the runtime was called: not a
+				// start that failed, so no advice about logs, the image, the command or the mounts.
+				decoded = fmt.Errorf("starting service %q: %w", name, err)
+			} else if !detach && !madeNothing {
 				decoded = o.undiagnosedStartError(name, err)
 			} else {
 				decoded = o.decodeStartError(name, order, err)
@@ -6768,6 +6790,11 @@ func (o *Orchestrator) Logs(services []string, opts runtime.LogsOptions) error {
 	if err != nil {
 		return err
 	}
+	if len(services) > 0 {
+		if err := o.checkNamedDeps(targets); err != nil {
+			return err
+		}
+	}
 	// Only this project's containers are read: a container of a service's
 	// name that is another project's, carries no project label, or that the
 	// runtime gave no readable answer about is left out and said on stderr
@@ -6869,6 +6896,52 @@ func (l *lastWrite) idle(now time.Time, d time.Duration) bool {
 	return l.writing.Load() == 0 && now.Sub(time.Unix(0, l.at.Load())) >= d
 }
 
+// exitWatch decides, from the looks a follow takes at the container it follows, whether that
+// container has ended: the state of followUntilExit's watcher, with no clock of its own and no
+// runtime (every look is handed its time and what it saw), so that its boundaries — a look just
+// short of LogsExitSettle, one at it, one past it — are kept by rows that give the times (#1717),
+// not by rows that wait for them.
+type exitWatch struct {
+	seen         bool      // the container has been seen running while followed
+	stoppedSince time.Time // when it was first seen not running since (zero: it is running, not seen running yet, or `restart` took the count back)
+	endedAt      time.Time // when it had stayed not running for LogsExitSettle (zero: it has not)
+}
+
+// What a look at the container saw.
+type look int
+
+const (
+	lookRunning    look = iota // it exists and is running
+	lookNotRunning             // it is gone, or it exists in a state other than running (stopped, created, …)
+	lookUnknown                // the runtime gave no readable answer
+	lookRestarting             // `opossum restart` is under way (it holds a marker)
+)
+
+// see takes in a look made at now. A running container is seen and starts the count again; a gap
+// while `restart` is under way is not counted at all, however long it lasts; a look the runtime
+// does not answer changes nothing, so the time since the container was first seen not running
+// goes on being counted through it; one that was never seen running is never the end (docker
+// compose goes on following a container that had already exited before `logs -f` began).
+func (w *exitWatch) see(now time.Time, l look) {
+	switch {
+	case l == lookRestarting:
+		w.stoppedSince, w.endedAt = time.Time{}, time.Time{}
+	case l == lookUnknown:
+	case l == lookRunning:
+		w.seen = true
+		w.stoppedSince, w.endedAt = time.Time{}, time.Time{}
+	case !w.seen:
+	case w.stoppedSince.IsZero():
+		w.stoppedSince = now
+	case w.endedAt.IsZero() && now.Sub(w.stoppedSince) >= LogsExitSettle:
+		w.endedAt = now
+	}
+}
+
+// settled reports that the container has stayed not running for LogsExitSettle: the stream is
+// ended once it has also gone LogsExitDrain without a new line.
+func (w *exitWatch) settled() bool { return !w.endedAt.IsZero() }
+
 // followUntilExit runs stream, a service's followed logs written to w, until it
 // ends, and ends it once the service's container has ended: container 1.4.1's
 // `container logs -f` goes on after the container exits, is stopped or is
@@ -6923,8 +6996,7 @@ func (o *Orchestrator) followUntilExit(ctx context.Context, service string, w io
 			defer close(watched)
 			tick := time.NewTicker(LogsExitPoll)
 			defer tick.Stop()
-			seen := false
-			var stoppedSince, endedAt time.Time
+			var watch exitWatch
 			// Looked at once straight away, then at each tick: a container
 			// that stops within the first tick has been seen running.
 			for first := true; ; first = false {
@@ -6948,7 +7020,7 @@ func (o *Orchestrator) followUntilExit(ctx context.Context, service string, w io
 					}
 				}
 				now := time.Now()
-				if !endedAt.IsZero() && lw.idle(now, LogsExitDrain) {
+				if watch.settled() && lw.idle(now, LogsExitDrain) {
 					ended.Store(true)
 					cancel()
 					return
@@ -6956,18 +7028,13 @@ func (o *Orchestrator) followUntilExit(ctx context.Context, service string, w io
 				info := o.rt.Inspect(o.containerName(service))
 				switch {
 				case o.isRestarting(service):
-					// `restart` is stopping and starting it: the gap, however
-					// long, is not the end.
-					stoppedSince, endedAt = time.Time{}, time.Time{}
+					watch.see(now, lookRestarting)
 				case info.Unknown:
+					watch.see(now, lookUnknown)
 				case info.Exists && info.State == "running":
-					seen = true
-					stoppedSince, endedAt = time.Time{}, time.Time{}
-				case !seen:
-				case stoppedSince.IsZero():
-					stoppedSince = now
-				case endedAt.IsZero() && now.Sub(stoppedSince) >= LogsExitSettle:
-					endedAt = now
+					watch.see(now, lookRunning)
+				default:
+					watch.see(now, lookNotRunning)
 				}
 			}
 		}()
@@ -7891,6 +7958,11 @@ func (o *Orchestrator) Start(services []string) error {
 	if err != nil {
 		return err
 	}
+	if len(services) > 0 {
+		if err := o.checkNamedDeps(targets); err != nil {
+			return err
+		}
+	}
 	targets, err = o.inStartupOrder(targets)
 	if err != nil {
 		return err
@@ -8037,7 +8109,7 @@ func (o *Orchestrator) Kill(services []string, signal string) error {
 		return err
 	}
 	if !whole {
-		if err := o.checkNamedTeardownDeps(targets); err != nil {
+		if err := o.checkNamedDeps(targets); err != nil {
 			return err
 		}
 	}
@@ -8079,7 +8151,7 @@ func (o *Orchestrator) Stop(services []string) error {
 		return err
 	}
 	if !whole {
-		if err := o.checkNamedTeardownDeps(targets); err != nil {
+		if err := o.checkNamedDeps(targets); err != nil {
 			return err
 		}
 	}

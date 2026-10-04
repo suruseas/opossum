@@ -1,20 +1,20 @@
 package orchestrator_test
 
-// #1385 (the #1094 residual): naming a service for `stop`/`kill` takes the
-// name as the whole answer and builds no order (#1094's own remap), so a
-// gated service's undefined or gated-inactive dependency went unnoticed when
-// it was named this way — unlike the bare (no name) case, which already goes
-// through StartupOrderTolerant's undefined-dependency check.
+// #1385 (the #1094 residual), widened by #1431: naming a service for `stop`/`kill`/`logs`/`start`
+// takes the name as the whole answer and builds no order (#1094's own remap), so a gated service's
+// undefined or gated-inactive dependency went unnoticed when it was named this way — unlike the
+// bare (no name) case, which already goes through StartupOrderTolerant's undefined-dependency
+// check.
 //
-// docker compose v5.5.1, measured: `stop broken`/`kill broken` (broken
-// gated, depends_on an undefined or gated-inactive service) is a silent rc-0
-// no-op when broken has no container yet, and refuses once one exists (any
-// state, running or stopped) — the same asymmetry #1093 built
-// StartupOrderTolerant around for these two commands' unnamed case (a
-// project already running must stay reachable through opossum even with a
-// broken file). This is why the check here only runs for a named service
-// that already has a container: a gated service never started is not this
-// run's business over its file, same as before.
+// docker compose v5.5.1, measured with the file read (in its directory, with `-f`, or with `-p` and `-f`
+// together; given a project name by COMPOSE_PROJECT_NAME, or by `-p` with no `-f`, it does not read the file
+// at all and goes on for everything): `stop broken`, `kill broken`, `logs broken` and `start broken`
+// (broken gated, depends_on an undefined or
+// gated-inactive service) refuse with `no such service: <dep>` whether or not broken has a
+// container, running or stopped; `restart`, `exec` and `port` do not read the dependency. The
+// first version of this check ran only for a named service that already had a container, on a
+// reading — made partly with a project name given by `-p` alone — that docker compose went on without one;
+// that does not reproduce.
 
 import (
 	"bytes"
@@ -38,7 +38,25 @@ func gatedBrokenTeardownProject(dep string) *compose.Project {
 	})
 }
 
-func TestNamingAGatedServiceWithAnExistingContainerMakesStopKillSeeItsBadDependency(t *testing.T) {
+// namedCommands are the commands that read a named service's own dependency, each called with the
+// names it was given.
+var namedCommands = []struct {
+	name string
+	call func(o *orchestrator.Orchestrator, names []string) error
+}{
+	{"stop", func(o *orchestrator.Orchestrator, names []string) error { return o.Stop(names) }},
+	{"kill", func(o *orchestrator.Orchestrator, names []string) error { return o.Kill(names, "TERM") }},
+	{"logs", func(o *orchestrator.Orchestrator, names []string) error { return o.Logs(names, runtime.LogsOptions{}) }},
+	{"start", func(o *orchestrator.Orchestrator, names []string) error { return o.Start(names) }},
+}
+
+// refusedOverADependency says whether err is the refusal of a service's dependency — an undefined
+// one or one behind a profile that is not active — and not some other failure of the command.
+func refusedOverADependency(err error) bool {
+	return err != nil && (strings.Contains(err.Error(), "depends on unknown service") || strings.Contains(err.Error(), "whose profile is not active"))
+}
+
+func TestNamingAGatedServiceMakesStopKillLogsStartSeeItsBadDependency(t *testing.T) {
 	for _, dep := range []struct {
 		name string
 		dep  string
@@ -46,53 +64,49 @@ func TestNamingAGatedServiceWithAnExistingContainerMakesStopKillSeeItsBadDepende
 	}{
 		{"undefined", "nosuch", `depends on unknown service "nosuch"`},
 		// "name it explicitly" is the canName=true half of
-		// gatedDependencyRefusal — stop/kill take service names, so it
+		// gatedDependencyRefusal — these commands take service names, so it
 		// belongs in the message the same way it does for up.
 		{"gated-inactive", "other", `whose profile is not active — name it explicitly`},
 	} {
-		for _, tc := range []struct {
-			name string
-			call func(o *orchestrator.Orchestrator) error
-		}{
-			{"stop", func(o *orchestrator.Orchestrator) error { return o.Stop([]string{"broken"}) }},
-			{"kill", func(o *orchestrator.Orchestrator) error { return o.Kill([]string{"broken"}, "TERM") }},
-		} {
-			t.Run(dep.name+"/"+tc.name, func(t *testing.T) {
-				rt, _ := fakeShim(t)
-				o := orchestrator.New(gatedBrokenTeardownProject(dep.dep), rt, "opossum", &bytes.Buffer{})
-				// "<service>.<project>.<dns domain>" — the project's own name is
-				// "demo" (project() in orchestrator_test.go) and the dns domain
-				// passed to New above is "opossum".
-				if err := rt.Run(runtime.RunOptions{Name: "broken.demo.opossum", Image: "alpine:3.20"}); err != nil {
-					t.Fatalf("seeding broken's container: %v", err)
-				}
-				err := tc.call(o)
-				if err == nil || !strings.Contains(err.Error(), dep.want) {
-					t.Errorf("want %q refused (container already exists for it), got: %v", dep.want, err)
-				}
-			})
+		for _, container := range []string{"no container", "a container"} {
+			for _, tc := range namedCommands {
+				t.Run(dep.name+"/"+container+"/"+tc.name, func(t *testing.T) {
+					rt, _ := fakeShim(t)
+					if container == "no container" {
+						// The fake shim answers Inspect of a name it has not heard of with a plausible running
+						// container by default; this needs the opposite.
+						setShimEnv(rt, "INSPECT_ABSENT=broken.demo.opossum")
+					}
+					o := orchestrator.New(gatedBrokenTeardownProject(dep.dep), rt, "opossum", &bytes.Buffer{})
+					if container == "a container" {
+						// "<service>.<project>.<dns domain>" — the project's own name is "demo" (project() in
+						// orchestrator_test.go) and the dns domain passed to New above is "opossum".
+						if err := rt.Run(runtime.RunOptions{Name: "broken.demo.opossum", Image: "alpine:3.20"}); err != nil {
+							t.Fatalf("seeding broken's container: %v", err)
+						}
+					}
+					err := tc.call(o, []string{"broken"})
+					if err == nil || !strings.Contains(err.Error(), dep.want) {
+						t.Errorf("want %q refused (%s for it), got: %v", dep.want, container, err)
+					}
+				})
+			}
 		}
 	}
 }
 
 // Naming the gated-inactive dependency too enables it, the same way naming
 // enables broken itself elsewhere in the codebase (activeServices, via
-// checkNamedTeardownDeps) — so stop/kill go ahead instead of refusing.
+// checkNamedDeps) — so stop, kill, logs and start go ahead instead of refusing.
 func TestNamingBothTheGatedServiceAndItsDependencyEnablesBoth(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		call func(o *orchestrator.Orchestrator) error
-	}{
-		{"stop", func(o *orchestrator.Orchestrator) error { return o.Stop([]string{"broken", "other"}) }},
-		{"kill", func(o *orchestrator.Orchestrator) error { return o.Kill([]string{"broken", "other"}, "TERM") }},
-	} {
+	for _, tc := range namedCommands {
 		t.Run(tc.name, func(t *testing.T) {
 			rt, _ := fakeShim(t)
 			o := orchestrator.New(gatedBrokenTeardownProject("other"), rt, "opossum", &bytes.Buffer{})
 			if err := rt.Run(runtime.RunOptions{Name: "broken.demo.opossum", Image: "alpine:3.20"}); err != nil {
 				t.Fatalf("seeding broken's container: %v", err)
 			}
-			if err := tc.call(o); err != nil {
+			if err := tc.call(o, []string{"broken", "other"}); refusedOverADependency(err) {
 				t.Errorf("must not refuse once other is named alongside broken, got: %v", err)
 			}
 		})
@@ -118,13 +132,7 @@ func TestNamingMultipleServicesStillChecksEachOne(t *testing.T) {
 		if tc.seedGap {
 			names = []string{"web", "broken"}
 		}
-		for _, call := range []struct {
-			name string
-			do   func(o *orchestrator.Orchestrator) error
-		}{
-			{"stop", func(o *orchestrator.Orchestrator) error { return o.Stop(names) }},
-			{"kill", func(o *orchestrator.Orchestrator) error { return o.Kill(names, "TERM") }},
-		} {
+		for _, call := range namedCommands {
 			t.Run(tc.name+"/"+call.name, func(t *testing.T) {
 				rt, _ := fakeShim(t)
 				setShimEnv(rt, "INSPECT_ABSENT=web.demo.opossum")
@@ -132,7 +140,7 @@ func TestNamingMultipleServicesStillChecksEachOne(t *testing.T) {
 				if err := rt.Run(runtime.RunOptions{Name: "broken.demo.opossum", Image: "alpine:3.20"}); err != nil {
 					t.Fatalf("seeding broken's container: %v", err)
 				}
-				err := call.do(o)
+				err := call.call(o, names)
 				if err == nil || !strings.Contains(err.Error(), `depends on unknown service "nosuch"`) {
 					t.Errorf("want broken's dependency refused regardless of its position among %v, got: %v", names, err)
 				}
@@ -144,7 +152,7 @@ func TestNamingMultipleServicesStillChecksEachOne(t *testing.T) {
 // An optional (`required: false`) dependency behind a profile that is not
 // active is not a fault for `up` either (validateProfileDeps,
 // checkProjectLoads drop it via dropOptionalGatedDeps first) — found missing
-// here by independent review of #1385, which noticed checkNamedTeardownDeps
+// here by independent review of #1385, which noticed checkNamedDeps
 // ignored DependsOn's Optional field, so a perfectly healthy service with an
 // optional gated dependency could no longer be stopped or killed by name.
 func TestNamingAServiceWithAnOptionalGatedInactiveDependencyDoesNotRefuse(t *testing.T) {
@@ -157,20 +165,14 @@ func TestNamingAServiceWithAnOptionalGatedInactiveDependencyDoesNotRefuse(t *tes
 			"dbg": {Image: "alpine:3.20", Profiles: []string{"h"}},
 		})
 	}
-	for _, tc := range []struct {
-		name string
-		call func(o *orchestrator.Orchestrator) error
-	}{
-		{"stop", func(o *orchestrator.Orchestrator) error { return o.Stop([]string{"web"}) }},
-		{"kill", func(o *orchestrator.Orchestrator) error { return o.Kill([]string{"web"}, "TERM") }},
-	} {
+	for _, tc := range namedCommands {
 		t.Run(tc.name, func(t *testing.T) {
 			rt, _ := fakeShim(t)
 			o := orchestrator.New(optionalDepProject(), rt, "opossum", &bytes.Buffer{})
 			if err := rt.Run(runtime.RunOptions{Name: "web.demo.opossum", Image: "alpine:3.20"}); err != nil {
 				t.Fatalf("seeding web's container: %v", err)
 			}
-			if err := tc.call(o); err != nil {
+			if err := tc.call(o, []string{"web"}); refusedOverADependency(err) {
 				t.Errorf("must not refuse over an optional gated-inactive dependency, got: %v", err)
 			}
 		})
@@ -182,7 +184,7 @@ func TestNamingAServiceWithAnOptionalGatedInactiveDependencyDoesNotRefuse(t *tes
 // same set `up`/`checkProjectLoads` use via activeServices. `enabled` alone
 // does not see this (independent review of #1385: `up web` on this exact
 // layout starts db, but `stop web` afterwards refused over db "whose profile
-// is not active" until checkNamedTeardownDeps used activeServices too).
+// is not active" until checkNamedDeps used activeServices too).
 func TestNamingCarriesADependencyThatSharesItsProfile(t *testing.T) {
 	sharedProfileProject := func() *compose.Project {
 		return project("demo", map[string]*compose.Service{
@@ -309,20 +311,14 @@ func TestNamingAGatedServiceWithTwoDependenciesChecksBothOfThem(t *testing.T) {
 			},
 		})
 	}
-	for _, tc := range []struct {
-		name string
-		call func(o *orchestrator.Orchestrator) error
-	}{
-		{"stop", func(o *orchestrator.Orchestrator) error { return o.Stop([]string{"broken"}) }},
-		{"kill", func(o *orchestrator.Orchestrator) error { return o.Kill([]string{"broken"}, "TERM") }},
-	} {
+	for _, tc := range namedCommands {
 		t.Run(tc.name, func(t *testing.T) {
 			rt, _ := fakeShim(t)
 			o := orchestrator.New(twoDepsProject(), rt, "opossum", &bytes.Buffer{})
 			if err := rt.Run(runtime.RunOptions{Name: "broken.demo.opossum", Image: "alpine:3.20"}); err != nil {
 				t.Fatalf("seeding broken's container: %v", err)
 			}
-			err := tc.call(o)
+			err := tc.call(o, []string{"broken"})
 			if err == nil || !strings.Contains(err.Error(), `depends on unknown service "nosuch"`) {
 				t.Errorf("want the second dependency (nosuch) refused even though the first (web) is fine, got: %v", err)
 			}
@@ -331,9 +327,10 @@ func TestNamingAGatedServiceWithTwoDependenciesChecksBothOfThem(t *testing.T) {
 }
 
 // An optional dependency that does not exist at all is still refused as
-// unknown — Optional only excuses a gated-inactive dependency, not a missing
-// one, matching validateProfileDeps and the compose loader (independent
-// review of #1385).
+// unknown for a service the run reads without its being named (here, one with no `profiles:`) —
+// Optional excuses a gated-inactive dependency, and a missing one only for a gated service that
+// the name alone enables (TestNamingAGatedServiceWithAnOptionalUndefinedDependency); docker compose
+// refuses the file as it reads it for every command (measured, v5.5.1).
 func TestNamingAServiceWithAnOptionalButUndefinedDependencyStillRefuses(t *testing.T) {
 	proj := func() *compose.Project {
 		return project("demo", map[string]*compose.Service{
@@ -364,27 +361,81 @@ func TestNamingAServiceWithAnOptionalButUndefinedDependencyStillRefuses(t *testi
 	}
 }
 
-// Left with no container of its own, broken's bad dependency stays nobody's
-// business — an earlier opossum never started it, and stop/kill go on with
-// whatever else was named (or the whole project, unnamed).
-func TestNamingAGatedServiceWithNoContainerLeavesStopKillAlone(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		call func(o *orchestrator.Orchestrator) error
+// A dependency written `required: false` is not read as a fault for a gated service that only its
+// name enables, whatever it points at: docker compose v5.5.1 goes on for `stop`, `kill` and `logs` over
+// an undefined one (`start` then stops for there being no container, which is not about the
+// dependency). With the profile turned on by `--profile` or COMPOSE_PROFILES the service is read like
+// any other, and the undefined one is refused (measured, all four).
+func TestNamingAGatedServiceWithAnOptionalUndefinedDependency(t *testing.T) {
+	proj := func() *compose.Project {
+		return project("demo", map[string]*compose.Service{
+			"web": {Image: "alpine:3.20"},
+			"broken": {
+				Image:     "alpine:3.20",
+				Profiles:  []string{"g"},
+				DependsOn: compose.DependsOn{{Name: "nosuch", Optional: true}},
+			},
+		})
+	}
+	// An unrelated profile turned on does not read broken like an ordinary service: only its own
+	// (or `*`) does (docker compose v5.5.1, measured: `--profile h stop broken` goes on).
+	for _, pr := range []struct {
+		name    string
+		on      []string
+		refused bool
 	}{
-		{"stop", func(o *orchestrator.Orchestrator) error { return o.Stop([]string{"broken"}) }},
-		{"kill", func(o *orchestrator.Orchestrator) error { return o.Kill([]string{"broken"}, "TERM") }},
+		{"only the name enables it", nil, false},
+		{"profile g turned on", []string{"g"}, true},
+		{"an unrelated profile h turned on", []string{"h"}, false},
+		{"every profile turned on (*)", []string{"*"}, true},
 	} {
+		for _, tc := range namedCommands {
+			t.Run(tc.name+"/"+pr.name, func(t *testing.T) {
+				rt, _ := fakeShim(t)
+				o := orchestrator.New(proj(), rt, "opossum", &bytes.Buffer{})
+				if pr.on != nil {
+					o.EnableProfiles(pr.on)
+				}
+				if err := rt.Run(runtime.RunOptions{Name: "broken.demo.opossum", Image: "alpine:3.20"}); err != nil {
+					t.Fatalf("seeding broken's container: %v", err)
+				}
+				err := tc.call(o, []string{"broken"})
+				// Refused in any words counts as refused: a row that expects it let go must not pass
+				// because a different refusal (a profile that is "not active" for a service the
+				// file does not define) was worded differently.
+				if refused := refusedOverADependency(err); refused != pr.refused {
+					t.Errorf("refused over the optional undefined dependency = %v, want %v, got: %v", refused, pr.refused, err)
+				}
+				if pr.refused && !strings.Contains(err.Error(), `depends on unknown service "nosuch"`) {
+					t.Errorf("refused, but not over the undefined service: %v", err)
+				}
+			})
+		}
+	}
+}
+
+// An optional dependency that is let go does not end the check: a later one that is a fault is still
+// refused (docker compose refuses `broken` with [dbg optional, nosuch]).
+func TestAnOptionalDependencyLetGoDoesNotEndTheCheck(t *testing.T) {
+	proj := project("demo", map[string]*compose.Service{
+		"web": {Image: "alpine:3.20"},
+		"dbg": {Image: "alpine:3.20", Profiles: []string{"h"}},
+		"broken": {
+			Image:    "alpine:3.20",
+			Profiles: []string{"g"},
+			DependsOn: compose.DependsOn{
+				{Name: "dbg", Optional: true},
+				{Name: "nosuch"},
+			},
+		},
+	})
+	for _, tc := range namedCommands {
 		t.Run(tc.name, func(t *testing.T) {
 			rt, _ := fakeShim(t)
-			// The fake shim answers Inspect of any name it has not heard of with a
-			// plausible running container of this project by default (a
-			// convenience for tests where that is the common case) — this one
-			// needs the opposite, since the point is that broken has no container.
-			setShimEnv(rt, "INSPECT_ABSENT=broken.demo.opossum")
-			o := orchestrator.New(gatedBrokenTeardownProject("nosuch"), rt, "opossum", &bytes.Buffer{})
-			if err := tc.call(o); err != nil {
-				t.Errorf("must not refuse over broken's dependency while it has no container yet, got: %v", err)
+			o := orchestrator.New(proj, rt, "opossum", &bytes.Buffer{})
+			err := tc.call(o, []string{"broken"})
+			if err == nil || !strings.Contains(err.Error(), `depends on unknown service "nosuch"`) {
+				t.Errorf("want nosuch refused after the optional dbg, got: %v", err)
 			}
 		})
 	}

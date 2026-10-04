@@ -294,6 +294,7 @@ func everyCommandReadsTheProject(t *testing.T, body string) {
 				t.Setenv("COMPOSE_PROFILES", env)
 				t.Setenv("XDG_STATE_HOME", t.TempDir())
 				fakeShim(t)
+				strictContainers(t, "web.demo.opossum")
 				compose := writeCompose(t, body)
 				out, err := run(t, append([]string{"-f", compose, cmd}, rest...)...)
 				said := err != nil && strings.Contains(err.Error(), "dependency cycle detected")

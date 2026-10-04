@@ -69,6 +69,10 @@ func fakeShim(t *testing.T) (*runtime.Runtime, func() []string) {
 		"HEALTH_COUNTER=" + filepath.Join(dir, "health.count"),
 		"STATE_DIR=" + dir, // remembers each run's config-hash for idempotency evals
 		"INSPECT_PROJECT_FROM_NAME=1",
+		// A name nothing here ran is not a container the runtime has, as the real CLI answers for one it
+		// has never seen: a test says what exists with strictContainers, and one that forgets to is red
+		// at once instead of passing on a container that was never there (#1551).
+		"INSPECT_STRICT=1",
 	}}
 	read := func() []string {
 		b, err := os.ReadFile(logPath)
@@ -97,12 +101,11 @@ func setShimEnv(rt *runtime.Runtime, kv ...string) {
 	rt.Env = append(rt.Env, kv...)
 }
 
-// strictContainers makes the fake answer as the real CLI does for a name it has never seen (rc 1,
-// `container not found`) and then makes the containers a test stands on, by running them in the
+// strictContainers makes the containers a test stands on (fakeShim has the fake answer as the real CLI does
+// for a name it has never seen — rc 1, `container not found` — so only these are there), by running them in the
 // fake that rt drives, so that every container the test relies on is one the runtime has (#1551).
-// The default fake says any name is a running container; a test that says what exists calls this,
-// and the names it lists are all that exists. The fake remembers what was run in rt's STATE_DIR,
-// which fakeShim sets. Each is run with the project label its <service>.<project>.<domain> name
+// A test that says what exists calls this, and the names it lists are all that exists. The fake
+// remembers what was run in rt's STATE_DIR, which fakeShim sets. Each is run with the project label its <service>.<project>.<domain> name
 // carries, as a container opossum made has it: one run without is recorded as owned by nobody, and
 // the commands that check the owner before acting leave it alone.
 func strictContainers(t *testing.T, rt *runtime.Runtime, names ...string) {
@@ -126,6 +129,9 @@ func strictContainerWith(t *testing.T, rt *runtime.Runtime, n string, extra ...s
 	if !have {
 		t.Fatal("strictContainers needs the shim's STATE_DIR: the fake remembers the containers it ran there")
 	}
+	// Already set by fakeShim, so a test that went through it gets nothing from this line: it is
+	// here for one that set STATE_DIR itself and did not, and would otherwise run its containers
+	// into a fake that is not strict.
 	setShimEnv(rt, "INSPECT_STRICT=1")
 	args := []string{"run", "-d", "--name", n}
 	if parts := strings.Split(n, "."); len(parts) >= 3 {
@@ -1319,6 +1325,7 @@ func TestRunOneOffUnknownService(t *testing.T) {
 
 func TestExecMapsServiceToContainer(t *testing.T) {
 	rt, log := fakeShim(t)
+	strictContainers(t, rt, "web.demo.opossum")
 	p := project("demo", map[string]*compose.Service{"web": {Image: "web:latest"}})
 	o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
 	if err := o.Exec("web", []string{"echo", "hi"}, runtime.ExecOptions{TTY: true}); err != nil {

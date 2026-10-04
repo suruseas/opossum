@@ -856,7 +856,7 @@ func expand(raw []byte, lookup varLookup, emptyAs string, hold *[]heldValue) ([]
 			// Find the `}` that closes THIS reference, skipping any nested `${…}` so a
 			// reference with a nested default (`${A:-${B}}`) is captured whole rather
 			// than truncated at the first inner `}`.
-			end := matchBrace(s[i+2:])
+			end := matchBrace(s, i+2, hold != nil)
 			if end < 0 {
 				return nil, unterminatedRef{at: i}
 			}
@@ -949,10 +949,165 @@ type heldValue struct {
 	written string
 }
 
-// matchBrace returns the index in s of the `}` that closes a `${` reference whose
-// content starts at s[0], skipping nested `${…}` so the outer reference is captured
-// whole. Returns -1 if no matching `}` is found.
-func matchBrace(s string) int {
+// matchBrace returns the index, relative to from, of the `}` that closes the `${` reference whose
+// content starts at text[from]. It finds it the way docker compose does (measured, v5.5.1, and
+// the same as compose-go's getFirstBraceClosingIndex): every `{` met is an opening — the one of
+// a nested `${…}` and one the word has of its own (`${E:-{x}}`) — and the character right after
+// it is not looked at, so `{{x}}` costs one `}` and not two (`${E:-{{x}}}` closes at the second
+// `}`). Counting only `${`, as this did, closed `${E:-{x}}` at the first `}` and left the rest of
+// the word behind as text (#1631). When that count never gets back to zero (a `{` the word
+// does not close, or `{}`, whose `}` the skip eats), docker compose takes the last `}` of the
+// value.
+//
+// docker compose counts inside one YAML value; this reads the file's text, before it is parsed,
+// so the value is found first (scalarEnd) and the count is made inside it: a `}` after the
+// closing quote, in a comment or of a flow mapping is not the word's. Where the value cannot be
+// told (a comment, a quote that is never closed), the
+// reference is closed as it was before the word's own `{` counted — and so is a reference whose
+// word has no `{` of its own, which is read exactly as it always was. Returns -1 if there is none.
+func matchBrace(text string, from int, inDocument bool) int {
+	old := matchBraceAcrossLines(text[from:])
+	if old < 0 {
+		return -1
+	}
+	// Without a `{` of the word's own the count above is the one this has always made, and
+	// reading the value's extent could only narrow it (a reference whose `}` is lines away).
+	if !hasBareBrace(text[from : from+old]) {
+		return old
+	}
+	// Text that is not a YAML document (a `.env` value, a default being read again) is one value.
+	end := len(text)
+	if inDocument {
+		if end = scalarEnd(text, from); end < 0 {
+			return old
+		}
+	}
+	value := text[from:end]
+	depth := 1
+	for i := 0; i < len(value); i++ {
+		switch value[i] {
+		case '{':
+			depth++
+			i++ // the character after a `{` is not looked at
+		case '}':
+			if depth--; depth == 0 {
+				return i
+			}
+		}
+	}
+	if old >= len(value) {
+		return old // the reference goes on past the value as read here (a multi-line one)
+	}
+	if last := strings.LastIndexByte(value, '}'); last >= 0 {
+		return last
+	}
+	return old
+}
+
+// scalarEnd returns the index in text where the YAML scalar that holds text[at] ends, or -1
+// when it cannot tell. A quoted scalar ends at its closing quote, which may be lines away
+// (`"` with `\` escapes, `'` with `”`); a plain scalar of a block ends at a ` #` comment or at
+// the end of its line. A quote opens a scalar only where a node can begin (after `:`, `-`, `?`,
+// `,`, `[`, `{` or the start of the line, or after a tag or an anchor), as YAML reads one. The
+// reading is one line's, from its start to at: where the line is itself a comment, it says -1.
+// (A plain value inside a flow collection is not looked for: docker compose refuses one that has
+// a `{` in it, and a word with no `{` of its own never gets here.)
+func scalarEnd(text string, at int) int {
+	start := strings.LastIndexByte(text[:at], '\n') + 1
+	if cr := strings.LastIndexByte(text[start:at], '\r'); cr >= 0 {
+		start += cr + 1
+	}
+	const plain, single, double = 0, 1, 2
+	state, prev := plain, byte(0)
+	for k := start; k < at-2; k++ { // up to the `${` of the reference itself
+		c := text[k]
+		switch state {
+		case double:
+			switch c {
+			case '\\':
+				k++
+			case '"':
+				state, prev = plain, c
+			}
+		case single:
+			if c == '\'' {
+				if k+1 < at-2 && text[k+1] == '\'' {
+					k++
+				} else {
+					state, prev = plain, c
+				}
+			}
+		default:
+			switch {
+			case c == '"' && opensNode(prev):
+				state = double
+			case c == '\'' && opensNode(prev):
+				state = single
+			case c == '#' && (prev == 0 || text[k-1] == ' ' || text[k-1] == '\t'):
+				return -1 // inside a comment
+			case (c == '!' || c == '&') && opensNode(prev):
+				// A tag or an anchor before the node: the quote after it opens the scalar.
+				for k < at-2 && text[k] != ' ' && text[k] != '\t' {
+					k++
+				}
+			case c != ' ' && c != '\t':
+				prev = c
+			}
+		}
+	}
+	switch state {
+	case double:
+		for k := at; k < len(text); k++ {
+			if text[k] == '\\' {
+				k++
+			} else if text[k] == '"' {
+				return k
+			}
+		}
+		return -1
+	case single:
+		for k := at; k < len(text); k++ {
+			if text[k] == '\'' {
+				if k+1 < len(text) && text[k+1] == '\'' {
+					k++
+					continue
+				}
+				return k
+			}
+		}
+		return -1
+	}
+	for k := at; k < len(text); k++ {
+		if text[k] == '\n' || text[k] == '\r' || (text[k] == '#' && (text[k-1] == ' ' || text[k-1] == '\t')) {
+			return k
+		}
+	}
+	return len(text)
+}
+
+// opensNode says whether a quote right after prev (the last byte of the line that is not a
+// space, 0 for none) begins a scalar.
+func opensNode(prev byte) bool {
+	switch prev {
+	case 0, ':', '-', '?', ',', '[', '{':
+		return true
+	}
+	return false
+}
+
+// hasBareBrace says whether s has a `{` that is not the one of a `${`.
+func hasBareBrace(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] == '{' && (i == 0 || s[i-1] != '$') {
+			return true
+		}
+	}
+	return false
+}
+
+// matchBraceAcrossLines is how a reference that does not end on its line was closed before the
+// word's own `{` counted: the `}` that balances the `${` openings.
+func matchBraceAcrossLines(s string) int {
 	depth := 1
 	for i := 0; i < len(s); i++ {
 		switch {

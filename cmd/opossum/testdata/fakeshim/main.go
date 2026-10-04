@@ -206,7 +206,17 @@ func main() {
 				return false
 			}
 		}
-		return !isGone("container", name)
+		if isGone("container", name) {
+			return false
+		}
+		// $INSPECT_STRICT: a name nothing here ran is not a container the runtime has, for `start`,
+		// `logs`, `exec` and `kill` as for `inspect` (#1551).
+		if os.Getenv("INSPECT_STRICT") != "" && stateDir != "" {
+			if _, err := os.Stat(filepath.Join(stateDir, "created-"+hex.EncodeToString([]byte(name)))); err != nil {
+				return false
+			}
+		}
+		return true
 	}
 	// seenVolumePath marks a named volume a `run` made here (#1551).
 	seenVolumePath := func(name string) string {
@@ -581,6 +591,14 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error: internalError: \"failed to stop container\" (cause: \"notFound: \"container with ID %s not found\"\")\n", lastArg())
 			os.Exit(1)
 		}
+		// $INSPECT_STRICT: a name nothing here ran is not a container the runtime has, for `stop` as
+		// for `inspect` (#1551).
+		if os.Getenv("INSPECT_STRICT") != "" && stateDir != "" {
+			if _, err := os.Stat(createdPath(lastArg())); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: internalError: \"failed to stop container\" (cause: \"notFound: \"container with ID %s not found\"\")\n", lastArg())
+				os.Exit(1)
+			}
+		}
 		if p := stoppedPath(lastArg()); p != "" {
 			_ = os.WriteFile(p, []byte("1"), 0o644)
 		}
@@ -588,6 +606,14 @@ func main() {
 		if isGone("container", lastArg()) {
 			fmt.Fprintf(os.Stderr, "Error: internalError: \"failed to delete container\" (cause: \"notFound: \"container with ID %s not found\"\")\n", lastArg())
 			os.Exit(1)
+		}
+		// $INSPECT_STRICT: a name nothing here ran is not a container the runtime has, for `delete` as
+		// for `inspect` (#1551).
+		if os.Getenv("INSPECT_STRICT") != "" && stateDir != "" {
+			if _, err := os.Stat(createdPath(lastArg())); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: internalError: \"failed to delete container\" (cause: \"notFound: \"container with ID %s not found\"\")\n", lastArg())
+				os.Exit(1)
+			}
 		}
 		markGone("container", lastArg())
 		if p := stoppedPath(lastArg()); p != "" {
@@ -630,8 +656,17 @@ func main() {
 	case "exec":
 		// A container that is not there cannot be exec'd into (container
 		// 1.4.1, same wording as `start`).
-		if len(args) > 1 && !there(args[1]) {
-			fmt.Fprintf(os.Stderr, "Error: get failed: container %s not found\n", args[1])
+		// The container is the first argument that is not a flag (`exec -t NAME …`; a flag that takes a
+		// value is not read — the runtime does not make one).
+		target := ""
+		for _, a := range args[1:] {
+			if !strings.HasPrefix(a, "-") {
+				target = a
+				break
+			}
+		}
+		if target != "" && !there(target) {
+			fmt.Fprintf(os.Stderr, "Error: get failed: container %s not found\n", target)
 			os.Exit(1)
 		}
 

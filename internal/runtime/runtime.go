@@ -795,7 +795,7 @@ func (r *Runtime) commandToRunWithoutEntrypoint(o RunOptions) ([]string, error) 
 		if o.Command[0] == "" {
 			// `--entrypoint=` with nothing after the `=` takes the image's place on the line
 			// (container 1.5.0), so an empty first word cannot be made the entrypoint.
-			return nil, fmt.Errorf("`entrypoint: []` makes the first word of the command the entrypoint, and that word is empty — write the program to run")
+			return nil, refusal("`entrypoint: []` makes the first word of the command the entrypoint, and that word is empty — write the program to run")
 		}
 		return o.Command, nil
 	}
@@ -815,7 +815,7 @@ func (r *Runtime) commandToRunWithoutEntrypoint(o RunOptions) ([]string, error) 
 		return nil, fmt.Errorf("`entrypoint: []` takes the image's entrypoint away, and %s has no command that can be read to run instead — write a `command:`", o.Image)
 	}
 	if len(cmd) == 0 {
-		return nil, fmt.Errorf("`entrypoint: []` takes the image's entrypoint away, and neither the service nor %s names a command to run instead — write a `command:`", o.Image)
+		return nil, refusal("`entrypoint: []` takes the image's entrypoint away, and neither the service nor %s names a command to run instead — write a `command:`", o.Image)
 	}
 	return cmd, nil
 }
@@ -1475,9 +1475,16 @@ func (r *Runtime) Run(o RunOptions) error {
 	// with a command to run in its place: with none, docker refuses it ("no command specified")
 	// where it starts the image's CMD for `[]`. Passed on as `--entrypoint=`, the empty value
 	// would take the image's place on the line (container 1.5.0) (#1626).
+	// An empty first word with more words after it (`["", "x"]`) is no program to run: docker
+	// fails to start it (`exec: "": executable file not found`) whatever the command is. Passed
+	// on, `--entrypoint=` would take the next word — the image's place on the line — and a word
+	// of the entrypoint would be pulled as an image (container 1.5.0) (#1651).
+	if len(entrypoint) > 1 && entrypoint[0] == "" {
+		return refusal("`entrypoint:` starts with an empty word, and no program is named by it — docker compose fails to start it too (exec: \"\": executable file not found); write the program as the first word")
+	}
 	emptyWord := len(entrypoint) == 1 && entrypoint[0] == ""
 	if emptyWord && len(o.Command) == 0 {
-		return fmt.Errorf("`entrypoint: [\"\"]` takes the image's entrypoint away, and the service has no `command:` to run instead — docker compose refuses it too (no command specified); write a `command:`")
+		return refusal("`entrypoint: [\"\"]` takes the image's entrypoint away, and the service has no `command:` to run instead — docker compose refuses it too (no command specified); write a `command:`")
 	}
 	if (o.EntrypointCleared && len(entrypoint) == 0) || emptyWord {
 		words, err := r.commandToRunWithoutEntrypoint(o)
@@ -1596,6 +1603,17 @@ func (c *cappedBuffer) String() string {
 	// handling to survive; not done here; it is not the ordinary case (#1353).
 	return string(c.head) + "\n...\n" + string(c.tail)
 }
+
+// Refusal is a refusal of the compose file's own words that Run makes before it starts a
+// container: the runtime was asked nothing about running it (at most what the image's CMD is),
+// so there is no failure of the runtime behind it, no container to read logs from and nothing
+// in the image, command or mounts to verify. A caller that adds advice to a failed start
+// leaves it off one of these (#1703).
+type Refusal struct{ Msg string }
+
+func (e *Refusal) Error() string { return e.Msg }
+
+func refusal(format string, a ...any) error { return &Refusal{Msg: fmt.Sprintf(format, a...)} }
 
 // RunError wraps a failed detached `container run` with its captured stderr, so a
 // caller can decode a cryptic runtime failure (e.g. a VZError attach conflict)

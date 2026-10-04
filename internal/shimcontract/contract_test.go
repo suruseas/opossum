@@ -832,6 +832,38 @@ func init() {
 }
 
 func init() {
+	// With $INSPECT_STRICT the other commands that look for a container agree with `inspect` (container 1.4.1,
+	// testdata/real-cli-output.md, #1551): `start`, `logs`, `exec`, `kill`, `stop` and `delete` of a name nothing ran are rc 1 (and `stats` says no such container),
+	// each in its own words, and of one that was run are not.
+	contract = append(contract, struct {
+		name  string
+		env   []string
+		steps []step
+	}{"with INSPECT_STRICT start, logs, exec, kill, stop, delete and stats of a name nothing ran are refused, and of one that was run are not", []string{"INSPECT_STRICT=1"}, []step{
+		{argv: []string{"start", "NAME"}, rc: 1, has: "container probe.demo.opossum not found"},
+		{argv: []string{"logs", "NAME"}, rc: 1, has: "failed to get logs for container probe.demo.opossum"},
+		{argv: []string{"exec", "NAME", "true"}, rc: 1, has: "container probe.demo.opossum not found"},
+		{argv: []string{"kill", "NAME"}, rc: 1, has: "failed to kill container"},
+		{argv: []string{"stop", "NAME"}, rc: 1, has: "failed to stop container"},
+		{argv: []string{"delete", "--force", "NAME"}, rc: 1, has: "failed to delete container"},
+		{argv: []string{"run", "-d", "--name", "NAME", "alpine"}, rc: 0},
+		{argv: []string{"start", "NAME"}, rc: 0, lacks: "Error"},
+		{argv: []string{"logs", "NAME"}, rc: 0, lacks: "Error"},
+		{argv: []string{"exec", "NAME", "true"}, rc: 0, lacks: "Error"},
+		// The runtime puts -i and -t before the name: the container is the first argument that is not a flag.
+		{argv: []string{"exec", "-t", "NAME", "true"}, rc: 0, lacks: "Error"},
+		{argv: []string{"exec", "-i", "-t", "OTHER", "true"}, rc: 1, has: "container probe.other.opossum not found"},
+		{argv: []string{"start", "OTHER"}, rc: 1, has: "container probe.other.opossum not found"},
+		// `stats` takes names and flags together: a flag is not a name to look for.
+		{argv: []string{"stats", "--no-stream", "OTHER"}, rc: 1, has: "no such container"},
+		{argv: []string{"stats", "--no-stream", "NAME"}, rc: 0, lacks: "Error"},
+		{argv: []string{"stats", "--no-stream", "--format", "json", "NAME"}, rc: 0, lacks: "Error"},
+		{argv: []string{"kill", "NAME"}, rc: 0, lacks: "Error"},
+		{argv: []string{"stop", "NAME"}, rc: 0, lacks: "Error"},
+	}})
+}
+
+func init() {
 	// With $INSPECT_STRICT a volume nothing here made is not one the runtime has (container 1.4.1,
 	// testdata/real-cli-output.md, #1551): `volume delete` of it is rc 1, `failed to delete one or more
 	// volumes: ["<name>"]`, as it is for one deleted already. A volume a `run -v NAME:/x` made is there to

@@ -502,6 +502,43 @@ jobs:
         # don't fail CI on the deprecation notice.
         continue-on-error: true
         run: goreleaser check
+      # The last step of the job, whatever the steps before it said: the
+      # runners keep GOCACHE on their own disk between jobs and nothing else
+      # removes it, so when the cache is larger than the limit this deletes
+      # the cache files whose mtime is more than three hours old. Both jobs
+      # carry it and the two runners share one machine, so what it does while
+      # the other job compiles, and why it deletes files by age and does not
+      # run `go clean -cache`, is written at the top of the script. It never
+      # fails the job (the script exits 0 on every path). Private repository
+      # only: a GitHub-hosted runner is a fresh machine.
+      #
+      # The age is the file's mtime, not its atime (atime is not dependable
+      # under WSL). The go command rewrites the mtime of a cache file it uses,
+      # but only when the file is more than an hour old, so a file whose mtime
+      # is more than 180 minutes old was last used at least 120 minutes ago
+      # (not "three hours ago"): not a file a running job can be holding when
+      # a run takes a quarter of an hour. The limit of that reasoning: a job
+      # has no `timeout-minutes` (the default is 360), so one stalled for more
+      # than two hours can have files taken from under it, and it is a job
+      # that has failed already. The same goes for a job that fails before the
+      # checkout: there is no script to run, this step is red too, and the job
+      # was red before it.
+      #
+      # Only the size of the cache trims, and 20 GiB is a first figure: a cap
+      # on what the cache grows to. The runners are in WSL2, whose `df` on the
+      # cache's own filesystem says 891 GiB free of 1007 GiB while the virtual
+      # disk file is 106.4 GiB on a Windows drive that had 53 GiB free
+      # (2026-10-04); what runs out is that drive, and `df /mnt/c` shows it.
+      # Its free space only warns, below 20 GiB, and never trims: deleting
+      # files inside WSL does not shrink the virtual disk file, so a trim
+      # would not give it back. (Compacting the file is for a person to decide.)
+      - name: the runner's Go cache is trimmed when it is large
+        if: ${{ always() && github.event.repository.private }}
+        env:
+          OPOSSUM_CI_MAX_CACHE_GIB: "20"
+          OPOSSUM_CI_WARN_FREE_PATH: /mnt/c
+          OPOSSUM_CI_WARN_FREE_GIB: "20"
+        run: sh .github/scripts/ci-trim-cache.sh
 
   # The current release's compiler, in a job of its own (see the top of the
   # file): the same runner class, the same environment, its own checkout —
@@ -587,3 +624,40 @@ jobs:
       - name: the temporary directory is removed
         if: ${{ always() }}
         run: rm -rf "/tmp/opossum-ci-${{ github.run_id }}-${{ github.job }}"
+      # The last step of the job, whatever the steps before it said: the
+      # runners keep GOCACHE on their own disk between jobs and nothing else
+      # removes it, so when the cache is larger than the limit this deletes
+      # the cache files whose mtime is more than three hours old. Both jobs
+      # carry it and the two runners share one machine, so what it does while
+      # the other job compiles, and why it deletes files by age and does not
+      # run `go clean -cache`, is written at the top of the script. It never
+      # fails the job (the script exits 0 on every path). Private repository
+      # only: a GitHub-hosted runner is a fresh machine.
+      #
+      # The age is the file's mtime, not its atime (atime is not dependable
+      # under WSL). The go command rewrites the mtime of a cache file it uses,
+      # but only when the file is more than an hour old, so a file whose mtime
+      # is more than 180 minutes old was last used at least 120 minutes ago
+      # (not "three hours ago"): not a file a running job can be holding when
+      # a run takes a quarter of an hour. The limit of that reasoning: a job
+      # has no `timeout-minutes` (the default is 360), so one stalled for more
+      # than two hours can have files taken from under it, and it is a job
+      # that has failed already. The same goes for a job that fails before the
+      # checkout: there is no script to run, this step is red too, and the job
+      # was red before it.
+      #
+      # Only the size of the cache trims, and 20 GiB is a first figure: a cap
+      # on what the cache grows to. The runners are in WSL2, whose `df` on the
+      # cache's own filesystem says 891 GiB free of 1007 GiB while the virtual
+      # disk file is 106.4 GiB on a Windows drive that had 53 GiB free
+      # (2026-10-04); what runs out is that drive, and `df /mnt/c` shows it.
+      # Its free space only warns, below 20 GiB, and never trims: deleting
+      # files inside WSL does not shrink the virtual disk file, so a trim
+      # would not give it back. (Compacting the file is for a person to decide.)
+      - name: the runner's Go cache is trimmed when it is large
+        if: ${{ always() && github.event.repository.private }}
+        env:
+          OPOSSUM_CI_MAX_CACHE_GIB: "20"
+          OPOSSUM_CI_WARN_FREE_PATH: /mnt/c
+          OPOSSUM_CI_WARN_FREE_GIB: "20"
+        run: sh .github/scripts/ci-trim-cache.sh

@@ -90,6 +90,14 @@ func run(args []string) int {
 				fmt.Fprintf(os.Stderr, "Error: internalError: \"failed to stop container\" (cause: \"notFound: \"container with ID %s not found\"\")\n", name)
 				return 1
 			}
+			// $INSPECT_STRICT: a name nothing here ran is not a container the runtime has, for `stop` as
+			// for `inspect` (#1551).
+			if os.Getenv("INSPECT_STRICT") != "" {
+				if _, err := os.Stat(createdPath(dir, name)); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: internalError: \"failed to stop container\" (cause: \"notFound: \"container with ID %s not found\"\")\n", name)
+					return 1
+				}
+			}
 			for _, m := range strings.Fields(os.Getenv("STOP_FAIL")) {
 				if name == m {
 					return 0
@@ -165,6 +173,14 @@ func run(args []string) int {
 			if _, err := os.Stat(gonePath(dir, name)); err == nil {
 				fmt.Fprintf(os.Stderr, "Error: internalError: \"failed to delete container\" (cause: \"notFound: \"container with ID %s not found\"\")\n", name)
 				return 1
+			}
+			// $INSPECT_STRICT: a name nothing here ran is not a container the runtime has, for `delete` as
+			// for `inspect` (#1551).
+			if os.Getenv("INSPECT_STRICT") != "" {
+				if _, err := os.Stat(createdPath(dir, name)); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: internalError: \"failed to delete container\" (cause: \"notFound: \"container with ID %s not found\"\")\n", name)
+					return 1
+				}
 			}
 			sticky := false
 			for _, m := range strings.Fields(os.Getenv("DELETE_STICKY")) {
@@ -603,6 +619,12 @@ func run(args []string) int {
 		// $RUN_EXISTS_ANY refuses every run with the sentence naming that one
 		// container — what a caller sees when the refusal is about some other name.
 		if taken := os.Getenv("RUN_EXISTS_ANY"); taken != "" {
+			// The holder is a container the runtime has, as the sentence says: a strict inspect
+			// (INSPECT_STRICT) finds it rather than answering not found (#1551).
+			if dir := os.Getenv("STATE_DIR"); dir != "" {
+				_ = os.Remove(gonePath(dir, taken))
+				_ = os.WriteFile(createdPath(dir, taken), []byte("1"), 0o644)
+			}
 			fmt.Fprintf(os.Stderr, "Error: container with id %s already exists\n", taken)
 			return 1
 		}
@@ -907,8 +929,9 @@ func run(args []string) int {
 		// found`) — a healthcheck probe (the one caller of Exec in production)
 		// against a container that vanished mid-probe must see a failure, not
 		// a fake that always answers healthy.
-		if len(args) > 1 && !there(args[1]) {
-			fmt.Fprintf(os.Stderr, "Error: get failed: container %s not found\n", args[1])
+		// The container is the first argument that is not a flag (`exec -t NAME …`: the name is not args[1]).
+		if target := execTarget(args); target != "" && !there(target) {
+			fmt.Fprintf(os.Stderr, "Error: get failed: container %s not found\n", target)
 			return 1
 		}
 		if os.Getenv("HEALTH_HANG") != "" {

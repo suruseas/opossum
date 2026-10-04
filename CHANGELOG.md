@@ -6,6 +6,15 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.42.1] - 2026-10-04
+
+### Fixed
+
+- `logs <service>` and `start <service>` now refuse over the named service's own dependency on a service the file does not define, or whose profile is not active, as docker compose does (`restart`, `exec` and `port` do not read it, there or here). `stop <service>` and `kill <service>` now refuse the same way whether or not a container exists for it yet; they used to refuse only when one did. A dependency written `required: false` is not a fault for a gated service that only its name enables, as there. docker compose reads the file this way when run in its directory, with `-f`, or with `-p` and `-f` together; given a project name by `COMPOSE_PROJECT_NAME` (in the shell or `.env`), or by `-p` with no `-f`, it does not read the file at all and goes on, which opossum does not copy. Only the named service's own dependencies are looked at, where docker compose also follows a gated dependency's own.
+- A `${VAR:-word}` or `${VAR:+word}` whose word has a `{` of its own now closes where docker compose closes it. `${CFG:-{x}}` has the word `{x}` (opossum used to stop at the first `}` and leave a stray `}` after the value: `ev}` where docker compose gives `ev`, and `}` for an empty `${E:+{x}}`), and `${E:-{{x}}}` closes one `}` early, as docker compose reads it. A `{` the word never closes, or a `{}`, takes the last `}` of the YAML value that holds the reference, so a `}` after the closing quote, in a comment or of a flow mapping is left alone. A reference whose word has no `{` of its own is read exactly as before. The same holds for values in a `.env` file, each read as one value.
+- An `entrypoint:` list that starts with an empty word and has more words after it (`entrypoint: ["", "x"]`) is now refused with a message, as docker compose fails to start it (`exec: "": executable file not found`). Before, `container` 1.5.0 read the empty `--entrypoint=` as taking the next word on the line for its value, so a word of the entrypoint was pulled as if it were an image, and a different image could be started.
+- An `entrypoint:` that names no program (`["", "sh"]`, `[""]` with no `command:`, `[]` with a command whose first word is empty, or `[]` with neither a command nor an image CMD to run) is refused as one line, without a failure's advice. Opossum refuses these itself, before it starts a container, so there is no runtime failure above it, no container to read logs from and nothing in the image, command or mounts to verify; the advice that said so (`there is no container left to read logs from — the failure above is what there is; verify the image, command, and mounts in the compose file`) was wrong for them, as was `exited non-zero — check its output above, or run it directly with opossum run` for a `service_completed_successfully` dependency. This holds under `up`, `up --dry-run` and a foreground `up`.
+
 ## [0.42.0] - 2026-10-02
 
 ### Fixed
@@ -2731,7 +2740,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v0.42.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v0.42.1...HEAD
+[0.42.1]: https://github.com/suruseas/opossum/compare/v0.42.0...v0.42.1
 [0.42.0]: https://github.com/suruseas/opossum/compare/v0.41.0...v0.42.0
 [0.41.0]: https://github.com/suruseas/opossum/compare/v0.40.1...v0.41.0
 [0.40.1]: https://github.com/suruseas/opossum/compare/v0.40.0...v0.40.1
