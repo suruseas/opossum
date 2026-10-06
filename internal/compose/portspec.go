@@ -21,7 +21,7 @@ import (
 // where the mirroring of a lone container port kept the empty address —
 // they failed at `up`. A real address is kept, and an IPv6 one written
 // without brackets is bracketed (`::1:8080:80` → `[::1]:8080:80`; see
-// below). Called after checkPortSpec: dropping the empty
+// below), and a range of one port is the port. Called after checkPortSpec: dropping the empty
 // parts first would fold an address that is only colons (`:::80`) into a
 // port the check would then pass.
 func normalizePortSpec(spec string) string {
@@ -53,6 +53,19 @@ func normalizePortSpec(spec string) string {
 		}
 		if empty {
 			parts = parts[len(parts)-2:]
+		}
+	}
+	// A range as wide as one port is that port (`47100-47100:80` is `47100:80`, `80:80-80` is `80:80`; docker compose
+	// reads `published: "47100"` and `target: 80`, measured on v5.5.1), so a later question about the port — is it taken by
+	// another entry, which one does the file name — sees one port and not a range it has to know to read as one.
+	for i := max(0, len(parts)-2); i < len(parts); i++ {
+		if lo, hi, isRange := strings.Cut(parts[i], "-"); isRange {
+			// By number, as docker compose reads it: `08080-8080` is the one port 8080, the first written as it was.
+			if l, lerr := strconv.Atoi(lo); lerr == nil {
+				if h, herr := strconv.Atoi(hi); herr == nil && l == h {
+					parts[i] = lo
+				}
+			}
 		}
 	}
 	s = strings.Join(parts, ":")

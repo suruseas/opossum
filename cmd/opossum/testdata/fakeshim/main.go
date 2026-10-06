@@ -18,6 +18,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 )
 
 func main() {
@@ -455,11 +456,47 @@ func main() {
 			if stateDir != "" {
 				_ = os.Remove(gonePath("network", name))
 			}
+			// A label key the runtime refuses (1.5.0, rc 1; it takes lower-case words and digits joined by `.`, `/` or `-`, so
+			// a key that starts with `-`, is empty, or holds a space or a control character is among them, and an upper-case letter or a
+			// `_` is another that this fake lets through) is named in the metadata as it was written (testdata/real-cli-output.md).
+			for _, a := range os.Args[1:] {
+				if v, ok := strings.CutPrefix(a, "--label="); ok {
+					key, _, _ := strings.Cut(v, "=")
+					bad := key == "" || key[0] == '-' || strings.ContainsFunc(key, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) })
+					if v == key+"=" {
+						bad = true // a label written with no value: the runtime names the whole `k=`
+					}
+					if bad {
+						if key == "" || v == key+"=" {
+							key = v // an empty key: the runtime names the whole `=value`
+						}
+						var shown strings.Builder // the runtime writes a tab as `\t` and another control character as `\u{01}`
+						for _, r := range key {
+							switch {
+							case r == '\t':
+								shown.WriteString(`\t`)
+							case r == '\n':
+								shown.WriteString(`\n`)
+							case unicode.IsControl(r):
+								fmt.Fprintf(&shown, `\u{%02X}`, r)
+							default:
+								shown.WriteRune(r)
+							}
+						}
+						fmt.Fprintf(os.Stderr, "Error: LabelError(code: ContainerResource.AppErrorCode(rawValue: \"invalid_label_key_content\"), metadata: [\"key\": \"%s\"])\n", shown.String())
+						os.Exit(1)
+					}
+				}
+			}
 			if p := netLabelsPath(name); p != "" {
 				var labels []string
 				for i, a := range os.Args[1:] {
 					if a == "--label" && i+2 < len(os.Args) {
 						labels = append(labels, os.Args[i+2])
+					}
+					// opossum passes `--label=<k=v>` as one argument (#1423); the real CLI reads both.
+					if v, ok := strings.CutPrefix(a, "--label="); ok {
+						labels = append(labels, v)
 					}
 				}
 				_ = os.WriteFile(p, []byte(strings.Join(labels, "\n")), 0o644)
@@ -656,14 +693,22 @@ func main() {
 	case "exec":
 		// A container that is not there cannot be exec'd into (container
 		// 1.4.1, same wording as `start`).
-		// The container is the first argument that is not a flag (`exec -t NAME …`; a flag that takes a
-		// value is not read — the runtime does not make one).
+		// The container is the first argument that is not a flag (`exec -t NAME …`), and a flag that takes its
+		// value apart (`-e A=1`, `--user u`; container 1.5.0, testdata/real-cli-output.md) is read with the value,
+		// which is not the name.
 		target := ""
+		valued := false
 		for _, a := range args[1:] {
-			if !strings.HasPrefix(a, "-") {
-				target = a
-				break
+			if valued {
+				valued = false
+				continue
 			}
+			if strings.HasPrefix(a, "-") {
+				valued = execTakesValue[a]
+				continue
+			}
+			target = a
+			break
 		}
 		if target != "" && !there(target) {
 			fmt.Fprintf(os.Stderr, "Error: get failed: container %s not found\n", target)
@@ -1225,3 +1270,7 @@ func refuseEmptyLoad(args []string) {
 		os.Exit(1)
 	}
 }
+
+// execTakesValue are the flags of `container exec` that take their value as the next argument (container 1.5.0).
+var execTakesValue = map[string]bool{"-e": true, "--env": true, "--env-file": true, "--gid": true, "--uid": true, "-u": true, "--user": true,
+	"-w": true, "--workdir": true, "--cwd": true, "--ulimit": true}

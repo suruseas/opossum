@@ -148,6 +148,18 @@ func specKeysFromSchema(data []byte) (map[string][]string, error) {
 	for _, k := range []string{"limits", "reservations"} {
 		out["services.*.deploy.resources."+k] = props(get(get(res, "properties"), k))
 	}
+	depProps := get(dep, "properties")
+	for _, k := range []string{"restart_policy", "placement", "update_config", "rollback_config"} {
+		out["services.*.deploy."+k] = props(get(depProps, k))
+	}
+	out["services.*.deploy.placement.preferences[]"] = props(get(get(get(depProps, "placement"), "properties"), "preferences"))
+	resProps := get(res, "properties")
+	reservations := get(resProps, "reservations")
+	revProps := get(reservations, "properties")
+	out["services.*.deploy.resources.reservations.devices[]"] = props(get(revProps, "devices"))
+	grItem := get(resolve(get(revProps, "generic_resources")), "items")
+	out["services.*.deploy.resources.reservations.generic_resources[]"] = props(grItem)
+	out["services.*.deploy.resources.reservations.generic_resources[].discrete_resource_spec"] = props(get(get(resolve(grItem), "properties"), "discrete_resource_spec"))
 	dev := resolve(get(svcProps, "develop"))
 	out["services.*.develop.watch[]"] = props(get(get(dev, "properties"), "watch"))
 	for _, k := range []string{"ports", "volumes", "secrets", "configs", "env_file"} {

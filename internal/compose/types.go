@@ -3,6 +3,7 @@
 package compose
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"math"
@@ -31,6 +32,8 @@ type Project struct {
 	// hides the one in the `.env`, which is what the same lookup does for every
 	// other variable.
 	EnvName string
+	// nameEmptied is that the file's `name:` came to nothing by a reference (CheckEmptyName).
+	nameEmptied bool
 	// EnvProfiles is what COMPOSE_PROFILES is set to, read where EnvName is: ""
 	// when nothing sets it, and when it is set to nothing. It is what a run
 	// given no `--profile` goes by.
@@ -119,9 +122,13 @@ type Service struct {
 	// does nothing under docker compose). Their entries are folded into
 	// Volumes at the load (expandVolumesFrom); OwnVolumes keeps this
 	// service's own, for `config` to print what was written.
-	VolumesFrom VolumesFrom   `yaml:"volumes_from"`
-	OwnVolumes  Volumes       `yaml:"-"`
-	Tmpfs       StringOrSlice `yaml:"tmpfs"` // service-level tmpfs targets (#93); volume-form `type: tmpfs` folds in (#79)
+	VolumesFrom VolumesFrom `yaml:"volumes_from"`
+	// Linked names the services `links:` lists (`b`, or `b:alias`: the alias does nothing here, where containers
+	// find each other by service name). docker compose reads each, and a `network_mode: service:<name>`, as a
+	// dependency on that service (LinkedNames); `links` itself is still not acted on.
+	Linked     []string      `yaml:"-"`
+	OwnVolumes Volumes       `yaml:"-"`
+	Tmpfs      StringOrSlice `yaml:"tmpfs"` // service-level tmpfs targets (#93); volume-form `type: tmpfs` folds in (#79)
 	// NoCopy are the container paths whose volume must NOT be filled from the
 	// image. Docker seeds a fresh volume from the image at the mount point, and
 	// `volume: {nocopy: true}` turns that off; opossum emulates the seeding, so it
@@ -141,13 +148,13 @@ type Service struct {
 	DependsOn      DependsOn       `yaml:"depends_on"`
 	Healthcheck    *Healthcheck    `yaml:"healthcheck"`
 	Profiles       StringOrSlice   `yaml:"profiles"`    // service starts only when one of these profiles is active (empty = always); the type takes a bare name so the shape check below refuses it in the field's own words, not the decoder's
-	MemLimit       scalarStr       `yaml:"mem_limit"`   // legacy memory limit ("512m", "2g", …)
-	CPUs           scalarStr       `yaml:"cpus"`        // legacy CPU limit (may be fractional)
+	MemLimit       bareInt         `yaml:"mem_limit"`   // legacy memory limit ("512m", "2g", …)
+	CPUs           cpuCount        `yaml:"cpus"`        // legacy CPU limit (may be fractional)
 	SSH            bool            `yaml:"ssh"`         // forward the host SSH agent (--ssh) for private git over SSH
 	User           string          `yaml:"user"`        // --user (name|uid[:gid]) the process runs as
 	WorkingDir     string          `yaml:"working_dir"` // --workdir the process starts in
 	Init           bool            `yaml:"init"`        // --init: run a tini-like init as PID 1 to reap zombies
-	ShmSize        scalarStr       `yaml:"shm_size"`    // size of /dev/shm (`1gb`, `64M`, bytes) → --shm-size <bytes>
+	ShmSize        bareInt         `yaml:"shm_size"`    // size of /dev/shm (`1gb`, `64M`, bytes) → --shm-size <bytes>
 	Ulimits        Ulimits         `yaml:"ulimits"`     // resource limits (`nofile: 65536` or `{soft, hard}`) → --ulimit name=soft:hard
 	ReadOnly       bool            `yaml:"read_only"`   // --read-only root filesystem
 	TTY            bool            `yaml:"tty"`         // -t: a pseudo-terminal for the service's process (`up`); `run` decides by the terminal it was typed at
@@ -191,6 +198,77 @@ type scalarStr string
 
 func (s *scalarStr) UnmarshalYAML(n *yaml.Node) error {
 	*s = scalarStr(n.Value)
+	return nil
+}
+
+// keyNodeThroughMerge is the node a mapping holds under key as a decode reads it: the key written in the mapping, else
+// the one a `<<` merge key brings (an alias to a mapping, a mapping, or a list of them, the first that has it). nil when
+// there is none.
+func keyNodeThroughMerge(n *yaml.Node, key string) *yaml.Node {
+	n = unalias(n)
+	if n.Kind != yaml.MappingNode {
+		return nil
+	}
+	for j := 0; j+1 < len(n.Content); j += 2 {
+		if unalias(n.Content[j]).Value == key {
+			return unalias(n.Content[j+1])
+		}
+	}
+	for j := 0; j+1 < len(n.Content); j += 2 {
+		if n.Content[j].Value != "<<" {
+			continue
+		}
+		src := unalias(n.Content[j+1])
+		if src.Kind == yaml.SequenceNode {
+			for _, m := range src.Content {
+				if v := keyNodeThroughMerge(m, key); v != nil {
+					return v
+				}
+			}
+		} else if v := keyNodeThroughMerge(src, key); v != nil {
+			return v
+		}
+	}
+	return nil
+}
+
+// bareInt is a whole number as written, in a field where the text of one is read: `mem_limit` and `shm_size`
+// (a size), and the `target` and `published` of a long-form port. An integer written bare is the number YAML
+// reads it as (`04000000` is 1048576, `0x100000` and `0o4000000` the same, `010` is eight — docker compose
+// decodes the file before it reads the number), and anything else is its text, read by what the field reads
+// (parseMemoryBytes for a size). A number with a fraction or an exponent is left as it is: docker compose
+// drops one in a size with no word, leaving no limit, which is not copied here.
+type bareInt string
+
+func (b *bareInt) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.ScalarNode && n.Tag == "!!int" {
+		var i int64
+		if err := n.Decode(&i); err == nil {
+			*b = bareInt(strconv.FormatInt(i, 10))
+			return nil
+		}
+	}
+	*b = bareInt(n.Value)
+	return nil
+}
+
+// cpuCount is a count of CPUs as written: a number written bare is the number YAML reads it
+// as (`010` is eight, `0x10` sixteen, `0o10` eight, `0b11` three — docker compose decodes the
+// file before it casts the count), and anything else is its text, cast by parseCPUs.
+type cpuCount string
+
+func (c *cpuCount) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.ScalarNode && (n.Tag == "!!int" || n.Tag == "!!float") {
+		var f float64
+		if err := n.Decode(&f); err == nil {
+			// Through 32 bits at once, as docker compose casts the number: written as a 64-bit
+			// float and read again as a 32-bit one, a number on the middle of two 32-bit floats
+			// is rounded twice, and comes out one CPU away.
+			*c = cpuCount(strconv.FormatFloat(float64(float32(f)), 'g', -1, 32))
+			return nil
+		}
+	}
+	*c = cpuCount(n.Value)
 	return nil
 }
 
@@ -249,7 +327,7 @@ type DeployResources struct {
 // DeployLimits is deploy.resources.limits.
 type DeployLimits struct {
 	Memory scalarStr `yaml:"memory"`
-	CPUs   scalarStr `yaml:"cpus"`
+	CPUs   cpuCount  `yaml:"cpus"`
 }
 
 func (s *Service) deployMemory() string {
@@ -266,6 +344,12 @@ func (s *Service) deployCPUs() string {
 	return ""
 }
 
+// The most a memory limit and a CPU count are given to container: a larger one is as good as none, and container fails on it (see Resources).
+const (
+	maxMemoryMiB = 8796093022207 // 2^43 - 1: a MiB short of 2^63 bytes
+	maxCPUCount  = 100000000
+)
+
 // Resources resolves the effective `container run` -m/-c arguments from the
 // legacy (mem_limit/cpus) and modern (deploy.resources.limits) fields. Both forms
 // may be set only if they agree (docker compose parity). Memory is emitted in
@@ -278,8 +362,18 @@ func (s *Service) Resources() (mem, cpu string, err error) {
 		return "", "", fmt.Errorf("service %q: %w", s.Name, err)
 	}
 	if memBytes > 0 {
-		mib := (int64(memBytes) + (1 << 20) - 1) / (1 << 20) // ceil to MiB
-		mem = strconv.FormatInt(mib, 10) + "M"
+		// Ceil to MiB, then no more than container takes: past 8796093022207M (a MiB short of 2^63 bytes) its runtime fails to start
+		// the container (measured, container 1.5.0: 8796093022208M and above drop the connection, and a few more digits stop the CLI
+		// itself). A limit that large is no limit, as docker compose reads a number past what it holds (it drops it, silently).
+		// Done in floating point: the count of bytes is one, and past int64 the conversion wraps and the limit went negative.
+		// The bytes are a whole number, as docker compose cuts them (`1048576.5` is `1048576`), and a limit of less than one byte is none.
+		mib := math.Ceil(math.Trunc(memBytes) / (1 << 20))
+		if mib > maxMemoryMiB {
+			mib = maxMemoryMiB
+		}
+		if mib > 0 {
+			mem = strconv.FormatInt(int64(mib), 10) + "M"
+		}
 	}
 	cpus, err := resolveScalar("cpus", "deploy.resources.limits.cpus",
 		string(s.CPUs), s.deployCPUs(), parseCPUs)
@@ -287,7 +381,14 @@ func (s *Service) Resources() (mem, cpu string, err error) {
 		return "", "", fmt.Errorf("service %q: %w", s.Name, err)
 	}
 	if cpus > 0 {
-		cpu = strconv.Itoa(int(math.Ceil(cpus))) // Apple container wants a whole CPU count
+		// Apple container wants a whole CPU count. More than the host has is the host's count there (measured, container 1.5.0, up
+		// to 100000000), and past that its runtime fails (`cpu.max` cannot be written at 1000000000; a few more digits drop its connection), so a
+		// count above that is the largest it takes: no more than the host's, which is what it comes to. A count past what an int holds
+		// used to wrap into the largest int.
+		if cpus > maxCPUCount {
+			cpus = maxCPUCount
+		}
+		cpu = strconv.Itoa(int(math.Ceil(cpus)))
 	}
 	return mem, cpu, nil
 }
@@ -349,14 +450,17 @@ func parseMemoryBytes(s string) (float64, error) {
 	return num * f, nil
 }
 
-// parseCPUs parses a CPU count ("1.5", "0.5", "2").
+// parseCPUs parses a CPU count ("1.5", "0.5", "2") as docker compose casts one: by
+// strconv.ParseFloat to a 32-bit float, so a blank around it is not trimmed (`" 2"` is
+// refused), `2.0000000001` is two, and `1e39` is out of range; and a number that is not
+// finite (`inf`, `NaN`) is refused: `inf` came to the largest integer as the count of CPUs,
+// and `NaN` to no limit, with no word of either.
 func parseCPUs(s string) (float64, error) {
-	s = strings.TrimSpace(s)
 	if s == "" {
 		return 0, nil
 	}
-	f, err := strconv.ParseFloat(s, 64)
-	if err != nil {
+	f, err := strconv.ParseFloat(s, 32)
+	if err != nil || math.IsInf(f, 0) || math.IsNaN(f) {
 		return 0, fmt.Errorf("not a number of CPUs — use a number, e.g. \"1.5\" or \"2\"")
 	}
 	if f < 0 {
@@ -700,11 +804,8 @@ var checkedBlocks = map[string]bool{"volumes.bind": true}
 // enough to find the line.
 //
 // nil when every key belongs — and nil when the value is not a mapping,
-// which is not a check passed but one nobody makes: `bind: foo` and
-// `bind: [a]` load here and are listed among the ignored fields, where
-// docker compose refuses them (`… .bind must be a mapping`). The long-form
-// decoder has no field for `bind`, so nothing reads its shape. Left as it
-// was (see the entry for `volumes` in docs/compatibility.md).
+// which is not a check passed but one made before this is asked
+// (refuseBadBindBlock refuses `bind: foo` and `bind: [a]`).
 func refuseUnknownIn(block yaml.Node, specPath, prefix string) error {
 	b := unalias(&block)
 	if b.Kind != yaml.MappingNode {
@@ -724,6 +825,106 @@ func refuseUnknownIn(block yaml.Node, specPath, prefix string) error {
 		}
 	}
 	return nil
+}
+
+// bindOptions are the options of a mount's `bind:` block and what docker compose takes as the
+// value of each (v5.5.1, measured by writing each with a value of every YAML type and a
+// word of each spelling): `propagation` any string; `selinux` `z` or `Z`; `recursive`
+// `enabled`, `disabled`, `writable` or `readonly`; `create_host_path` a boolean, or one of the
+// words boolWord reads. Anything of another type — a number, true/false for a string option,
+// null, a list, a mapping — is refused (`must be a string`, `must be a boolean`).
+var bindOptions = map[string]struct {
+	boolean bool
+	words   []string // the strings a string option may be, nil for any
+}{
+	"propagation":      {},
+	"selinux":          {words: []string{"z", "Z"}},
+	"recursive":        {words: []string{"enabled", "disabled", "writable", "readonly"}},
+	"create_host_path": {boolean: true},
+}
+
+// refuseBadBindBlock refuses what docker compose refuses about the shape of a mount's `bind:`
+// block, whose contents nothing here reads (#1177): a block that is not a mapping (`bind: foo`,
+// `bind: [a]`, `bind:` with nothing — `bind must be a mapping`), and an option of a type or a
+// word it does not take. The names of the keys are asked of docker compose's schema
+// (refuseUnknownIn). prefix is where the block is (`volumes entry 1.bind`).
+//
+// A value that is an alias is followed, as docker compose follows it. A `!!binary` value is read
+// as the text its base64 stands for, as docker compose reads it (`!!binary dHJ1ZQ==` is `true`),
+// and any other tag docker compose takes as text (a custom one) as the text it holds; a `<<`
+// merge key is let through: what it merges is not read here. A key is taken by its text whatever
+// its tag (`!custom selinux: q` is the option `selinux`, as there).
+//
+// The refusals name the option and the line, not the value: it may have come from a `${...}`
+// reference, where a secret lives — the place, not the contents (as readQuotedBools says).
+func refuseBadBindBlock(block yaml.Node, prefix string) error {
+	b := unalias(&block)
+	if b.Kind != yaml.MappingNode {
+		got := kindName(b.Kind)
+		if b.Kind == yaml.ScalarNode && b.ShortTag() == "!!null" {
+			got = "nothing"
+		}
+		return fmt.Errorf("%s must be a mapping, got %s (line %d) — write the options as `key: value` under it, or leave `bind:` out", prefix, got, b.Line)
+	}
+	for i := 0; i+1 < len(b.Content); i += 2 {
+		opt, ok := bindOptions[b.Content[i].Value]
+		if !ok {
+			continue
+		}
+		key, v := b.Content[i].Value, unalias(b.Content[i+1])
+		where := prefix + "." + key
+		tag := ""
+		if v.Kind == yaml.ScalarNode {
+			tag = v.ShortTag()
+		}
+		// A scalar of a type YAML reads as something other than text, and anything that is not a
+		// scalar, is not a string; the same for the type a boolean option takes, which is
+		// true/false or text.
+		typed := v.Kind != yaml.ScalarNode || tag == "!!null" || tag == "!!int" || tag == "!!float" || tag == "!!timestamp"
+		text := v.Value
+		if tag == "!!binary" {
+			// What base64 stands for; what does not decode is the text it is.
+			if raw, err := base64.StdEncoding.DecodeString(strings.Join(strings.Fields(v.Value), "")); err == nil {
+				text = string(raw)
+			}
+		}
+		if opt.boolean {
+			switch {
+			case typed:
+				return fmt.Errorf("%s must be true or false, got %s (line %d) — write `true` or `false`", where, bindValueKind(v), v.Line)
+			case tag != "!!bool":
+				if _, ok := boolWord(text); !ok {
+					return fmt.Errorf("%s must be true or false, got a word that is not one (line %d) — write `true` or `false`", where, v.Line)
+				}
+			}
+			continue
+		}
+		if typed || tag == "!!bool" {
+			return fmt.Errorf("%s must be a string, got %s (line %d) — quote it if it is meant literally", where, bindValueKind(v), v.Line)
+		}
+		if opt.words != nil && !slices.Contains(opt.words, text) {
+			return fmt.Errorf("%s must be one of %s (line %d)", where, strings.Join(opt.words, ", "), v.Line)
+		}
+	}
+	return nil
+}
+
+// bindValueKind says what a value that is not the type asked for is, for a refusal.
+func bindValueKind(v *yaml.Node) string {
+	if v.Kind != yaml.ScalarNode {
+		return kindName(v.Kind)
+	}
+	switch v.ShortTag() {
+	case "!!null":
+		return "nothing"
+	case "!!int", "!!float":
+		return "a number"
+	case "!!bool":
+		return "true/false"
+	case "!!timestamp":
+		return "a date"
+	}
+	return "a single value"
 }
 
 // ignoredItemKeys names the keys opossum does not read in a list's
@@ -769,6 +970,10 @@ func ignoredItemKeys(field string, n *yaml.Node) ([]string, error) {
 				// is listed, and a key that does not belong in it is
 				// refused where docker compose refuses it.
 				if checkedBlocks[field+"."+key] {
+					if err := refuseBadBindBlock(fields[key], prefix+"."+key); err != nil {
+						refused = err
+						return
+					}
 					if err := refuseUnknownIn(fields[key], specPath+"."+key, prefix+"."+key); err != nil {
 						refused = err
 						return
@@ -902,15 +1107,28 @@ func retriesCount(n *yaml.Node) (int, error) {
 	case "!!int":
 		v, err := strconv.ParseInt(n.Value, 0, 64)
 		if err != nil {
-			return notACount()
+			// docker compose reads the count as an unsigned 64-bit number, so a whole number up to 2^64-1 is
+			// one it takes. ParseInt gives back the largest int for one past it, which is the count kept for
+			// "as many as it takes"; what ParseUint refuses too (past 2^64-1, or below the smallest int) is not a count.
+			if _, uerr := strconv.ParseUint(n.Value, 0, 64); uerr != nil {
+				return notACount()
+			}
 		}
 		count = int(v)
 	case "!!float":
+		// A float is a count docker compose takes whatever its size (1e10 and 1e300 are read); it is cut to a
+		// whole number, and one past what an int holds is kept as the largest. A fraction below zero is refused as
+		// a negative number is (-0.5): docker compose refuses it where it stays in the project, and reads it where a later
+		// file or an extending service writes the count over it (#1774; the files are asked once they are merged).
 		f, err := strconv.ParseFloat(n.Value, 64)
-		if err != nil || math.IsInf(f, 0) || math.IsNaN(f) || f > math.MaxInt32 {
+		if err != nil || math.IsInf(f, 0) || math.IsNaN(f) || f < 0 {
 			return notACount()
 		}
-		count = int(f)
+		if f >= math.MaxInt64 {
+			count = math.MaxInt
+		} else {
+			count = int(f)
+		}
 	case "!!str":
 		v, err := strconv.Atoi(n.Value)
 		if err != nil {
@@ -1038,6 +1256,23 @@ func (s *Service) UnmarshalYAML(value *yaml.Node) error {
 	}
 	if vols, ok := keys["volumes"]; ok {
 		s.VolumeSubpaths = volumeSubpaths(&vols)
+	}
+	if links, ok := keys["links"]; ok {
+		if seq := unalias(&links); seq.Kind == yaml.SequenceNode {
+			for _, item := range seq.Content {
+				if it := unalias(item); it.Kind == yaml.ScalarNode && it.Tag == "!!str" {
+					// `b:alias` is the service `b`; docker compose splits on the colon only where there is one
+					// (`b:c:d` is the name `b:c:d`, which no service has, and `""` names none).
+					name := it.Value
+					if parts := strings.Split(it.Value, ":"); len(parts) == 2 {
+						name = parts[0]
+					}
+					if !slices.Contains(s.Linked, name) {
+						s.Linked = append(s.Linked, name)
+					}
+				}
+			}
+		}
 	}
 	// A field written with nothing after it (`volumes:` alone) decodes to
 	// nothing: the list decoders above are not even called for a null, so the
@@ -1476,25 +1711,63 @@ func (p *Ports) UnmarshalYAML(value *yaml.Node) error {
 			if item.ShortTag() == "!!null" || item.Value == "" {
 				return fmt.Errorf("ports entry %d of %d is empty — write the port (`host:container`, or a mapping with `target:`) or remove the `- `", i+1, len(value.Content))
 			}
-			if err := checkPortSpec(item.Value); err != nil {
+			// An integer written bare is the number YAML reads (`010` is eight, `0x10` sixteen), as in the long
+			// form (`-0`, which docker compose reads as a float, comes out as the port 0, which is refused below).
+			spec := item.Value
+			if item.Tag == "!!int" {
+				var n int64
+				if err := item.Decode(&n); err == nil {
+					spec = strconv.FormatInt(n, 10)
+				}
+			}
+			if err := checkPortSpec(spec); err != nil {
 				return fmt.Errorf("ports entry %d of %d: %v", i+1, len(value.Content), err)
 			}
-			out = append(out, normalizePortSpec(item.Value))
+			out = append(out, normalizePortSpec(spec))
 			continue
 		}
 		// Long form: {target, published, protocol, host_ip}. target/published are
-		// scalarStr so a numeric `target: 80` (not quoted) decodes cleanly.
+		// bareInt so a numeric `target: 80` (not quoted) decodes cleanly, to the number YAML reads.
 		if err := bareKeysIn(fmt.Sprintf("ports entry %d of %d", i+1, len(value.Content)), item, "target", "published"); err != nil {
 			return err
 		}
 		var lf struct {
-			Target    scalarStr `yaml:"target"`
-			Published scalarStr `yaml:"published"`
-			Protocol  string    `yaml:"protocol"`
-			HostIP    string    `yaml:"host_ip"`
+			Target    bareInt `yaml:"target"`
+			Published bareInt `yaml:"published"`
+			Protocol  string  `yaml:"protocol"`
+			HostIP    string  `yaml:"host_ip"`
 		}
 		if err := item.Decode(&lf); err != nil {
 			return err
+		}
+		// `-0` is a float to docker compose, which refuses it as a port; yaml.v3 reads it as the integer
+		// 0, which would pass as no host port. Left as its text, it is refused below as it was.
+		for j := 0; j+1 < len(item.Content); j += 2 {
+			if v := unalias(item.Content[j+1]); v.Kind == yaml.ScalarNode && v.Tag == "!!int" && v.Value == "-0" {
+				switch unalias(item.Content[j]).Value {
+				case "target":
+					lf.Target = "-0"
+				case "published":
+					lf.Published = "-0"
+				}
+			}
+		}
+		// A `target` written as a float with a whole value (`80.0`, `1e2`) is the container port it says: docker
+		// compose reads the number as an integer (measured, v5.5.1: `up` publishes `target: 80.0` and `1e2`). One
+		// outside 1 to 65535 stays as its text, and is refused below as docker compose's engine refuses it at `up`.
+		// The key is looked up as the decode does, through a `<<` merge key.
+		if v := keyNodeThroughMerge(item, "target"); v != nil && v.Kind == yaml.ScalarNode && v.Tag == "!!float" {
+			f, err := strconv.ParseFloat(v.Value, 64)
+			if err != nil {
+				// A float written in hex, octal or binary (`!!float 0x50`) has no `p` exponent for ParseFloat; docker compose reads
+				// it as the integer it is (80).
+				if n, ierr := strconv.ParseInt(v.Value, 0, 64); ierr == nil {
+					f, err = float64(n), nil
+				}
+			}
+			if err == nil && f == math.Trunc(f) && f >= 0 && f < 1e15 {
+				lf.Target = bareInt(strconv.FormatInt(int64(f), 10))
+			}
 		}
 		target := string(lf.Target)
 		if target == "" {
@@ -2720,13 +2993,24 @@ func (c *ConfigRefs) UnmarshalYAML(value *yaml.Node) error {
 		}
 		out = append(out, ConfigRef{Source: lf.Source, Target: lf.Target})
 	}
-	*c = out
+	// Entries mounted at one target are one entry, the last written (see SecretRefs).
+	pos := map[string]int{}
+	kept := out[:0]
+	for _, r := range out {
+		if i, seen := pos[r.Target]; seen {
+			kept[i] = r
+			continue
+		}
+		pos[r.Target] = len(kept)
+		kept = append(kept, r)
+	}
+	*c = kept
 	return nil
 }
 
 // SecretRef is a service's reference to a top-level secret. The short form is
 // just the secret name (mounted at /run/secrets/<name>); the long form
-// (`{source, target}`) mounts it at /run/secrets/<target>.
+// (`{source, target}`) mounts it at /run/secrets/<target>, or at the target when that is an absolute path (SecretPath).
 type SecretRef struct {
 	Source string
 	Target string
@@ -2767,7 +3051,20 @@ func (s *SecretRefs) UnmarshalYAML(value *yaml.Node) error {
 		}
 		out = append(out, SecretRef{Source: lf.Source, Target: lf.Target})
 	}
-	*s = out
+	// Entries mounted at one target are one entry, the last written (docker compose, measured: a file that
+	// writes a target twice has the later entry only, as two files do).
+	pos := map[string]int{}
+	kept := out[:0]
+	for _, r := range out {
+		at := SecretPath(r.Target) // the default written out (`/run/secrets/k`) is the same place as the bare name
+		if i, seen := pos[at]; seen {
+			kept[i] = r
+			continue
+		}
+		pos[at] = len(kept)
+		kept = append(kept, r)
+	}
+	*s = kept
 	return nil
 }
 
@@ -3545,7 +3842,19 @@ func (u *Ulimits) UnmarshalYAML(value *yaml.Node) error {
 			if n.Kind != yaml.ScalarNode || n.Tag == "!!null" {
 				return 0, fmt.Errorf("ulimits %s must be a whole number, got %s", what, kindName(n.Kind))
 			}
-			c, err := strconv.ParseInt(n.Value, 10, 64)
+			// An integer written bare is the number YAML reads (`010` is eight, `0x10` sixteen), and what YAML
+			// reads as a float (`08`, and `-0`, which yaml.v3 reads as an integer and docker compose as a float) is
+			// refused: docker compose does both (measured, v5.5.1).
+			text := n.Value
+			if n.Tag == "!!int" && n.Value != "-0" {
+				var i int64
+				if err := n.Decode(&i); err == nil {
+					text = strconv.FormatInt(i, 10)
+				}
+			} else if n.Tag == "!!float" || n.Value == "-0" {
+				return 0, fmt.Errorf("ulimits %s must be a non-negative whole number, as in 65536 (got %q)", what, n.Value)
+			}
+			c, err := strconv.ParseInt(text, 10, 64)
 			if err != nil || c < 0 {
 				return 0, fmt.Errorf("ulimits %s must be a non-negative whole number, as in 65536 (got %q)", what, n.Value)
 			}
@@ -3977,3 +4286,15 @@ func kindName(k yaml.Kind) string {
 // ptr hands back a pointer to a copy: the map[string]yaml.Node the second
 // pass decodes into is not addressable.
 func ptr(n yaml.Node) *yaml.Node { return &n }
+
+// LinkedNames are the services this one depends on without a `depends_on` for them: those `links:` lists and the one
+// `network_mode: service:<name>` names. docker compose reads both as `depends_on: {<name>: {condition: service_started,
+// required: true}}` (measured, v5.5.1: an undefined or profile-gated target is refused as one, and a cycle is a dependency
+// cycle), so they are held to the same rules and put in the same order.
+func (s *Service) LinkedNames() []string {
+	names := append([]string(nil), s.Linked...)
+	if target, ok := strings.CutPrefix(s.NetworkMode, "service:"); ok && !slices.Contains(names, target) {
+		names = append(names, target)
+	}
+	return names
+}

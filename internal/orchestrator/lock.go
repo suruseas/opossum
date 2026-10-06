@@ -23,7 +23,9 @@ import (
 // while it starts the service's dependencies (it calls `up` for those; with
 // `--no-deps` it takes no lock) and `watch` while it rebuilds a service. A
 // foreground `up` holds it until the service exits or Ctrl-C: attached, the
-// call has not finished. Not taken by the readers (`ps`, `logs`, `config`,
+// call has not finished. A detached `up` holds it until its restart supervisor has claimed the
+// project (or the wait for that is over), so a `down` cannot land between the
+// two and leave a supervisor watching a project taken down (#1740). Not taken by the readers (`ps`, `logs`, `config`,
 // `port`, `ls`, `volumes`): an `up` in progress shows a half-started
 // project to `ps` under docker compose too. Not taken for the one-off's own
 // container (it removes only that; an `up` beside it is not deprived of

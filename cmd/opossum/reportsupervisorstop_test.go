@@ -30,7 +30,7 @@ func TestReportSupervisorStop(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var out bytes.Buffer
-			reportSupervisorStop(&out, tc.stopped, tc.attempted, tc.stoppedMsg)
+			reportSupervisorStop(&out, 0, tc.stopped, tc.attempted, tc.stoppedMsg)
 			if got := out.String(); got != tc.want {
 				t.Errorf("got %q, want %q", got, tc.want)
 			}

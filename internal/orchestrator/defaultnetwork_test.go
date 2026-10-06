@@ -75,7 +75,7 @@ func TestTheDefaultNetworksDeclarationIsThatNetworks(t *testing.T) {
 		if err := orchestrator.New(defaultProject(&compose.NetworkDecl{Name: "shared"}), rt, "opossum", &bytes.Buffer{}).Up(true); err != nil {
 			t.Fatalf("Up: %v", err)
 		}
-		if !hasLine(log(), "network create --label opossum.project=demo shared") {
+		if !hasLine(log(), "network create --label=opossum.project=demo shared") {
 			t.Errorf("want shared made with the project's label, got %v", log())
 		}
 		if indexOf(log(), "network create demo-net") >= 0 {
@@ -124,7 +124,7 @@ func TestTheDefaultNetworksDeclarationIsThatNetworks(t *testing.T) {
 		if err := orchestrator.New(defaultProject(&d), rt, "opossum", &bytes.Buffer{}).Up(true); err != nil {
 			t.Fatalf("Up: %v", err)
 		}
-		if !hasLine(log(), "network create --label k=v --subnet 10.7.0.0/24 demo-net") {
+		if !hasLine(log(), "network create --label=k=v --subnet 10.7.0.0/24 demo-net") {
 			t.Errorf("want the labels and the subnet on demo-net, got %v", log())
 		}
 	})
@@ -203,7 +203,7 @@ func TestAnotherNetworksSettingsAreNotTheDefaultNetworks(t *testing.T) {
 	if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true); err != nil {
 		t.Fatalf("Up: %v", err)
 	}
-	if !hasLine(log(), "network create demo-net") || !hasLine(log(), "network create --internal --label o=1 demo-other") {
+	if !hasLine(log(), "network create demo-net") || !hasLine(log(), "network create --internal --label=o=1 demo-other") {
 		t.Errorf("want demo-net plain and demo-other host-only with its label, got %v", log())
 	}
 }

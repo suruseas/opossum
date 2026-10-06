@@ -531,6 +531,27 @@ var contract = []struct {
 		{argv: []string{"network", "inspect", "demo-plain"}, has: `"labels" : {`, lacks: `opossum.project`},
 		{argv: []string{"network", "inspect", "demo-plain"}, lacks: `tier`},
 	}},
+	// The joined spelling, `--label=k=v`, is what opossum passes (#1423): the real CLI reads it as it
+	// reads the apart one (container 1.5.0: `--label=-x=1` reaches the label check, which refuses the
+	// key, where `--label -x=1` is rc 64), so the fake reads labels both ways.
+	{"a network answers the labels it was given joined to the flag", nil, []step{
+		{argv: []string{"network", "create", "--label=tier=back", "--label=opossum.project=demo", "demo-joined"}},
+		{argv: []string{"network", "inspect", "demo-joined"}, has: `"opossum.project" : "demo"`},
+		{argv: []string{"network", "inspect", "demo-joined"}, has: `"tier" : "back"`},
+	}},
+	// The runtime refuses a label key such as one that starts with `-`, is empty, or holds a space or a control character, rc 1, naming the key
+	// as written (container 1.5.0, #1729; an empty key is named with its `=value`, a tab as `\t`, another control character as `\u{01}`). A key that has
+	// an `=` after a name is read as that name.
+	{"a network refuses a label key the runtime refuses", nil, []step{
+		{argv: []string{"network", "create", "--label=-x=1", "demo-k1"}, rc: 1, has: `"invalid_label_key_content"), metadata: ["key": "-x"])`},
+		{argv: []string{"network", "create", "--label==1", "demo-k2"}, rc: 1, has: `metadata: ["key": "=1"])`},
+		{argv: []string{"network", "create", "--label=a b=1", "demo-k3"}, rc: 1, has: `metadata: ["key": "a b"])`},
+		{argv: []string{"network", "create", "--label=a\tb=1", "demo-k5"}, rc: 1, has: `metadata: ["key": "a\tb"])`},
+		{argv: []string{"network", "create", "--label=a\x01b=1", "demo-k6"}, rc: 1, has: `metadata: ["key": "a\u{01}b"])`},
+		{argv: []string{"network", "create", "--label=k=", "demo-k7"}, rc: 1, has: `metadata: ["key": "k="])`},
+		{argv: []string{"network", "create", "--label=k", "demo-k8"}, lacks: "LabelError"},
+		{argv: []string{"network", "create", "--label=x=y=1", "demo-k4"}, lacks: "LabelError"},
+	}},
 	// A network already deleted is not there to delete a second time: the real
 	// CLI fails (1.4.1: `Error: failed to delete one or more networks:
 	// ["<name>"]`), a different shape from `network inspect`'s `network not
@@ -853,6 +874,32 @@ func init() {
 		// The runtime puts -i and -t before the name: the container is the first argument that is not a flag.
 		{argv: []string{"exec", "-t", "NAME", "true"}, rc: 0, lacks: "Error"},
 		{argv: []string{"exec", "-i", "-t", "OTHER", "true"}, rc: 1, has: "container probe.other.opossum not found"},
+		// A flag that takes its value apart reads the value with it: it is not the container (container 1.5.0, #1691, every one of
+		// these answered rc 1 for a name that is not there and rc 0 for one that is). A value joined to the flag is one argument.
+		{argv: []string{"exec", "-e", "A=1", "OTHER", "true"}, rc: 1, has: "container probe.other.opossum not found"},
+		{argv: []string{"exec", "-e", "A=1", "NAME", "true"}, rc: 0, lacks: "Error"},
+		{argv: []string{"exec", "--env", "A=1", "OTHER", "true"}, rc: 1, has: "container probe.other.opossum not found"},
+		{argv: []string{"exec", "--env", "A=1", "NAME", "true"}, rc: 0, lacks: "Error"},
+		{argv: []string{"exec", "--env-file", "f.env", "OTHER", "true"}, rc: 1, has: "container probe.other.opossum not found"},
+		{argv: []string{"exec", "--env-file", "f.env", "NAME", "true"}, rc: 0, lacks: "Error"},
+		{argv: []string{"exec", "--gid", "0", "OTHER", "true"}, rc: 1, has: "container probe.other.opossum not found"},
+		{argv: []string{"exec", "--gid", "0", "NAME", "true"}, rc: 0, lacks: "Error"},
+		{argv: []string{"exec", "--uid", "0", "OTHER", "true"}, rc: 1, has: "container probe.other.opossum not found"},
+		{argv: []string{"exec", "--uid", "0", "NAME", "true"}, rc: 0, lacks: "Error"},
+		{argv: []string{"exec", "-u", "root", "OTHER", "true"}, rc: 1, has: "container probe.other.opossum not found"},
+		{argv: []string{"exec", "-u", "root", "NAME", "true"}, rc: 0, lacks: "Error"},
+		{argv: []string{"exec", "--user", "root", "OTHER", "true"}, rc: 1, has: "container probe.other.opossum not found"},
+		{argv: []string{"exec", "--user", "root", "NAME", "true"}, rc: 0, lacks: "Error"},
+		{argv: []string{"exec", "-w", "/tmp", "OTHER", "true"}, rc: 1, has: "container probe.other.opossum not found"},
+		{argv: []string{"exec", "-w", "/tmp", "NAME", "true"}, rc: 0, lacks: "Error"},
+		{argv: []string{"exec", "--workdir", "/tmp", "OTHER", "true"}, rc: 1, has: "container probe.other.opossum not found"},
+		{argv: []string{"exec", "--workdir", "/tmp", "NAME", "true"}, rc: 0, lacks: "Error"},
+		{argv: []string{"exec", "--cwd", "/tmp", "OTHER", "true"}, rc: 1, has: "container probe.other.opossum not found"},
+		{argv: []string{"exec", "--cwd", "/tmp", "NAME", "true"}, rc: 0, lacks: "Error"},
+		{argv: []string{"exec", "--ulimit", "nofile=64", "OTHER", "true"}, rc: 1, has: "container probe.other.opossum not found"},
+		{argv: []string{"exec", "--ulimit", "nofile=64", "NAME", "true"}, rc: 0, lacks: "Error"},
+		{argv: []string{"exec", "--env=A=1", "OTHER", "true"}, rc: 1, has: "container probe.other.opossum not found"},
+		{argv: []string{"exec", "-i", "-e", "A=1", "OTHER", "true"}, rc: 1, has: "container probe.other.opossum not found"},
 		{argv: []string{"start", "OTHER"}, rc: 1, has: "container probe.other.opossum not found"},
 		// `stats` takes names and flags together: a flag is not a name to look for.
 		{argv: []string{"stats", "--no-stream", "OTHER"}, rc: 1, has: "no such container"},

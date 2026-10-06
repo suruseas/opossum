@@ -49,6 +49,9 @@ type Orchestrator struct {
 	// supervisorHandled is the project whose supervisor the command has already asked (#1406).
 	stopSupervisor    func(project string) (stopped, attempted bool)
 	supervisorHandled string
+	// afterUpLocked is what `up` runs when it is done (whatever it came to), before it lets go of the project's lock: the
+	// start of the restart supervisor, which has to be in place, claimed, before a `down` can be let in (#1740).
+	afterUpLocked func(upErr error)
 	// imageEnvs remembers what each image declared, so planning an overlay asks the
 	// runtime once per image rather than once per mount it considers.
 	imageEnvs map[string]map[string]string
@@ -191,6 +194,12 @@ func (o *Orchestrator) upDependenciesOf(service string, deps []string) error {
 func (o *Orchestrator) SetUpOptions(forceRecreate, build, noBuild, removeOrphans, fromDocker bool) {
 	o.up = upOptions{forceRecreate: forceRecreate, build: build, noBuild: noBuild, removeOrphans: removeOrphans, fromDocker: fromDocker}
 }
+
+// SetAfterUpLocked sets what the next `up` runs as it finishes, with the error it is returning, while it still holds the
+// project's lock. The restart supervisor is started there: begun after the lock was let go, a `down` could take the project
+// down in between and the supervisor would then claim a project nothing was left in. A dry run takes no lock and runs
+// nothing.
+func (o *Orchestrator) SetAfterUpLocked(f func(upErr error)) { o.afterUpLocked = f }
 
 // SetSupervisorStopper replaces how a stop of the restart supervisor is asked (StopSupervisor), for
 // a caller that asked it before the project was loaded and wants the same one asked here.
@@ -408,6 +417,37 @@ func (o *Orchestrator) validateProfileDeps(names []string, named map[string]bool
 		if err := checkVolumesFromRefs(o.Project, name); err != nil {
 			return err
 		}
+		if err := o.checkLinkedRefs(name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkLinkedRefs refuses, for one active service, a `links:` entry, a `network_mode: service:` or a `volumes_from:` naming a service the file does
+// not define — docker compose reads each as a dependency, and refuses an undefined one as it refuses a `depends_on` target
+// (`depends on undefined service`). A service with no `profiles:` was refused for it where the file is read
+// (compose.addLinkedDeps); this is the same refusal for a gated one that turns out to be active (#1802). Where the file writes a
+// `depends_on` for the same service with `required: false`, docker compose keeps that over the one it makes from the link, so
+// that dependency is the optional one's to answer for (checkNamedDeps and the loops of the other checks refuse an undefined one where the profile
+// enables the service, and let a gated service that only its name enables be).
+func (o *Orchestrator) checkLinkedRefs(name string) error {
+	svc := o.Project.Services[name]
+	targets := svc.LinkedNames()
+	for _, ref := range svc.VolumesFrom {
+		if !strings.HasPrefix(ref, "container:") {
+			holder, _, _ := strings.Cut(ref, ":")
+			targets = append(targets, holder)
+		}
+	}
+	for _, target := range targets {
+		if t, ok := o.Project.Services[target]; ok && t != nil {
+			continue
+		}
+		if slices.ContainsFunc(svc.DependsOn, func(d compose.Dependency) bool { return d.Name == target && d.Optional }) {
+			continue // the loop over the dependencies refuses an undefined one where the profile enables the service
+		}
+		return fmt.Errorf("service %q depends on undefined service %q: invalid compose project", name, target)
 	}
 	return nil
 }
@@ -1626,19 +1666,22 @@ func (o *Orchestrator) checkProjectLoads(named map[string]bool, canName bool) er
 		if err := checkVolumesFromRefs(o.Project, name); err != nil {
 			return err
 		}
+		if err := o.checkLinkedRefs(name); err != nil {
+			return err
+		}
 	}
 	return o.cycleAmong(active)
 }
 
 // checkNamedDeps refuses a named `stop`, `kill`, `logs` or `start` when one of the services it
-// names depends directly on one the file does not define, or on another gated-inactive
-// service (#1385, #1431): docker compose reads the file for these four the same way and
+// names depends on one the file does not define, or on another gated-inactive
+// service (#1385, #1431), or one of the services they carry does (#1711): docker compose reads the file for these four the same way and
 // refuses over the named service's own dependency whether or not a container exists for it
 // (measured, v5.5.1, with the file read — `docker compose stop broken` in the file's directory, with
 // `-f`, or with `-p` and `-f` together; given a project name by COMPOSE_PROJECT_NAME or by `-p` with no
 // `-f` it does not read the file at all and goes on). `restart`, `exec` and `port` do not read it, there or here. docker compose
-// also follows a gated dependency's own dependencies (a(g) -> b(g) -> nosuch refuses); this does
-// not, and reads the named service's own ones only. An earlier opossum checked only a named service that
+// also follows a dependency's own dependencies (a(g) -> b(g) -> nosuch refuses), and so does this
+// (#1711). An earlier opossum checked only a named service that
 // already had a container, on a reading that docker compose refused only then — a mix of
 // measurements, some of them made with `-p` alone — and `logs` and `start` not at all.
 //
@@ -1647,15 +1690,9 @@ func (o *Orchestrator) checkProjectLoads(named map[string]bool, canName bool) er
 // gated one that only its name enables; an undefined one of a service the run reads without the
 // name (no `profiles:`, or its profile turned on) is refused whatever `required` says.
 //
-// This only checks the named services' own direct dependencies — not the
-// whole active project the way checkProjectLoads does for `up` and `build`:
-// measured (v5.5.1), naming one service does not make docker compose refuse
-// over an unrelated, already-active service's own bad dependency (`stop web`
-// with `--profile g` on and a broken `other` still goes ahead when `web`
-// itself is fine). checkProjectLoads's own loop — walking every active
-// service's dependencies, not just the named ones' — would have refused
-// that, which would be a new and wrong refusal for a service nobody named or
-// asked to check; only the loop is kept narrow for that reason.
+// This checks the named services, the dependencies they carry, and the dependencies of every service the run reads without a name (no
+// `profiles:`, or its profile turned on): docker compose (v5.5.1) reads those of an unrelated service that `--profile` has made active too
+// (`stop web` with `--profile g` on and a broken `other` refuses: #1801).
 //
 // What counts as "active" for a direct dependency is not narrower, though:
 // it is activeServices(named), the same set checkProjectLoads itself uses —
@@ -1663,15 +1700,42 @@ func (o *Orchestrator) checkProjectLoads(named map[string]bool, canName bool) er
 // measured), and enabled alone does not see that (independent review of
 // #1385: `up web` on web[x] -> db[x] starts db, but `stop web` afterwards
 // refused over db "whose profile is not active" until this used the same
-// set up does). Unlike checkProjectLoads, this does not walk a transitive
-// chain (a named service's dependency's own dependency) or check
-// checkVolumesFromRefs — neither was part of the fault #1385 is about, and
-// narrower is safer here given the above.
+// set up does). Unlike checkProjectLoads, this does not check
+// checkVolumesFromRefs — it was not part of the fault #1385 is about. It does walk the
+// chain of dependencies the named services carry (#1711), as docker compose does.
 func (o *Orchestrator) checkNamedDeps(services []string) error {
 	named := namedSet(services)
 	active := o.activeServices(named)
-	for _, name := range services {
+	// The services this reads the dependencies of: the named ones, and every one a dependency carries on to that is active here
+	// (docker compose follows them all, measured v5.5.1, #1711: `a` -> `b` -> a service the file does not define refuses for `a`, and so
+	// does one more step, and one through a service that has no `profiles:`). An optional dependency behind a profile that is not
+	// active is not followed, and not asked about.
+	queue := append([]string(nil), services...)
+	// …and every service the run reads without a name: no `profiles:`, or a profile turned on by `--profile` or COMPOSE_PROFILES. docker compose
+	// reads the dependencies of an unrelated one of those too (measured, v5.5.1, #1801: `stop web` with `--profile g` on and a broken `other`
+	// refuses, whether `other` is optional, behind an inactive profile, or one step further on).
+	all := make([]string, 0, len(o.Project.Services))
+	for name := range o.Project.Services {
+		all = append(all, name)
+	}
+	sort.Strings(all) // the refusal named must not ride on the order a map hands them back
+	for _, name := range all {
+		if o.enabled(name, nil) {
+			queue = append(queue, name)
+		}
+	}
+	seen := map[string]bool{}
+	for len(queue) > 0 {
+		name := queue[0]
+		queue = queue[1:]
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
 		svc := o.Project.Services[name]
+		if err := o.checkLinkedRefs(name); err != nil {
+			return err
+		}
 		for _, dep := range svc.DependsOn {
 			// An undefined dependency is refused whatever `required` says wherever the service is
 			// one the run reads without being named: no `profiles:`, or a profile turned on by
@@ -1686,11 +1750,15 @@ func (o *Orchestrator) checkNamedDeps(services []string) error {
 			// (same as validateProfileDeps and checkProjectLoads) — up does not refuse it, so
 			// none of these may.
 			if dep.Optional {
+				if _, ok := o.Project.Services[dep.Name]; ok && active[dep.Name] {
+					queue = append(queue, dep.Name)
+				}
 				continue
 			}
 			if !active[dep.Name] {
 				return gatedDependencyRefusal(name, dep.Name, true)
 			}
+			queue = append(queue, dep.Name)
 		}
 	}
 	return nil
@@ -1805,17 +1873,26 @@ func (o *Orchestrator) activeServices(named map[string]bool) map[string]bool {
 // checkProjectLoads, so by `up` and `run` (`start` and `restart` are
 // unchanged by it, measured). A dependency the
 // file does not define is not touched (reading the file refuses it, whatever
-// `required` says), nor is one on a service that is active (it is waited
-// for as any other). Done where the active set is known with the names the
+// `required` says) — but for an optional one of a gated service that only its
+// name enables, which is left out as one behind an inactive profile is (#1712) —
+// nor is one on a service that is active (it is waited for as any other). Done where the active set is known with the names the
 // command was given — naming a service carries a dependency under a shared
 // profile, optional or not (measured) — and not from the order every service
 // takes (activeList), which knows no names and would leave out what a name
 // carries.
 func (o *Orchestrator) dropOptionalGatedDeps(active map[string]bool) {
-	for _, svc := range o.Project.Services {
+	for name, svc := range o.Project.Services {
 		kept := svc.DependsOn[:0:0]
 		for _, dep := range svc.DependsOn {
-			if _, defined := o.Project.Services[dep.Name]; defined && dep.Optional && !active[dep.Name] {
+			_, defined := o.Project.Services[dep.Name]
+			if defined && dep.Optional && !active[dep.Name] {
+				continue
+			}
+			// An optional dependency the file does not define is left alone where the service is a gated one that only its name
+			// enables (measured, v5.5.1: `up`, `run`, `build` and `pull` go on); where the service is read without the name
+			// (no `profiles:`, or a profile turned on by `--profile` or COMPOSE_PROFILES) it is refused whatever `required` says
+			// (#1712, as checkNamedDeps does for `stop`, `kill`, `logs` and `start`).
+			if !defined && dep.Optional && !o.enabled(name, nil) {
 				continue
 			}
 			kept = append(kept, dep)
@@ -2016,11 +2093,15 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 	// roll them back. A dry run changes nothing and writes nothing under the
 	// state dir, so it takes no lock — and is not refused by one either.
 	if !o.up.dryRun {
-		lock, err := lockProject(o.Project.Name)
-		if err != nil {
-			return err
+		lock, lockErr := lockProject(o.Project.Name)
+		if lockErr != nil {
+			return lockErr
 		}
 		defer lock.release()
+		// Registered after the lock's release, so it runs before it, whatever way this returns from here.
+		if o.afterUpLocked != nil {
+			defer func() { o.afterUpLocked(err) }()
+		}
 	}
 	if !o.rt.Available() {
 		return ErrRuntimeAbsent()
@@ -2217,6 +2298,7 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 	// the check below decides what counts as a conflict — a container-only port
 	// spec leaves the host side to the engine, so a busy port is opossum's problem
 	// to solve, not the user's to fix.
+	o.settleHostPortRanges(order)
 	o.remapAutoHostPorts(order)
 
 	// Pre-flight: fail before starting anything if a published host port is already
@@ -2273,8 +2355,7 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 			if ierr := o.interrupted(); ierr != nil {
 				return ierr
 			}
-			return fmt.Errorf("couldn't create network %q for the project: %w\n"+
-				"  check the runtime is healthy (`opossum doctor`); if a stale network with that name exists, remove it with `container network delete %s`", rn.name, nerr, rn.name)
+			return fmt.Errorf("couldn't create network %q for the project: %w\n%s", rn.name, nerr, networkCreateAdvice(rn.name, nerr))
 		}
 		// Said once it is known: the runtime answers "already exists" for a
 		// network an earlier `up` made, and a line saying it was being created
@@ -3004,6 +3085,86 @@ func whyUnavailable(spokenFor bool, src claimSource, service, port string, bindE
 	}
 }
 
+// settleHostPortRanges puts an entry whose host side is a range and whose container side is one port
+// (`"7670-7671:80"`) on one host port of that range. docker compose reads it as "publish container port 80 on
+// a free port of 7670-7671" — measured with three containers on `7690-7692:80`: 7690, 7691, 7692, the first free
+// port each time, and a fourth refused — while the runtime refuses the spelling whole ("publish host and
+// container port counts are not equal"). The entry is the line of the file asking for that range, so it is
+// settled before the pre-flight and not announced as a port opossum moved.
+//
+// A port the service's own running container already publishes in the range is kept, so a second `up` does not
+// move the port and recreate the container. Otherwise the first port of the range that no other entry of the
+// file covers and that binds. A range with no such port is left on its first port, for the pre-flight to say
+// it is in use.
+func (o *Orchestrator) settleHostPortRanges(order []string) {
+	covers := func(network string, n int) bool {
+		for _, svc := range o.Project.Services {
+			if svc == nil {
+				continue
+			}
+			for _, spec := range svc.Ports {
+				nw, lo, hi, ok := hostPortSpan(spec)
+				if !ok || nw != network || n < lo || n > hi {
+					continue
+				}
+				if lo != hi && specContainerPort(spec) != 0 {
+					continue // a range of this kind (this entry's own included) holds nothing until it is settled
+				}
+				return true
+			}
+		}
+		return false
+	}
+	for _, name := range order {
+		svc := o.Project.Services[name]
+		if svc == nil {
+			continue
+		}
+		var running map[string][]int // "<container port>/<proto>" -> host ports the container publishes there (two entries may share a container port)
+		for i, spec := range svc.Ports {
+			network, lo, hi, ok := hostPortSpan(spec)
+			cport := specContainerPort(spec)
+			if !ok || lo == hi || cport == 0 || svc.AutoHostPort[spec] {
+				continue
+			}
+			if running == nil {
+				running = map[string][]int{}
+				if info := o.rt.Inspect(o.containerName(name)); info.Exists && info.State == "running" &&
+					info.Labels[projectLabel] == o.Project.Name {
+					for _, entry := range info.Ports {
+						for _, pm := range entry.Span() {
+							k := fmt.Sprintf("%d/%s", pm.ContainerPort, pm.Proto)
+							running[k] = append(running[k], pm.HostPort)
+						}
+					}
+				}
+			}
+			_, host, _, _ := hostSide(spec)
+			chosen, kept := lo, false
+			for _, h := range running[fmt.Sprintf("%d/%s", cport, network)] {
+				if h >= lo && h <= hi && !covers(network, h) {
+					chosen, kept = h, true
+					break
+				}
+			}
+			if !kept {
+				for n := lo; n <= hi; n++ {
+					if covers(network, n) {
+						continue
+					}
+					if o.askHostPort(network, net.JoinHostPort(host, strconv.Itoa(n))) == nil {
+						chosen = n
+						break
+					}
+				}
+			}
+			if newSpec, ok := withHostPort(spec, chosen); ok {
+				svc.Ports[i] = newSpec
+			}
+		}
+	}
+}
+
 // remapAutoHostPorts moves a published port opossum chose itself, when the port
 // it chose is not available.
 //
@@ -3372,7 +3533,15 @@ func (o *Orchestrator) remapAutoHostPorts(order []string) {
 				}
 				continue
 			}
+			// The number the entry is being moved off is not a place to move it to. It was found in use
+			// (a claim of the file's, or a bind that was refused), and a system that hands it out again
+			// — it was free in the moment between, or only in use as far as the answer went — would
+			// put the entry back where it was, with a notice saying it moved (#1753).
+			mirrored, _ := strconv.Atoi(port)
 			free, err := o.freeHostPortClearOf(network, address, func(n int) bool {
+				if n == mirrored {
+					return true
+				}
 				spoken, _ := taken(network, strconv.Itoa(n), name, hostTextOf(spec))
 				return spoken
 			})
@@ -5191,14 +5360,14 @@ func (o *Orchestrator) volumeName(src string) string {
 }
 
 // secretMounts renders a service's file-based secret references as read-only
-// bind mounts at /run/secrets/<target> — the path official images read via
+// bind mounts at /run/secrets/<target>, or at the target when it is an absolute path — the path official images read via
 // their *_FILE env vars (e.g. POSTGRES_PASSWORD_FILE). Refs are validated
 // against the project's file-based secrets at load time (#76).
 func (o *Orchestrator) secretMounts(svc *compose.Service) []string {
 	var out []string
 	for _, ref := range svc.Secrets {
 		sec := o.Project.Secrets[ref.Source]
-		out = append(out, o.resolvePath(sec.File)+":/run/secrets/"+ref.Target+":ro")
+		out = append(out, o.resolvePath(sec.File)+":"+compose.SecretPath(ref.Target)+":ro")
 	}
 	return out
 }
@@ -6495,12 +6664,8 @@ func (o *Orchestrator) Ps(opts PsOptions) error {
 	for _, n := range notes {
 		fmt.Fprintln(os.Stderr, n)
 	}
-	if pid := SupervisorPID(o.Project.Name); pid != 0 {
-		msg := fmt.Sprintf("restart supervisor: running (pid %d)", pid)
-		if log, err := SupervisorLogFile(o.Project.Name); err == nil {
-			msg += " — " + log
-		}
-		fmt.Fprintln(os.Stderr, msg)
+	if line := supervisorLine(o.Project.Name); line != "" {
+		fmt.Fprintln(os.Stderr, line)
 	}
 	return unansweredOwners(unanswered, "opossum ps")
 }
@@ -7672,8 +7837,7 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 				if o.interrupted() != nil {
 					return runInterrupted("the network for " + service + " was not created")
 				}
-				return fmt.Errorf("couldn't create network %q for the run: %w\n"+
-					"  check the runtime is healthy (`opossum doctor`); if a stale network with that name exists, remove it with `container network delete %s`", rn.name, err, rn.name)
+				return fmt.Errorf("couldn't create network %q for the run: %w\n%s", rn.name, err, networkCreateAdvice(rn.name, err))
 			}
 			if rn.internal {
 				o.warnInternalNetwork(rn.name)
@@ -8781,3 +8945,14 @@ func (o *Orchestrator) ensureBindDirs(service string, vols []string, redo string
 // Run-to-completion services can appear — the supervisor filters them out itself,
 // since they are meant to exit.
 func (o *Orchestrator) Started() []string { return o.started }
+
+// networkCreateAdvice is the line that follows a failed `network create`. The runtime's own refusal of a label key
+// (`invalid_label_key_content`: for example a key that starts with `-`, is empty, has an upper-case letter, a `_`, a space or a
+// control character) says what to fix, so the advice names the labels; any other failure
+// keeps the advice about the runtime and a stale network.
+func networkCreateAdvice(name string, err error) string {
+	if err != nil && strings.Contains(err.Error(), `rawValue: "invalid_label_key`) {
+		return "  fix the label key it names, under `labels:` of that network in the compose file"
+	}
+	return fmt.Sprintf("  check the runtime is healthy (`opossum doctor`); if a stale network with that name exists, remove it with `container network delete %s`", name)
+}

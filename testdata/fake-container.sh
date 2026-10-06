@@ -92,6 +92,26 @@ case "$1" in
             printf 'Error: invalid network name: %s\n' "$name" >&2; exit 1 ;;
         esac
         if [ "${#name}" -gt 63 ]; then printf 'Error: invalid network name: %s\n' "$name" >&2; exit 1; fi
+        # A label key the runtime refuses (1.5.0, rc 1; it takes lower-case words and digits joined by `.`, `/` or `-`, so
+        # a key that starts with `-`, is empty, or holds a space or a control character is among them, and an upper-case letter or a
+        # `_` is another that this fake lets through) is named in the metadata as it was written (testdata/real-cli-output.md).
+        for a in "$@"; do
+          case "$a" in
+            --label=*)
+              k=${a#--label=}; k=${k%%=*}
+              case "$k" in
+                ''|-*|*[[:space:][:cntrl:]]*) bad=1 ;;
+                *) bad="" ;;
+              esac
+              [ "${a#--label=}" = "$k=" ] && bad=1  # a label written with no value: the runtime names the whole `k=`
+              if [ -n "$bad" ]; then
+                  { [ -n "$k" ] && [ "${a#--label=}" != "$k=" ]; } || k=${a#--label=}  # an empty key or no value: the whole `=value` or `k=`
+                  # the runtime writes a tab as `\t` and another control character as `\u{01}`
+                  k=$(printf '%s' "$k" | sed -e "s/$(printf '\t')/\\\\t/g" -e "s/$(printf '\001')/\\\\u{01}/g")
+                  printf 'Error: LabelError(code: ContainerResource.AppErrorCode(rawValue: "invalid_label_key_content"), metadata: ["key": "%s"])\n' "$k" >&2; exit 1
+              fi ;;
+          esac
+        done
         # The labels it was made with are what a later `inspect` answers with
         # (one `key=value` per line), where something is being remembered.
         m=$(marker netlabels "$name")
@@ -102,6 +122,8 @@ case "$1" in
             [ "$want" = 1 ] && printf '%s\n' "$a" >> "$m"
             want=""
             [ "$a" = "--label" ] && want=1
+            # opossum passes `--label=<k=v>` as one argument (#1423); the real CLI reads both.
+            case "$a" in --label=*) printf '%s\n' "${a#--label=}" >> "$m" ;; esac
           done
         fi
         gm=$(marker netgone "$name")
@@ -530,12 +552,17 @@ case "$1" in
   # (1.4.1: `Error: get failed: container <name> not found`) — a healthcheck
   # probe against a container that vanished mid-probe must see a failure.
   exec)
-    # The container is the first argument that is not a flag (`exec -t NAME ...`; a flag that takes a
-    # value is not read — the runtime does not make one).
-    n=; skip=1
+    # The container is the first argument that is not a flag (`exec -t NAME ...`), and a flag that takes its
+    # value apart (`-e A=1`, `--user u`; container 1.5.0, testdata/real-cli-output.md) is read with the value,
+    # which is not the name. A value joined to the flag (`--env=A=1`) is one argument.
+    n=; skip=1; val=
     for a in "$@"; do
       if [ "$skip" = 1 ]; then skip=0; continue; fi
-      case "$a" in -*) continue ;; esac
+      if [ -n "$val" ]; then val=; continue; fi
+      case "$a" in
+        -e|--env|--env-file|--gid|--uid|-u|--user|-w|--workdir|--cwd|--ulimit) val=1; continue ;;
+        -*) continue ;;
+      esac
       n=$a; break
     done
     if [ -n "$n" ] && ! is_there "$n"; then

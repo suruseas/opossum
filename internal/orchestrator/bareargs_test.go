@@ -27,10 +27,10 @@ func TestABareBuildArgTakesTheShellsValueAndIsLeftOutWhenUnset(t *testing.T) {
 		os.Unsetenv("OPOSSUM_TEST_ARG_UNSET")
 	}
 	for _, tc := range []struct{ name, args, want, absent string }{
-		{"set in the shell", "OPOSSUM_TEST_ARG_SET", "--build-arg OPOSSUM_TEST_ARG_SET=fromshell", ""},
-		{"a value holding an equals sign", "OPOSSUM_TEST_ARG_EQ", "--build-arg OPOSSUM_TEST_ARG_EQ=x=y", ""},
+		{"set in the shell", "OPOSSUM_TEST_ARG_SET", "--build-arg=OPOSSUM_TEST_ARG_SET=fromshell", ""},
+		{"a value holding an equals sign", "OPOSSUM_TEST_ARG_EQ", "--build-arg=OPOSSUM_TEST_ARG_EQ=x=y", ""},
 		{"unset in the shell", "OPOSSUM_TEST_ARG_UNSET", "", "OPOSSUM_TEST_ARG_UNSET"},
-		{"written with a value", "B=fromfile", "--build-arg B=fromfile", ""},
+		{"written with a value", "B=fromfile", "--build-arg=B=fromfile", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rt, log := fakeShim(t)

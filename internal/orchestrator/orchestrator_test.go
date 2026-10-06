@@ -740,8 +740,8 @@ func TestUpBuildTargetFlag(t *testing.T) {
 	if err := o.Up(true); err != nil {
 		t.Fatalf("Up: %v", err)
 	}
-	if !hasLine(log(), "build --progress plain -t demo-api:latest -l opossum.project=demo -l opossum.service=api --target builder /ctx") {
-		t.Errorf("expected build to pass --target builder, got %v", log())
+	if !hasLine(log(), "build --progress plain -t demo-api:latest -l opossum.project=demo -l opossum.service=api --target=builder /ctx") {
+		t.Errorf("expected build to pass --target=builder, got %v", log())
 	}
 }
 
@@ -813,6 +813,31 @@ func TestUpMountsFileSecrets(t *testing.T) {
 	}
 	if indexOf(log(), "-v /secrets/api.txt:/run/secrets/api_key:ro") < 0 {
 		t.Errorf("expected api-key secret mounted at its target, got %v", log())
+	}
+}
+
+func TestUpMountsASecretAtItsAbsoluteOrRelativeTarget(t *testing.T) {
+	// An absolute target is the path in the container; a relative one, with path parts, is under /run/secrets (#1778).
+	rt, log := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{
+		"db": {Image: "postgres:16", Secrets: compose.SecretRefs{
+			{Source: "a", Target: "/x/y"},
+			{Source: "b", Target: "n/m"},
+			{Source: "c", Target: "/run/secrets/c"},
+		}},
+	})
+	p.Secrets = map[string]compose.Secret{
+		"a": {File: "/secrets/a.txt"},
+		"b": {File: "/secrets/b.txt"},
+		"c": {File: "/secrets/c.txt"},
+	}
+	if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	for _, want := range []string{"-v /secrets/a.txt:/x/y:ro", "-v /secrets/b.txt:/run/secrets/n/m:ro", "-v /secrets/c.txt:/run/secrets/c:ro"} {
+		if indexOf(log(), want) < 0 {
+			t.Errorf("want %q, got %v", want, log())
+		}
 	}
 }
 

@@ -438,7 +438,17 @@ func (r *Runtime) EnsureNetworkLabeled(name string, internal bool, labels []stri
 		args = append(args, "--internal")
 	}
 	for _, l := range labels {
-		args = append(args, "--label", l)
+		// Joined, as `--user=`, `--env=` and the others are (#996): a key that starts with `-` would be
+		// read as a flag by `container`, which answers `Missing value for '--label <label>'` (rc 64)
+		// where the joined form reaches its own refusal of the key.
+		//
+		// A label with no value is the key alone: `network create` reads `--label=k=` as the key `k=` and refuses it
+		// (`invalid_label_key_content`, container 1.5.0), where `--label=k` is `k` with an empty value, as `run` and `volume
+		// create` read both. docker compose makes such a network (#1816).
+		if k, v, ok := strings.Cut(l, "="); ok && v == "" && k != "" {
+			l = k
+		}
+		args = append(args, "--label="+l)
 	}
 	if subnets.V4 != "" {
 		args = append(args, "--subnet", subnets.V4)
@@ -816,6 +826,14 @@ func (r *Runtime) commandToRunWithoutEntrypoint(o RunOptions) ([]string, error) 
 	}
 	if len(cmd) == 0 {
 		return nil, refusal("`entrypoint: []` takes the image's entrypoint away, and neither the service nor %s names a command to run instead — write a `command:`", o.Image)
+	}
+	if cmd[0] == "" {
+		// The image's CMD is `[""]` or starts with an empty word: with the entrypoint taken away it
+		// would be the program, and there is none to run. docker compose starts it and the runtime
+		// refuses it (`executable file not found`); `--entrypoint=` with nothing after it, passed on,
+		// takes the image's place on the line (container 1.5.0: `Missing expected argument
+		// '<image>'`), and with words after it the next word is pulled as an image (#1704).
+		return nil, refusal("`entrypoint: []` takes the image's entrypoint away, and the first word of the command of %s is empty, so no program is named by it — docker compose fails to start it too; write a `command:`", o.Image)
 	}
 	return cmd, nil
 }
@@ -1247,10 +1265,10 @@ func (r *Runtime) Build(o BuildOptions) error {
 		args = append(args, "-f", o.Dockerfile)
 	}
 	if o.Target != "" {
-		args = append(args, "--target", o.Target)
+		args = append(args, "--target="+o.Target) // joined (#1423, as #996): the value may start with `-`
 	}
 	for _, a := range o.Args {
-		args = append(args, "--build-arg", a)
+		args = append(args, "--build-arg="+a) // joined (#1423, as #996): the key may start with `-`
 	}
 	ctx := o.Context
 	if ctx == "" {

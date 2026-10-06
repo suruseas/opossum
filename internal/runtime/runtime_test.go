@@ -1315,7 +1315,7 @@ func TestBuildAssemblesArgv(t *testing.T) {
 		t.Fatalf("Build: %v", err)
 	}
 	got := lastLine(t, read)
-	want := "build --progress plain -t demo-api:latest -f Dockerfile.api --build-arg VERSION=1 --build-arg MODE=prod /ctx"
+	want := "build --progress plain -t demo-api:latest -f Dockerfile.api --build-arg=VERSION=1 --build-arg=MODE=prod /ctx"
 	if got != want {
 		t.Errorf("Build argv mismatch\n got: %s\nwant: %s", got, want)
 	}
@@ -1326,9 +1326,50 @@ func TestBuildTargetArgv(t *testing.T) {
 	if err := rt.Build(BuildOptions{Tag: "app:latest", Context: "/ctx", Target: "builder"}); err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	if got := lastLine(t, read); got != "build --progress plain -t app:latest --target builder /ctx" {
+	if got := lastLine(t, read); got != "build --progress plain -t app:latest --target=builder /ctx" {
 		t.Errorf("Build --target argv = %q", got)
 	}
+}
+
+// A value that starts with `-` is one argument with its flag, as `--user=`, `--env=` and the other
+// flags are written (#996): given apart, `container` reads it as a flag and answers `Missing value
+// for '--label <label>'` (rc 64, measured on 1.5.0) — for a network label, a build target and a
+// build argument alike (#1423). Joined, a label key it dislikes reaches its own refusal
+// (`invalid_label_key_content`), and the builder's own parser reads the others.
+func TestAValueThatStartsWithADashIsJoinedToItsFlag(t *testing.T) {
+	t.Run("a network label", func(t *testing.T) {
+		rt, read := loggingShim(t)
+		if _, err := rt.EnsureNetworkLabeled("demo-net", false, []string{"-x=1", "b=2"}, NetworkSubnets{}); err != nil {
+			t.Fatalf("EnsureNetworkLabeled: %v", err)
+		}
+		var create string
+		for _, l := range read() {
+			if strings.HasPrefix(l, "network create ") {
+				create = l
+			}
+		}
+		if want := "network create --label=-x=1 --label=b=2 demo-net"; create != want {
+			t.Errorf("network create argv = %q, want %q", create, want)
+		}
+	})
+	t.Run("a build target", func(t *testing.T) {
+		rt, read := loggingShim(t)
+		if err := rt.Build(BuildOptions{Tag: "app:latest", Context: "/ctx", Target: "-x"}); err != nil {
+			t.Fatalf("Build: %v", err)
+		}
+		if got, want := lastLine(t, read), "build --progress plain -t app:latest --target=-x /ctx"; got != want {
+			t.Errorf("build argv = %q, want %q", got, want)
+		}
+	})
+	t.Run("a build argument", func(t *testing.T) {
+		rt, read := loggingShim(t)
+		if err := rt.Build(BuildOptions{Tag: "app:latest", Context: "/ctx", Args: []string{"-X=1", "B=2"}}); err != nil {
+			t.Fatalf("Build: %v", err)
+		}
+		if got, want := lastLine(t, read), "build --progress plain -t app:latest --build-arg=-X=1 --build-arg=B=2 /ctx"; got != want {
+			t.Errorf("build argv = %q, want %q", got, want)
+		}
+	})
 }
 
 func TestBuildDefaultsContextToDot(t *testing.T) {
@@ -1874,6 +1915,37 @@ func TestAPublishedEntryCoversItsWholeSpan(t *testing.T) {
 				if got[i] != tc.want[i] {
 					t.Errorf("port %d of the span is %v, want %v", i, got[i], tc.want[i])
 				}
+			}
+		})
+	}
+}
+
+// A network label with no value is given as the key alone: `network create` reads `--label=k=` as the key `k=` and refuses it
+// (`invalid_label_key_content`, container 1.5.0), where `--label=k` is `k` with an empty value, which docker compose makes (#1816). A
+// value that is something, one that is only `=`, and a key that is nothing are given as they are.
+func TestANetworkLabelWithNoValueIsGivenAsTheKeyAlone(t *testing.T) {
+	for _, tc := range []struct{ name, label, want string }{
+		{"no value", "k=", "--label=k"},
+		{"a value", "k=v", "--label=k=v"},
+		{"a value that is an equals sign", "k==", "--label=k=="},
+		{"a value with an equals sign in it", "k=a=", "--label=k=a="},
+		{"the key alone", "k", "--label=k"},
+		{"a key that starts with a dash and no value", "-x=", "--label=-x"},
+		{"no key", "=", "--label=="},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt, read := loggingShim(t)
+			if _, err := rt.EnsureNetworkLabeled("demo-net", false, []string{tc.label}, NetworkSubnets{}); err != nil {
+				t.Fatalf("EnsureNetworkLabeled: %v", err)
+			}
+			var create string
+			for _, l := range read() {
+				if strings.HasPrefix(l, "network create ") {
+					create = l
+				}
+			}
+			if want := "network create " + tc.want + " demo-net"; create != want {
+				t.Errorf("network create argv = %q, want %q", create, want)
 			}
 		})
 	}

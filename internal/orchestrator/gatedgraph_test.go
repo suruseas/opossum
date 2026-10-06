@@ -310,8 +310,8 @@ func TestAGatedFaultDoesNotStopTheCommandsThatReadOrTakeDown(t *testing.T) {
 				on := profile == "profile g turned on"
 				want := map[bool]string{false: tc.off, true: tc.on}[on]
 				// `stop`, `logs` and `restart` take the names as the whole
-				// answer and build no order, so they read no cycle and no
-				// gated service's undefined dependency either (#1094: finding
+				// answer and build no order, so they read no cycle (and `restart` no
+				// gated service's undefined dependency either, where `stop` and `logs` do now: #1801) (#1094: finding
 				// that one is now also part of reading an order — an ungated
 				// one is still refused while the file is read, before any
 				// command runs, so it is not part of this remap). `ps` and
@@ -330,7 +330,10 @@ func TestAGatedFaultDoesNotStopTheCommandsThatReadOrTakeDown(t *testing.T) {
 				// second layer (`stop`/`kill` use loadOrchestratorToTakeDown,
 				// which never refuses over the file — see docs/compatibility.md's
 				// `depends_on` row), so for it this remap is the real answer.
-				if readsNoOrderWhenNamed[cmd] && (want == "C" || (want == "U" && tc.body == gatedUndefined)) {
+				// A gated service's undefined dependency, with its profile on, is read by `stop web` and `logs web` (docker compose
+				// refuses them for it, measured v5.5.1, #1801: the dependencies of every service the run reads are asked, named or not);
+				// the Orchestrator's Restart, called directly, does not ask again (the CLI's `restart web` is refused in cmd/opossum first).
+				if readsNoOrderWhenNamed[cmd] && (want == "C" || (want == "U" && tc.body == gatedUndefined && cmd == "restart web")) {
 					want = "ok"
 				}
 				if tolerantOfActiveCycle[cmd] && want == "C" {

@@ -488,6 +488,46 @@ func TestWhereTheValueCannotBeReadTheReferenceIsClosedAsBefore(t *testing.T) {
 	}
 }
 
+// Where the value is a plain scalar over several lines, or a quote opened on an earlier line, the extent of it is read
+// from the reference's own line only. A word whose braces do not balance on that line is closed at the last `}` of
+// it — not at the first `}` that balances the `${` openings, as the rows above say of the rows that go past the line,
+// and not where docker compose closes it, which reads the folded value (#1707; a docs sentence said "as before" of
+// this, which it is not: the value is `ev }}` here and was `ev} }}` before the rule, and docker compose gives `ev}`).
+// Each row holds what opossum gives and says what docker compose v5.5.1 gives (not asserted), so that a change to
+// either shows.
+func TestAWordWhoseBracesDoNotBalanceOnTheLineOfAMultiLineValueIsClosedAtTheLastBraceOfTheLine(t *testing.T) {
+	const head = "services:\n  a:\n    image: alpine\n"
+	for _, tc := range []struct {
+		name, body string
+		docker     map[string]string // docker compose v5.5.1; not asserted
+		want       map[string]string // opossum
+	}{
+		{"a plain value over two lines, three { and two } on the line", "    environment:\n      V: a\n       ${E:-{{{x}}\n       }}\n",
+			map[string]string{"V": "a ev}"}, map[string]string{"V": "a ev }}"}},
+		{"a quote opened on the line before", "    environment:\n      V: \"a\n       b: '${E:-{{{x}}' }}\"\n",
+			map[string]string{"V": "a b: 'ev}"}, map[string]string{"V": "a b: 'ev' }}"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lookup := func(n string) (string, bool) { return "ev", n == "E" }
+			d, err := interpolateDocument([]byte(head+tc.body), lookup)
+			if err != nil {
+				t.Fatalf("interpolateDocument: %v", err)
+			}
+			var parsed struct {
+				Services map[string]struct {
+					Environment map[string]string `yaml:"environment"`
+				} `yaml:"services"`
+			}
+			if err := d.into(&parsed); err != nil {
+				t.Fatalf("does not read back: %v\n%s", err, d.raw)
+			}
+			if env := parsed.Services["a"].Environment; !reflect.DeepEqual(env, tc.want) {
+				t.Errorf("environment = %v, want %v (docker compose gives %v)", env, tc.want, tc.docker)
+			}
+		})
+	}
+}
+
 // The gate is what keeps a word with no `{` of its own as it was: the value's extent is not read for
 // it, and the `{` of a nested `${` is not counted as the word's own (#1708). Each row gives the index
 // the old count (the `}` that balances the `${` openings) closes at; reading the value as a word with

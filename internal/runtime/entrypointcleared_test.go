@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -178,6 +179,34 @@ func TestAClearedEntrypointRunsTheCommandInItsPlace(t *testing.T) {
 			options: RunOptions{Name: "w", Image: "img", Entrypoint: []string{"", ""}, Command: []string{"y"}},
 			wantErr: "starts with an empty word",
 		},
+		// The image's own CMD starts with an empty word: with the entrypoint cleared it would be the
+		// program, and none is named (#1704; docker compose fails to start it). `--entrypoint=` with
+		// no value takes the image's place on the line, and the word after it would be pulled.
+		{
+			name: "an image's CMD that is one empty word", cmdJSON: `[""]`, here: true,
+			options:    RunOptions{Name: "w", Image: "img", EntrypointCleared: true},
+			wantInspec: true, wantErr: "the first word of the command of img is empty",
+		},
+		{
+			name: "an image's CMD that starts with an empty word and has more", cmdJSON: `["","x"]`, here: true,
+			options:    RunOptions{Name: "w", Image: "img", EntrypointCleared: true},
+			wantInspec: true, wantErr: "the first word of the command of img is empty",
+		},
+		{
+			name: "an image's CMD that is read after the image is pulled, and starts with an empty word", cmdJSON: `["","x"]`, here: false,
+			options:    RunOptions{Name: "w", Image: "img", EntrypointCleared: true},
+			wantInspec: true, wantPull: true, wantErr: "the first word of the command of img is empty",
+		},
+		{
+			name: "an image's CMD with an empty word after the first is run as it is", cmdJSON: `["echo",""]`, here: true,
+			options: RunOptions{Name: "w", Image: "img", EntrypointCleared: true},
+			wantRun: "run --name w --entrypoint=echo img ", wantInspec: true,
+		},
+		{
+			name: "the service's command wins over an image's CMD that starts with an empty word", cmdJSON: `["","x"]`, here: true,
+			options: RunOptions{Name: "w", Image: "img", EntrypointCleared: true, Command: []string{"echo", "hi"}},
+			wantRun: "run --name w --entrypoint=echo img hi",
+		},
 		{
 			name: "not cleared: the image is not asked", cmdJSON: `["postgres"]`, here: true,
 			options: RunOptions{Name: "w", Image: "img"},
@@ -205,6 +234,29 @@ func TestAClearedEntrypointRunsTheCommandInItsPlace(t *testing.T) {
 			}
 			if got := s.called("image pull"); got != tc.wantPull {
 				t.Errorf("the image pulled = %v, want %v", got, tc.wantPull)
+			}
+		})
+	}
+}
+
+// The refusal of an image's CMD that starts with an empty word is the file's own refusal, made
+// before anything is run (a `Refusal`, which callers leave the failed-start advice off), and a
+// dry run makes it too where the image is here to be read: a plan that held the run would be one
+// that cannot be carried out (#1704).
+func TestAnImageCmdThatStartsWithAnEmptyWordIsARefusalInADryRunToo(t *testing.T) {
+	for _, dry := range []bool{false, true} {
+		t.Run(map[bool]string{false: "a run", true: "a dry run"}[dry], func(t *testing.T) {
+			s := newClearedShim(t, `[""]`, true)
+			s.rt.DryRun = dry
+			err := s.rt.Run(RunOptions{Name: "w", Image: "img", EntrypointCleared: true})
+			var refused *Refusal
+			if !errors.As(err, &refused) {
+				t.Fatalf("Run = %v, want a Refusal", err)
+			}
+			for _, l := range s.rt.Plan {
+				if strings.HasPrefix(l, "run ") {
+					t.Errorf("the plan holds a run of it: %q", s.rt.Plan)
+				}
 			}
 		})
 	}

@@ -13,6 +13,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"gopkg.in/yaml.v3"
 )
 
 // servicespec.json is the shape of a service as docker compose v5.5.1 checks it,
@@ -468,6 +470,12 @@ func checkServiceShapes(path string, services map[string]any, values *[]error, o
 	// sink, for the commands that take a project down (#1468) — kept there and the
 	// read goes on: an earlier opossum passed such a value on.
 	fault := func(err error) error {
+		// In a file that is only extended from, the range of a number is not asked: docker compose puts it to the service that
+		// results from the extends, where the extender may write over the value (measured, v5.5.1), and resolveExtends asks it
+		// of that service (boundsThatStay, #1461).
+		if only != "" && isBoundFault(err) {
+			return nil
+		}
 		if values == nil {
 			return err
 		}
@@ -496,6 +504,36 @@ func checkServiceShapes(path string, services map[string]any, values *[]error, o
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
+			// An `expose` entry is a port number or a string: a float is refused (docker compose, measured v5.5.1:
+			// `unsupported expose value`), where a number written bare is read. In a service that is not taken too.
+			if k == "expose" {
+				if err := exposeFloats(path, "services."+name+".expose", svc[k], fault); err != nil {
+					return err
+				}
+			}
+			// What docker compose still casts of the `deploy` of a service that is not taken (see deployCasts).
+			if k == "deploy" && notTaken {
+				if m, ok := svc[k].(map[string]any); ok {
+					if err := deployCasts(path, "services."+name+".deploy", m, fault); err != nil {
+						return err
+					}
+				}
+			}
+			// `build` is held to the schema in every file, a service that is not taken and one an extends takes from another file
+			// included, whatever the extender writes over it (measured, v5.5.1), but for its `additional_contexts`, whose shapes
+			// docker compose refuses are read as far as they go, on purpose (see buildWithoutContexts).
+			if k == "build" {
+				if bnode := spec.Properties[k]; bnode != nil {
+					if msg := bnode.mismatch(buildWithoutContexts(svc[k]), "services."+name+".build"); msg != "" {
+						if err := fault(fmt.Errorf("compose file %s: %s", path, msg)); err != nil {
+							return err
+						}
+					}
+				}
+				if err := buildFormRules(path, "services."+name+".build", svc[k], fault); err != nil {
+					return err
+				}
+			}
 			if notTaken && readAsItIsWhereNotTaken[k] {
 				continue
 			}
@@ -524,20 +562,49 @@ func checkServiceShapes(path string, services map[string]any, values *[]error, o
 					return err
 				}
 			}
+			// The `mode` of a `secrets` or `configs` entry that is no scalar number or string — a null, a
+			// bool, a list, a mapping — is refused by docker compose's schema, in the file that writes it
+			// (#1544; measured, v5.5.1); a float, a string that is no octal number and a number past int64
+			// are asked once the files are merged (checkSecretModes).
+			// An extended file is not asked here: docker compose puts the schema to a service an extends takes after
+			// it is merged, so the extending service may write the entry again (the merged project is asked, in
+			// checkSecretModes).
+			// A key of a long-form entry of `volumes` with nothing after it — at any depth of the entry — is refused by docker compose in
+			// the file that writes it, over a value an earlier file gave too, once the entries of one mount point are one (#1586;
+			// measured, v5.5.1). A service an extends takes from another file is asked once it is merged (nullsThatStay), and one that
+			// is not taken is not asked.
+			if k == "volumes" && only == "" {
+				entries, _ := svc[k].([]any)
+				if err := longEntryNulls(path, "services."+name+"."+k, mergeSeqByTarget(entries), fault); err != nil {
+					return err
+				}
+			}
+			if (k == "secrets" || k == "configs") && only == "" {
+				if err := secretModeKinds(path, "services."+name+"."+k, k, svc[k], fault); err != nil {
+					return err
+				}
+			}
 			// A `mode` that is not the string docker compose reads in `ports[].mode` and
 			// `deploy.mode` (#1533; measured, v5.5.1).
-			if err := modeKinds(path, "services."+name+"."+k, k, svc[k], notTaken, fault); err != nil {
+			// The services an extends takes from another file (the one it names, and the ones it extends in turn in
+			// that file) have their `replicas` asked after they are merged with the service that extends them (docker compose reads the count there: the extender may write over it).
+			if err := modeKinds(path, "services."+name+"."+k, k, svc[k], notTaken, only != "" && taken != nil && taken[name], fault); err != nil {
 				return err
 			}
-			// `cpus` is a key opossum reads itself, which a service docker compose does not take
-			// is not asked: docker compose still casts it there, with strconv.ParseFloat as it is,
-			// and refuses a string that does not read (`cpus: abc`, `"0x2"`, `" 2"`, `"_1"`, `"1__0"`;
-			// `"1_0"`, `"1e2"`, `"inf"` read) (#1566; measured, v5.5.1). A service taken is read by
-			// the decode.
-			if k == "cpus" && notTaken {
+			// `cpus` is a key opossum reads itself, when the service starts: docker compose casts it as the file is read,
+			// in every service of every file, with strconv.ParseFloat as it is, and refuses a string that does not read
+			// (`cpus: abc`, `"0x2"`, `" 2"`, `"_1"`, `"1__0"`; `"1_0"`, `"1e2"`, `"inf"` read), whatever a later file or an
+			// extending service writes over it (#1566, #1771; measured, v5.5.1).
+			if k == "cpus" {
 				if str, isString := svc[k].(string); isString {
 					if _, err := strconv.ParseFloat(str, 64); err != nil {
-						if err := fault(fmt.Errorf("compose file %s: services.%s.cpus %q does not read as a number", path, name, str)); err != nil {
+						msg := fmt.Errorf("compose file %s: services.%s.cpus %q does not read as a number", path, name, str)
+						if !notTaken {
+							// The service the project is made of: the words its own reading of `cpus` has, which show a value that reads
+							// and do not give the one written back.
+							msg = fmt.Errorf("compose file %s: service %q: cpus: not a number of CPUs — use a number, e.g. \"1.5\" or \"2\"", path, name)
+						}
+						if err := fault(msg); err != nil {
 							return err
 						}
 					}
@@ -574,6 +641,17 @@ func checkServiceShapes(path string, services map[string]any, values *[]error, o
 			if notTaken {
 				shaped = withoutEmptyName(shaped)
 			}
+			// A key with nothing after it in the service an extends takes from another file is not asked here: docker compose
+			// puts the schema to it once it is merged with the service that extends it, so a null the extender writes over is read
+			// (resolveExtends asks what stays, by nullsThatStay).
+			if only != "" && !notTaken {
+				if shaped == nil && !refusedWhateverIsWrittenOver([]string{k}) {
+					continue
+				}
+				if m, ok := shaped.(map[string]any); ok {
+					shaped = withoutNullsExceptRefused(m, []string{k})
+				}
+			}
 			if msg := node.mismatch(shaped, where); msg != "" {
 				if err := fault(fmt.Errorf("compose file %s: %s", path, msg)); err != nil {
 					return err
@@ -588,7 +666,7 @@ func checkServiceShapes(path string, services map[string]any, values *[]error, o
 			// the bounds of the number a string reads into are not (`oom_score_adj: "2000"`,
 			// `cpu_count: "-5"`, `cpu_percent: "150"`). The byte sizes, the duration and `attach` are
 			// among the keys it asks nothing of there (readAsItIsWhereNotTaken, above), so none of
-			// them reaches this. `cpus` is cast just above, for a service not taken only (#1559,
+			// them reaches this. `cpus` is cast just above (#1559,
 			// #1571; measured, v5.5.1).
 			if kind, ok := castKeys[k]; ok {
 				if s, isString := svc[k].(string); isString && !castOK(kind, s) {
@@ -651,6 +729,36 @@ var readAsItIsWhereNotTaken = map[string]bool{
 // nullChecked are the service keys whose blocks are read into a typed shape by the decode,
 // which passes a key of them that holds nothing: asked here, by the schema.
 var nullChecked = map[string]bool{"deploy": true, "build": true, "healthcheck": true, "networks": true, "depends_on": true}
+
+// buildWithoutContexts is a service's `build` as the schema is asked of it: without its `additional_contexts`, whose shapes
+// docker compose refuses (a scalar, a number, a list item without `=`) are read as far as they go, as they were
+// (see TestAdditionalContextsAreReadForTheirNames) since the key is not acted on; and without the keys of a mapping that hold
+// nothing, which nullChecked asks (refused in a file, read where the extender writes over them). A copy.
+func buildWithoutContexts(v any) any {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return v
+	}
+	out := withoutNullValues(m)
+	delete(out, "additional_contexts")
+	return out
+}
+
+// withoutNullValues is a copy of a mapping without the keys that hold nothing, at any depth through mappings. A key of no
+// characters is a key like another here: docker compose refuses it, and the schema is to be asked of it.
+func withoutNullValues(m map[string]any) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, x := range m {
+		if x == nil {
+			continue
+		}
+		if inner, ok := x.(map[string]any); ok {
+			x = withoutNullValues(inner)
+		}
+		out[k] = x
+	}
+	return out
+}
 
 // nothingWhereNoneIsTaken says where v, a mapping, holds a key with nothing after it that
 // the node gives no null — at any depth, through the branches of a oneOf that take a
@@ -1047,6 +1155,114 @@ func emptyMountSections(path, where string, v any, fault func(error) error) erro
 	return nil
 }
 
+// secretModeKinds asks the `mode` of the long-form entries of a service's `secrets` or `configs`
+// for a kind docker compose's schema takes: a number or a string.
+func secretModeKinds(path, where, kind string, v any, fault func(error) error) error {
+	entries, _ := v.([]any)
+	// What the file writes twice for one target is one entry, the last (docker compose folds them before it asks).
+	for i, e := range mergeSeqBySecretTarget(entries, kind) {
+		m, ok := e.(map[string]any)
+		if !ok {
+			continue
+		}
+		if at := nullKeyIn(m, ""); at != "" && at != "mode" {
+			if err := fault(fmt.Errorf("compose file %s: %s[%d].%s has nothing after it — write the value, or remove the key", path, where, i, at)); err != nil {
+				return err
+			}
+		}
+		mode, present := m["mode"]
+		if !present {
+			continue
+		}
+		switch mode.(type) {
+		case nil, bool, []any, map[string]any:
+			if err := fault(fmt.Errorf("compose file %s: %s[%d].mode must be a number or a string (an octal number such as \"0440\"), and this is %s", path, where, i, describeYAMLValue(mode))); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// checkPortHostIPs refuses a long-form `ports` entry of the merged project whose `host_ip` is empty: docker compose
+// reads the address once the files are merged (`invalid ip address:`; measured, v5.5.1), so an entry a later file
+// writes again, or a `!override` or `!reset` of `ports`, takes the refusal away, and one that stays is refused in a service
+// whose profile is not enabled too.
+func checkPortHostIPs(name string, services map[string]any) error {
+	names := make([]string, 0, len(services))
+	for n := range services {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		svc, ok := services[n].(map[string]any)
+		if !ok {
+			continue
+		}
+		entries, _ := svc["ports"].([]any)
+		for i, e := range entries {
+			if m, ok := e.(map[string]any); ok && m["host_ip"] == "" {
+				return fmt.Errorf("%s: services.%s.ports[%d].host_ip is empty — write an IP address, as in `127.0.0.1` or `::1`, or leave the key out", name, n, i)
+			}
+		}
+	}
+	return nil
+}
+
+// checkSecretModes asks the `mode` of the `secrets` and `configs` entries of the merged project, as docker
+// compose casts it once the files are merged (#1544; measured, v5.5.1): a whole number up to int64, or a
+// string that reads as an octal number (`"0440"`, `"+1"`, `"-1"`), is taken; a float (`1.5`, `1.0`, `!!float 1`), a number
+// past int64 and any other string are refused. A later file that writes the entry over, or leaves out its `mode`,
+// takes the refusal away, which is why this is asked of the merged project and not of each file. A service
+// whose profile is not enabled is asked too, as there. A null, a bool, a list and a mapping are asked here too (for the file
+// ones of the project itself, secretModeKinds asks them file by file), because a service an extends takes from another
+// file is put to the schema only once it is merged. A bare `-0`, which docker compose reads as a float, is read
+// as the number it is: a known difference, the merged tree no longer says how it was written.
+func checkSecretModes(name string, services map[string]any) error {
+	names := make([]string, 0, len(services))
+	for n := range services {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		svc, ok := services[n].(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, kind := range []string{"secrets", "configs"} {
+			entries, _ := svc[kind].([]any)
+			// Entries mounted at one target are one entry, the last written, in a file of its own as in two.
+			for i, e := range mergeSeqBySecretTarget(entries, kind) {
+				m, ok := e.(map[string]any)
+				if !ok {
+					continue
+				}
+				bad := false
+				mode, present := m["mode"]
+				switch x := mode.(type) {
+				case float64, uint64, time.Time:
+					bad = true
+				case string:
+					_, err := strconv.ParseInt(x, 8, 64)
+					bad = err != nil
+				case nil:
+					bad = present
+				case bool, []any, map[string]any:
+					bad = true
+				}
+				if bad {
+					shown := describeYAMLValue(m["mode"])
+					if m["mode"] == negZeroMode {
+						shown = "-0 (which docker compose reads as a float)"
+					}
+					return fmt.Errorf("%s: services.%s.%s[%d].mode %s is not a mode docker compose can read — write a whole number, or an octal string such as \"0440\"", name, n, kind, i, shown)
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // modeKinds asks the `mode` of a service's `ports` entries and of its `deploy` for a string,
 // the kind docker compose reads there (`host`, `ingress`; `replicated`, `global`): a number,
 // a bool, a null, a list and a mapping are refused, in the file that writes them, as docker
@@ -1054,7 +1270,7 @@ func emptyMountSections(path, where string, v any, fault func(error) error) erro
 // entries is not asked here: docker compose refuses one that is no whole number and no
 // octal string only after the files are merged, so a later `-f` file that replaces or resets
 // it makes the file it was in fine there (#1544).
-func modeKinds(path, where, key string, v any, notTaken bool, fault func(error) error) error {
+func modeKinds(path, where, key string, v any, notTaken, replicasLater bool, fault func(error) error) error {
 	say := func(at, want string, got any) error {
 		return fault(fmt.Errorf("compose file %s: %s%s.mode must be %s, and this is %s", path, where, at, want, describeYAMLValue(got)))
 	}
@@ -1065,8 +1281,28 @@ func modeKinds(path, where, key string, v any, notTaken bool, fault func(error) 
 			// 2, "2", 2.0 and !!float 2 do; "two", "", "1e2", "0x2", 1.5, true, null, a list and a
 			// mapping do not — refused in the file that writes them, as a later `-f` that replaces
 			// the value does not help there.
-			if replicas, present := m["replicas"]; present && !replicasReadable(replicas) && !(notTaken && !isString(replicas)) {
+			// Only a count that is no string is asked later: docker compose refuses a string that is no whole number in
+			// the file that writes it. A list or a mapping is asked of the service that results, where the extender may write
+			// over it with `!override` or `!reset` (and refuses a value written over it without one, which resolveExtends asks of the pair: #1776).
+			later := replicasLater
+			if _, isString := m["replicas"].(string); isString {
+				later = false
+			}
+			if replicas, present := m["replicas"]; present && !later && !replicasReadable(replicas) && !(notTaken && !isString(replicas)) {
 				if err := fault(fmt.Errorf("compose file %s: %s.replicas must be a whole number, and this is %s", path, where, describeYAMLValue(replicas))); err != nil {
+					return err
+				}
+			}
+			// The blocks of `deploy` besides `mode` and `replicas` (see deployShapes), in a service that is taken.
+			// A service an extends takes from another file is put to the schema once it is merged with the service that
+			// extends it (the extender may write the block over, or reset `deploy`), which resolveExtends asks; what docker
+			// compose casts as it reads the file stays asked here, as in a service that is not taken.
+			if !notTaken && !replicasLater {
+				if err := deployShapes(path, where, m, false, fault); err != nil {
+					return err
+				}
+			} else if replicasLater {
+				if err := deployCasts(path, where, m, fault); err != nil {
 					return err
 				}
 			}
@@ -1116,6 +1352,20 @@ func describeYAMLValue(v any) string {
 	return fmt.Sprintf("%v", v)
 }
 
+// exposeFloats refuses an `expose` entry written as a float (`80.0`, `!!float 80`, `1.5`).
+func exposeFloats(path, where string, list any, fault func(error) error) error {
+	entries, _ := list.([]any)
+	for i, e := range entries {
+		if f, ok := e.(float64); ok {
+			text := strconv.FormatFloat(f, 'f', -1, 64)
+			if err := fault(fmt.Errorf("compose file %s: %s[%d] %s is a float, and an exposed port is an integer or a string — write it as `%s` or `\"%s\"`", path, where, i, text, text, text)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // portFieldKinds asks the fields of a long-form `ports` entry for the kind docker compose
 // reads (#1536; measured, v5.5.1, `config -q`): `name` and `app_protocol` are strings (a
 // number, a bool, a null, a float and a list are refused), `host_ip` and `protocol` are
@@ -1143,6 +1393,7 @@ func portFieldKinds(path, where string, list any, notTaken bool, fault func(erro
 				bad = !isString
 			case "host_ip", "protocol":
 				bad = v == nil
+
 			case "published":
 				switch v.(type) {
 				case []any, map[string]any:
@@ -1205,4 +1456,642 @@ func withoutEmptyName(v any) any {
 func isDriveLetter(section string) bool {
 	r, size := utf8.DecodeRuneInString(section)
 	return size == len(section) && unicode.IsLetter(r)
+}
+
+// nullsThatStay says where a service that has been merged with the one it extends still holds a key with nothing after it that the
+// schema gives no null — the extender wrote it and the extended service gave the key no value, or the extended service held it and
+// nothing wrote over it (docker compose refuses both: it puts the schema to the merged service). "" when there is none. A service
+// that has no such key is the business of the checks of its file, which asked everything else.
+func nullsThatStay(name string, merged map[string]any) string {
+	spec, err := loadServiceSpec()
+	if err != nil {
+		return ""
+	}
+	keys := make([]string, 0, len(merged))
+	for k := range merged {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		node := spec.Properties[k]
+		if node == nil {
+			continue
+		}
+		where := "services." + name + "." + k
+		if k == "volumes" || k == "secrets" || k == "configs" {
+			entries, _ := merged[k].([]any)
+			for i, e := range entries {
+				if m, ok := e.(map[string]any); ok {
+					if at := nullKeyIn(m, ""); at != "" {
+						return fmt.Sprintf("%s[%d].%s has nothing after it — write the value, or remove the key", where, i, at)
+					}
+				}
+			}
+		}
+		if nullChecked[k] {
+			asked := merged[k]
+			// `build.provenance` and `build.sbom` are read by docker compose with nothing after them once an extends has merged
+			// the service (measured, v5.5.1); every other key it refuses.
+			if m, ok := asked.(map[string]any); ok && k == "build" {
+				asked = withoutNullKeys(m, "provenance", "sbom")
+			}
+			if msg := node.nothingWhereNoneIsTaken(asked, where, 0, false); msg != "" {
+				return msg
+			}
+		}
+		if heldToTheSchema[k] && containsNull(merged[k]) {
+			if msg := node.mismatch(merged[k], where); msg != "" {
+				return msg
+			}
+		}
+	}
+	return ""
+}
+
+// withoutNullKeys is a copy of a mapping without the named keys where they hold nothing.
+func withoutNullKeys(m map[string]any, names ...string) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		drop := false
+		for _, n := range names {
+			if k == n && v == nil {
+				drop = true
+			}
+		}
+		if !drop {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// containsNull reports whether v is a null, or a mapping or list that holds one at any depth.
+func containsNull(v any) bool {
+	switch x := v.(type) {
+	case nil:
+		return true
+	case map[string]any:
+		for _, e := range x {
+			if containsNull(e) {
+				return true
+			}
+		}
+	case []any:
+		for _, e := range x {
+			if containsNull(e) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// nullOverAValue says where the extending service writes, with nothing after it, a key docker compose refuses that way even over a
+// value (refusedOverAValue), over a value the extended service gave it; "" when none. path is the keys above the mappings.
+func nullOverAValue(own, base map[string]any, path []string, refused func([]string) bool) string {
+	keys := make([]string, 0, len(own))
+	for k := range own {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		here := append(append([]string(nil), path...), k)
+		given, has := base[k]
+		if own[k] == nil {
+			if has && given != nil && refused(here) {
+				return strings.Join(here, ".")
+			}
+			continue
+		}
+		if ownMap, ok := own[k].(map[string]any); ok {
+			if baseMap, ok := given.(map[string]any); ok {
+				if at := nullOverAValue(ownMap, baseMap, here, refused); at != "" {
+					return at
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// withoutBackedNulls is a copy of a service without the keys that hold nothing where an earlier file gave the key a value
+// (docker compose leaves that value, so there is no null to ask about), at any depth through mappings.
+func withoutBackedNulls(m map[string]any, backing map[string]any) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		given := backing[k]
+		if v == nil && given != nil {
+			continue
+		}
+		if inner, ok := v.(map[string]any); ok {
+			innerBacking, _ := given.(map[string]any)
+			v = withoutBackedNulls(inner, innerBacking)
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// withoutNullsExceptRefused is a copy of a mapping without the keys that hold nothing, at any depth through mappings, but for those
+// docker compose refuses whatever is written over them (refusedWhateverIsWrittenOver). path is the keys above it, from the service.
+func withoutNullsExceptRefused(m map[string]any, path []string) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		here := append(append([]string(nil), path...), k)
+		if v == nil && !refusedWhateverIsWrittenOver(here) {
+			continue
+		}
+		if inner, ok := v.(map[string]any); ok {
+			v = withoutNullsExceptRefused(inner, here)
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// longEntryNulls refuses a key with nothing after it in the long form of the entries of a list (an `x-` key is a note, and is left).
+func longEntryNulls(path, where string, entries []any, fault func(error) error) error {
+	for i, e := range entries {
+		m, ok := e.(map[string]any)
+		if !ok {
+			continue
+		}
+		if at := nullKeyIn(m, ""); at != "" {
+			if err := fault(fmt.Errorf("compose file %s: %s[%d].%s has nothing after it — write the value, or remove the key", path, where, i, at)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// nullKeyIn is the path of the first key of a mapping, or of one inside it, that holds nothing; "" when none. An `x-` key is not looked into.
+func nullKeyIn(m map[string]any, prefix string) string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if strings.HasPrefix(k, "x-") {
+			continue
+		}
+		here := k
+		if prefix != "" {
+			here = prefix + "." + k
+		}
+		switch x := m[k].(type) {
+		case nil:
+			return here
+		case map[string]any:
+			// The names of `labels` hold what they like, nothing included (a null label is an empty one), so the mapping is not looked into.
+			if k == "labels" {
+				continue
+			}
+			if at := nullKeyIn(x, here); at != "" {
+				return at
+			}
+		}
+	}
+	return ""
+}
+
+// withoutNestedNulls is a copy of a merged project tree whose services have lost the keys that hold nothing inside the fields
+// refuseNestedShapes reads one level down (`build`, `healthcheck`, `develop`, `deploy`), at any depth through mappings and the mappings of lists.
+func withoutNestedNulls(tree map[string]any) map[string]any {
+	out := make(map[string]any, len(tree))
+	for k, v := range tree {
+		out[k] = v
+	}
+	services, ok := tree["services"].(map[string]any)
+	if !ok {
+		return out
+	}
+	cleaned := make(map[string]any, len(services))
+	for name, v := range services {
+		svc, ok := v.(map[string]any)
+		if !ok {
+			cleaned[name] = v
+			continue
+		}
+		c := make(map[string]any, len(svc))
+		for k, x := range svc {
+			if _, nested := nestedShapes[k]; nested {
+				x = withoutNullsDeep(x)
+			}
+			c[k] = x
+		}
+		cleaned[name] = c
+	}
+	out["services"] = cleaned
+	return out
+}
+
+// withoutNullsDeep is a value without the keys that hold nothing, in its mappings and in the mappings of its lists, at any depth
+// (but for the names under `args`).
+func withoutNullsDeep(x any) any {
+	switch v := x.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for k, e := range v {
+			// The names under `args` hold what they like, nothing included (a build argument taken from the environment).
+			if k == "args" && e != nil {
+				out[k] = e
+				continue
+			}
+			if e == nil {
+				continue
+			}
+			out[k] = withoutNullsDeep(e)
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, e := range v {
+			out[i] = withoutNullsDeep(e)
+		}
+		return out
+	}
+	return x
+}
+
+// boundFaultText is the whole of a refusal of a number outside the bounds of its key: the file, the place, the number, the bound. It
+// ends in the bound, so a refusal of another kind that carries a value the file wrote (a quoted word that says "is above the most")
+// is not taken for it (#1461).
+var boundFaultText = regexp.MustCompile(`^compose file .+: services\.[^ ]+ -?[0-9][0-9.eE+-]* is (below the least|above the most), -?[0-9][0-9.eE+-]*$`)
+
+// isBoundFault says that a refusal of checkServiceShapes is one of a number outside the bounds of its key.
+func isBoundFault(err error) bool {
+	return boundFaultText.MatchString(err.Error())
+}
+
+// typesThatStay is the refusal, nil when there is none, of a value the schema takes the wrong kind of, or outside the bounds of its key, in a service that
+// results from an `extends` of a service of another file: docker compose asks these of that service, not of the file it was read
+// from, so a value the extender writes over is not asked (#1461, #1771). name is the service as the file names it, and where the file
+// the refusal is named by.
+func typesThatStay(where, name string, svc map[string]any) error {
+	// A key with nothing after it is nullsThatStay's to say, in its own words.
+	svc = withoutNullValues(svc)
+	var faults []error
+	if err := checkServiceShapes(where, map[string]any{name: svc}, &faults, ""); err != nil {
+		return err
+	}
+	if len(faults) > 0 {
+		return faults[0]
+	}
+	// The long `ports` entries are read into a type by the decode, which has the service whole at the end; asked of the entries here, so that a
+	// `target` that stays is refused naming the files it may come from (#1780).
+	if ports, ok := svc["ports"]; ok {
+		return validateMerged(where, map[string]any{"services": map[string]any{name: map[string]any{"ports": ports}}}, asMerged)
+	}
+	return nil
+}
+
+// hostKeys are the keys of a service that hold a mapping of host names: the path from the service.
+var hostKeys = [][]string{{"extra_hosts"}, {"build", "extra_hosts"}}
+
+// hostEntriesHeld notes, for the services of a merged tree, the `extra_hosts` and `build.extra_hosts` that are a mapping, with the number of
+// entries in it: "<service>\x00<dotted path>".
+func hostEntriesHeld(merged map[string]any) map[string]int {
+	held := map[string]int{}
+	services, _ := merged["services"].(map[string]any)
+	for name, v := range services {
+		svc, _ := v.(map[string]any)
+		for _, path := range hostKeys {
+			if m, ok := keyAt(svc, path).(map[string]any); ok {
+				held[name+"\x00"+strings.Join(path, ".")] = len(m)
+			}
+		}
+	}
+	return held
+}
+
+// keyAt is the value a path of keys leads to in a mapping, nil where it leads nowhere.
+func keyAt(m map[string]any, path []string) any {
+	var cur any = m
+	for _, k := range path {
+		mm, ok := cur.(map[string]any)
+		if !ok {
+			return nil
+		}
+		cur = mm[k]
+	}
+	return cur
+}
+
+// hostEntriesLeftNone is the refusal, nil when there is none, of a service whose `extra_hosts` or `build.extra_hosts` was a mapping before
+// the file at path (merged into the tree as next) was merged in, that the file wrote, and that holds no entry after it: the `!reset` of
+// the file took each entry out, or the file and the ones before it wrote none. docker compose refuses that, naming the file
+// (`services.a.extra_hosts must be a mapping`; measured, v5.5.1, where a key that is not written again is read as it was, and a list
+// written over a mapping that has entries leaves them). A key the file writes with `!override`, or under one, is not asked.
+func hostEntriesLeftNone(path string, held map[string]int, next, merged map[string]any, tags []mergeTag) error {
+	services, _ := merged["services"].(map[string]any)
+	nextServices, _ := next["services"].(map[string]any)
+	names := make([]string, 0, len(held))
+	for key := range held {
+		names = append(names, key)
+	}
+	sort.Strings(names)
+	for _, key := range names {
+		parts := strings.SplitN(key, "\x00", 2)
+		keyPath := strings.Split(parts[1], ".")
+		nextSvc, _ := nextServices[parts[0]].(map[string]any)
+		if !keyWritten(nextSvc, keyPath) {
+			continue
+		}
+		// A key the file writes under an `!override` of it, of the `build` it is in, or of the service stands whole, not merged with the
+		// earlier files' (docker compose reads it as it is).
+		if overriddenAbove(tags, append([]string{"services", parts[0]}, keyPath...)) {
+			continue
+		}
+		svc, _ := services[parts[0]].(map[string]any)
+		empty := false
+		switch v := keyAt(svc, keyPath).(type) {
+		case map[string]any:
+			empty = len(v) == 0
+		case []any:
+			empty = len(v) == 0 && held[key] == 0
+		}
+		if empty {
+			return fmt.Errorf("compose file %s: services.%s.%s must be a mapping — it holds no entry once this file is merged in; reset the whole key (`%s: !reset null`) to take them all out", path, parts[0], parts[1], keyPath[len(keyPath)-1])
+		}
+	}
+	return nil
+}
+
+// keyWritten says that a path of keys leads to a key in a mapping, whatever its value (nothing included).
+func keyWritten(m map[string]any, path []string) bool {
+	var cur any = m
+	for _, k := range path {
+		mm, ok := cur.(map[string]any)
+		if !ok {
+			return false
+		}
+		v, ok := mm[k]
+		if !ok {
+			return false
+		}
+		cur = v
+	}
+	return true
+}
+
+// overriddenAbove says that a tag stands on the key at path, or on a key above it: the file wrote that key (or the one it is in) with
+// `!override` (a `!reset` one is not written at all).
+func overriddenAbove(tags []mergeTag, path []string) bool {
+	for _, t := range tags {
+		if len(t.path) <= len(path) && strings.Join(t.path, "\x00") == strings.Join(path[:len(t.path)], "\x00") {
+			return true
+		}
+	}
+	return false
+}
+
+// negZeroMode stands in the merged tree for a `mode` written `-0`, which docker compose reads as a float (see intoMarked): a private-use
+// character, so not an octal number and not a word a file is likely to hold, and checkSecretModes refuses it where it stays.
+const negZeroMode = "\ue002-0"
+
+// markNegativeZeroModes rewrites, in a document, the `mode` of a `secrets` or `configs` entry of a service that is the bare integer `-0` to the word
+// negZeroMode.
+func markNegativeZeroModes(doc *yaml.Node) {
+	root := documentRoot(doc)
+	if root == nil || root.Kind != yaml.MappingNode {
+		return
+	}
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value != "services" {
+			continue
+		}
+		services := unalias(root.Content[i+1])
+		if services.Kind != yaml.MappingNode {
+			continue
+		}
+		for j := 0; j+1 < len(services.Content); j += 2 {
+			svc := unalias(services.Content[j+1])
+			if svc.Kind != yaml.MappingNode {
+				continue
+			}
+			for k := 0; k+1 < len(svc.Content); k += 2 {
+				if key := svc.Content[k].Value; key != "secrets" && key != "configs" {
+					continue
+				}
+				list := unalias(svc.Content[k+1])
+				if list.Kind != yaml.SequenceNode {
+					continue
+				}
+				for _, item := range list.Content {
+					entry := unalias(item)
+					if entry.Kind != yaml.MappingNode {
+						continue
+					}
+					for m := 0; m+1 < len(entry.Content); m += 2 {
+						if entry.Content[m].Value != "mode" {
+							continue
+						}
+						if v := unalias(entry.Content[m+1]); v.Kind == yaml.ScalarNode && v.Tag == "!!int" && v.Value == "-0" {
+							entry.Content[m+1] = &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: negZeroMode, Line: v.Line, Column: v.Column}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// checkSecretTarget says why a secret's target is no file's path, nil when it is one: a name, a path of names under /run/secrets, or an
+// absolute path. Where docker compose lets any string through, the mount is a file at that path, which `.` and `..` parts, an empty
+// part, and a trailing `/` do not make.
+func checkSecretTarget(target string) error {
+	if target == "" {
+		return nil
+	}
+	rest := target
+	if strings.HasPrefix(rest, "/") {
+		rest = rest[1:]
+	}
+	isPath := strings.Contains(target, "/")
+	for _, part := range strings.Split(rest, "/") {
+		// A bare `.` is read as it always was (a name); in a path a `.` part is no file's.
+		if part == "" || part == ".." || (part == "." && isPath) {
+			return fmt.Errorf("is no file's path — write a name, a path of names under /run/secrets, or an absolute path, with no `.` or `..` part, no empty part (`//`) and no `/` at the end")
+		}
+	}
+	return nil
+}
+
+// SecretPath is the path in the container a secret with this target is mounted at: an absolute target as it is, any other under /run/secrets.
+func SecretPath(target string) string {
+	if strings.HasPrefix(target, "/") {
+		return target
+	}
+	return "/run/secrets/" + target
+}
+
+// buildFormRules asks a service's `build` for the forms docker compose reads of two keys as each file is read, in every file, a service nothing takes
+// included (measured, v5.5.1: `config -q`; a later file or an extending service that writes the value over does not take the refusal away): an `ssh` list
+// entry is `default` or has an `=`, and none is written twice, and a `ulimits` limit is not a word, a fraction or a boolean (#1783). The rest is asked of the
+// merged project (checkBuildModel).
+func buildFormRules(path, where string, v any, fault func(error) error) error {
+	b, ok := v.(map[string]any)
+	if !ok {
+		return nil
+	}
+	say := func(at, msg string) error {
+		return fault(fmt.Errorf("compose file %s: %s.%s %s", path, where, at, msg))
+	}
+	if limits, ok := b["ulimits"].(map[string]any); ok {
+		limitNames := make([]string, 0, len(limits))
+		for ln := range limits {
+			limitNames = append(limitNames, ln)
+		}
+		sort.Strings(limitNames)
+		for _, ln := range limitNames {
+			switch x := limits[ln].(type) {
+			case string, float64, bool:
+				// A limit that is a word, a fraction or a boolean is refused wherever it is written (a sibling an extends does not take too).
+				if err := say("ulimits."+ln, fmt.Sprintf("is %s — write a whole number, or a mapping of a whole `soft` and a whole `hard`", describeYAMLValue(x))); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	if ssh, ok := b["ssh"].([]any); ok {
+		seen := map[string]bool{}
+		for i, e := range ssh {
+			s, isString := e.(string)
+			if !isString {
+				continue
+			}
+			if s != "default" && !strings.Contains(s, "=") {
+				if err := say(fmt.Sprintf("ssh[%d]", i), fmt.Sprintf("%q is neither `default` nor `id=path`", s)); err != nil {
+					return err
+				}
+			}
+			if seen[s] {
+				if err := say(fmt.Sprintf("ssh[%d]", i), fmt.Sprintf("%q is written twice", s)); err != nil {
+					return err
+				}
+			}
+			seen[s] = true
+		}
+	}
+	return nil
+}
+
+// ulimitValueOK says that a `ulimits` value is a whole number, or a mapping of exactly a whole `soft` and a whole `hard`.
+func ulimitValueOK(v any) bool {
+	whole := func(x any) bool {
+		switch x.(type) {
+		case int, int64, uint64:
+			return true
+		}
+		return false
+	}
+	// What holds nothing is asked by the rules of a key with nothing after it (it is read where the extender writes over it).
+	if v == nil {
+		return true
+	}
+	if m, ok := v.(map[string]any); ok {
+		for _, x := range m {
+			if x == nil {
+				return true
+			}
+		}
+		return len(m) == 2 && whole(m["soft"]) && whole(m["hard"])
+	}
+	return whole(v)
+}
+
+// checkBuildModel asks the project the files make for what docker compose reads of a service's `build` once they are merged (measured, v5.5.1: a later
+// file or an extending service that writes the value over makes the file fine, a service nothing takes is not in it, and one a profile leaves out is, but
+// for the secrets it names): `no_cache`, `privileged` and `pull` cast to a boolean, `shm_size` to a byte size, each `extra_hosts` entry is `host=ip`,
+// each `ulimits` value is a whole number or a mapping of a whole `soft` and a whole `hard` and nothing else, and each of the `secrets` names a declared
+// secret (a string, or a mapping with a `source`, and a `mode` that reads) (#1783).
+func checkBuildModel(name string, services map[string]any, declared map[string]any) error {
+	names := make([]string, 0, len(services))
+	for n := range services {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		svc, ok := services[n].(map[string]any)
+		if !ok {
+			continue
+		}
+		b, ok := svc["build"].(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, k := range []string{"no_cache", "privileged", "pull", "shm_size"} {
+			kind := "bool"
+			if k == "shm_size" {
+				kind = "bytes"
+			}
+			if str, isString := b[k].(string); isString && !castOK(kind, str) {
+				return fmt.Errorf("%s: services.%s.build.%s %q does not read as %s", name, n, k, str, castKindNames[kind])
+			}
+		}
+		if limits, ok := b["ulimits"].(map[string]any); ok {
+			limitNames := make([]string, 0, len(limits))
+			for ln := range limits {
+				limitNames = append(limitNames, ln)
+			}
+			sort.Strings(limitNames)
+			for _, ln := range limitNames {
+				if !ulimitValueOK(limits[ln]) {
+					return fmt.Errorf("%s: services.%s.build.ulimits.%s is %s — write a whole number, or a mapping of a whole `soft` and a whole `hard`", name, n, ln, describeYAMLValue(limits[ln]))
+				}
+			}
+		}
+		if hosts, ok := b["extra_hosts"].([]any); ok {
+			for i, h := range hosts {
+				if str, isString := h.(string); isString && strings.IndexAny(str, "=:") <= 0 {
+					return fmt.Errorf("%s: services.%s.build.extra_hosts[%d] %q is not a `host=ip` entry — write the name of the host, `=` or `:`, and its address", name, n, i, str)
+				}
+			}
+		}
+		// A service a profile may leave out is not asked for the secrets it names (docker compose asks it once the profile is active, which
+		// the load does not know); its other casts are asked whatever the profiles are.
+		gated := false
+		if profiles, ok := svc["profiles"].([]any); ok && len(profiles) > 0 {
+			gated = true
+		}
+		entries, _ := b["secrets"].([]any)
+		for i, e := range entries {
+			source, mode, hasMode := "", any(nil), false
+			switch x := e.(type) {
+			case string:
+				source = x
+			case map[string]any:
+				source, _ = x["source"].(string)
+				mode, hasMode = x["mode"]
+			default:
+				continue
+			}
+			if !gated {
+				if source == "" {
+					return fmt.Errorf("%s: services.%s.build.secrets[%d] names no secret — write the name of a secret declared under `secrets:`", name, n, i)
+				}
+				if _, ok := declared[source]; !ok {
+					return fmt.Errorf("%s: services.%s.build.secrets[%d] names the secret %q, which the file does not declare under `secrets:`", name, n, i, source)
+				}
+			}
+			if hasMode {
+				bad := false
+				switch m := mode.(type) {
+				case float64, uint64, time.Time, bool, []any, map[string]any:
+					bad = true
+				case string:
+					_, err := strconv.ParseInt(m, 8, 64)
+					bad = err != nil
+				case nil:
+					bad = true
+				}
+				if bad {
+					return fmt.Errorf("%s: services.%s.build.secrets[%d].mode %s is not a mode docker compose can read — write a whole number, or an octal string such as \"0440\"", name, n, i, describeYAMLValue(mode))
+				}
+			}
+		}
+	}
+	return nil
 }

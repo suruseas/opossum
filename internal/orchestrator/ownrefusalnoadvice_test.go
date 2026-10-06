@@ -27,11 +27,15 @@ func TestAnEntrypointRefusalOfTheFileCarriesNoStartFailureAdvice(t *testing.T) {
 		name string
 		s    compose.Service
 		want string
+		env  []string // fake knobs
 	}{
-		{"an empty first word and a program after it", compose.Service{Image: "alpine:3", Entrypoint: compose.Command{"", "sh"}}, "starts with an empty word"},
-		{"one empty word and no command", compose.Service{Image: "alpine:3", Entrypoint: compose.Command{""}}, "has no `command:` to run instead"},
-		{"cleared, with no command and an image that names none", compose.Service{Image: "alpine:3", EntrypointCleared: true}, "names a command to run instead"},
-		{"cleared, with a command whose first word is empty", compose.Service{Image: "alpine:3", EntrypointCleared: true, Command: compose.Command{"", "x"}}, "that word is empty"},
+		{"an empty first word and a program after it", compose.Service{Image: "alpine:3", Entrypoint: compose.Command{"", "sh"}}, "starts with an empty word", nil},
+		{"one empty word and no command", compose.Service{Image: "alpine:3", Entrypoint: compose.Command{""}}, "has no `command:` to run instead", nil},
+		{"cleared, with no command and an image that names none", compose.Service{Image: "alpine:3", EntrypointCleared: true}, "names a command to run instead", nil},
+		{"cleared, with a command whose first word is empty", compose.Service{Image: "alpine:3", EntrypointCleared: true, Command: compose.Command{"", "x"}}, "that word is empty", nil},
+		// The image's own CMD starts with an empty word (#1704): read from the image, so it is the
+		// runtime that is asked first, and still the file's mistake that is told.
+		{"cleared, with an image whose CMD starts with an empty word", compose.Service{Image: "alpine:3", EntrypointCleared: true}, "the first word of the command of alpine:3 is empty", []string{"IMAGE_CMD=alpine:3=,x"}},
 	} {
 		for _, mode := range []struct {
 			name   string
@@ -45,6 +49,7 @@ func TestAnEntrypointRefusalOfTheFileCarriesNoStartFailureAdvice(t *testing.T) {
 			t.Run(svc.name+"/"+mode.name, func(t *testing.T) {
 				t.Setenv("XDG_STATE_HOME", t.TempDir())
 				rt, _ := fakeShim(t)
+				setShimEnv(rt, svc.env...)
 				s := svc.s
 				o := orchestrator.New(project("demo", map[string]*compose.Service{"s": &s}), rt, "opossum", &bytes.Buffer{})
 				o.SetDryRun(mode.dry)

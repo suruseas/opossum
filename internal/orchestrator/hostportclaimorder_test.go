@@ -27,7 +27,6 @@ package orchestrator_test
 import (
 	"bytes"
 	"fmt"
-	"net"
 	"strings"
 	"testing"
 
@@ -261,12 +260,10 @@ func freePortWithNeighbours(t *testing.T) int {
 		}
 		free := true
 		for _, n := range []int{p - 2, p - 1, p + 1, p + 2, p + 3} {
-			l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", n))
-			if err != nil {
+			if !portFreeWhereItIsChecked(n) {
 				free = false
 				break
 			}
-			l.Close()
 		}
 		if free {
 			return p

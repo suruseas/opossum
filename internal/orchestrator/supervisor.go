@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -82,24 +83,57 @@ func SupervisorLogFile(project string) (string, error) {
 // well, and the pid is believed only if a live process with that start time is
 // still there.
 func SupervisorPID(project string) int {
-	path, err := supervisorPidFile(project)
-	if err != nil {
-		return 0
-	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return 0
-	}
-	pid, started, ok := parsePidFile(string(b))
-	if !ok || !processAlive(pid) {
-		return 0
-	}
-	// No token means the file can't be tied to a process, and StopSupervisor
-	// escalates to SIGKILL — so it is treated as stale rather than acted on.
-	if started == "" || !sameProcess(pid, started) {
+	pid, unknown := lookSupervisor(project)
+	if unknown {
 		return 0
 	}
 	return pid
+}
+
+// lookSupervisor reads the project's pid file. pid is the one it names when that is a live process that has the start
+// marker the file records; 0 when the file is stale (no file, nothing behind it, a pid that is another process now).
+// unknown is set, with the pid, when a live process is behind the file and its start time cannot be read now
+// (`ps` failed, even asked again): neither the project's supervisor nor a stale file, and whoever acts on it —
+// signals it, removes the file, claims over it — acts on a guess. `down` removed the file of a live supervisor this
+// way, and left it running with nothing that could find it (#1755).
+func lookSupervisor(project string) (pid int, unknown bool) {
+	path, err := supervisorPidFile(project)
+	if err != nil {
+		return 0, false
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0, false
+	}
+	pid, started, ok := parsePidFile(string(b))
+	if !ok || !processAlive(pid) {
+		return 0, false
+	}
+	// No token means the file can't be tied to a process, and StopSupervisor
+	// escalates to SIGKILL — so it is treated as stale rather than acted on.
+	if started == "" {
+		return 0, false
+	}
+	if strings.HasPrefix(started, procTokenPrefix) {
+		// No tick now (the process has no /proc entry) matches nothing, not a token that is only the prefix.
+		ticks := procStartTicks(pid)
+		if ticks != "" && procTokenPrefix+ticks == started {
+			return pid, false
+		}
+		return 0, false
+	}
+	now := psStartedAt(pid)
+	if now == "" {
+		// `ps` has nothing to say of a process that was alive a moment ago and is gone now: stale, not unknown.
+		if !processAlive(pid) {
+			return 0, false
+		}
+		return pid, true
+	}
+	if now == started {
+		return pid, false
+	}
+	return 0, false
 }
 
 // parsePidFile reads "<pid> <start-marker>"; the marker may be absent in a file
@@ -160,24 +194,21 @@ func procStartTicks(pid int) string {
 	return rest[19]
 }
 
-// psStartedAt is the start time as `ps` reports it, or "".
+// psStartedAt is the start time as `ps` reports it, or "" when `ps` would not say. A `ps` that fails
+// (a fork that did not go through, on a machine that is busy) is asked again, psTries more times, psWait
+// apart: what asks is the claim that writes the marker and the look that checks it, and an empty answer
+// from either was taken as "no such process" (#1739, #1755).
 func psStartedAt(pid int) string {
-	out, err := exec.Command("ps", "-o", "lstart=", "-p", strconv.Itoa(pid)).Output()
-	if err != nil {
-		return ""
+	for try := 0; ; try++ {
+		out, err := exec.Command("ps", "-o", "lstart=", "-p", strconv.Itoa(pid)).Output()
+		if got := strings.Join(strings.Fields(string(out)), "-"); err == nil && got != "" {
+			return got
+		}
+		if try >= psTries {
+			return ""
+		}
+		time.Sleep(psWait)
 	}
-	return strings.Join(strings.Fields(string(out)), "-")
-}
-
-// sameProcess reports whether the token in a pid file is the one the process has now. A
-// token is read the way it was written.
-func sameProcess(pid int, started string) bool {
-	if strings.HasPrefix(started, procTokenPrefix) {
-		// No tick now (the process has no /proc entry) matches nothing, not a token that is only the prefix.
-		ticks := procStartTicks(pid)
-		return ticks != "" && procTokenPrefix+ticks == started
-	}
-	return psStartedAt(pid) == started
 }
 
 // processAlive reports whether a pid is a live process. Signal 0 performs the
@@ -196,6 +227,13 @@ func processAlive(pid int) bool {
 // couldn't tell" branch without an unreproducible race is to make the check
 // itself say "still alive" on command.
 var processAliveFn = processAlive
+
+// psTries and psWait are how many more times, and how far apart, `ps` is asked for a start time when the first
+// answer is empty (`ps` can fail on a machine that is busy). Variables so a test can shorten the wait.
+var (
+	psTries = 5
+	psWait  = 50 * time.Millisecond
+)
 
 // ClaimSupervisor is how a supervisor takes ownership of a project: it takes the
 // project's claim lock and writes the pid file whole under it, so exactly one process
@@ -216,7 +254,15 @@ func ClaimSupervisor(project string) error {
 	}
 	path := filepath.Join(dir, "supervisor.pid")
 	me := os.Getpid()
-	content := []byte(strconv.Itoa(me) + " " + processStartedAt(me) + "\n")
+	// The marker is asked for before the lock is taken, not under it: a `ps` that is slow or fails holds
+	// every other claim up for as long as the asking goes on (psStartedAt asks again a few times).
+	started := processStartedAt(me)
+	// A claim with no marker is read as stale (see SupervisorPID): nobody would be behind it, a second
+	// claim would succeed over it, and `down` would find no one to stop. It is not made.
+	if started == "" {
+		return errors.New("cannot read this process's start time (is `ps` available?), so the claim would not tell it from a stale one")
+	}
+	content := []byte(strconv.Itoa(me) + " " + started + "\n")
 	// Every claim goes through one lock, held from the first look at the file to the
 	// moment the claim is in place. Without it a racer that found the file just created
 	// and not yet written read it as empty — nobody behind it — removed it, and claimed
@@ -230,7 +276,9 @@ func ClaimSupervisor(project string) error {
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
 		return err
 	}
-	if SupervisorPID(project) != 0 {
+	if pid, unknown := lookSupervisor(project); unknown {
+		return fmt.Errorf("cannot tell whether the process %d named by the pid file is this project's supervisor (`ps` could not be read), so the claim does not go over it", pid)
+	} else if pid != 0 {
 		return errAlreadySupervised
 	}
 	// Nothing is behind a file that is there now: a crash or a reboot left it. The claim
@@ -383,11 +431,37 @@ func (o *Orchestrator) StillSupervised(names []string) []string {
 	return out
 }
 
-// clearPidFile removes the pid file, so a later `up` doesn't see a stale one.
+// clearPidFile removes the pid file, so a later `up` doesn't see a stale one — unless a
+// supervisor is behind it now. It goes through the lock a claim does, holds it until the file
+// is gone, and looks again under it: `down` found nobody behind the file, or saw the one
+// behind it go, some time before, and a supervisor may have claimed in between. Removing
+// that file would leave a supervisor `down` could no longer find (#1550). With the clear
+// started a little behind the claim, swept across the claim's whole length, the claim was
+// gone in 133 of 400 rounds (the number of rounds that fell in the window, not how often it
+// happens: with no delay it did not happen in 1200).
 func clearPidFile(project string) {
-	if path, err := supervisorPidFile(project); err == nil {
-		os.Remove(path)
+	path, err := supervisorPidFile(project)
+	if err != nil {
+		return
 	}
+	// The lock file is made if it is not there, as a claim makes it: a clear that went on
+	// without one would cross a claim that made it a moment later. Where it cannot be made
+	// (no state dir, or one that cannot be written) nothing is removed: the pid file is not
+	// there, or cannot be removed by this user either.
+	lock, err := os.OpenFile(path+".lock", os.O_RDWR|os.O_CREATE, 0o644)
+	if err != nil {
+		return
+	}
+	defer lock.Close() // closing the file releases the lock
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return
+	}
+	// pid is set both for a supervisor that is there and for a live process that could not be checked
+	// (lookSupervisor): neither is a file to remove.
+	if pid, _ := lookSupervisor(project); pid != 0 {
+		return
+	}
+	os.Remove(path)
 }
 
 // stopSupervisorTermWait, stopSupervisorKillWait and stopSupervisorPoll are the
@@ -427,7 +501,16 @@ func waitForDeath(pid int, timeout time.Duration) bool {
 // out (#1401): the difference is exactly what a caller about to remove this
 // project's containers and networks needs to know.
 func StopSupervisor(project string) (stopped, attempted bool) {
-	pid := SupervisorPID(project)
+	pid, unknown := lookSupervisor(project)
+	if unknown {
+		// A live process stands behind the pid file and `ps` will not say whether it is this project's
+		// supervisor. Not signalled (it may be another process by now), and the file stays, so that the
+		// next `down` can look again: reported as attempted and not confirmed, so that the caller tells
+		// the reader to check by hand (#1755), and says, from SupervisorUncheckedPID read before, that
+		// nothing was asked of it (#1759).
+		attempted = true
+		return
+	}
 	if pid == 0 {
 		clearPidFile(project)
 		return
@@ -456,22 +539,24 @@ func StopSupervisor(project string) (stopped, attempted bool) {
 	return
 }
 
-// stopSupervisorAndReport stops this project's supervisor and logs what happened,
+// stopSupervisorAndReport stops this project's supervisor and logs what happened, and says whether one is left
+// (asked and not confirmed gone, or one that could not be checked: its pid file is still there),
 // including the case a bare `if StopSupervisor(...) { … }` would otherwise drop on
 // the floor: asked, but not confirmed stopped (#1401). Shared by Down and Destroy,
 // which do this identically before touching anything else.
-func (o *Orchestrator) stopSupervisorAndReport() {
+func (o *Orchestrator) stopSupervisorAndReport() (left bool) {
 	// A supervisor the command already asked to stop under this very name, and could not confirm
 	// gone, is not asked again: its pid file is still there, so a second ask would wait out the whole
 	// budget a second time and say the same thing twice (#1406). A name that differs — the file named
 	// the project, where the command went by the directory's — is another supervisor's, and is asked.
 	if o.supervisorHandled != "" && o.supervisorHandled == o.Project.Name {
-		return
+		return false
 	}
 	stop := o.stopSupervisor
 	if stop == nil {
 		stop = StopSupervisor
 	}
+	unchecked := SupervisorUncheckedPID(o.Project.Name) // before the stop: it decides whether the supervisor is asked
 	if stopped, attempted := stop(o.Project.Name); stopped {
 		o.logf("Stopped the restart supervisor\n")
 	} else if attempted {
@@ -482,8 +567,10 @@ func (o *Orchestrator) stopSupervisorAndReport() {
 		// has no writer of its own dedicated to warnings the way cmd's stderr
 		// is (#1415: unifying the stream too would need Orchestrator to carry
 		// a second writer, out of scope for a text-only inconsistency).
-		o.logf("opossum: %s\n", NoticeSupervisorStopFailed())
+		o.logf("opossum: %s\n", NoticeSupervisorStopFailedFor(unchecked))
+		return true
 	}
+	return false
 }
 
 // SupervisedServices returns the services whose `restart:` asks to be kept up,
@@ -534,6 +621,34 @@ func NoticeSupervisorStopFailed() string {
 		"by hand (`kill`) if it's still there.", codeSupervisorStopFailed)
 }
 
+// SupervisorUncheckedPID is the pid of a live process behind this project's pid file that `ps` would not vouch for
+// (lookSupervisor's unknown), and 0 when there is none. It is read before a stop is tried, because that is when it decides
+// whether the supervisor will be asked at all: StopSupervisor does not signal it (#1759).
+func SupervisorUncheckedPID(project string) int {
+	if pid, unchecked := lookSupervisor(project); unchecked {
+		return pid
+	}
+	return 0
+}
+
+// NoticeSupervisorUnchecked is the line for a supervisor that was not signalled because `ps` would not say whether the
+// process behind the pid file is this project's (#1759): it says what happened (nothing was asked of it) and how to look.
+func NoticeSupervisorUnchecked(pid int) string {
+	return fmt.Sprintf("[%s] couldn't check whether process %d is this project's restart supervisor (`ps` did not answer), "+
+		"so it was not asked to stop — it may still be watching this project's containers. Run `ps -p %d` to check, "+
+		"and stop it by hand (`kill`) if it is the supervisor.", codeSupervisorStopFailed, pid, pid)
+}
+
+// NoticeSupervisorStopFailedFor is the notice for a stop that was attempted and not confirmed, worded for what happened to
+// the supervisor: unchecked is the pid SupervisorUncheckedPID gave before the stop (nonzero: it was never asked, because it
+// could not be checked), 0 when it was asked and is not confirmed gone.
+func NoticeSupervisorStopFailedFor(unchecked int) string {
+	if unchecked != 0 {
+		return NoticeSupervisorUnchecked(unchecked)
+	}
+	return NoticeSupervisorStopFailed()
+}
+
 // StartSupervisor launches the watcher for this project in the background and
 // records its pid. It is a no-op when one is already running — a second `up` in
 // the same project must not leave two watchers racing to restart the same
@@ -582,6 +697,80 @@ func StartSupervisor(project, workdir string, args []string) (int, error) {
 		return 0, err
 	}
 	// The child claims the pid file itself; this process doesn't write it.
-	go func() { _ = cmd.Wait() }()
-	return cmd.Process.Pid, nil
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	pid := cmd.Process.Pid
+	return pid, awaitSupervisorClaim(project, pid, exited, logPath)
+}
+
+// supervisorStartWait is how long `up` waits for a watcher it started to take its claim, or to be gone.
+// A variable so a test can shorten it.
+var supervisorStartWait = 1500 * time.Millisecond
+
+// awaitSupervisorClaim waits until the watcher this process started either holds the project's claim
+// (it is going to stay), exits cleanly (another watcher holds the project: nothing is wrong), or exits with
+// an error — a watcher that dies at once, as one does when it cannot read its own start time, was announced as
+// running and watching nothing (#1739). The error carries the last line of the log the watcher wrote on the way
+// out. A watcher still starting when the wait is over is taken as started, as it was before.
+func awaitSupervisorClaim(project string, pid int, exited <-chan error, logPath string) error {
+	deadline := time.Now().Add(supervisorStartWait)
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-exited:
+			if err == nil {
+				return nil
+			}
+			if last := lastLogLine(logPath); last != "" {
+				return fmt.Errorf("it exited at once (%v): %s", err, last)
+			}
+			return fmt.Errorf("it exited at once (%v); see %s", err, logPath)
+		case <-time.After(20 * time.Millisecond):
+			if SupervisorPID(project) == pid {
+				return nil
+			}
+		}
+	}
+	return nil
+}
+
+// lastLogLine is the last non-empty line of the file's last 4 KiB, or "".
+func lastLogLine(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return ""
+	}
+	size := st.Size()
+	start := size - 4096
+	if start < 0 {
+		start = 0
+	}
+	buf := make([]byte, size-start)
+	if _, err := f.ReadAt(buf, start); err != nil && err != io.EOF {
+		return ""
+	}
+	lines := strings.Split(strings.TrimRight(string(buf), "\n"), "\n")
+	return strings.TrimSpace(lines[len(lines)-1])
+}
+
+// supervisorLine is the line `ps` prints about the project's restart supervisor, or "" when there is none:
+// running, or — a live process behind the pid file whose start time `ps` would not give — not checked. Said so, where
+// it used to be left out as if there were no supervisor, which `down` and `destroy` read the same way (#1755).
+func supervisorLine(project string) string {
+	pid, unknown := lookSupervisor(project)
+	if pid == 0 {
+		return ""
+	}
+	if unknown {
+		return fmt.Sprintf("restart supervisor: could not be checked (pid %d: `ps` would not say whether it is this project's) — look with `ps -p %d`", pid, pid)
+	}
+	msg := fmt.Sprintf("restart supervisor: running (pid %d)", pid)
+	if log, err := SupervisorLogFile(project); err == nil {
+		msg += " — " + log
+	}
+	return msg
 }

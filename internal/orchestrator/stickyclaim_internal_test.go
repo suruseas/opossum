@@ -66,7 +66,8 @@ func freePortsForSticky(t *testing.T, n int) []int {
 	// hundred above — and 65535 has nothing above it.
 	//
 	// The budget for walking past the ones over the cutoff is what it is because
-	// the OS hands these out IN SEQUENCE, not at random. The numbers above 65299
+	// macOS hands these out IN SEQUENCE, not at random (Linux does hand them out at random, which is
+	// why a number let go can come straight back there: #1753). The numbers above 65299
 	// are not a small chance on every draw; they are a stretch of about 235 that
 	// the allocation walks through, and a run starting inside it has to walk all
 	// the way out. Measured: with the allocation put at 65150, this helper failed
@@ -90,7 +91,17 @@ func freePortsForSticky(t *testing.T, n int) []int {
 			t.Fatal(err)
 		}
 		if p := l.Addr().(*net.TCPAddr).Port; p >= freePortLow && p <= freePortHigh {
-			defer l.Close()
+			// Free where `up` asks, and not only on loopback — the number and the ones a row builds beside it
+			// (the one below, three above): let go for the asking, and held again.
+			l.Close()
+			if !portsFreeWhereUpAsks(p-1, p+3) {
+				continue
+			}
+			held, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", p))
+			if err != nil {
+				continue
+			}
+			defer held.Close()
 			ports = append(ports, p)
 			continue
 		}

@@ -492,8 +492,8 @@ func mergeValue(base, over any, key string, path string) any {
 	// gave. Read both sides that way. Not for a *service* called
 	// `depends_on`.
 	if key == "depends_on" && !collections[path] {
-		if b, ok := dependsOnAsMap(base); ok {
-			if o, ok := dependsOnAsMap(over); ok {
+		if b, ok := dependsOnAsMap(base, true); ok {
+			if o, ok := dependsOnAsMap(over, false); ok {
 				return mergeMap(b, o, childPath(path, key))
 			}
 		}
@@ -544,6 +544,12 @@ func mergeValue(base, over any, key string, path string) any {
 			if mergeByTargetKeys[key] {
 				return mergeSeqByTarget(merged)
 			}
+			// A service's `secrets` and `configs` entries merge by the place they are mounted at: a later
+			// file's entry for the same target replaces the earlier one whole (its `mode` with it), where an
+			// entry for another target is added (#1544; measured, v5.5.1, -f files and extends alike).
+			if (key == "secrets" || key == "configs") && collections[parentPath(path)] {
+				return mergeSeqBySecretTarget(merged, key)
+			}
 			return merged
 		}
 	}
@@ -551,15 +557,41 @@ func mergeValue(base, over any, key string, path string) any {
 }
 
 // dependsOnAsMap reads a `depends_on:` value in either form as the mapping
-// form: a list of names becomes `{name: {condition: service_started}}` (the
-// entry docker compose makes of a listed name), a mapping is returned as
-// is. Anything else — a scalar, a list holding something that is not a
+// form: a list of names becomes `{name: {condition: service_started, required: true}}`
+// (the entry docker compose makes of a listed name, in the later file too), a mapping is
+// returned as is — with the `required` an earlier file's entry has by default put in
+// (earlier says it is the earlier side of a merge). Anything else — a scalar, a list holding something that is not a
 // name — is not a value this can read, and ok is false so the caller falls
 // back to the ordinary merge (and the decode names it).
-func dependsOnAsMap(v any) (map[string]any, bool) {
+func dependsOnAsMap(v any, earlier bool) (map[string]any, bool) {
 	switch x := v.(type) {
 	case map[string]any:
-		return x, true
+		if !earlier {
+			return x, true
+		}
+		// An entry of an EARLIER file that names a condition has a `required` as well, true unless written so —
+		// as the entry of a listed name does, below: a later file's `required: ~` is then "not given" over it,
+		// where over no key at all it would stay a null the decode refuses (#1585; measured, v5.5.1). Not for the
+		// later file's own map: docker compose gives `required` its default after the merge, so a later
+		// `{condition: service_healthy}` that writes no `required` leaves an earlier `required: false` as it is. A
+		// copy: the map is the file's own.
+		out := make(map[string]any, len(x))
+		for name, entry := range x {
+			if m, ok := entry.(map[string]any); ok {
+				if _, hasCond := m["condition"]; hasCond {
+					if _, hasReq := m["required"]; !hasReq {
+						withRequired := make(map[string]any, len(m)+1)
+						for key, val := range m {
+							withRequired[key] = val
+						}
+						withRequired["required"] = true
+						entry = withRequired
+					}
+				}
+			}
+			out[name] = entry
+		}
+		return out, true
 	case []any:
 		out := make(map[string]any, len(x))
 		for _, item := range x {
@@ -567,7 +599,7 @@ func dependsOnAsMap(v any) (map[string]any, bool) {
 			if !ok {
 				return nil, false
 			}
-			out[name] = map[string]any{"condition": ConditionStarted}
+			out[name] = map[string]any{"condition": ConditionStarted, "required": true}
 		}
 		return out, true
 	}
@@ -653,6 +685,49 @@ func mergeSeqByTarget(xs []any) []any {
 			continue
 		}
 		pos[t] = len(out)
+		out = append(out, x)
+	}
+	return out
+}
+
+// mergeSeqBySecretTarget collapses `secrets` or `configs` entries that are mounted at the same target, keeping the
+// LAST one at the FIRST one's place. An entry that writes no target is mounted at the default of its kind
+// (`/run/secrets/<source>`, `/<source>`), so the short form `- k` and `{source: k}` are one entry, and one that writes the
+// default out is the same one. An entry that is neither a name nor a mapping with a name is left alone.
+func mergeSeqBySecretTarget(xs []any, kind string) []any {
+	dir := "/run/secrets/"
+	if kind == "configs" {
+		dir = "/"
+	}
+	keyOf := func(x any) string {
+		switch e := x.(type) {
+		case string:
+			return dir + e
+		case map[string]any:
+			// A target written, even an empty one, is its own place (docker compose does not read an empty
+			// one as the default); an empty one has no key and is left alone.
+			if target, ok := e["target"].(string); ok {
+				return target
+			}
+			if source, ok := e["source"].(string); ok {
+				return dir + source
+			}
+		}
+		return ""
+	}
+	pos := map[string]int{}
+	out := make([]any, 0, len(xs))
+	for _, x := range xs {
+		k := keyOf(x)
+		if k == "" {
+			out = append(out, x)
+			continue
+		}
+		if i, seen := pos[k]; seen {
+			out[i] = x
+			continue
+		}
+		pos[k] = len(out)
 		out = append(out, x)
 	}
 	return out
@@ -864,6 +939,7 @@ func loadFilesEnvDir(paths []string, envFiles []string, envDir string, soft bool
 	}
 
 	var doc interpolated
+	var mergedTree map[string]any // the merged files, for the soft read to try again with what a nested null left out
 	// The files the project was read from: the -f paths, with the files
 	// each includes before it. What a failure in the merged document names.
 	loaded := paths
@@ -941,6 +1017,7 @@ func loadFilesEnvDir(paths []string, envFiles []string, envDir string, soft bool
 		// then render the merged result.
 		var merged map[string]any
 		loaded = nil
+		mixed := map[string]mixedKey{} // the list-or-mapping keys that two of the files merged so far wrote
 		for _, src := range sources {
 			path := src.path
 			// Every -f file belongs to the project whose directory is the
@@ -984,8 +1061,20 @@ func loadFilesEnvDir(paths []string, envFiles []string, envDir string, soft bool
 			} else {
 				// A key this file tagged `!reset` or `!override` leaves the
 				// earlier files' value out of the merge.
-				applyMergeTags(merged, tags, true)
+				held := hostEntriesHeld(merged)
+				applyMergeTagsOver(merged, tags, true, mixed)
+				dropGone(merged, mixed)
+				markMixed(merged, m, mixed)
 				merged = mergeMap(merged, m, "")
+				// An `extra_hosts` (or `build.extra_hosts`) that was a mapping, that this file writes, and that holds no entry once it is merged
+				// in (its `!reset` took each one out) is refused naming this file (measured, v5.5.1: `must be a mapping`), where the
+				// other mappings that are left empty are read.
+				if err := hostEntriesLeftNone(path, held, m, merged, tags); err != nil {
+					if scope.values == nil {
+						return nil, err
+					}
+					*scope.values = append(*scope.values, err)
+				}
 				// What the file adds is checked in what it made of the
 				// earlier files too, as docker compose checks each file's
 				// merge: a key this file writes with nothing after it and
@@ -993,7 +1082,22 @@ func loadFilesEnvDir(paths []string, envFiles []string, envDir string, soft bool
 				// `internal:`, a `build.context:` no base has — is nothing
 				// in the result, and refused naming this file.
 				if err := validateMerged(path, merged, asMerged); err != nil {
-					return nil, err
+					// A nested key with nothing after it that the merged files leave nothing under: a read that goes on past refused
+					// values keeps the refusal and goes on (#1582), and the decode of the merged files reads them again without the key.
+					// The check of each file has not always kept it (a `!override` of the mapping reads the earlier file's value as
+					// the one that stays).
+					if scope.values == nil || !strings.Contains(err.Error(), "got nothing") {
+						return nil, err
+					}
+					*scope.values = append(*scope.values, err)
+				}
+				// A service that has nothing under it once this file is merged in — no earlier file wrote it, and this one writes it
+				// bare — is refused naming this file, a later file that gives it a body does not take that away (measured, v5.5.1).
+				if err := serviceWithoutBody(path, merged); err != nil {
+					if scope.values == nil {
+						return nil, err
+					}
+					*scope.values = append(*scope.values, err)
 				}
 			}
 		}
@@ -1010,6 +1114,7 @@ func loadFilesEnvDir(paths []string, envFiles []string, envDir string, soft bool
 				documentNameFault = &DocumentNameFault{Before: before, After: after}
 			}
 		}
+		mergedTree = merged
 		data, err := yaml.Marshal(merged)
 		if err != nil {
 			return nil, fmt.Errorf("merging compose files: %w", err)
@@ -1023,15 +1128,49 @@ func loadFilesEnvDir(paths []string, envFiles []string, envDir string, soft bool
 		if len(loaded) > 1 || multi {
 			read = asMerged
 		}
-		return nil, decodeErr(mergedName(loaded), read, blameService(doc, err))
+		refusal := decodeErr(mergedName(loaded), read, blameService(doc, err))
+		// A key with nothing after it in a nested field (`healthcheck: {test: ~}`, `build: {dockerfile: ~}`) that no earlier file
+		// gave a value is refused by the decode of the merged files. A read that goes on past refused values has kept the
+		// refusal when the file that wrote it was merged in (above, where the same decode ran on the files so far), and reads
+		// the merged files again with those keys left out: the commands that take a project down have to read the file (#1582).
+		retry, ok := interpolated{}, false
+		if scope.values != nil && mergedTree != nil && strings.Contains(err.Error(), "got nothing") {
+			if data, merr := yaml.Marshal(withoutNestedNulls(mergedTree)); merr == nil {
+				retry, ok = interpolated{raw: data}, true
+			}
+		}
+		var again composeFile
+		if !ok || retry.into(&again) != nil {
+			return nil, refusal
+		}
+		doc, f = retry, again
 	}
 	// What docker compose checks of the model it built out of every file:
 	// the merged document, with `extends` read (#1462).
 	var modelDoc struct {
 		Services map[string]any `yaml:"services"`
+		Secrets  map[string]any `yaml:"secrets"`
 	}
-	if err := doc.into(&modelDoc); err == nil {
+	if err := doc.intoMarked(&modelDoc); err == nil {
+		if err := checkBuildModel("compose file "+mergedName(loaded), modelDoc.Services, modelDoc.Secrets); err != nil {
+			if scope.values == nil {
+				return nil, err
+			}
+			*scope.values = append(*scope.values, err)
+		}
 		if err := checkModelBounds("compose file "+mergedName(loaded), modelDoc.Services); err != nil {
+			if scope.values == nil {
+				return nil, err
+			}
+			*scope.values = append(*scope.values, err)
+		}
+		if err := checkSecretModes("compose file "+mergedName(loaded), modelDoc.Services); err != nil {
+			if scope.values == nil {
+				return nil, err
+			}
+			*scope.values = append(*scope.values, err)
+		}
+		if err := checkPortHostIPs("compose file "+mergedName(loaded), modelDoc.Services); err != nil {
 			if scope.values == nil {
 				return nil, err
 			}
@@ -1111,6 +1250,7 @@ func loadFilesEnvDir(paths []string, envFiles []string, envDir string, soft bool
 		Networks:     f.Networks,
 		Unsupported:  ignoredTopLevel(doc),
 		nameFault:    nameFault,
+		nameEmptied:  f.Name == "" && nameEmptiedIn(paths, scope.lookup()),
 		docNameFault: documentNameFault,
 		valueFault:   firstOf(scope.values),
 	}
@@ -1130,6 +1270,11 @@ func loadFilesEnvDir(paths []string, envFiles []string, envDir string, soft bool
 		if decl.Internal && decl.External {
 			return nil, fmt.Errorf("network %q: internal and external cannot both be set (an external network is used as-is)", name)
 		}
+	}
+	// What `links:` and `network_mode: service:` name is a dependency, as docker compose reads it: before anything reads the
+	// dependencies, and before `volumes_from` adds its own.
+	if err := addLinkedDeps(f.Services, names); err != nil {
+		return nil, err
 	}
 	// `volumes_from` is folded before anything reads a service's mounts:
 	// the entries it borrows are mounts like any other from here on.
@@ -1287,7 +1432,7 @@ func loadFilesEnvDir(paths []string, envFiles []string, envDir string, soft bool
 			if err != nil || int64(b) <= 0 {
 				return nil, fmt.Errorf("service %q: shm_size %q is not a size — write it as 64M, 1gb, or a byte count", name, s)
 			}
-			svc.ShmSize = scalarStr(strconv.FormatInt(int64(b), 10))
+			svc.ShmSize = bareInt(strconv.FormatInt(int64(b), 10))
 		}
 		// `mac_address` reaches the runtime as `--network <name>,mac=XX:XX:XX:XX:XX:XX`
 		// on the service's first network. The runtime refuses any other
@@ -1382,10 +1527,10 @@ func loadFilesEnvDir(paths []string, envFiles []string, envDir string, soft bool
 			if sec.File == "" {
 				return nil, fmt.Errorf("secret %q must set `file` (only file-based secrets are supported)", ref.Source)
 			}
-			// The target names a file directly under /run/secrets; reject a path
-			// that would nest under or escape it.
-			if strings.ContainsAny(ref.Target, "/") || strings.Contains(ref.Target, "..") {
-				return nil, fmt.Errorf("service %q: secret target %q must be a bare name (no path separators)", name, ref.Target)
+			// The target is a file under /run/secrets, or an absolute path; docker compose lets any string through and its engine mounts it
+			// there, which a path that is no file's cannot be (#1778).
+			if err := checkSecretTarget(ref.Target); err != nil {
+				return nil, fmt.Errorf("service %q: secret target %q %v", name, ref.Target, err)
 			}
 		}
 	}
@@ -1414,6 +1559,73 @@ func refuseBadNames(file, kind string, names []string) error {
 		if !validVolumeName(name) {
 			return fmt.Errorf("%s: %s name %q %s", file, kind, name, volumeNameRule)
 		}
+	}
+	return nil
+}
+
+// nameEmptiedIn is whether the project's `name:` came to nothing by a reference, read of the files given as docker compose
+// reads them (measured, v5.5.1): a file that writes a name by a reference that comes to nothing makes the project's name
+// empty, one that writes a name that is something puts it right, and one that writes `name: ""` or none leaves what the files
+// before it made (so `n`, empty, `""` is the refusal, and empty, `n`, `""` is not). A project whose name no `-p` or
+// COMPOSE_PROJECT_NAME gives is refused for it; an included file's `name:` is not the project's.
+func nameEmptiedIn(paths []string, lookup varLookup) bool {
+	emptied := false
+	for _, path := range paths {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		one, err := interpolateDocument(raw, lookup)
+		if err != nil {
+			continue
+		}
+		if one.nameEmptied {
+			emptied = true
+		} else if writesAName(one) {
+			emptied = false
+		}
+	}
+	return emptied
+}
+
+// writesAName is whether the document's top-level `name:` is a scalar with something in it, as it is once its references are
+// expanded.
+func writesAName(one interpolated) bool {
+	node := one.node
+	if node == nil {
+		var doc yaml.Node
+		if yaml.Unmarshal(one.raw, &doc) != nil {
+			return false
+		}
+		node = &doc
+	}
+	root := node
+	if root.Kind == yaml.DocumentNode && len(root.Content) == 1 {
+		root = root.Content[0]
+	}
+	if root.Kind != yaml.MappingNode {
+		return false
+	}
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value == "name" {
+			v := root.Content[i+1]
+			for v.Kind == yaml.AliasNode && v.Alias != nil {
+				v = v.Alias
+			}
+			return v.Kind == yaml.ScalarNode && v.ShortTag() != "!!null" && v.Value != ""
+		}
+	}
+	return false
+}
+
+// CheckEmptyName is the refusal of a project whose `name:` came to nothing by a reference (`name: ${P:-}`, P unset or empty):
+// docker compose reads that as "project name must not be empty" and not as the directory's name, so the project it would
+// have started has no name here either. It is for the callers that know whether `-p` or COMPOSE_PROJECT_NAME named the
+// project, which make it no fault; the commands that take a project down name it and go on, as an earlier opossum started the
+// project under the directory's name.
+func (p *Project) CheckEmptyName() error {
+	if p.nameEmptied && p.EnvName == "" {
+		return errors.New("project name must not be empty — the `name:` of the compose file is made of variables that come to nothing; set one, write a name, or give `-p`")
 	}
 	return nil
 }
@@ -2212,7 +2424,10 @@ func validateOne(path string, one interpolated, earlier map[string]any, values *
 	} else {
 		doc = withoutNotGivenInExtending(doc)
 	}
-	doc = withoutUntakenResources(doc, only)
+	doc = withoutUntakenDeploy(doc, only)
+	doc = withoutNotGivenInTaken(doc, only)
+	doc = withoutDeferredTypes(doc, only)
+	doc = withoutNegativeRetries(doc)
 	var f composeFile
 	if err := doc.Decode(&f); err != nil {
 		refusal := decodeErr(path, asWritten, blameService(interpolated{node: doc, raw: one.raw}, err))
@@ -2456,6 +2671,11 @@ func startsWithBang(written []byte, line, column int) bool {
 // mergeValueOK reports whether what a `<<` merge key holds is one docker compose reads:
 // a mapping, or a list whose every item is one (aliases followed).
 func mergeValueOK(v *yaml.Node) bool {
+	// An alias to an anchor tagged `!reset` merges nothing, whatever the anchor holds (docker compose
+	// v5.5.1 takes `<<: *z` over `z: &z !reset [/z]`): takeMergeTags drops the key.
+	if v != nil && v.Kind == yaml.AliasNode && v.Alias != nil && v.Alias.Tag == "!reset" {
+		return true
+	}
 	for v != nil && v.Kind == yaml.AliasNode {
 		v = v.Alias
 	}
@@ -2467,6 +2687,10 @@ func mergeValueOK(v *yaml.Node) bool {
 		return true
 	case yaml.SequenceNode:
 		for _, item := range v.Content {
+			// An alias to a `!reset` anchor merges nothing, whatever it holds (see above).
+			if item != nil && item.Kind == yaml.AliasNode && item.Alias != nil && item.Alias.Tag == "!reset" {
+				continue
+			}
 			for item != nil && item.Kind == yaml.AliasNode {
 				item = item.Alias
 			}
@@ -2700,8 +2924,8 @@ func documentRoot(doc *yaml.Node) *yaml.Node {
 // several -f files this runs on each file before the merge, as docker
 // compose resolves it: what a file extends is what that file defines.
 // Reports whether anything was resolved.
-func resolveExtendsInTree(where, projectDir string, tree map[string]any, lookup varLookup, values *[]error) (bool, error) {
-	return resolveExtends(where, projectDir, tree, lookup, nil, values, "")
+func resolveExtendsInTree(where, projectDir string, tree map[string]any, lookup varLookup, values *[]error, earlier map[string]any) (bool, error) {
+	return resolveExtends(where, projectDir, tree, lookup, nil, values, "", earlier)
 }
 
 // extendsID names one service of one file on the resolution stack, so that
@@ -2718,7 +2942,7 @@ func extendsID(where, name string) string { return where + "#" + name }
 // chain of services it extends in turn, and no other service of the file — docker compose reads
 // the rest of the file for nothing but its own errors, and a service that extends a file that is
 // missing, or this file again, is not its business there (#1561, #1516).
-func resolveExtends(where, projectDir string, tree map[string]any, lookup varLookup, stack []string, values *[]error, only string) (bool, error) {
+func resolveExtends(where, projectDir string, tree map[string]any, lookup varLookup, stack []string, values *[]error, only string, earlier map[string]any) (bool, error) {
 	services, _ := tree["services"].(map[string]any)
 	touched := false
 	done := map[string]bool{}
@@ -2781,6 +3005,8 @@ func resolveExtends(where, projectDir string, tree map[string]any, lookup varLoo
 			}
 		}
 		var base map[string]any
+		fromFile := ""    // the file the extended service comes from, when it is another's
+		viaChain := false // and whether that service extends another in turn
 		if otherFile {
 			// The named file is read from the project directory of the
 			// unit this file belongs to — the first -f file's directory,
@@ -2794,11 +3020,13 @@ func resolveExtends(where, projectDir string, tree map[string]any, lookup varLoo
 			if !filepath.IsAbs(path) {
 				path = filepath.Join(projectDir, path)
 			}
-			b, err := extendedServiceFromFile(where, name, path, target, lookup, append(stack, id), values)
+			b, chained, err := extendedServiceFromFile(where, name, path, target, lookup, append(stack, id), values)
 			if err != nil {
 				return err
 			}
 			base = b
+			fromFile = path
+			viaChain = chained
 		} else {
 			raw, exists := services[target]
 			if !exists {
@@ -2831,7 +3059,138 @@ func resolveExtends(where, projectDir string, tree map[string]any, lookup varLoo
 			delete(own, serviceTagsKey)
 		}
 		delete(base, serviceTagsKey)
+		// A `deploy.replicas` that is a list or a mapping in the extended service and that the extender writes over with a value of another
+		// kind, without `!override` or `!reset` (which took it out of the extended service above), is refused: docker compose cannot merge
+		// the two (measured, v5.5.1: #1776). A list over a list, a mapping over a mapping and a null merge; one that the extender leaves
+		// in place is asked once the service that extends this one is merged, or at the end (replicasReadable). Asked of what a file that is only
+		// extended from holds too, where one service of the file extends another.
+		if fromFile != "" || only != "" {
+			if bd, ok := base["deploy"].(map[string]any); ok {
+				if od, ok := own["deploy"].(map[string]any); ok {
+					if ov, written := od["replicas"]; written && ov != nil && replicasKind(ov) != replicasKind(bd["replicas"]) && replicasKind(bd["replicas"]) != "count" {
+						e := fmt.Errorf("compose file %s%s: services.%s.deploy.replicas is %s in the service it extends, and cannot be merged with %s written over it — write `replicas` or `deploy` with `!override` or `!reset` to replace it", where, orFile(fromFile), name, describeYAMLValue(bd["replicas"]), describeYAMLValue(ov))
+						if values == nil {
+							return e
+						}
+						*values = append(*values, e)
+					}
+				}
+			}
+		}
+		// A key the extending service writes with nothing after it that docker compose refuses even over a value, over a value the
+		// extended service gave: refused (the merge below reads any other null as "not given" there).
+		var earlierSvc map[string]any
+		if earlierServices, ok := earlier["services"].(map[string]any); ok {
+			earlierSvc, _ = earlierServices[name].(map[string]any)
+		}
+		{
+			// Where a service is only extended from (a hop), the service that extends it may still write the key over, and docker
+			// compose refuses a null over a value only for the keys it refuses whatever is written over them.
+			refused := refusedOverAValue
+			if only != "" {
+				refused = refusedWhateverIsWrittenOver
+			}
+			at, over := nullOverAValue(own, base, nil, refused), "the service it extends"
+			if at == "" && earlierSvc != nil {
+				at, over = nullOverAValue(own, earlierSvc, nil, refused), "an earlier file"
+			}
+			if at != "" {
+				e := fmt.Errorf("compose file %s: services.%s.%s has nothing after it, over the value %s gives it — write the value, or remove the key", where, name, at, over)
+				if values == nil {
+					return e
+				}
+				*values = append(*values, e)
+			}
+		}
 		services[name] = mergeMap(base, own, childPath("services", name))
+		// An infinity or a NaN that stays in the merged service came from the other file (what this file
+		// writes itself was refused where the file was read): docker compose cannot write it into its
+		// model. Named by the service it came from (target), in the file it came from. Asked of the service this
+		// file takes, once, and not of a hop through a file that is only extended from (only is set there): the
+		// service that extends it may write over it.
+		if fromFile != "" && only == "" {
+			if at := nonFiniteInService(services[name], "services."+target); at != "" {
+				where := fromFile
+				if viaChain {
+					where += " (or a file it extends)" // the value may be written in a file this one extends in turn
+				}
+				err := fmt.Errorf("compose file %s: %s is a number docker compose cannot read — infinity and NaN cannot go into its model; quote it to keep it a string", where, at)
+				if values == nil {
+					return err
+				}
+				*values = append(*values, err)
+			}
+		}
+		// The blocks of `deploy` that stay in the merged service are put to the schema the same way (see
+		// deployShapes), and a key with nothing after it that stays is refused: the extender writing the key over, or
+		// resetting `deploy`, is what takes either away.
+		if fromFile != "" && only == "" {
+			merged, _ := services[name].(map[string]any)
+			if d, ok := merged["deploy"].(map[string]any); ok {
+				where := fromFile
+				if viaChain {
+					where += " (or a file it extends)"
+				}
+				say := func(e error) error {
+					if values == nil {
+						return e
+					}
+					*values = append(*values, e)
+					return nil
+				}
+				if err := deployShapes(where, "services."+target+".deploy", d, true, say); err != nil {
+					return err
+				}
+			}
+		}
+		// The number of replicas that stays in the merged service is read the same way: where it came from
+		// the other file, whatever it holds is what docker compose casts, and the file it was read in did not
+		// ask (a count the extender writes over is not asked at all).
+		if fromFile != "" && only == "" {
+			merged, _ := services[name].(map[string]any)
+			if d, ok := merged["deploy"].(map[string]any); ok {
+				if replicas, present := d["replicas"]; present && !replicasReadable(replicas) {
+					where := fromFile
+					if viaChain {
+						where += " (or a file it extends)"
+					}
+					err := fmt.Errorf("compose file %s: services.%s.deploy.replicas must be a whole number, and this is %s", where, target, describeYAMLValue(replicas))
+					if values == nil {
+						return err
+					}
+					*values = append(*values, err)
+				}
+			}
+		}
+		// A number outside the bounds of its key that is still there once the services are merged (see boundsThatStay): the extender
+		// writing a value over it is what takes it away. Asked of what a service takes from another file, as the null is below.
+		if fromFile != "" && only == "" {
+			whereFile := fmt.Sprintf("%s (or %s, the file it extends)", where, fromFile)
+			if viaChain {
+				whereFile = fmt.Sprintf("%s (or %s, the file it extends, or a file that one extends)", where, fromFile) // the value may be written in a file this one extends in turn
+			}
+			if e := typesThatStay(whereFile, name, services[name].(map[string]any)); e != nil {
+				if values == nil {
+					return e
+				}
+				*values = append(*values, e)
+			}
+		}
+		// A key with nothing after it that is still there once the services are merged: the schema is put to it now (see nullsThatStay).
+		if only == "" {
+			if msg := nullsThatStay(name, withoutBackedNulls(services[name].(map[string]any), earlierSvc)); msg != "" {
+				whereFile := where
+				if fromFile != "" {
+					// The key may be the extender's own, or the extended service's: both files are named.
+					whereFile = fmt.Sprintf("%s (or %s, the file it extends)", where, fromFile)
+				}
+				e := fmt.Errorf("compose file %s: %s", whereFile, msg)
+				if values == nil {
+					return e
+				}
+				*values = append(*values, e)
+			}
+		}
 		done[name] = true
 		touched = true
 		return nil
@@ -2865,7 +3224,7 @@ func resolveExtends(where, projectDir string, tree map[string]any, lookup varLoo
 // made absolute against that file's directory, since the project resolves
 // relative paths against its first file. Only the service comes over: the
 // file's top-level declarations do not (measured).
-func extendedServiceFromFile(where, name, path, target string, lookup varLookup, stack []string, values *[]error) (map[string]any, error) {
+func extendedServiceFromFile(where, name, path, target string, lookup varLookup, stack []string, values *[]error) (base map[string]any, chained bool, err error) {
 	// A relative -f leaves `where` relative, and so this path; the paths
 	// rebased below must be absolute, since the project resolves relative
 	// ones against its own directory (a relative one would be doubled).
@@ -2874,25 +3233,32 @@ func extendedServiceFromFile(where, name, path, target string, lookup varLookup,
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("%s: service %q extends %q of %s, which cannot be read: %v — name the file by a path from the project directory (the first file's, or the include entry's), or remove extends:", where, name, target, path, err)
+		return nil, false, fmt.Errorf("%s: service %q extends %q of %s, which cannot be read: %v — name the file by a path from the project directory (the first file's, or the include entry's), or remove extends:", where, name, target, path, err)
 	}
 	if err := checkOneDocument(path, raw, values); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	doc, err := interpolateDocument(raw, lookup)
 	if err != nil {
-		return nil, fmt.Errorf("interpolating %s (extended by service %q of %s): %w", path, name, where, err)
+		return nil, false, fmt.Errorf("interpolating %s (extended by service %q of %s): %w", path, name, where, err)
 	}
 	doc, tags, err := takeMergeTags(doc)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if err := validateOne(path, doc, nil, values, target); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	var tree map[string]any
-	if err := doc.into(&tree); err != nil {
-		return nil, decodeErr(path, asWritten, err)
+	if err := doc.intoMarked(&tree); err != nil {
+		return nil, false, decodeErr(path, asWritten, err)
+	}
+	// Whether the service itself extends another (so what it holds may have come from a file it extends in
+	// turn: the file named in a refusal of an infinity is then the one it was reached through).
+	if sv, ok := tree["services"].(map[string]any); ok {
+		if tsvc, ok := sv[target].(map[string]any); ok {
+			_, chained = tsvc["extends"]
+		}
 	}
 	markServiceTags(tree, tags)
 	defer unmarkServiceTags(tree)
@@ -2901,26 +3267,20 @@ func extendedServiceFromFile(where, name, path, target string, lookup varLookup,
 	// measured: a/two.yml → b/near.yml → c/far.yml reads a/b/c/far.yml,
 	// where the first hop from a -f file counts from the project
 	// directory).
-	if _, err := resolveExtends(path, filepath.Dir(path), tree, lookup, stack, values, target); err != nil {
-		return nil, err
+	if _, err := resolveExtends(path, filepath.Dir(path), tree, lookup, stack, values, target, nil); err != nil {
+		return nil, false, err
 	}
 	services, _ := tree["services"].(map[string]any)
 	svc, ok := services[target].(map[string]any)
 	if !ok {
-		return nil, fmt.Errorf("%s: service %q extends %q of %s, and that file does not define it — name a service %s defines, or remove extends:", where, name, target, path, path)
+		return nil, false, fmt.Errorf("%s: service %q extends %q of %s, and that file does not define it — name a service %s defines, or remove extends:", where, name, target, path, path)
 	}
-	base := deepCopyTree(svc).(map[string]any)
-	// An infinity or a NaN in what docker compose takes of this file: the service, as
-	// it is once its own extends is resolved. The rest of the file it does not read.
-	if at := nonFiniteInService(base, "services."+target); at != "" {
-		err := fmt.Errorf("compose file %s: %s is a number docker compose cannot read — infinity and NaN cannot go into its model; quote it to keep it a string", path, at)
-		if values == nil {
-			return nil, err
-		}
-		*values = append(*values, err)
-	}
+	base = deepCopyTree(svc).(map[string]any)
+	// An infinity or a NaN in what docker compose takes of this file is asked of the
+	// service that extends it, once the two are merged (resolveExtends): a value the
+	// extending service writes over or resets is not in the model docker compose checks.
 	rebasePaths(base, filepath.Dir(path))
-	return base, nil
+	return base, chained, nil
 }
 
 // rebasePaths makes the host paths a service writes relative to its own
@@ -3009,11 +3369,11 @@ func relativeHostPath(s string) bool {
 // name a line (a file with one has been checked as written already).
 func resolveSameFileExtends(doc interpolated, tags []mergeTag, where, projectDir string, lookup varLookup, values *[]error) (*interpolated, error) {
 	var tree map[string]any
-	if err := doc.into(&tree); err != nil {
+	if err := doc.intoMarked(&tree); err != nil {
 		return nil, nil // the decode below says so in its own words
 	}
 	markServiceTags(tree, tags)
-	touched, err := resolveExtendsInTree(where, projectDir, tree, lookup, values)
+	touched, err := resolveExtendsInTree(where, projectDir, tree, lookup, values, nil)
 	unmarkServiceTags(tree)
 	if err != nil || !touched {
 		return nil, err
@@ -3507,7 +3867,7 @@ func loadUnitRaw(path string, raw []byte, projectDir string, scope envScope, ear
 		return nil, nil, nil, err
 	}
 	var m map[string]any
-	if err := one.into(&m); err != nil {
+	if err := one.intoMarked(&m); err != nil {
 		// The same words as the single-file road. A key set twice is found
 		// here rather than at the final decode, and saying "not valid YAML"
 		// for it was the same wrong advice by a different route — the one a
@@ -3620,8 +3980,11 @@ func loadUnitRaw(path string, raw []byte, projectDir string, scope envScope, ear
 	}
 	if group != nil {
 		// A key this file tagged `!reset` or `!override` leaves the included
-		// files' value out, as it does an earlier -f file's.
-		applyMergeTags(group, tags, true)
+		// files' value out, as it does an earlier -f file's — a field of a service, of a network, a volume,
+		// a config or a secret; not the item itself (a service, or one of those by its name), which docker
+		// compose merges with the included one whatever it is tagged with (measured, v5.5.1: `web: !override {…}`,
+		// `web: !reset null`, `n: !reset null`, an alias or a merge key to a tagged mapping).
+		applyMergeTags(group, withoutItemTags(tags), true)
 		m = mergeMap(group, m, "")
 		files = append(included, files...)
 		// What is still nothing once the includes — and the earlier -f
@@ -3653,7 +4016,7 @@ func loadUnitRaw(path string, raw []byte, projectDir string, scope envScope, ear
 	// includes — is what it extends, and an earlier file's version of the
 	// extending service is what this file's resolved version goes over.
 	markServiceTags(m, tags)
-	_, err = resolveExtendsInTree(path, projectDir, m, scope.lookup(), scope.values)
+	_, err = resolveExtendsInTree(path, projectDir, m, scope.lookup(), scope.values, earlier)
 	unmarkServiceTags(m)
 	if err != nil {
 		return nil, nil, nil, err
@@ -3664,7 +4027,9 @@ func loadUnitRaw(path string, raw []byte, projectDir string, scope envScope, ear
 // validateMerged decodes what the files so far make together and names
 // the file just added in what it refuses.
 func validateMerged(path string, merged map[string]any, read readAs) error {
-	data, err := yaml.Marshal(merged)
+	// A negative `healthcheck.retries` is asked of the project the files make, once the last is merged in (#1774): a later file
+	// may still write the count over it or reset it.
+	data, err := yaml.Marshal(withoutNegativeRetriesTree(merged))
 	if err != nil {
 		return fmt.Errorf("merging compose files: %w", err)
 	}
@@ -3674,6 +4039,89 @@ func validateMerged(path string, merged map[string]any, read readAs) error {
 		return decodeErr(path, read, blameService(doc, err))
 	}
 	return nil
+}
+
+// withoutNotGivenInTaken is a file that is only extended from (only names the service taken from it) without the keys of that
+// service, and of the ones it extends in turn in the file, that hold nothing: docker compose puts the schema to the service once
+// it is merged with the one that extends it, so what the extender writes over is read, and what stays is refused by
+// nullsThatStay. The keys it refuses with nothing after them whatever is written over them (refusedOverAValue) stay in, to be refused
+// here as in any file.
+func withoutNotGivenInTaken(doc *yaml.Node, only string) *yaml.Node {
+	if only == "" {
+		return doc
+	}
+	root := documentRoot(doc)
+	if root == nil || root.Kind != yaml.MappingNode {
+		return doc
+	}
+	var generic struct {
+		Services map[string]any `yaml:"services"`
+	}
+	if err := doc.Decode(&generic); err != nil {
+		return doc
+	}
+	taken := takenServices(generic.Services, only)
+	newRoot := copyMapping(root)
+	for i := 0; i+1 < len(newRoot.Content); i += 2 {
+		if newRoot.Content[i].Value != "services" || newRoot.Content[i+1].Kind != yaml.MappingNode {
+			continue
+		}
+		services := copyMapping(newRoot.Content[i+1])
+		for j := 0; j+1 < len(services.Content); j += 2 {
+			if svc := services.Content[j+1]; taken[services.Content[j].Value] && svc.Kind == yaml.MappingNode {
+				services.Content[j+1] = prunedExtended(svc, nil)
+			}
+		}
+		newRoot.Content[i+1] = services
+	}
+	if root == doc {
+		return newRoot
+	}
+	out := *doc
+	out.Content = []*yaml.Node{newRoot}
+	return &out
+}
+
+// refusedWhateverIsWrittenOver names the keys of a service that docker compose refuses with nothing after them in a file it
+// extends from even where the extending service writes a value over them (measured, v5.5.1: `build`,
+// `depends_on`, `gpus`, `logging`, `models`, `networks` and `ports` as a whole, and each entry of `ulimits`,
+// `extra_hosts` and `depends_on`); every other key is read where something is written over it.
+func refusedWhateverIsWrittenOver(path []string) bool {
+	switch len(path) {
+	case 1:
+		switch path[0] {
+		case "build", "depends_on", "gpus", "logging", "models", "networks", "ports":
+			return true
+		}
+	case 2:
+		return path[0] == "ulimits" || path[0] == "extra_hosts" || path[0] == "depends_on"
+	}
+	return false
+}
+
+// prunedExtended prunes the nothings of a mapping but those at keys docker compose refuses whatever is written over them.
+func prunedExtended(n *yaml.Node, path []string) *yaml.Node {
+	if n.Kind != yaml.MappingNode {
+		return withoutNotGiven(n)
+	}
+	out := *n
+	pairs := n.Content
+	if resolved, err := mergedPairs(n); err == nil {
+		pairs = resolved
+	}
+	out.Content = make([]*yaml.Node, 0, len(pairs))
+	for i := 0; i+1 < len(pairs); i += 2 {
+		k, v := pairs[i], pairs[i+1]
+		here := append(append([]string(nil), path...), unalias(k).Value)
+		if isNothing(v) {
+			if refusedWhateverIsWrittenOver(here) {
+				out.Content = append(out.Content, k, v)
+			}
+			continue
+		}
+		out.Content = append(out.Content, k, prunedExtended(v, here))
+	}
+	return &out
 }
 
 // withoutNotGivenInExtending copies the document with the bare keys of each
@@ -3780,10 +4228,18 @@ func withoutNotGivenBacked(doc *yaml.Node, earlier map[string]any) *yaml.Node {
 			continue
 		}
 		written := root.Content[i+1]
-		kept := make([]*yaml.Node, 0, len(written.Content))
-		for j := 0; j+1 < len(written.Content); j += 2 {
-			name, svc := written.Content[j], written.Content[j+1]
+		// The services the mapping comes to, a `<<` merge key at `services:` itself resolved: a service it brings is asked of what an
+		// earlier file holds under its own name.
+		pairs := written.Content
+		if resolved, err := mergedPairs(written); err == nil {
+			pairs = resolved
+		}
+		kept := make([]*yaml.Node, 0, len(pairs))
+		for j := 0; j+1 < len(pairs); j += 2 {
+			name, svc := pairs[j], pairs[j+1]
 			if isNothing(svc) {
+				// "Not given" over a service an earlier file wrote; one no earlier file wrote is refused once the file is merged in
+				// (serviceWithoutBody).
 				continue
 			}
 			// (`extends` read through an alias and a merge key too: `<<: *e`.)
@@ -3815,19 +4271,33 @@ func withoutNotGivenBacked(doc *yaml.Node, earlier map[string]any) *yaml.Node {
 // prunedBacked prunes the nothings of a mapping that an earlier value backs, and
 // leaves the ones that nothing backs where they are.
 func prunedBacked(n *yaml.Node, before map[string]any, path []string) *yaml.Node {
+	// A mapping written as an alias (`logging: *l`, `a: *z`) is the mapping it stands for, asked key by key as one written there; the
+	// anchor's own nodes are not changed, the pruned mapping being a copy.
+	if n.Kind == yaml.AliasNode && n.Alias != nil && n.Alias.Kind == yaml.MappingNode {
+		n = n.Alias
+	}
 	if n.Kind != yaml.MappingNode {
 		return withoutNotGiven(n)
 	}
 	out := *n
-	out.Content = make([]*yaml.Node, 0, len(n.Content))
-	for i := 0; i+1 < len(n.Content); i += 2 {
-		k, v := n.Content[i], n.Content[i+1]
-		backing, backed := before[k.Value]
+	// The pairs the mapping comes to, with a `<<` merge key resolved (a key written in the mapping wins over a merged one): a
+	// value a merge key brings is read as one written there, so a null it carries is asked of what an earlier file holds (#1594).
+	// A merge source that is no mapping is left as it is, for the decode to refuse.
+	pairs := n.Content
+	if resolved, err := mergedPairs(n); err == nil {
+		pairs = resolved
+	}
+	out.Content = make([]*yaml.Node, 0, len(pairs))
+	for i := 0; i+1 < len(pairs); i += 2 {
+		k, v := pairs[i], pairs[i+1]
+		// The name a key is written by may be an alias (`*k : v`): the file reads it as the name it stands for.
+		name := unalias(k).Value
+		backing, backed := before[name]
 		backed = backed && backing != nil
 		if backed {
-			backing = longFormOfShort(k.Value, backing)
+			backing = longFormOfShort(name, backing)
 		}
-		here := append(append([]string(nil), path...), k.Value)
+		here := append(append([]string(nil), path...), name)
 		switch {
 		case isNothing(v):
 			if backed && !refusedOverAValue(here) {
@@ -3836,21 +4306,53 @@ func prunedBacked(n *yaml.Node, before map[string]any, path []string) *yaml.Node
 			out.Content = append(out.Content, k, v)
 		case backed:
 			sub, _ := backing.(map[string]any)
+			// A dependency an earlier file gave has a `required` whether it wrote one or not (it is
+			// required unless written so), which a `required: ~` of a later file is "not given" over.
+			if len(here) == 2 && here[0] == "depends_on" && sub != nil {
+				if _, has := sub["required"]; !has {
+					withDefault := make(map[string]any, len(sub)+1)
+					for key, val := range sub {
+						withDefault[key] = val
+					}
+					withDefault["required"] = true
+					sub = withDefault
+				}
+			}
 			out.Content = append(out.Content, k, prunedBacked(v, sub, here))
 		default:
 			out.Content = append(out.Content, k, prunedBacked(v, nil, here))
 		}
 	}
+	// A limit an earlier file gave as `{soft, hard}` is merged into by a later file's part of it: a side written
+	// as one number, a side that is null (dropped above), an empty mapping — docker compose merges them into the
+	// earlier two (measured, v5.5.1). Each file is read on its own before the merge, and a limit with one side is
+	// refused there, so the sides the later file leaves out are written into it from the earlier file.
+	if len(path) == 2 && path[0] == "ulimits" && before != nil {
+		for _, side := range []string{"soft", "hard"} {
+			if hasKey(&out, side) {
+				continue
+			}
+			if v, ok := before[side]; ok && v != nil {
+				var val yaml.Node
+				if err := val.Encode(v); err == nil {
+					key := yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: side}
+					out.Content = append(out.Content, &key, &val)
+				}
+			}
+		}
+	}
 	return &out
 }
 
-// withoutUntakenResources copies a file that is only extended from (`only` names the
-// service taken) without the `deploy.resources` of the services docker compose does not
-// take: it reads none of it there, and a value of the wrong kind in it (`limits: abc`,
-// `limits: {cpus: true}`, `reservations: {memory: ~}`) passes (measured, v5.5.1, 84 forms of
-// `resources` for a service taken and one not) — where it refuses the same in a service
-// taken (#1581). A file read whole is returned as it is.
-func withoutUntakenResources(doc *yaml.Node, only string) *yaml.Node {
+// withoutUntakenDeploy copies a file that is only extended from (`only` names the
+// service taken) without the `deploy` of the services docker compose does not take: it
+// reads none of it there — whatever it holds, a word, a list, a number, a key it does not
+// know, and a value of the wrong kind in `resources` (`limits: abc`, `limits: {cpus: true}`,
+// `reservations: {memory: ~}`) passes (measured, v5.5.1: 84 forms of `resources` and the
+// forms of `deploy` itself, for a service taken and one not) — where it refuses the same in
+// a service taken (#1581, #1606). The number of replicas it still casts, so that one is kept in
+// the copy, for modeKinds to ask. A file read whole is returned as it is.
+func withoutUntakenDeploy(doc *yaml.Node, only string) *yaml.Node {
 	if only == "" {
 		return doc
 	}
@@ -3877,24 +4379,38 @@ func withoutUntakenResources(doc *yaml.Node, only string) *yaml.Node {
 			if taken[services.Content[j].Value] || svc.Kind != yaml.MappingNode {
 				continue
 			}
+			if !hasKey(svc, "deploy") {
+				continue
+			}
+			svcCopy := copyMapping(svc)
+			svcCopy.Content = svcCopy.Content[:0]
 			for k := 0; k+1 < len(svc.Content); k += 2 {
-				deploy := svc.Content[k+1]
-				if svc.Content[k].Value != "deploy" || deploy.Kind != yaml.MappingNode || !hasKey(deploy, "resources") {
+				if svc.Content[k].Value != "deploy" {
+					svcCopy.Content = append(svcCopy.Content, svc.Content[k], svc.Content[k+1])
 					continue
 				}
-				kept := copyMapping(deploy)
-				kept.Content = kept.Content[:0]
-				for m := 0; m+1 < len(deploy.Content); m += 2 {
-					if deploy.Content[m].Value != "resources" {
-						kept.Content = append(kept.Content, deploy.Content[m], deploy.Content[m+1])
+				// The number of replicas, and the few counts and labels that docker compose reads into its model
+				// (untakenDeployKept), are what it still casts of `deploy` in a service not taken, and
+				// modeKinds and deployCasts ask them of this copy: kept, with nothing else. Read from
+				// what the file comes to, with aliases and merge keys resolved (`deploy: *d`, `deploy: {<<: *d}`),
+				// and not from the node as it is written, where a `replicas` behind either of them is not to be seen.
+				var keptDeploy map[string]any
+				if m, ok := generic.Services[services.Content[j].Value].(map[string]any); ok {
+					if d, ok := m["deploy"].(map[string]any); ok {
+						keptDeploy = untakenDeployKept(d)
 					}
 				}
-				svcCopy := copyMapping(svc)
-				svcCopy.Content[k+1] = kept
-				services.Content[j+1] = svcCopy
-				svc = svcCopy
-				changed = true
+				if len(keptDeploy) == 0 {
+					continue
+				}
+				var kept yaml.Node
+				if err := kept.Encode(keptDeploy); err != nil {
+					continue
+				}
+				svcCopy.Content = append(svcCopy.Content, svc.Content[k], &kept)
 			}
+			services.Content[j+1] = svcCopy
+			changed = true
 		}
 		newRoot.Content[i+1] = services
 	}
@@ -3909,17 +4425,333 @@ func withoutUntakenResources(doc *yaml.Node, only string) *yaml.Node {
 	return &out
 }
 
+// withoutNegativeRetries is a file without a `healthcheck.retries` that is a negative number: docker compose refuses one where it stays in
+// the project the files make, and reads it where a later file or an extending service writes the count over it or resets it, or where
+// it stands in a service nothing takes (measured, v5.5.1: #1774). It is the copy each file is checked by; the merged files are decoded
+// whole, where a count that stays is refused (retriesCount).
+func withoutNegativeRetries(doc *yaml.Node) *yaml.Node {
+	root := documentRoot(doc)
+	if root == nil || root.Kind != yaml.MappingNode {
+		return doc
+	}
+	newRoot := copyMapping(root)
+	changed := false
+	for i := 0; i+1 < len(newRoot.Content); i += 2 {
+		if newRoot.Content[i].Value != "services" || newRoot.Content[i+1].Kind != yaml.MappingNode {
+			continue
+		}
+		services := copyMapping(newRoot.Content[i+1])
+		for j := 0; j+1 < len(services.Content); j += 2 {
+			svc := services.Content[j+1]
+			if svc.Kind != yaml.MappingNode {
+				continue
+			}
+			svcCopy := copyMapping(svc)
+			svcCopy.Content = svcCopy.Content[:0]
+			for k := 0; k+1 < len(svc.Content); k += 2 {
+				key, val := svc.Content[k], unalias(svc.Content[k+1])
+				if key.Value != "healthcheck" || val.Kind != yaml.MappingNode {
+					svcCopy.Content = append(svcCopy.Content, svc.Content[k], svc.Content[k+1])
+					continue
+				}
+				hc := copyMapping(val)
+				hc.Content = hc.Content[:0]
+				for h := 0; h+1 < len(val.Content); h += 2 {
+					if val.Content[h].Value == "retries" && negativeCount(val.Content[h+1]) {
+						changed = true
+						continue
+					}
+					hc.Content = append(hc.Content, val.Content[h], val.Content[h+1])
+				}
+				svcCopy.Content = append(svcCopy.Content, key, hc)
+			}
+			services.Content[j+1] = svcCopy
+		}
+		newRoot.Content[i+1] = services
+	}
+	if !changed {
+		return doc
+	}
+	if root == doc {
+		return newRoot
+	}
+	out := *doc
+	out.Content = []*yaml.Node{newRoot}
+	return &out
+}
+
+// withoutNegativeRetriesTree is a merged tree of the files so far without a `healthcheck.retries` that is a negative number.
+func withoutNegativeRetriesTree(merged map[string]any) map[string]any {
+	services, ok := merged["services"].(map[string]any)
+	if !ok {
+		return merged
+	}
+	changed := false
+	cleaned := make(map[string]any, len(services))
+	for name, v := range services {
+		svc, ok := v.(map[string]any)
+		hc, hok := map[string]any(nil), false
+		if ok {
+			hc, hok = svc["healthcheck"].(map[string]any)
+		}
+		if !hok || !negativeCountValue(hc["retries"]) {
+			cleaned[name] = v
+			continue
+		}
+		changed = true
+		hcCopy := make(map[string]any, len(hc))
+		for k, x := range hc {
+			if k != "retries" {
+				hcCopy[k] = x
+			}
+		}
+		svcCopy := make(map[string]any, len(svc))
+		for k, x := range svc {
+			svcCopy[k] = x
+		}
+		svcCopy["healthcheck"] = hcCopy
+		cleaned[name] = svcCopy
+	}
+	if !changed {
+		return merged
+	}
+	out := make(map[string]any, len(merged))
+	for k, v := range merged {
+		out[k] = v
+	}
+	out["services"] = cleaned
+	return out
+}
+
+// negativeCountValue says that a decoded value is a number below zero, or a quoted whole number below zero.
+func negativeCountValue(v any) bool {
+	switch x := v.(type) {
+	case int:
+		return x < 0
+	case int64:
+		return x < 0
+	case float64:
+		return x < 0
+	case string:
+		n, err := strconv.Atoi(x)
+		return err == nil && n < 0
+	}
+	return false
+}
+
+// negativeCount says that a node is a number below zero: bare, or quoted when it is a whole number.
+func negativeCount(n *yaml.Node) bool {
+	n = unalias(n)
+	if n.Kind != yaml.ScalarNode {
+		return false
+	}
+	switch n.Tag {
+	case "!!int", "!!float":
+		if v, err := strconv.ParseInt(n.Value, 0, 64); err == nil {
+			return v < 0 // `-0x1`, `-0o7`, `-0b1`, `-1_0`
+		}
+		if f, err := strconv.ParseFloat(strings.ReplaceAll(n.Value, "_", ""), 64); err == nil {
+			return f < 0
+		}
+	case "!!str":
+		// A quoted count must be a whole number as it is read (retriesCount): a word, or a fraction, is refused in the file that writes it.
+		if v, err := strconv.Atoi(n.Value); err == nil {
+			return v < 0
+		}
+	}
+	return false
+}
+
+// replicasKind says what a `deploy.replicas` is for merging: a `list`, a `mapping`, or a `count` (anything else).
+func replicasKind(v any) string {
+	switch v.(type) {
+	case []any:
+		return "list"
+	case map[string]any:
+		return "mapping"
+	}
+	return "count"
+}
+
+// orFile is the words that name the file a service is taken from, when it is another's.
+func orFile(fromFile string) string {
+	if fromFile == "" {
+		return ""
+	}
+	return " (or " + fromFile + ", the file it extends)"
+}
+
+// uncastTarget says that a long `ports` entry has a `target` docker compose does not cast as the file is read: anything that is not a
+// string, a binary or a null — a number (a fraction, a negative, one past 65535), a boolean, a timestamp, a list, a mapping. A word is cast
+// (and refused) wherever it is; the rest is read where the service is merged (measured, v5.5.1: #1780).
+func uncastTarget(entry *yaml.Node) bool {
+	v := keyNodeThroughMerge(entry, "target")
+	if v == nil {
+		return false
+	}
+	switch v.Kind {
+	case yaml.SequenceNode, yaml.MappingNode:
+		return true
+	case yaml.ScalarNode:
+		switch v.Tag {
+		case "!!int", "!!float", "!!bool", "!!timestamp":
+			return true
+		}
+	}
+	return false
+}
+
+// holdsNothing says that a node is nothing, or holds nothing in a mapping or a list inside it, at any depth.
+func holdsNothing(n *yaml.Node) bool {
+	if isNothing(n) {
+		return true
+	}
+	n = unalias(n)
+	for _, c := range n.Content {
+		if holdsNothing(c) {
+			return true
+		}
+	}
+	return false
+}
+
+// deferredTypedKeys are the keys of a service that docker compose reads into no type while it reads a file that is only
+// extended from, a service taken and one not alike: the extender may write over them, and it asks them (measured, v5.5.1,
+// `config -q`, the service as it comes out of the extends) of the service that results (typesThatStay, #1771). The casts of
+// numbers and booleans, `ports` as a whole and the `target` of a long entry, `build`, `depends_on`, `env_file`, and `healthcheck.retries` and `healthcheck.disable`, and the list form of `environment`, `labels` and `sysctls`, are
+// asked of the file as they are everywhere, and so are not here.
+var deferredTypedKeys = map[string]bool{
+	"command": true, "entrypoint": true, "environment": true, "labels": true, "extra_hosts": true, "sysctls": true,
+}
+
+// deferredPortFields are the fields of a long `ports` entry that docker compose asks of the service an extends results in.
+var deferredPortFields = map[string]bool{"published": true, "mode": true, "protocol": true, "host_ip": true}
+
+// withoutDeferredTypes is a file that is only extended from (only names the service taken) without what docker compose asks only of
+// the service that results from the extends: the keys of deferredTypedKeys, a `deploy` that is not a mapping, `healthcheck` but its `retries`, the long entries of `ports`
+// but their `target` and the like (deferredPortFields), and in a service that is not taken every key readAsItIsWhereNotTaken lists.
+// It is the copy the file is checked by; what the service holds is taken from the file as it was written. A file read whole is
+// returned as it is.
+func withoutDeferredTypes(doc *yaml.Node, only string) *yaml.Node {
+	if only == "" {
+		return doc
+	}
+	root := documentRoot(doc)
+	if root == nil || root.Kind != yaml.MappingNode {
+		return doc
+	}
+	var generic struct {
+		Services map[string]any `yaml:"services"`
+	}
+	if err := doc.Decode(&generic); err != nil {
+		return doc
+	}
+	taken := takenServices(generic.Services, only)
+	newRoot := copyMapping(root)
+	for i := 0; i+1 < len(newRoot.Content); i += 2 {
+		if newRoot.Content[i].Value != "services" || newRoot.Content[i+1].Kind != yaml.MappingNode {
+			continue
+		}
+		services := copyMapping(newRoot.Content[i+1])
+		for j := 0; j+1 < len(services.Content); j += 2 {
+			svc := services.Content[j+1]
+			if svc.Kind != yaml.MappingNode {
+				continue
+			}
+			isTaken := taken[services.Content[j].Value]
+			svcCopy := copyMapping(svc)
+			svcCopy.Content = svcCopy.Content[:0]
+			for k := 0; k+1 < len(svc.Content); k += 2 {
+				key, val := svc.Content[k], svc.Content[k+1]
+				// What holds nothing, or has a key or an entry that holds nothing, is asked as it has been (a key with nothing after it
+				// is read by its own rules: refusedOverAValue, nullsThatStay).
+				if holdsNothing(val) {
+					svcCopy.Content = append(svcCopy.Content, key, val)
+					continue
+				}
+				switch {
+				case (key.Value == "environment" || key.Value == "labels" || key.Value == "sysctls") && val.Kind == yaml.SequenceNode:
+					// The entries of the list form are read into strings as the file is read (`[1]`, `[true]`): asked of the file
+					// (measured, v5.5.1), where the mapping form and a scalar are asked of the service that results.
+					svcCopy.Content = append(svcCopy.Content, key, val)
+				case deferredTypedKeys[key.Value], !isTaken && readAsItIsWhereNotTaken[key.Value]:
+					continue
+				case (key.Value == "stop_grace_period" || key.Value == "shm_size") && val.Kind == yaml.ScalarNode:
+					// A number or a word (`5`, `abc`) is read by docker compose in the service the extends results in; a list is
+					// asked of the file (measured, v5.5.1).
+					continue
+				case key.Value == "deploy":
+					// The blocks of a `deploy` that is a mapping are asked as they have been (untakenDeployKept, deployShapes); one that is
+					// not a mapping is the one kind of it docker compose reads into no type.
+					if val.Kind == yaml.MappingNode {
+						svcCopy.Content = append(svcCopy.Content, key, val)
+					}
+				case key.Value == "healthcheck":
+					if val.Kind != yaml.MappingNode {
+						continue
+					}
+					kept := copyMapping(val)
+					kept.Content = kept.Content[:0]
+					for h := 0; h+1 < len(val.Content); h += 2 {
+						// `disable` is cast to a boolean as the file is read when it is a word (`abc`); a number is read.
+						if v := val.Content[h].Value; v == "retries" || v == "disable" && val.Content[h+1].Tag == "!!str" {
+							kept.Content = append(kept.Content, val.Content[h], val.Content[h+1])
+						}
+					}
+					svcCopy.Content = append(svcCopy.Content, key, kept)
+				case key.Value == "ports" && val.Kind == yaml.SequenceNode:
+					ports := copyMapping(val)
+					ports.Content = make([]*yaml.Node, 0, len(val.Content))
+					for _, entry := range val.Content {
+						if entry.Kind != yaml.MappingNode {
+							ports.Content = append(ports.Content, entry)
+							continue
+						}
+						// docker compose reads a long entry's `target` as it comes in a file that is only extended from: one that is a fraction, a
+						// boolean, a list or a mapping is left in a service nothing takes, and in the service taken where the extender writes `ports`
+						// over it, and refused where it stays (the decode of the merged files asks); a word is refused wherever it is (measured, v5.5.1: #1780).
+						if uncastTarget(entry) {
+							continue
+						}
+						e := copyMapping(entry)
+						e.Content = e.Content[:0]
+						for f := 0; f+1 < len(entry.Content); f += 2 {
+							if !deferredPortFields[entry.Content[f].Value] {
+								e.Content = append(e.Content, entry.Content[f], entry.Content[f+1])
+							}
+						}
+						ports.Content = append(ports.Content, e)
+					}
+					svcCopy.Content = append(svcCopy.Content, key, ports)
+				default:
+					svcCopy.Content = append(svcCopy.Content, key, val)
+				}
+			}
+			services.Content[j+1] = svcCopy
+		}
+		newRoot.Content[i+1] = services
+	}
+	if root == doc {
+		return newRoot
+	}
+	out := *doc
+	out.Content = []*yaml.Node{newRoot}
+	return &out
+}
+
 // refusedOverAValue names the keys of a service that docker compose refuses with
 // nothing after them even where an earlier file gave the key a value (measured, v5.5.1,
-// `config -q`, 119 keys of a service, nested ones included): `depends_on`, `logging` and
-// `networks` as a whole, `healthcheck.test`, `logging.driver`, and each entry of
-// `ulimits`. Every other key measured is "not given" there (#1589; `models` and an `extra_hosts` entry are refused by docker compose whatever an earlier file holds, and are not asked here).
+// `config -q`, 119 keys of a service, nested ones included): `depends_on`, `logging`,
+// `networks` and `models` as a whole, `healthcheck.test`, `logging.driver`, and each entry of
+// `ulimits` and of `extra_hosts`, a build's included (#1593). Every other key measured is "not given" there (#1589).
 func refusedOverAValue(path []string) bool {
 	switch len(path) {
 	case 1:
-		return path[0] == "depends_on" || path[0] == "logging" || path[0] == "networks"
+		return path[0] == "depends_on" || path[0] == "logging" || path[0] == "networks" || path[0] == "models"
 	case 2:
-		return (path[0] == "healthcheck" && path[1] == "test") || (path[0] == "logging" && path[1] == "driver") || path[0] == "ulimits"
+		return (path[0] == "healthcheck" && path[1] == "test") || (path[0] == "logging" && path[1] == "driver") || path[0] == "ulimits" || path[0] == "extra_hosts"
+	case 3:
+		return path[0] == "build" && path[1] == "extra_hosts"
 	}
 	return false
 }
@@ -4095,4 +4927,48 @@ func (e *ExtendsRef) describe() string {
 		return fmt.Sprintf(" (a service in %s)", e.File)
 	}
 	return ""
+}
+
+// serviceWithoutBody is the refusal of a service of a merged tree that holds nothing; nil when there is none.
+func serviceWithoutBody(path string, merged map[string]any) error {
+	services, _ := merged["services"].(map[string]any)
+	names := make([]string, 0, len(services))
+	for name := range services {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if services[name] == nil {
+			return fmt.Errorf("compose file %s: service %q must be a mapping — the key has nothing under it once the files so far are merged; give it at least `image:` or `build:`, or remove the key", path, name)
+		}
+	}
+	return nil
+}
+
+// addLinkedDeps puts the services a service `links:` to, and the one its `network_mode: service:` names, among its
+// dependencies, as docker compose does (`depends_on: {b: {condition: service_started, required: true}}`, measured v5.5.1): the
+// order they start in, what `up a` brings with it, and what the commands that read the dependencies refuse follow from
+// that. A target the file does not define is refused where the service has no `profiles:` — one that has them is asked
+// once a command knows it is active (orchestrator.checkLinkedRefs), as an undefined `depends_on` target is.
+func addLinkedDeps(services map[string]*Service, names []string) error {
+	for _, name := range names {
+		svc := services[name]
+		if svc == nil {
+			continue
+		}
+		// The `network_mode: service:` target is kept with the links: the value itself is cleared further down (only `none` is acted on).
+		svc.Linked = svc.LinkedNames()
+		for _, target := range svc.Linked {
+			if t, ok := services[target]; !ok || t == nil {
+				if len(svc.Profiles) != 0 {
+					continue
+				}
+				return fmt.Errorf("service %q depends on undefined service %q: invalid compose project", name, target)
+			}
+			if !slices.ContainsFunc(svc.DependsOn, func(d Dependency) bool { return d.Name == target }) {
+				svc.DependsOn = append(svc.DependsOn, Dependency{Name: target, Condition: ConditionStarted})
+			}
+		}
+	}
+	return nil
 }

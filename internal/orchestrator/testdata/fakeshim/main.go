@@ -31,6 +31,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 )
 
 func main() { os.Exit(run(os.Args[1:])) }
@@ -514,12 +515,48 @@ func run(args []string) int {
 				fmt.Fprintln(os.Stderr, "Error: internalError: \"failed to create network\"")
 				return 1
 			}
+			// A label key the runtime refuses (1.5.0, rc 1; it takes lower-case words and digits joined by `.`, `/` or `-`, so
+			// a key that starts with `-`, is empty, or holds a space or a control character is among them, and an upper-case letter or a
+			// `_` is another that this fake lets through) is named in the metadata as it was written (testdata/real-cli-output.md).
+			for _, a := range args {
+				if v, ok := strings.CutPrefix(a, "--label="); ok {
+					key, _, _ := strings.Cut(v, "=")
+					bad := key == "" || key[0] == '-' || strings.ContainsFunc(key, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) })
+					if v == key+"=" {
+						bad = true // a label written with no value: the runtime names the whole `k=`
+					}
+					if bad {
+						if key == "" || v == key+"=" {
+							key = v // an empty key: the runtime names the whole `=value`
+						}
+						var shown strings.Builder // the runtime writes a tab as `\t` and another control character as `\u{01}`
+						for _, r := range key {
+							switch {
+							case r == '\t':
+								shown.WriteString(`\t`)
+							case r == '\n':
+								shown.WriteString(`\n`)
+							case unicode.IsControl(r):
+								fmt.Fprintf(&shown, `\u{%02X}`, r)
+							default:
+								shown.WriteRune(r)
+							}
+						}
+						fmt.Fprintf(os.Stderr, "Error: LabelError(code: ContainerResource.AppErrorCode(rawValue: \"invalid_label_key_content\"), metadata: [\"key\": \"%s\"])\n", shown.String())
+						return 1
+					}
+				}
+			}
 			// The labels it was made with are what a later inspect answers with.
 			if dir := os.Getenv("STATE_DIR"); dir != "" {
 				var labels []string
 				for i, a := range args {
 					if a == "--label" && i+1 < len(args) {
 						labels = append(labels, args[i+1])
+					}
+					// opossum passes `--label=<k=v>` as one argument (#1423); the real CLI reads both.
+					if v, ok := strings.CutPrefix(a, "--label="); ok {
+						labels = append(labels, v)
 					}
 				}
 				_ = os.WriteFile(netLabelsPath(dir, name), []byte(strings.Join(labels, "\n")), 0o644)

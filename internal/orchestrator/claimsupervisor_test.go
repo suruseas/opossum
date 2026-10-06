@@ -241,7 +241,7 @@ func usePsReading(t *testing.T, procStat string, readings ...string) {
 	t.Cleanup(func() { procRoot = old })
 	bin := t.TempDir()
 	count := filepath.Join(t.TempDir(), "count")
-	script := "#!/bin/sh\nn=$(cat " + count + " 2>/dev/null || echo 0)\necho $((n+1)) > " + count + "\ncase $n in\n"
+	script := "#!/bin/sh\nn=$(cat '" + count + "' 2>/dev/null || echo 0)\necho $((n+1)) > '" + count + "'\ncase $n in\n"
 	for i, r := range readings {
 		script += strconv.Itoa(i) + ") echo '" + r + "';;\n"
 	}
@@ -344,6 +344,11 @@ func TestAProcTokenThatIsNotTheProcessesIsAReusedPid(t *testing.T) {
 			writePidFile(t, "reused", strconv.Itoa(os.Getpid())+" "+token+"\n")
 			if got := SupervisorPID("reused"); got != 0 {
 				t.Fatalf("SupervisorPID = %d for the token %q, want 0 (not the process)", got, token)
+			}
+			// A reused pid is stale, not a process that could not be checked: left as unknown, a file that
+			// means nothing would be kept for good and every claim after it refused.
+			if _, unknown := lookSupervisor("reused"); unknown {
+				t.Fatalf("lookSupervisor says the process could not be checked, for the token %q", token)
 			}
 		})
 	}

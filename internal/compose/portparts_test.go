@@ -75,13 +75,18 @@ func TestAPortWithEmptyPartsIsReadAsThePortsThatAreThere(t *testing.T) {
 			}
 		})
 	}
-	// The long form assembles its spec from the keys that are there, so an
-	// empty host_ip and no protocol leave nothing behind without help.
-	p, err := Load(writeTemp(t, "services:\n  web:\n    image: alpine\n    ports:\n      - {target: 80, published: 8080, host_ip: \"\"}\n"))
+	// The long form: an empty `protocol` is no protocol and leaves nothing behind. An empty `host_ip` is not read as
+	// no address: docker compose v5.5.1 refuses it (`invalid ip address:`, measured with `published` and without; the
+	// first of these rows was written against v5.5.0 and read it as the ports that are there), once the files are
+	// merged (see TestThePortsAndExposeFieldsAreAskedOfTheProjectAsDockerComposeAsksIt).
+	p, err := Load(writeTemp(t, "services:\n  web:\n    image: alpine\n    ports:\n      - {target: 80, published: 8080, protocol: \"\"}\n"))
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
 	if got := strings.Join(p.Services["web"].Ports, ","); got != "8080:80" {
 		t.Errorf("long form = %q, want 8080:80", got)
+	}
+	if got := loadErr(t, "services:\n  web:\n    image: alpine\n    ports:\n      - {target: 80, published: 8080, host_ip: \"\"}\n"); !strings.Contains(got, "host_ip is empty") {
+		t.Errorf("want the empty address refused, got:\n%s", got)
 	}
 }

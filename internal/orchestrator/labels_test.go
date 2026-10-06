@@ -48,7 +48,7 @@ func TestUpCreatesTheNetworkWithItsLabels(t *testing.T) {
 	if err := o.Up(true); err != nil {
 		t.Fatalf("Up: %v", err)
 	}
-	if indexOf(log(), "network create --internal --label net.tier=back --label owner=ops demo-back") < 0 {
+	if indexOf(log(), "network create --internal --label=net.tier=back --label=owner=ops demo-back") < 0 {
 		t.Errorf("expected the network created with its labels, got %v", log())
 	}
 }
@@ -65,7 +65,7 @@ func TestRunOneOffPutsServiceLabelsBeforeItsOwnAndLabelsTheNetwork(t *testing.T)
 	if err := o.RunOneOff("web", []string{"true"}, orchestrator.RunOneOffOptions{}); err != nil {
 		t.Fatalf("RunOneOff: %v", err)
 	}
-	if indexOf(log(), "network create --label net.tier=back demo-back") < 0 {
+	if indexOf(log(), "network create --label=net.tier=back demo-back") < 0 {
 		t.Errorf("expected the one-off run's network created with its labels, got %v", log())
 	}
 	var runLine string

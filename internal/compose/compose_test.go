@@ -471,9 +471,10 @@ services:
       - source: s
         target: ../escape
 `))
-	want := `service "db": secret target "../escape" must be a bare name (no path separators)`
-	if err == nil || err.Error() != want {
-		t.Fatalf("error = %v, want %s", err, want)
+	// A `..` part is still refused (a path is read now: #1778); the words say what a target may be.
+	want := `service "db": secret target "../escape" is no file's path`
+	if err == nil || !strings.HasPrefix(err.Error(), want) {
+		t.Fatalf("error = %v, want it to begin %s", err, want)
 	}
 }
 

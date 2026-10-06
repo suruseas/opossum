@@ -687,7 +687,10 @@ list; codes are add-only and never change meaning.
   supervisor's pid file is still there, so nothing new actually starts watching,
   and the old policy (on the old service set) is left in force. Run `opossum ps`
   to see whether the supervisor is still listed, and stop it by hand (its pid is
-  there too) if so.
+  there too) if so. When `ps` would not answer about the process behind the pid
+  file, nothing was signalled: the notice then says `... was not asked to stop`,
+  names the process and gives `ps -p <pid>` to check it by hand, and `up` says it
+  started no new supervisor over it instead of saying it couldn't start one.
 - **`[OPSM-202]` … `DNS domain "opossum" not found`** → run `sudo container system
   dns create opossum` once, then `up` again (needed for bare-name discovery).
 - **`[OPSM-203]` … `network <n> is internal (host-only): … no internet egress`** →
@@ -767,7 +770,7 @@ Every `[OPSM-NNN]` opossum can emit (add-only; grouped 1xx storage / 2xx network
 - `OPSM-407` — a service's container exited right after starting, with no health gate to catch it (`up` reports its logs and fails).
 - `OPSM-412` — the image has no arm64 build, so the container cannot start on Apple silicon.
 - `OPSM-413` — a `required: false` dependency did not become healthy, or did not complete successfully; the dependent is started anyway, as docker compose starts it. Also a run-to-completion service that failed while none of the services the command starts requires it (a dependent behind a profile that is not on, or not named): passed over, as docker compose does.
-- `OPSM-414` — asked the per-project supervisor to stop but couldn't confirm it did within the time waited; it may still be running.
+- `OPSM-414` — asked the per-project supervisor to stop but couldn't confirm it did within the time waited; it may still be running, or (`... was not asked to stop`) could not check whether the process behind the pid file is the supervisor (`ps` would not answer) and did not signal it.
 - `OPSM-501` — unsupported top-level compose field(s), ignored.
 - `OPSM-502` — unsupported service compose field(s), ignored (e.g. `network_mode: host`).
 - `OPSM-601` — a `watch` rebuild action failed.

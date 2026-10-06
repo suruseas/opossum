@@ -581,6 +581,12 @@ func upCmd() *cobra.Command {
 				os.Exit(130)
 			}()
 			o.OnSignal(ctx)
+			// The supervisor is started as `up` finishes, while it still holds the project's lock (see below).
+			if !dryRun && !foreground {
+				o.SetAfterUpLocked(func(upErr error) {
+					startSupervisorFor(cmd.ErrOrStderr(), o, noSupervisor, profiles, upErr != nil)
+				})
+			}
 			upErr := o.Up(!foreground, args...)
 			// Deliberately also on the error path. Most failures roll the stack back,
 			// leaving nothing to watch — but one doesn't: a service that exits right
@@ -600,15 +606,16 @@ func upCmd() *cobra.Command {
 			// interrupted `up` can leave a background process where there was none.
 			// --no-supervisor still opts out of that, and `down` still ends it.
 			//
-			// Still after Up returns, never during it: a watcher started earlier would
+			// Still after the stack is built, never while it is being built: a watcher started earlier would
 			// see the half-built stack and try to "fix" containers still being made.
 			// --dry-run resolves without starting anything, so there is nothing to
 			// watch. A foreground `up` means "run it here until it ends" — leaving a
 			// watcher to restart the service the user just watched finish would
 			// contradict it.
-			if !dryRun && !foreground {
-				startSupervisorFor(cmd.ErrOrStderr(), o, noSupervisor, profiles, upErr != nil)
-			}
+			//
+			// Inside Up, as it finishes, and not after it returns (SetAfterUpLocked): the project's lock is held until the
+			// watcher has claimed it (or the wait for that, a second and a half, is over), so a `down` cannot take the
+			// project down between the two and leave a supervisor that claims a project nothing is left in (#1740).
 			return upErr
 		},
 	}
@@ -663,8 +670,9 @@ func downCmd() *cobra.Command {
 			// opossum command to remove.
 			earlyStopped := ""
 			if name := projectNameWithoutCompose(); name != "" {
+				unchecked := orchestrator.SupervisorUncheckedPID(name) // before the stop: it decides whether the supervisor is asked
 				stopped, attempted := stopSupervisorFn(name)
-				reportSupervisorStop(cmd.ErrOrStderr(), stopped, attempted, "opossum: stopped the restart supervisor")
+				reportSupervisorStop(cmd.ErrOrStderr(), unchecked, stopped, attempted, "opossum: stopped the restart supervisor")
 				orchestrator.ClearWatched(name)
 				// Only a stop that could not be confirmed is not asked again: its pid file is still
 				// there, so asking again would wait the budget out a second time. One that stopped
@@ -684,7 +692,7 @@ func downCmd() *cobra.Command {
 				if name := projectNameWithoutCompose(); name != "" {
 					// Not taken down, since the name is a guess (see downByLabel) — but
 					// the way to say it is not.
-					return fmt.Errorf("%w\n  the project's containers can still be taken down without its file, by naming it: `opossum -p %s down` (the name of the project, if it is not %q, is what its containers' label says: `opossum ls`)", err, name, name)
+					return withTakeDownWithoutFile(err, name)
 				}
 				return err
 			}
@@ -1840,6 +1848,12 @@ func loadOrchestratorAs(out io.Writer, softValues bool) (*orchestrator.Orchestra
 	default:
 		nameWithoutFlag = compose.SanitizeName(filepath.Base(proj.BaseDir))
 	}
+	// A `name:` that came to nothing by a variable is refused as docker compose refuses it, unless -p names the
+	// project (COMPOSE_PROJECT_NAME is asked by CheckEmptyName itself). A take-down goes on, with a note: an
+	// earlier opossum started the project under the directory's name.
+	if err := proj.CheckEmptyName(); err != nil && projectName == "" && !softValues {
+		return nil, err
+	}
 	// What the name would have been before COMPOSE_PROJECT_NAME was read.
 	without := compose.SanitizeName(filepath.Base(proj.BaseDir))
 	if proj.Name != "" {
@@ -1863,6 +1877,11 @@ func loadOrchestratorAs(out io.Writer, softValues bool) (*orchestrator.Orchestra
 	return o, nil
 }
 
+// withTakeDownWithoutFile adds to a refusal of the compose file the command that takes the project down without it, by naming it.
+func withTakeDownWithoutFile(err error, name string) error {
+	return fmt.Errorf("%w\n  the project's containers can still be taken down without its file, by naming it: `opossum -p %s down` (the name of the project, if it is not %q, is what its containers' label says: `opossum ls`)", err, name, name)
+}
+
 // loadOrchestratorToTakeDown is loadOrchestrator for the commands that stop
 // or remove what is running (`down`, `destroy`, `stop`, `kill`): the mounts
 // docker compose refuses, and a secret or config name it refuses, are named
@@ -1874,6 +1893,13 @@ func loadOrchestratorAs(out io.Writer, softValues bool) (*orchestrator.Orchestra
 func loadOrchestratorToTakeDown(out, stderr io.Writer, verb string) (*orchestrator.Orchestrator, error) {
 	o, err := loadOrchestratorAs(out, true)
 	if err != nil {
+		// `down` says this where it handles the same failure; the others have no way down by name of their own, and a file
+		// this version refuses may be one an earlier version started the project from (#1481).
+		if verb != "down" {
+			if name := projectNameWithoutCompose(); name != "" {
+				err = withTakeDownWithoutFile(err, name)
+			}
+		}
 		return nil, err
 	}
 	// The documents of one file that name the project differently: 0.38.0 and later
@@ -1886,6 +1912,11 @@ func loadOrchestratorToTakeDown(out, stderr io.Writer, verb string) (*orchestrat
 			return nil, &nameAsked{fmt.Errorf("compose file: %w\n  name the project you mean: `opossum %s-p %s %s` for the one an earlier version started, `opossum %s-p %s %s` for the one every document names", err, givenFilesAsFlags(), fault.Before, verb, givenFilesAsFlags(), fault.After, verb)}
 		}
 		return nil, err
+	}
+	// A `name:` that came to nothing by a variable (`up` refuses it): an earlier opossum started the project under
+	// the directory's name, and that is the project taken down here, unless -p names another.
+	if err := o.Project.CheckEmptyName(); err != nil && projectName == "" {
+		fmt.Fprintf(stderr, "opossum: %s — `up` refuses this compose file; going on under the directory's name, as an earlier opossum may have started it\n", err)
 	}
 	// A value docker compose reads as another kind — a string that is not a number,
 	// one outside a key's bounds, a `scale` below zero: `up` refuses it, and an
@@ -2294,14 +2325,14 @@ var stopSupervisorFn = orchestrator.StopSupervisor
 // its successor) passes "". A stop that was attempted but not confirmed always
 // prints — the point of the second return value existing at all (#1401) is that
 // this case must not be silent.
-func reportSupervisorStop(w io.Writer, stopped, attempted bool, stoppedMsg string) {
+func reportSupervisorStop(w io.Writer, unchecked int, stopped, attempted bool, stoppedMsg string) {
 	switch {
 	case stopped:
 		if stoppedMsg != "" {
 			fmt.Fprintln(w, stoppedMsg)
 		}
 	case attempted:
-		fmt.Fprintln(w, "opossum: "+orchestrator.NoticeSupervisorStopFailed())
+		fmt.Fprintln(w, "opossum: "+orchestrator.NoticeSupervisorStopFailedFor(unchecked))
 	}
 }
 
@@ -2413,7 +2444,8 @@ func startSupervisorFor(stderr io.Writer, o *orchestrator.Orchestrator, disabled
 		// a supervisor is running for this project, so a "stopped the old one"
 		// line right before it would read as a contradiction. A failure to
 		// confirm still has to be said.
-		reportSupervisorStop(stderr, stopped, attempted, "")
+		// (Only a supervisor `ps` vouched for gets here: SupervisorPID is 0 for one it would not.)
+		reportSupervisorStop(stderr, 0, stopped, attempted, "")
 		if !supervisorReplacedSafely(stopped, attempted) {
 			// The generic OPSM-414 notice above only says the old supervisor may
 			// still be running — it does not say what this `up` itself leaves
@@ -2440,6 +2472,14 @@ func startSupervisorFor(stderr io.Writer, o *orchestrator.Orchestrator, disabled
 			}
 			return
 		}
+	}
+	if pid := orchestrator.SupervisorUncheckedPID(o.Project.Name); pid != 0 {
+		// An old supervisor may be there: `ps` would not say, so SupervisorPID read it as none. A new one is not started
+		// over it (it would refuse, and the line after would say the services are unwatched when the old one may be watching).
+		fmt.Fprintf(stderr, "opossum: couldn't check whether process %d is the restart supervisor of this project (`ps` did not answer), "+
+			"so no new one is started — services with `restart:` are watched only if it is. Run `ps -p %d` to check, "+
+			"and run `opossum up` again once `ps` answers\n", pid, pid)
+		return
 	}
 	if _, err := orchestrator.StartSupervisor(o.Project.Name, o.Project.BaseDir, args); err != nil {
 		fmt.Fprintf(stderr, "opossum: couldn't start the restart supervisor (%v) — services with `restart:` "+

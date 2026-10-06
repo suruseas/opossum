@@ -36,12 +36,23 @@ func there(name string) bool {
 
 // execTarget is the container an `exec` is for: the first argument after the verb that is not a
 // flag (`exec -i -t NAME cmd` — the runtime puts -i and -t before the name). "" when there is none.
-// A flag that takes a value (`-u x`) is not read: the runtime does not make one, and `x` would be taken for the name.
+// A flag that takes its value apart (`-u x`, `-e A=1`) is read with the value, which is not the name; a value joined to the flag is one argument.
 func execTarget(args []string) string {
+	valued := false
 	for _, a := range args[1:] {
-		if !strings.HasPrefix(a, "-") {
-			return a
+		if valued {
+			valued = false
+			continue
 		}
+		if strings.HasPrefix(a, "-") {
+			valued = execTakesValue[a]
+			continue
+		}
+		return a
 	}
 	return ""
 }
+
+// execTakesValue are the flags of `container exec` that take their value as the next argument (container 1.5.0, testdata/real-cli-output.md).
+var execTakesValue = map[string]bool{"-e": true, "--env": true, "--env-file": true, "--gid": true, "--uid": true, "-u": true, "--user": true,
+	"-w": true, "--workdir": true, "--cwd": true, "--ulimit": true}

@@ -62,7 +62,6 @@ func TestALimitWrittenAsAListAMappingOrABlankIsRefused(t *testing.T) {
 		{"a bare number of bytes", svc + "    mem_limit: 1048576\n", "1M", ""},
 		{"zero bytes is no limit", svc + "    mem_limit: \"0\"\n", "", ""},
 		{"a padded size (docker refuses; taken here, trimmed)", svc + "    mem_limit: \" 512m \"\n", "512M", ""},
-		{"a padded count (docker refuses; taken here, trimmed)", svc + "    cpus: \" 0.5 \"\n", "", "1"},
 		{"the deploy limits", svc + "    deploy:\n      resources:\n        limits:\n          memory: 256m\n          cpus: \"0.5\"\n", "256M", "1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

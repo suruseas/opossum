@@ -27,12 +27,39 @@ import (
 // thing standing between the two entries is what this project claimed.
 func freePort(t *testing.T) int {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	// A port that is free on loopback is not always free where `up` asks: its pre-flight binds the wildcard
+	// address, which a connection a machine made out from that port refuses (on Linux the local ports of
+	// outgoing connections are the even ones, and a closed one lingers for a minute). A port drawn only on
+	// loopback was then in use as far as `up` was concerned, and the test failed with OPSM-201 (#1753).
+	for try := 0; try < 40; try++ {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := l.Addr().(*net.TCPAddr).Port
+		l.Close()
+		if portFreeWhereItIsChecked(p) {
+			return p
+		}
 	}
-	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port
+	t.Fatal("no port that is free on loopback and on the wildcard address in 40 tries")
+	return 0
+}
+
+// portFreeWhereItIsChecked reports whether n can be bound on loopback and on the wildcard address, which is what
+// `up` binds to see whether a host port is taken. Closed again at once.
+func portFreeWhereItIsChecked(n int) bool {
+	for _, addr := range []struct{ network, address string }{
+		{"tcp", fmt.Sprintf("127.0.0.1:%d", n)},
+		{"tcp4", fmt.Sprintf(":%d", n)},
+	} {
+		l, err := net.Listen(addr.network, addr.address)
+		if err != nil {
+			return false
+		}
+		l.Close()
+	}
+	return true
 }
 
 func TestAClaimedHostPortIsTheOneProtocolItNames(t *testing.T) {

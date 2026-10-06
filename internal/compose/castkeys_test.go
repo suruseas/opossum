@@ -1368,7 +1368,7 @@ func TestDeployReplicasReadsAsAWholeNumber(t *testing.T) {
 		if err := os.WriteFile(b, []byte("services:\n  web:\n    deploy:\n      replicas: 2\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := Load(a, b); err == nil {
+		if _, err := LoadFiles([]string{a, b}, nil); err == nil {
 			t.Errorf("docker compose refuses the file that writes it, and it was read")
 		}
 	})
@@ -1383,8 +1383,7 @@ func TestDeployReplicasReadsAsAWholeNumber(t *testing.T) {
 // A `mode` in `ports[]` and `deploy` is a string (#1533; measured, v5.5.1, `config -q`): a
 // number, a bool, a null, a list and a mapping are refused, in the file that writes them
 // (docker compose asks by its schema, file by file: a later `-f` file that resets it does
-// not help). The `mode` of `secrets` and `configs` is asked only after the merge there, and
-// is left alone here (#1544).
+// not help). The `mode` of `secrets` and `configs` is asked in secretmodes_test.go (#1544).
 func TestAModeOfAPortAndOfDeployIsAString(t *testing.T) {
 	const svc = "services:\n  web:\n    image: alpine\n"
 	bodies := map[string]func(v string) string{
@@ -1431,7 +1430,7 @@ func TestAModeOfAPortAndOfDeployIsAString(t *testing.T) {
 		if err := os.WriteFile(b, []byte("services:\n  web:\n    deploy: !reset {}\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := Load(a, b); err == nil {
+		if _, err := LoadFiles([]string{a, b}, nil); err == nil {
 			t.Errorf("docker compose refuses the file that writes it, and it was read")
 		}
 	})
@@ -1450,7 +1449,7 @@ func TestAModeOfAPortAndOfDeployIsAString(t *testing.T) {
 		if err := os.WriteFile(b, []byte("services:\n  web:\n    secrets:\n      - source: s\n        mode: 0400\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := Load(a, b); err != nil {
+		if _, err := LoadFiles([]string{a, b}, nil); err != nil {
 			t.Errorf("docker compose reads this (the mode is replaced before it is asked), and it was refused: %v", err)
 		}
 	})

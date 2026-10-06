@@ -123,21 +123,33 @@ func freeRunOf(t *testing.T, n int) int {
 		if base < 1024 || base > 65535-n-1 {
 			continue
 		}
-		free := true
-		for i := 1; i < n; i++ {
-			c, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", base+i))
-			if err != nil {
-				free = false
-				break
-			}
-			c.Close()
-		}
-		if free {
+		if portsFreeWhereUpAsks(base, base+n-1) {
 			return base
 		}
 	}
 	t.Fatalf("no run of %d free ports on this machine after 40 tries", n)
 	return 0
+}
+
+// portsFreeWhereUpAsks reports whether every port from `from` to `to` can be bound on loopback and on the IPv4
+// wildcard address, which is where `up` asks whether a host port is taken: a port free on loopback only is one an
+// outgoing connection of the machine holds (on Linux the local ports of those are the even ones), and the wildcard
+// refuses it, so a test that took such a port for a free one failed with OPSM-201 (#1753, #1758). Closed again at
+// once; loopback before the wildcard, as on Linux the two overlap.
+func portsFreeWhereUpAsks(from, to int) bool {
+	for p := from; p <= to; p++ {
+		loop, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", p))
+		if err != nil {
+			return false
+		}
+		loop.Close()
+		wild, err := net.Listen("tcp4", fmt.Sprintf(":%d", p))
+		if err != nil {
+			return false
+		}
+		wild.Close()
+	}
+	return true
 }
 
 func freeRun(t *testing.T) int { return freeRunOf(t, 3) }

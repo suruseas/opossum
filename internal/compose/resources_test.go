@@ -29,7 +29,7 @@ func TestDeployExtraSurfaced(t *testing.T) {
 }
 
 func deployLimits(mem, cpus string) *Deploy {
-	return &Deploy{Resources: &DeployResources{Limits: &DeployLimits{Memory: scalarStr(mem), CPUs: scalarStr(cpus)}}}
+	return &Deploy{Resources: &DeployResources{Limits: &DeployLimits{Memory: scalarStr(mem), CPUs: cpuCount(cpus)}}}
 }
 
 // Resource limits resolve to Apple `container` -m/-c args: memory in MiB with an

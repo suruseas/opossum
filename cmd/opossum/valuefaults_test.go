@@ -233,7 +233,7 @@ func TestAValueFaultInAnExtendedFileDoesNotStopATakeDown(t *testing.T) {
 		}
 		return p
 	}
-	write("base.yaml", "services:\n  basesvc:\n    image: web\n    cpu_count: \"-1\"\n  sibling:\n    image: web\n    pids_limit: \"x\"\n")
+	write("base.yaml", "services:\n  basesvc:\n    image: web\n    cpu_count: \"-1\"\n")
 	extending := write("compose.yaml", "name: demo\nservices:\n  web:\n    extends:\n      file: base.yaml\n      service: basesvc\n")
 	// The same, one file further: an included file that extends, and a chain of two.
 	write("inc.yaml", "services:\n  web:\n    extends:\n      file: base.yaml\n      service: basesvc\n")
@@ -254,7 +254,9 @@ func TestAValueFaultInAnExtendedFileDoesNotStopATakeDown(t *testing.T) {
 	write("base-inf.yaml", "services:\n  basesvc:\n    image: web\n    extends: chained\n  chained:\n    image: web\n    x-a: .inf\n")
 	infinity := write("compose-inf.yaml", "name: demo\nservices:\n  web:\n    extends:\n      file: base-inf.yaml\n      service: basesvc\n")
 	const infinityFault = "services.basesvc.x-a is a number docker compose cannot read — infinity and NaN cannot go into its model; quote it to keep it a string"
-	const basesvcFault = "services.basesvc.cpu_count -1 is below the least, 0"
+	// The range of a number is put to the service the extends results in (#1461), which is named by its own name; the fault of a service
+	// nothing extends in the same file is the row of siblingOnly.
+	const basesvcFault = "services.web.cpu_count -1 is below the least, 0"
 	for _, tc := range []struct {
 		name string
 		file string

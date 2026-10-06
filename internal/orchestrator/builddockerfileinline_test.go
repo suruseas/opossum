@@ -35,7 +35,7 @@ func TestADockerfileWrittenInTheComposeFileIsGivenToTheBuilder(t *testing.T) {
 			wantStdin: inline, wantF: "-"},
 		{name: "with a target and an argument", build: &compose.Build{Context: "app", DockerfileInline: inline, Target: "one",
 			Args: compose.Environment{"WHO=me"}},
-			wantStdin: inline, wantF: "-", extra: []string{"--target one", "--build-arg WHO=me"}},
+			wantStdin: inline, wantF: "-", extra: []string{"--target=one", "--build-arg=WHO=me"}},
 		{name: "the text as written, blank lines and all", build: &compose.Build{Context: "app", DockerfileInline: "FROM alpine:3\n\n# a note\nRUN true\n"},
 			wantStdin: "FROM alpine:3\n\n# a note\nRUN true\n", wantF: "-"},
 		// The controls: an empty text is not written, and the Dockerfile in the

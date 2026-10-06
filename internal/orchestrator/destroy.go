@@ -121,7 +121,10 @@ func (o *Orchestrator) DestroyPlanFor(keepOverlay, keepImages, keepLocal bool) (
 		return p, err
 	}
 
-	p.SupervisorRunning = SupervisorPID(o.Project.Name) != 0
+	// A live process behind the pid file counts, whether `ps` could say it is the supervisor or not: left out, a
+	// destroy would remove the pid file of one that runs on, and nothing could find it (#1755).
+	supPid, _ := lookSupervisor(o.Project.Name)
+	p.SupervisorRunning = supPid != 0
 
 	for _, name := range order {
 		for _, cname := range []string{o.containerName(name), o.containerName(name + "-run")} {
@@ -443,9 +446,11 @@ func (o *Orchestrator) Destroy(p DestroyPlan) error {
 		return err
 	}
 	defer lock.release()
+	supervisorLeft := false
 	if p.SupervisorRunning {
-		o.stopSupervisorAndReport()
+		supervisorLeft = o.stopSupervisorAndReport()
 	}
+	supervisorDir, _ := supervisorStateDir(o.Project.Name)
 
 	for _, cname := range p.Containers {
 		o.logf("Removing container %s\n", cname)
@@ -466,6 +471,11 @@ func (o *Orchestrator) Destroy(p DestroyPlan) error {
 	}
 	var failed []string
 	for _, path := range p.Paths {
+		// The supervisor's own directory stays while one is left: its pid file is how the next `down` finds it.
+		if supervisorLeft && path == supervisorDir {
+			o.logf("Keeping %s: the restart supervisor may still be running\n", path)
+			continue
+		}
 		o.logf("Removing %s\n", path)
 		if err := os.RemoveAll(path); err != nil {
 			failed = append(failed, fmt.Sprintf("%s (%v)", path, err))

@@ -123,7 +123,21 @@ func TestAPortIsCheckedAtLoadTheWayDockerChecksIt(t *testing.T) {
 		{"ranges of one length", `"80-90:80-90"`, "80-90:80-90"},
 		{"a host range for one container port", `"8000-8010:80"`, "8000-8010:80"},
 		{"a bare container range", `"80-90"`, "80-90:80-90"},
-		{"a range of one", `"8080-8080:80"`, "8080-8080:80"},
+		// A range as wide as one port is that port, as docker compose reads it (v5.5.1 `config`: `published: "8080"`, `target: 80`).
+		{"a host range of one", `"8080-8080:80"`, "8080:80"},
+		{"a container range of one", `"8080:80-80"`, "8080:80"},
+		{"a range of one on both sides", `"8080-8080:80-80"`, "8080:80"},
+		{"a range of one with a host address", `"127.0.0.1:8080-8080:80"`, "127.0.0.1:8080:80"},
+		{"a range of one with a bracketed address", `"[::1]:8080-8080:80"`, "[::1]:8080:80"},
+		{"a range of one with a protocol", `"8080-8080:80/udp"`, "8080:80/udp"},
+		// By number, as docker compose reads them (`published: "8080"`, `target: 80`), the first port written as it was.
+		{"a host range of one with a leading zero", `"08080-8080:80"`, "08080:80"},
+		{"a host range of one with a leading zero at the top", `"8080-08080:80"`, "8080:80"},
+		{"a container range of one with a leading zero", `"8080:080-80"`, "8080:080"},
+		{"a bare container range of one", `"80-80"`, "80:80"},
+		{"a host range of one at 0", `"0-0:80"`, "0:80"},
+		{"a host range from 0 to 1 is a range", `"0-1:80"`, "0-1:80"},
+		{"a host range of two for a container range of one", `"8080-8081:80-80"`, "8080-8081:80"},
 		{"udp", `"80:80/udp"`, "80:80/udp"},
 		// The protocol is taken without regard to case and settled in lower
 		// case, where docker compose settles it (v5.5.1 writes `80:80/TCP`

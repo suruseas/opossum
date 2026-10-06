@@ -30,7 +30,7 @@ func TestADockerfileGivenAsTextIsReadFromStandardInput(t *testing.T) {
 		{"the text", BuildOptions{Tag: "x:1", Context: "/ctx", DockerfileInline: text},
 			"build --progress plain -t x:1 -f - /ctx", text},
 		{"the text beside a target", BuildOptions{Tag: "x:1", Context: "/ctx", DockerfileInline: text, Target: "one"},
-			"build --progress plain -t x:1 -f - --target one /ctx", text},
+			"build --progress plain -t x:1 -f - --target=one /ctx", text},
 		// The controls: a file name is passed as a file name, and with neither there
 		// is no -f at all and nothing is written to the builder.
 		{"a file name", BuildOptions{Tag: "x:1", Context: "/ctx", Dockerfile: "/ctx/Dockerfile.alt"},

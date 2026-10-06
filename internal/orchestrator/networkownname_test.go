@@ -33,7 +33,7 @@ func TestANetworkWithANameOfItsOwnIsMadeAndJoinedUnderThatName(t *testing.T) {
 			if err := invokePath(orchestrator.New(ownNameProject(), rt, "opossum", &bytes.Buffer{}), path); err != nil {
 				t.Fatalf("%s: %v", path, err)
 			}
-			if !hasLine(log(), "network create --label opossum.project=demo shared") {
+			if !hasLine(log(), "network create --label=opossum.project=demo shared") {
 				t.Errorf("want the network made as `shared` with the project's label, got %v", log())
 			}
 			if i := indexOf(log(), "--name web"); i < 0 || !strings.Contains(log()[i], " --network=shared ") {
@@ -42,7 +42,7 @@ func TestANetworkWithANameOfItsOwnIsMadeAndJoinedUnderThatName(t *testing.T) {
 			if i := indexOf(log(), "--name db."); path == "up" && (i < 0 || !strings.Contains(log()[i], " --network=demo-net ")) {
 				t.Errorf("want db left on the default network, got %v", log())
 			}
-			if hasLine(log(), "network create demo-n") || hasLine(log(), "network create --label opossum.project=demo demo-n") {
+			if hasLine(log(), "network create demo-n") || hasLine(log(), "network create --label=opossum.project=demo demo-n") {
 				t.Errorf("the network was also made under its key's name, got %v", log())
 			}
 		})
@@ -54,7 +54,7 @@ func TestANetworkWithANameOfItsOwnIsMadeAndJoinedUnderThatName(t *testing.T) {
 		if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true); err != nil {
 			t.Fatalf("Up: %v", err)
 		}
-		if !hasLine(log(), "network create --internal --label tier=back --label opossum.project=demo shared") {
+		if !hasLine(log(), "network create --internal --label=tier=back --label=opossum.project=demo shared") {
 			t.Errorf("want the declaration's flags and labels kept, and the project's added, got %v", log())
 		}
 	})
@@ -306,7 +306,7 @@ func TestANameTheRuntimeCannotCreateIsRefusedBeforeAnythingIsMade(t *testing.T) 
 		if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true); err != nil {
 			t.Fatalf("Up: %v", err)
 		}
-		if !hasLine(log(), "network create --label opossum.project=demo "+long) {
+		if !hasLine(log(), "network create --label=opossum.project=demo "+long) {
 			t.Errorf("want the network made, got %v", log())
 		}
 	})

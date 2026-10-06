@@ -4,13 +4,16 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 )
@@ -655,6 +658,9 @@ var heldMarker = regexp.MustCompile(held + `(\d+)` + held)
 // picked the wrong one would silently get the old behaviour back, and a suite
 // with no assertion about line numbers would stay green through it.
 type interpolated struct {
+	// nameEmptied is that the top-level `name:` was written with a reference and came to nothing (`name: ${P:-}` with
+	// P unset or empty): docker compose refuses that for the project name, where `name: ""` falls back to the directory.
+	nameEmptied bool
 	// node is the document with the marks taken out, or nil when there is no tree
 	// to hand over. Nil has two causes and they are not the same: no mark was
 	// written at all (nothing needed repairing, and the bytes are already right),
@@ -678,6 +684,22 @@ func (d interpolated) into(v any) error {
 		return d.node.Decode(v)
 	}
 	return yaml.Unmarshal(d.raw, v)
+}
+
+// intoMarked is into with the `mode` of a `secrets` or `configs` entry that is written `-0` read as the word negZeroMode: docker compose
+// reads `-0` as a float and refuses a mode that stays so, once the files are merged, where a later file or an extending service that writes the
+// mode over it makes the file fine; the tree the files are merged as would read it as the integer 0 and lose the way it was written (#1778).
+func (d interpolated) intoMarked(v any) error {
+	node := d.node
+	if node == nil {
+		var parsed yaml.Node
+		if err := yaml.Unmarshal(d.raw, &parsed); err != nil {
+			return yaml.Unmarshal(d.raw, v)
+		}
+		node = &parsed
+	}
+	markNegativeZeroModes(node)
+	return node.Decode(v)
 }
 
 // interpolateDocument expands a compose FILE and puts back the emptiness that
@@ -738,9 +760,10 @@ func interpolateDocument(raw []byte, lookup varLookup) (interpolated, error) {
 		// they failed here, which is the truth.
 		return interpolated{raw: out, written: raw}, nil
 	}
+	emptiedName := nameEmptied(&doc, vals)
 	unmark(&doc)
 	restore(&doc, vals, false)
-	return interpolated{node: &doc, raw: out, written: raw}, nil
+	return interpolated{node: &doc, raw: out, written: raw, nameEmptied: emptiedName}, nil
 }
 
 // restore puts held values back into the scalars whose markers stand for them,
@@ -830,6 +853,8 @@ func interpolate(raw []byte, lookup varLookup) ([]byte, error) {
 func expand(raw []byte, lookup varLookup, emptyAs string, hold *[]heldValue) ([]byte, error) {
 	var out bytes.Buffer
 	s := string(raw)
+	var quoted []quotedScalar // the double-quoted scalars of the file, found when a reference needs them
+	quotedKnown := false
 	for i := 0; i < len(s); {
 		c := s[i]
 		if c != '$' {
@@ -861,6 +886,27 @@ func expand(raw []byte, lookup varLookup, emptyAs string, hold *[]heldValue) ([]
 				return nil, unterminatedRef{at: i}
 			}
 			expr := s[i+2 : i+2+end]
+			written := s[i : i+2+end+1]
+			// In a double-quoted scalar the word is written in YAML's escapes (`"${C:-{\"a\":1}}"`):
+			// docker compose reads the YAML first and interpolates the string that came of it, so a
+			// `\"` or a `\\` in the word is the character it stands for. Here the word is set aside
+			// before the parser sees it, so it is read the same way now (#1706) — where the YAML parser
+			// says the reference is in a double-quoted scalar. Only the text of the file: a value a
+			// variable holds is what it is. A word with neither a backslash nor a quote is the same read
+			// either way, and the file is not parsed for it.
+			if hold != nil && strings.ContainsAny(expr, "\\\"") {
+				if !quotedKnown {
+					quoted, quotedKnown = quotedScalars(s), true
+				}
+				if q, ok := quotedAround(quoted, i); ok {
+					// A key is not interpolated, so a line break in it is no break in a reference.
+					un, err := unescapeDoubleQuoted(expr, q.key)
+					if err != nil {
+						return nil, err
+					}
+					expr, written = un, "${"+un+"}"
+				}
+			}
 			val, err := expandBraced(expr, lookup)
 			if err != nil {
 				// A failure from inside a default was found in a different string,
@@ -874,7 +920,7 @@ func expand(raw []byte, lookup varLookup, emptyAs string, hold *[]heldValue) ([]
 			if err := refuseMark("${"+expr+"}", val, emptyAs, hold); err != nil {
 				return nil, err
 			}
-			writeVal(&out, val, s[i:i+2+end+1], emptyAs, hold)
+			writeVal(&out, val, written, emptyAs, hold)
 			i += 2 + end + 1
 		case isNameStart(next):
 			j := i + 1
@@ -894,6 +940,255 @@ func expand(raw []byte, lookup varLookup, emptyAs string, hold *[]heldValue) ([]
 		}
 	}
 	return out.Bytes(), nil
+}
+
+// quotedScalar is a double-quoted scalar of the file as YAML reads it: where it opens and where it
+// closes in the text (the indexes of its two quotes), and whether it is a mapping key.
+type quotedScalar struct {
+	open, close int
+	key         bool
+}
+
+// parseQuoted reads text as YAML and returns the double-quoted scalars in it, in the order they are
+// written; ok is false where text is not YAML.
+func parseQuoted(text string) ([]quotedScalar, bool) {
+	// The line breaks YAML counts: LF, CR, CRLF as one, and NEL, LS and PS.
+	lineStart := []int{0}
+	for i := 0; i < len(text); i++ {
+		switch {
+		case text[i] == '\n':
+			lineStart = append(lineStart, i+1)
+		case text[i] == '\r':
+			if i+1 < len(text) && text[i+1] == '\n' {
+				i++
+			}
+			lineStart = append(lineStart, i+1)
+		case text[i] == 0xC2 && i+1 < len(text) && text[i+1] == 0x85,
+			text[i] == 0xE2 && i+2 < len(text) && text[i+1] == 0x80 && (text[i+2] == 0xA8 || text[i+2] == 0xA9):
+			i += map[byte]int{0xC2: 1, 0xE2: 2}[text[i]]
+			lineStart = append(lineStart, i+1)
+		}
+	}
+	// A position the parser gives is a line and a column, counted in characters: the byte it is at.
+	// The scalars come in the order they are written, so a position on the line of the last one is
+	// reached from it and the line is not counted again from its start.
+	curLine, curColumn, curOff := 0, 0, 0
+	at := func(line, column int) int {
+		if line < 1 || line > len(lineStart) {
+			return len(text)
+		}
+		if line != curLine || column < curColumn {
+			curLine, curColumn, curOff = line, 1, lineStart[line-1]
+		}
+		for ; curColumn < column && curOff < len(text); curColumn++ {
+			_, w := utf8.DecodeRuneInString(text[curOff:])
+			curOff += w
+		}
+		return curOff
+	}
+	var found []quotedScalar
+	var walk func(n *yaml.Node, key bool)
+	walk = func(n *yaml.Node, key bool) {
+		switch n.Kind {
+		case yaml.DocumentNode, yaml.SequenceNode:
+			for _, c := range n.Content {
+				walk(c, false)
+			}
+		case yaml.MappingNode:
+			for i, c := range n.Content {
+				walk(c, i%2 == 0)
+			}
+		case yaml.ScalarNode:
+			if n.Style&yaml.DoubleQuotedStyle == 0 {
+				return
+			}
+			open := openingQuote(text, at(n.Line, n.Column))
+			if open < 0 {
+				return
+			}
+			for i := open + 1; i < len(text); i++ {
+				if text[i] == '\\' {
+					i++
+				} else if text[i] == '"' {
+					found = append(found, quotedScalar{open, i, key})
+					return
+				}
+			}
+		}
+	}
+	var doc yaml.Node
+	if err := yaml.NewDecoder(strings.NewReader(text)).Decode(&doc); err != nil {
+		return nil, err == io.EOF // an empty file has no scalars; anything else is not YAML
+	}
+	walk(&doc, false)
+	return found, true
+}
+
+// quotedScalars reads text, the file before anything is expanded, as YAML, and returns the
+// double-quoted scalars in it in the order they are written. Asking the parser is what tells a
+// quoted scalar from a quote in a plain value (`a,"b"`), a line of a block scalar (`|`, `>`), a line
+// that continues a multi-line value, or a quote of a single-quoted one — every line-by-line guess
+// at it was wrong somewhere. nil where the text is not YAML as it stands (a reference whose word
+// holds a flow collection in a plain value does not parse before it is expanded): nothing is known
+// to be quoted then, and every word is left as written.
+func quotedScalars(text string) []quotedScalar {
+	if found, ok := parseQuoted(text); ok {
+		return found
+	}
+	// The references themselves can be what does not parse (a word with a bad escape or a quote in
+	// it, a `{` in a plain value in a flow collection): they are masked, same length, and the rest of
+	// the text is read.
+	if masked := maskReferences(text); masked != text {
+		if found, ok := parseQuoted(masked); ok {
+			return found
+		}
+	}
+	return nil
+}
+
+// maskReferences is text with each `${…}` reference written over with `_`, byte for byte, line breaks
+// kept, so that a position in the one is the same position in the other.
+func maskReferences(text string) string {
+	b := []byte(text)
+	for i := 0; i+1 < len(text); {
+		switch {
+		case text[i] == '$' && text[i+1] == '$':
+			i += 2
+		case text[i] == '$' && text[i+1] == '{':
+			end := matchBrace(text, i+2, true)
+			if end < 0 {
+				return text
+			}
+			for j := i; j <= i+2+end; j++ {
+				if b[j] != '\n' && b[j] != '\r' {
+					b[j] = '_'
+				}
+			}
+			i += 2 + end + 1
+		default:
+			i++
+		}
+	}
+	return string(b)
+}
+
+// openingQuote finds the quote that opens the scalar the parser put at text[from]: the node starts at
+// its anchor or its tag when it has one, and what is between them and the quote — more of them, white
+// space, line breaks, a comment (which may hold quotes of its own) — is passed over.
+func openingQuote(text string, from int) int {
+	for i := from; i < len(text); i++ {
+		switch text[i] {
+		case '"':
+			return i
+		case '#':
+			if i == 0 || strings.ContainsRune(" \t\r\n", rune(text[i-1])) {
+				for i < len(text) && text[i] != '\n' && text[i] != '\r' {
+					i++
+				}
+			}
+		case '&', '!':
+			for i < len(text) && !strings.ContainsRune(" \t\r\n", rune(text[i])) {
+				i++
+			}
+		}
+	}
+	return -1
+}
+
+// quotedAround finds the double-quoted scalar the reference that starts at text[at] is written in:
+// the one whose quotes are on each side of the `$`.
+func quotedAround(scalars []quotedScalar, at int) (quotedScalar, bool) {
+	i := sort.Search(len(scalars), func(i int) bool { return scalars[i].open >= at }) - 1
+	if i >= 0 && scalars[i].open < at && at < scalars[i].close {
+		return scalars[i], true
+	}
+	return quotedScalar{}, false
+}
+
+// unescapeDoubleQuoted reads s, text written inside a YAML double-quoted scalar, as YAML does:
+// `\"` is a quote, `\\` a backslash, `\t` a tab, `\x41`, `\u00e9` and `\U0001F600` the character
+// of that code, and the rest of the table of the YAML specification (`\0 \a \b \v \f \r \e`, `\ `,
+// `\N \_ \L \P`). What YAML refuses is refused the way docker compose refuses it (v5.5.1): an
+// escape it does not know (`\q`, `\$`, and `\/`, which go-yaml does not take) and a hexadecimal
+// escape that is too short or not hexadecimal, and a bare `"`, which ends the scalar. So is `\n` — a line break in a reference (not in a key, which is not interpolated), which docker
+// compose finds no reference in (`invalid interpolation format`). A backslash before a line break is
+// a continuation, left for the one that folds it.
+func unescapeDoubleQuoted(s string, key bool) (string, error) {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '"' {
+			// The scalar ends here, in the middle of the reference: docker compose finds the rest
+			// of the file is not YAML (`found unexpected end of stream`).
+			return "", fmt.Errorf("a `\"` in the word of a reference written in double quotes ends the quoted value: write it as `\\\"`")
+		}
+		if c != '\\' {
+			b.WriteByte(c)
+			continue
+		}
+		i++
+		if i >= len(s) {
+			return "", fmt.Errorf("a backslash ends the word of a reference written in double quotes: found unknown escape character")
+		}
+		switch e := s[i]; e {
+		case '0':
+			b.WriteByte(0)
+		case 'a':
+			b.WriteByte('\a')
+		case 'b':
+			b.WriteByte('\b')
+		case 't', '\t':
+			b.WriteByte('\t')
+		case 'v':
+			b.WriteByte('\v')
+		case 'f':
+			b.WriteByte('\f')
+		case 'r':
+			b.WriteByte('\r')
+		case 'e':
+			b.WriteByte(0x1b)
+		case ' ':
+			b.WriteByte(' ')
+		case '"':
+			b.WriteByte('"')
+		case '\\':
+			b.WriteByte('\\')
+		case 'N':
+			b.WriteString("\u0085")
+		case '_':
+			b.WriteString("\u00a0")
+		case 'L':
+			b.WriteString("\u2028")
+		case 'P':
+			b.WriteString("\u2029")
+		case '\n', '\r':
+			b.WriteByte('\\') // a continuation: folded by foldLineContinuations
+			b.WriteByte(e)
+		case 'n':
+			if key {
+				b.WriteByte('\n')
+				continue
+			}
+			return "", fmt.Errorf("a `\\n` in the word of a reference written in double quotes puts a line break in the reference: invalid interpolation format — write the word without it")
+		case 'x', 'u', 'U':
+			width := map[byte]int{'x': 2, 'u': 4, 'U': 8}[e]
+			if i+width >= len(s) {
+				return "", fmt.Errorf("a `\\%c` escape in the word of a reference written in double quotes is too short: did not find expected hexadecimal number", e)
+			}
+			code, err := strconv.ParseUint(s[i+1:i+1+width], 16, 32)
+			if err != nil {
+				return "", fmt.Errorf("a `\\%c` escape in the word of a reference written in double quotes is not hexadecimal: did not find expected hexadecimal number", e)
+			}
+			if (code >= 0xD800 && code <= 0xDFFF) || code > 0x10FFFF {
+				return "", fmt.Errorf("a `\\%c` escape in the word of a reference written in double quotes is not a Unicode character: found invalid Unicode character escape code", e)
+			}
+			b.WriteRune(rune(code))
+			i += width
+		default:
+			return "", fmt.Errorf("a `\\%c` in the word of a reference written in double quotes is not an escape YAML knows: found unknown escape character", e)
+		}
+	}
+	return b.String(), nil
 }
 
 // refuseMark stops a value that carries the mark from being written into a
@@ -1013,50 +1308,12 @@ func matchBrace(text string, from int, inDocument bool) int {
 // (A plain value inside a flow collection is not looked for: docker compose refuses one that has
 // a `{` in it, and a word with no `{` of its own never gets here.)
 func scalarEnd(text string, at int) int {
-	start := strings.LastIndexByte(text[:at], '\n') + 1
-	if cr := strings.LastIndexByte(text[start:at], '\r'); cr >= 0 {
-		start += cr + 1
-	}
-	const plain, single, double = 0, 1, 2
-	state, prev := plain, byte(0)
-	for k := start; k < at-2; k++ { // up to the `${` of the reference itself
-		c := text[k]
-		switch state {
-		case double:
-			switch c {
-			case '\\':
-				k++
-			case '"':
-				state, prev = plain, c
-			}
-		case single:
-			if c == '\'' {
-				if k+1 < at-2 && text[k+1] == '\'' {
-					k++
-				} else {
-					state, prev = plain, c
-				}
-			}
-		default:
-			switch {
-			case c == '"' && opensNode(prev):
-				state = double
-			case c == '\'' && opensNode(prev):
-				state = single
-			case c == '#' && (prev == 0 || text[k-1] == ' ' || text[k-1] == '\t'):
-				return -1 // inside a comment
-			case (c == '!' || c == '&') && opensNode(prev):
-				// A tag or an anchor before the node: the quote after it opens the scalar.
-				for k < at-2 && text[k] != ' ' && text[k] != '\t' {
-					k++
-				}
-			case c != ' ' && c != '\t':
-				prev = c
-			}
-		}
+	state, known := scalarState(text, at)
+	if !known {
+		return -1
 	}
 	switch state {
-	case double:
+	case scalarDouble:
 		for k := at; k < len(text); k++ {
 			if text[k] == '\\' {
 				k++
@@ -1065,7 +1322,7 @@ func scalarEnd(text string, at int) int {
 			}
 		}
 		return -1
-	case single:
+	case scalarSingle:
 		for k := at; k < len(text); k++ {
 			if text[k] == '\'' {
 				if k+1 < len(text) && text[k+1] == '\'' {
@@ -1083,6 +1340,62 @@ func scalarEnd(text string, at int) int {
 		}
 	}
 	return len(text)
+}
+
+// What kind of YAML scalar a reference is written in.
+const (
+	scalarPlain = iota
+	scalarSingle
+	scalarDouble
+)
+
+// scalarState says which kind of scalar holds the reference whose `${` is at text[at-2:at], read
+// from the start of its line; known is false where that cannot be told (the line is itself a
+// comment). A scalar that was opened on an earlier line is not known to be one: the state is the
+// plain one there.
+func scalarState(text string, at int) (state int, known bool) {
+	start := strings.LastIndexByte(text[:at], '\n') + 1
+	if cr := strings.LastIndexByte(text[start:at], '\r'); cr >= 0 {
+		start += cr + 1
+	}
+	prev := byte(0)
+	for k := start; k < at-2; k++ { // up to the `${` of the reference itself
+		c := text[k]
+		switch state {
+		case scalarDouble:
+			switch c {
+			case '\\':
+				k++
+			case '"':
+				state, prev = scalarPlain, c
+			}
+		case scalarSingle:
+			if c == '\'' {
+				if k+1 < at-2 && text[k+1] == '\'' {
+					k++
+				} else {
+					state, prev = scalarPlain, c
+				}
+			}
+		default:
+			switch {
+			case c == '"' && opensNode(prev):
+				state = scalarDouble
+			case c == '\'' && opensNode(prev):
+				state = scalarSingle
+			case c == '#' && (prev == 0 || text[k-1] == ' ' || text[k-1] == '\t'):
+				return scalarPlain, false // inside a comment
+			case (c == '!' || c == '&') && opensNode(prev):
+				// A tag or an anchor before the node: the quote after it opens the scalar.
+				for k < at-2 && text[k] != ' ' && text[k] != '\t' {
+					k++
+				}
+			case c != ' ' && c != '\t':
+				prev = c
+			}
+		}
+	}
+	return state, true
 }
 
 // opensNode says whether a quote right after prev (the last byte of the line that is not a
@@ -1319,4 +1632,39 @@ func badNameChar(r rune) bool {
 		return false
 	}
 	return true
+}
+
+// nameEmptied is whether the document's top-level `name` is a scalar written with references that came to nothing, found
+// by the marks that stand for them before unmark and restore take them out (an alias to a scalar of the kind counts,
+// as docker compose reads it through the alias).
+func nameEmptied(doc *yaml.Node, vals []heldValue) bool {
+	root := doc
+	if root.Kind == yaml.DocumentNode && len(root.Content) == 1 {
+		root = root.Content[0]
+	}
+	if root.Kind != yaml.MappingNode {
+		return false
+	}
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value != "name" {
+			continue
+		}
+		v := root.Content[i+1]
+		for v.Kind == yaml.AliasNode && v.Alias != nil {
+			v = v.Alias
+		}
+		if v.Kind != yaml.ScalarNode || !(strings.Contains(v.Value, emptied) || strings.Contains(v.Value, held)) {
+			return false // written out, with no reference in it
+		}
+		// What the references came to, the held values put back as restore does: a default that is empty rides as a
+		// held value, a reference to a variable that is unset as the mark.
+		resolved := heldMarker.ReplaceAllStringFunc(strings.ReplaceAll(v.Value, emptied, ""), func(m string) string {
+			if i, err := strconv.Atoi(strings.Trim(m, held)); err == nil && i >= 0 && i < len(vals) {
+				return vals[i].value
+			}
+			return m
+		})
+		return resolved == ""
+	}
+	return false
 }
