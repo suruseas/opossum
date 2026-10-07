@@ -9,10 +9,12 @@ that begins `{"$schema": "https://json-schema.org/draft/2020-12/schema", "$id":
 
 What is kept is the structure — types, items, oneOf, properties, patternProperties,
 the schema of an additional property, enum, pattern, minimum/maximum and
-uniqueItems — with every $ref written out. What is left out is the prose (titles,
-descriptions, defaults), `required` and the switch that forbids a key the schema
-does not know: opossum keeps its own list of the keys a service may have, and a
-newer docker compose may take a key this copy does not.
+uniqueItems — with every $ref written out, and `required` and the switch that forbids a key
+the schema does not know (`closed`, from `additionalProperties: false`) where an object
+has them. What is left out is the prose (titles, descriptions, defaults). The service's
+own list of keys is not asked of `closed`: opossum keeps its own list of the keys a service
+may have, and a newer docker compose may take a key this copy does not; a block under a
+service is, for the keys held to the schema.
 
 The schema is the Compose Specification's (https://github.com/compose-spec/compose-spec,
 Apache License 2.0); the file this writes keeps its structure and none of its prose.
@@ -45,6 +47,10 @@ def expand(node, stack=()):
         elif k == "additionalProperties":
             if isinstance(v, dict):
                 out["additional"] = expand(v, stack)
+            elif v is False:
+                out["closed"] = True
+        elif k == "required":
+            out["required"] = v
         elif k in KEEP:
             out[k] = expand(v, stack)
     return out

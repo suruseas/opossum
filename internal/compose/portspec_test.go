@@ -118,8 +118,14 @@ func TestAPortIsCheckedAtLoadTheWayDockerChecksIt(t *testing.T) {
 		{"container only", `"80"`, "80:80"},
 		{"bare number", `80`, "80:80"},
 		{"leading zero", `"080:80"`, "080:80"},
-		{"host port 0", `"0:80"`, "0:80"},
+		{"host port 0 is a host port left out", `"0:80"`, "80:80"}, // docker compose: `published: "0"`, the engine picks one; the runtime refuses 0 (#1820)
 		{"empty host port", `":80"`, "80:80"},
+		// Spelled with more zeros, docker compose reads the same port 0 (v5.5.1 `config`: `published: "0"`), and the runtime refuses each
+		// spelling as it does 0 (container 1.5.0), so each is a host port left out (#1840).
+		{"host port 00", `"00:80"`, "80:80"},
+		{"host port 000 with a protocol", `"000:80/udp"`, "80:80/udp"},
+		{"host port 00 with a host address", `"127.0.0.1:00:82"`, "127.0.0.1:82:82"},
+		{"host range of one at 00", `"00-00:80"`, "80:80"},
 		{"ranges of one length", `"80-90:80-90"`, "80-90:80-90"},
 		{"a host range for one container port", `"8000-8010:80"`, "8000-8010:80"},
 		{"a bare container range", `"80-90"`, "80-90:80-90"},
@@ -135,7 +141,7 @@ func TestAPortIsCheckedAtLoadTheWayDockerChecksIt(t *testing.T) {
 		{"a host range of one with a leading zero at the top", `"8080-08080:80"`, "8080:80"},
 		{"a container range of one with a leading zero", `"8080:080-80"`, "8080:080"},
 		{"a bare container range of one", `"80-80"`, "80:80"},
-		{"a host range of one at 0", `"0-0:80"`, "0:80"},
+		{"a host range of one at 0", `"0-0:80"`, "80:80"},
 		{"a host range from 0 to 1 is a range", `"0-1:80"`, "0-1:80"},
 		{"a host range of two for a container range of one", `"8080-8081:80-80"`, "8080-8081:80"},
 		{"udp", `"80:80/udp"`, "80:80/udp"},
@@ -154,7 +160,7 @@ func TestAPortIsCheckedAtLoadTheWayDockerChecksIt(t *testing.T) {
 		{"an address with the host port left out", `"127.0.0.1::80"`, "127.0.0.1:80:80"},
 		{"long form", `{target: 80, published: 8080, protocol: tcp}`, "8080:80/tcp"},
 		{"long form, published as a range", `{target: 80, published: "8000-8010"}`, "8000-8010:80"},
-		{"long form, published 0", `{target: 80, published: 0}`, "0:80"},
+		{"long form, published 0", `{target: 80, published: 0}`, "80:80"},
 		{"long form, an IPv6 host_ip", `{target: 80, host_ip: "::1"}`, "[::1]:80:80"},
 		{"long form, protocol in capitals", `{target: 80, protocol: TCP}`, "80:80/TCP"},
 	} {

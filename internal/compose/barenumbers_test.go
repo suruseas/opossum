@@ -74,7 +74,7 @@ func TestBareWholeNumbersAreTheNumberYAMLReads(t *testing.T) {
 		{"ulimits scalar", "0x7fffffffffffffff", "9223372036854775807:9223372036854775807"},
 		{"ulimits soft/hard", "0x7fffffffffffffff", "9223372036854775807:9223372036854775807"},
 		{"port published", "-0", "REFUSE"},
-		{"port published", "-00", "0:80"},
+		{"port published", "-00", "80:80"}, // the port 0, which is a host port left out (#1820)
 		{"port published", "+08", "REFUSE"},
 		{"port published", "!!float 3", "REFUSE"},
 		{"port target", "!!float 3", "9000:3"},

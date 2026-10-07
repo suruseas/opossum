@@ -91,3 +91,93 @@ func TestATagOnANetworkVolumeConfigOrSecretOverAnIncludeAndOverAnEarlierFile(t *
 		})
 	}
 }
+
+// And a `!reset` or `!override` written on a whole section (`networks:`, `volumes:`, `configs:`, `secrets:`, `services:`) is read over an earlier `-f` file and
+// not over an `include`: docker compose leaves what the included file wrote in the section, and merges what the parent writes into it (#1827; every row is
+// docker compose v5.5.1's `config --format json` for the same files — what the project holds: its services, and whether the included network, volume, config
+// and secret are there).
+func TestATagOnAWholeSectionOverAnIncludeAndOverAnEarlierFile(t *testing.T) {
+	const inc = "services:\n  s:\n    image: y\n    networks: [n]\n    volumes:\n      - {type: volume, source: v, target: /v}\n    configs: [c]\n    secrets: [k]\nnetworks:\n  n: {driver: bridge}\nvolumes:\n  v: {driver: local}\nconfigs:\n  c: {content: hello}\nsecrets:\n  k: {file: ./k.txt}\n"
+	const web = "services:\n  web:\n    image: x\n"
+	for _, tc := range []struct {
+		name, over string
+		include    bool
+		want       string // "services=…" and which of n v c k are there, or "error"
+	}{
+		{"include: networks !reset", web + "networks: !reset {}\n", true, "services=s,web nvck"},
+		{"include: networks !override", web + "networks: !override {m: {labels: {z: y}}}\n", true, "services=s,web nvck"},
+		{"include: volumes !reset", web + "volumes: !reset {}\n", true, "services=s,web nvck"},
+		{"include: volumes !override", web + "volumes: !override {m: {}}\n", true, "services=s,web nvck"},
+		{"include: configs !reset", web + "configs: !reset {}\n", true, "services=s,web nvck"},
+		{"include: configs !override", web + "configs: !override {m: {content: x}}\n", true, "services=s,web nvck"},
+		{"include: secrets !reset", web + "secrets: !reset {}\n", true, "services=s,web nvck"},
+		{"include: secrets !override", web + "secrets: !override {m: {file: ./k2.txt}}\n", true, "services=s,web nvck"},
+		{"include: services !override", "services: !override {web: {image: x}}\n", true, "services=s,web nvck"},
+		// Under `!reset` what the parent writes in the section is dropped with the rest of the section's tag (docker compose: the service that uses `m` is refused, and `web` is gone).
+		{"include: networks !reset with a network of the parent's that a service uses", "services:\n  web:\n    image: x\n    networks: [m]\nnetworks: !reset {m: {}}\n", true, "error"},
+		{"include: services !reset {web}", "services: !reset {web: {image: x}}\n", true, "services=s nvck"},
+		{"include: services !reset", "services: !reset {}\n", true, "services=s nvck"},
+		{"-f: networks !reset", web + "networks: !reset {}\n", false, "error"},
+		{"-f: networks !override", web + "networks: !override {m: {labels: {z: y}}}\n", false, "error"},
+		{"-f: volumes !reset", web + "volumes: !reset {}\n", false, "error"},
+		{"-f: configs !reset", web + "configs: !reset {}\n", false, "error"},
+		{"-f: secrets !reset", web + "secrets: !reset {}\n", false, "error"},
+		{"-f: secrets !override", web + "secrets: !override {m: {file: ./k2.txt}}\n", false, "error"},
+		{"-f: services !override", "services: !override {web: {image: x}}\n", false, "services=web"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			write := func(name, body string) {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write("k.txt", "s")
+			write("k2.txt", "s2")
+			var paths []string
+			if tc.include {
+				write("inc.yaml", inc)
+				write("p.yaml", "include:\n  - inc.yaml\n"+tc.over)
+				paths = []string{filepath.Join(dir, "p.yaml")}
+			} else {
+				write("base.yaml", inc)
+				write("p.yaml", tc.over)
+				paths = []string{filepath.Join(dir, "base.yaml"), filepath.Join(dir, "p.yaml")}
+			}
+			project, err := LoadFiles(paths, nil)
+			if tc.want == "error" {
+				if err == nil || !strings.Contains(err.Error(), "undefined") {
+					t.Fatalf("want the refusal docker compose makes (the service refers to what the tag took out: `undefined`), got %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			var services []string
+			for name := range project.Services {
+				services = append(services, name)
+			}
+			sort.Strings(services)
+			got := "services=" + strings.Join(services, ",")
+			if strings.HasSuffix(tc.want, " nvck") {
+				_, n := project.Networks["n"]
+				_, v := project.Volumes["v"]
+				_, c := project.Configs["c"]
+				_, k := project.Secrets["k"]
+				got += " "
+				for _, p := range []struct {
+					here bool
+					mark string
+				}{{n, "n"}, {v, "v"}, {c, "c"}, {k, "k"}} {
+					if p.here {
+						got += p.mark
+					}
+				}
+			}
+			if got != tc.want {
+				t.Errorf("got  %s\nwant %s", got, tc.want)
+			}
+		})
+	}
+}

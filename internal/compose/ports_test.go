@@ -15,6 +15,14 @@ func TestNormalizePort(t *testing.T) {
 		"3000-3005":         "3000-3005:3000-3005",
 		"3000-3005/udp":     "3000-3005:3000-3005/udp",
 		":80":               "80:80", // empty host (docker: random) -> mirror
+		"0:80":              "80:80", // host port 0 (docker: the engine picks one) -> mirror, as an empty one does
+		"0:80/udp":          "80:80/udp",
+		"127.0.0.1:0:80":    "127.0.0.1:80:80",
+		"[::1]:0:80":        "[::1]:80:80",
+		"0:80-82":           "80-82:80-82",
+		"0-1:80":            "0-1:80", // a range that starts at 0 is left to the runtime
+		"10:80":             "10:80",
+		"8080:0":            "8080:0",
 		"8080:80":           "8080:80",
 		"8080:80/udp":       "8080:80/udp",
 		"127.0.0.1:8080:80": "127.0.0.1:8080:80",
@@ -27,6 +35,47 @@ func TestNormalizePort(t *testing.T) {
 		if got, _ := normalizePort(in); got != want {
 			t.Errorf("normalizePort(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// A host port of 0 is a host port left out: the container port, which `up` moves if it is taken, as it does for a bare container port (#1820).
+func TestAHostPortOfZeroIsMirroredAndMovable(t *testing.T) {
+	for _, tc := range []struct {
+		in       string
+		mirrored bool
+	}{{"0:80", true}, {"127.0.0.1:0:80", true}, {"0:80/udp", true}, {":80", true}, {"8080:80", false}, {"0-1:80", false}, {"10:80", false},
+		{"00:80", true}, {"000:80/udp", true}, {"127.0.0.1:00:82", true}, {"00-00:80", true}, {"0-0:80", true}, {"00-01:80", false}, {"010:80", false}} {
+		t.Run(tc.in, func(t *testing.T) {
+			if _, mirrored := normalizePort(tc.in); mirrored != tc.mirrored {
+				t.Errorf("normalizePort(%q): mirrored = %v, want %v", tc.in, mirrored, tc.mirrored)
+			}
+		})
+	}
+}
+
+// The long form's published port is read as the short form's host port: `00` is the port 0 there as it is in `00:80`, and is a host port left
+// out. docker compose v5.5.1 `config` hands a long form's `"00"` back as written, where it does the short form's to `"0"`; `up` publishes it on
+// a free port, as it does `0` (measured, #1840).
+func TestLoadReadsALongFormPublishedPortOfZerosAsLeftOut(t *testing.T) {
+	for _, tc := range []struct{ name, entry, want string }{
+		{"published 00", `{target: 80, published: "00"}`, "80:80"},
+		{"published 000 with a host_ip", `{target: 80, published: "000", host_ip: 127.0.0.1, protocol: udp}`, "127.0.0.1:80:80/udp"},
+		{"published 0", `{target: 80, published: "0"}`, "80:80"},
+		{"published 010 is a port", `{target: 80, published: "010"}`, "010:80"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "compose.yaml")
+			if err := os.WriteFile(path, []byte("services:\n  web:\n    image: nginx\n    ports: ["+tc.entry+"]\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			p, err := Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := p.Services["web"].Ports; len(got) != 1 || got[0] != tc.want {
+				t.Errorf("ports = %v, want [%s]", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -158,6 +207,38 @@ services:
 	}
 	if auto["8080:80"] {
 		t.Errorf("an explicit mapping must never be marked movable, got %v", auto)
+	}
+}
+
+// A host port of 0 is a host port left out all the way through Load, not only in normalizePort: the entry it becomes is marked as
+// opossum's to move, so that `up` can give it a free port when the container port is taken (#1820, #1842). An explicit host port beside it is not.
+func TestLoadMarksAHostPortOfZeroAsMovable(t *testing.T) {
+	for _, tc := range []struct {
+		name, entry, spec string
+		movable           bool
+	}{
+		{"0:80", `"0:80"`, "80:80", true},
+		{"00:80", `"00:80"`, "80:80", true},
+		{"with a host address", `"127.0.0.1:0:81"`, "127.0.0.1:81:81", true},
+		{"with a protocol", `"0:82/udp"`, "82:82/udp", true},
+		{"long form published 0", `{target: 83, published: 0}`, "83:83", true},
+		{"an explicit host port is the user's", `"8084:84"`, "8084:84", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "compose.yaml")
+			mustWrite(t, path, "services:\n  web:\n    image: nginx\n    ports: ["+tc.entry+"]\n")
+			p, err := Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			svc := p.Services["web"]
+			if len(svc.Ports) != 1 || svc.Ports[0] != tc.spec {
+				t.Fatalf("ports = %v, want [%s]", svc.Ports, tc.spec)
+			}
+			if got := svc.AutoHostPort[tc.spec]; got != tc.movable {
+				t.Errorf("AutoHostPort[%q] = %v, want %v (%v)", tc.spec, got, tc.movable, svc.AutoHostPort)
+			}
+		})
 	}
 }
 

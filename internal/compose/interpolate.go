@@ -680,10 +680,20 @@ type interpolated struct {
 
 // into decodes the document into v.
 func (d interpolated) into(v any) error {
-	if d.node != nil {
-		return d.node.Decode(v)
+	node := d.node
+	if node == nil {
+		var parsed yaml.Node
+		if err := yaml.Unmarshal(d.raw, &parsed); err != nil {
+			return yaml.Unmarshal(d.raw, v) // the caller reports the syntax error in its own words
+		}
+		node = &parsed
 	}
-	return yaml.Unmarshal(d.raw, v)
+	spreadSequenceMerges(node)
+	// A tree is decoded without the merge key that brings a block in by itself: the load that starts a project refuses the file (validateOne, or where a file is
+	// read first the check of what was written, which says it of the alias), and a command that takes a project down reads it so (#1475), the refusal kept. The tree
+	// is the one the caller holds, so what is taken out here is out for what reads it after.
+	selfMerging(node, true)
+	return node.Decode(v)
 }
 
 // intoMarked is into with the `mode` of a `secrets` or `configs` entry that is written `-0` read as the word negZeroMode: docker compose
@@ -699,7 +709,63 @@ func (d interpolated) intoMarked(v any) error {
 		node = &parsed
 	}
 	markNegativeZeroModes(node)
+	spreadSequenceMerges(node)
+	// A tree is decoded without the merge key that brings a block in by itself: the load that starts a project refuses the file (validateOne, or where a file is
+	// read first the check of what was written, which says it of the alias), and a command that takes a project down reads it so (#1475), the refusal kept. The tree
+	// is the one the caller holds, so what is taken out here is out for what reads it after.
+	selfMerging(node, true)
 	return node.Decode(v)
+}
+
+// spreadSequenceMerges puts the list an alias stands for where a merge key holds the alias (`<<: *l` over `x-l: &l [*a, *b]`): docker compose
+// reads that as the merge of the mappings in the list, as it reads the list written there, where yaml.v3 refuses the alias to a list
+// (`map merge requires map or sequence of maps as the value`), in a service, a block of one, a list of items, and the other mappings of the
+// file alike; not at the top of the document, where docker compose refuses it. The list's own items are left as they are — aliases to mappings, which it merges.
+func spreadSequenceMerges(n *yaml.Node) {
+	spreadSequenceMergesThrough(n, map[*yaml.Node]bool{}, map[*yaml.Node]bool{}, map[*yaml.Node]bool{})
+}
+
+// spreadSequenceMergesThrough is spreadSequenceMerges that goes into what an alias stands for as well, once: an anchor a `!reset` took out of the tree with the
+// key it was written under (`x-r: !reset {a: &in {<<: *e}}`) is reached only from the alias that uses it (`environment: *in`), and docker compose reads it there
+// (#1874).
+// An alias's target is walked once however many aliases name it: a block that holds itself (`x-a: &a {k: *a}`) would never come to an end, and a lattice of
+// aliases (two branches over forty levels, measured) would be walked once for every path through it. This runs before the decode, which is what refuses either.
+// A node is walked once as well, whatever reached it: a block that an alias reaches again after the list it is in was walked (`x-l: &l [&m {K: v, <<: *l}]`, then
+// `x-y: *m`) is walked with the list no longer on the path, where the merge key is spread and makes a cycle with no alias in it, which seen, kept for the
+// targets of aliases, does not stop (#1898).
+// And the list is not put where its own block is: onPath holds the nodes this walk is inside, and a merge key whose alias is to one of them is left as it is,
+// which the decode refuses (`map merge requires map or sequence of maps`) where it would have gone round for ever in every file the decode reads (an
+// override file, an included one, a service, a declaration) and not only in the walks here.
+func spreadSequenceMergesThrough(n *yaml.Node, seen, visited, onPath map[*yaml.Node]bool) {
+	if n == nil || visited[n] {
+		return
+	}
+	visited[n] = true
+	onPath[n] = true
+	defer delete(onPath, n)
+	// A merge key at the top of the document is refused whatever it holds (docker compose: `map merge requires …` at the root), and not spread.
+	if n.Kind == yaml.DocumentNode && len(n.Content) == 1 && n.Content[0].Kind == yaml.MappingNode {
+		for _, c := range n.Content[0].Content {
+			spreadSequenceMergesThrough(c, seen, visited, onPath)
+		}
+		return
+	}
+	if n.Kind == yaml.AliasNode && n.Alias != nil && !seen[n.Alias] {
+		seen[n.Alias] = true
+		spreadSequenceMergesThrough(n.Alias, seen, visited, onPath)
+	}
+	if n.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			if n.Content[i].Value == "<<" {
+				if v := n.Content[i+1]; v.Kind == yaml.AliasNode && v.Alias != nil && v.Alias.Kind == yaml.SequenceNode && !onPath[v.Alias] {
+					n.Content[i+1] = v.Alias
+				}
+			}
+		}
+	}
+	for _, c := range n.Content {
+		spreadSequenceMergesThrough(c, seen, visited, onPath)
+	}
 }
 
 // interpolateDocument expands a compose FILE and puts back the emptiness that

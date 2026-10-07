@@ -2356,6 +2356,23 @@ func (d *VolumeDecl) UnmarshalYAML(value *yaml.Node) error {
 // goes) and the key's for a list or a mapping. what names the declaration
 // the way its refusals read it.
 func refuseNonStringDeclKeys(what string, n *yaml.Node, keys ...string) error {
+	return refuseNonStringDeclKeysThrough(what, n, map[*yaml.Node]bool{}, map[*yaml.Node]bool{}, keys...)
+}
+
+// refuseNonStringDeclKeysThrough is refuseNonStringDeclKeys that keeps what it has walked, as refuseNonStringKeysThrough does: a block that holds itself through
+// a merge key is refused, as docker compose refuses it, and does not take the process down (#1893).
+func refuseNonStringDeclKeysThrough(what string, n *yaml.Node, walking, walked map[*yaml.Node]bool, keys ...string) error {
+	if walked[n] {
+		return nil
+	}
+	if walking[n] {
+		return fmt.Errorf("%s: a merge key brings in the block that holds it (line %d) — a block cannot merge itself", what, n.Line)
+	}
+	walking[n] = true
+	defer func() {
+		delete(walking, n)
+		walked[n] = true
+	}()
 	for i := 0; i+1 < len(n.Content); i += 2 {
 		k := n.Content[i].Value
 		if n.Content[i].Tag == "!!merge" {
@@ -2366,7 +2383,7 @@ func refuseNonStringDeclKeys(what string, n *yaml.Node, keys ...string) error {
 			}
 			for _, m := range maps {
 				if m = unalias(m); m.Kind == yaml.MappingNode {
-					if err := refuseNonStringDeclKeys(what, m, keys...); err != nil {
+					if err := refuseNonStringDeclKeysThrough(what, m, walking, walked, keys...); err != nil {
 						return err
 					}
 				}
@@ -3161,6 +3178,8 @@ func (b *Build) UnmarshalYAML(value *yaml.Node) error {
 		msg = strings.Replace(msg, "environment entry ", "build.args entry ", 1)
 		msg = strings.Replace(msg, "for environment, got", "for build.args, got", 1)
 		msg = strings.Replace(msg, "environment variable ", "build.args variable ", 1)
+		// The words of a block that merges itself carry a colon where the name would be (`environment variable: a merge key brings in …`).
+		msg = strings.Replace(msg, "environment variable: ", "build.args variable: ", 1)
 		return errors.New(msg)
 	}
 	// docker compose refuses the pair when the project is loaded (v5.5.1, measured:
@@ -3728,6 +3747,26 @@ func mappingValue(n *yaml.Node, key string) (*yaml.Node, bool) {
 // walked instead, since its names end up in this one. what names the
 // field the way its refusals read it ("environment variable").
 func refuseNonStringKeys(what string, n *yaml.Node) error {
+	return refuseNonStringKeysThrough(what, n, map[*yaml.Node]bool{}, map[*yaml.Node]bool{})
+}
+
+// refuseNonStringKeysThrough is refuseNonStringKeys that keeps what it has walked: a block a merge key brings in that holds the block that brings it in
+// (`x-a: &a {K: v, <<: *a}`, which docker compose refuses) would otherwise be walked without end and take the process down, and a block the merge keys of a
+// lattice bring in by many ways is walked once.
+func refuseNonStringKeysThrough(what string, n *yaml.Node, walking, walked map[*yaml.Node]bool) error {
+	if walked[n] {
+		return nil
+	}
+	if walking[n] {
+		return fmt.Errorf("%s: a merge key brings in the block that holds it (line %d) — a block cannot merge itself", what, n.Line)
+	}
+	walking[n] = true
+	// Walked when it is done: the first look at it above is `walked`, so what is left in `walking` after it is never asked about again, and the delete is only
+	// what keeps `walking` the blocks being walked now (the cycle it means to find is one of those).
+	defer func() {
+		delete(walking, n)
+		walked[n] = true
+	}()
 	for i := 0; i+1 < len(n.Content); i += 2 {
 		key := unalias(n.Content[i])
 		if key.Kind != yaml.ScalarNode {
@@ -3741,7 +3780,7 @@ func refuseNonStringKeys(what string, n *yaml.Node) error {
 			}
 			for _, m := range maps {
 				if m = unalias(m); m.Kind == yaml.MappingNode {
-					if err := refuseNonStringKeys(what, m); err != nil {
+					if err := refuseNonStringKeysThrough(what, m, walking, walked); err != nil {
 						return err
 					}
 				}
@@ -3870,11 +3909,17 @@ func (u *Ulimits) UnmarshalYAML(value *yaml.Node) error {
 		case yaml.MappingNode:
 			var lim Ulimit
 			seen := map[string]bool{}
-			for j := 0; j+1 < len(v.Content); j += 2 {
-				key := unalias(v.Content[j]).Value
+			// The keys of the mapping are what it holds and what a merge key brings in (`nofile: {<<: *l}`, `{soft: 3, <<: *l}` with its own key winning, `<<: [*l, *m]` with
+			// the earlier source winning), as docker compose reads them (v5.5.1, #1903).
+			pairs, err := mergedPairs(v)
+			if err != nil {
+				return fmt.Errorf("ulimits %s: %w", name, err)
+			}
+			for j := 0; j+1 < len(pairs); j += 2 {
+				key := unalias(pairs[j]).Value
 				switch key {
 				case "soft", "hard":
-					c, err := count(name+"."+key, v.Content[j+1])
+					c, err := count(name+"."+key, pairs[j+1])
 					if err != nil {
 						return err
 					}
@@ -3907,6 +3952,21 @@ func (u *Ulimits) UnmarshalYAML(value *yaml.Node) error {
 // over a later one, and a source that is not a mapping is refused (yaml.v3:
 // `map merge requires map or sequence of maps as the value`).
 func mergedPairs(m *yaml.Node) ([]*yaml.Node, error) {
+	return mergedPairsThrough(m, map[*yaml.Node]bool{}, map[*yaml.Node][]*yaml.Node{})
+}
+
+// mergedPairsThrough is mergedPairs that knows the blocks it is in the middle of: one that a merge key brings in and that holds the block that brings it in
+// is refused, as docker compose refuses it, and does not take the process down (#1893). What a block comes to does not depend on the place it is brought in at,
+// so it is kept in done: a lattice of merges (two ways to each block) is merged once for each block, not once for each way down to it.
+func mergedPairsThrough(m *yaml.Node, walking map[*yaml.Node]bool, done map[*yaml.Node][]*yaml.Node) ([]*yaml.Node, error) {
+	if out, ok := done[m]; ok {
+		return out, nil
+	}
+	if walking[m] {
+		return nil, fmt.Errorf("a merge key brings in the block that holds it (line %d) — a block cannot merge itself", m.Line)
+	}
+	walking[m] = true
+	defer delete(walking, m)
 	var out []*yaml.Node
 	seen := map[string]bool{}
 	for i := 0; i+1 < len(m.Content); i += 2 {
@@ -3930,7 +3990,7 @@ func mergedPairs(m *yaml.Node) ([]*yaml.Node, error) {
 			if src.Kind != yaml.MappingNode {
 				return nil, fmt.Errorf("`<<:` merge requires a mapping or a list of mappings as the value, got %s", kindName(src.Kind))
 			}
-			sub, err := mergedPairs(src)
+			sub, err := mergedPairsThrough(src, walking, done)
 			if err != nil {
 				return nil, err
 			}
@@ -3944,6 +4004,7 @@ func mergedPairs(m *yaml.Node) ([]*yaml.Node, error) {
 			}
 		}
 	}
+	done[m] = out
 	return out, nil
 }
 

@@ -127,13 +127,21 @@ func writeFake(t *testing.T, bin, tool string, out func(v string) string, values
 		fmt.Fprintf(&cases, "%d) %s;;\n", i, line)
 	}
 	count := filepath.Join(bin, tool+".count")
+	// The count is a file that a call reads, adds one to and writes back, which is not one step: a call that reads it while another has truncated it
+	// reads nothing, matches no case, and prints nothing — a cache whose size could not be read, which the script takes as not wanting a trim — and four
+	// scripts at once do that to about one call in eight (1600 calls on four loops: 215 printed nothing, #1756). So a tool with one answer, which is the
+	// same for every call, keeps no count.
 	script := "#!/bin/sh\n" +
 		"echo \"$*\" >> '" + filepath.Join(bin, tool+".args") + "'\n" +
-		"for last; do :; done\n" +
-		"n=0; [ -f '" + count + "' ] && read n < '" + count + "'\n" +
-		"echo $((n+1)) > '" + count + "'\n" +
-		"[ \"$n\" -ge " + fmt.Sprint(len(values)) + " ] && n=" + fmt.Sprint(len(values)-1) + "\n" +
-		"case $n in\n" + cases.String() + "esac\n"
+		"for last; do :; done\n"
+	if len(values) == 1 {
+		script += "n=0\n"
+	} else {
+		script += "n=0; [ -f '" + count + "' ] && read n < '" + count + "'\n" +
+			"echo $((n+1)) > '" + count + "'\n" +
+			"[ \"$n\" -ge " + fmt.Sprint(len(values)) + " ] && n=" + fmt.Sprint(len(values)-1) + "\n"
+	}
+	script += "case $n in\n" + cases.String() + "esac\n"
 	_ = os.Remove(count)
 	if err := os.WriteFile(filepath.Join(bin, tool), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
@@ -819,5 +827,45 @@ func TestBothJobsEndWithTheTrim(t *testing.T) {
 		if env["OPOSSUM_CI_MAX_CACHE_GIB"] != "20" || env["OPOSSUM_CI_WARN_FREE_PATH"] != "/mnt/c" || env["OPOSSUM_CI_WARN_FREE_GIB"] != "20" || len(env) != 3 {
 			t.Errorf("%s: the trim runs with env %v; the cache limit, the drive to watch and its floor are written here, with their reasons beside them, and nothing else is set", name, env)
 		}
+	}
+}
+
+// A fake tool with one answer gives it to every call, however many run at once: `four at once` runs four scripts that each ask `du`, and a call that was answered
+// nothing is a cache whose size could not be read, which the script takes as not wanting a trim, so that "nothing to trim now (another job trimmed first)" was
+// said where nobody had trimmed (#1756). The count a call kept in a file, read and written back by each of four, was empty for about one call in eight.
+func TestAFakeToolWithOneAnswerAnswersEveryCallWhenFourAskAtOnce(t *testing.T) {
+	bin := t.TempDir()
+	writeFakeDu(t, bin, "60817408")
+	// What makes it so, said without waiting for the race to show: a tool that has one answer keeps no count file at all, and one that has several does.
+	one, err := os.ReadFile(filepath.Join(bin, "du"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(one), "du.count") {
+		t.Errorf("a fake `du` with one answer keeps a count that four callers read and write at once:\n%s", one)
+	}
+	several := t.TempDir()
+	writeFakeDu(t, several, "60817408", "1")
+	if two, err := os.ReadFile(filepath.Join(several, "du")); err != nil || !strings.Contains(string(two), "du.count") {
+		t.Errorf("a fake `du` with two answers has to count its calls to give the second: %v\n%s", err, two)
+	}
+	var wg sync.WaitGroup
+	const callers, calls = 4, 120
+	unanswered := make([]int, callers)
+	for c := 0; c < callers; c++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < calls; i++ {
+				out, err := exec.Command(filepath.Join(bin, "du"), "-sk", "/x").Output()
+				if err != nil || !strings.HasPrefix(string(out), "60817408\t") {
+					unanswered[c]++
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if n := unanswered[0] + unanswered[1] + unanswered[2] + unanswered[3]; n != 0 {
+		t.Errorf("%d of %d calls of a fake `du` that answers one size were not answered with it when %d callers asked at once", n, callers*calls, callers)
 	}
 }

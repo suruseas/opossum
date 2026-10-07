@@ -34,13 +34,9 @@ func TestAServiceKeyIsHeldToTheShapeDockerComposeGivesIt(t *testing.T) {
 		stricter["restart/"+f] = "opossum reads the policy and refuses one it does not have"
 		stricter["mac_address/"+f] = "opossum reads the address and refuses one that is not six hex pairs"
 	}
-	// A key the schema does not give a mapping is refused there (`additional
-	// properties 'a' not allowed`) and taken here: a newer docker compose may know it.
+	// A key the schema does not give a mapping is refused there (`additional properties 'a' not allowed`) and, since #1644, here: no row is
+	// left that docker compose refuses for its shape and opossum takes.
 	laxer := map[string]string{}
-	for _, r := range []string{"blkio_config/map", "blkio_config/mapS", "credential_spec/map", "credential_spec/mapS",
-		"logging/map", "logging/mapS", "provider/map", "provider/mapS"} {
-		laxer[r] = "a key the schema does not know under it is taken (a newer docker compose may know it)"
-	}
 
 	raw, err := os.ReadFile("testdata/service-key-forms.json")
 	if err != nil {

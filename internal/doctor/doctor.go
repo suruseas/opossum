@@ -70,7 +70,7 @@ type check struct {
 // kept small so checks are easy to test.
 type Runner interface {
 	Output(args ...string) (string, error)
-	DNSDomainExists(domain string) bool
+	DNSDomainState(domain string) runtime.DNSState
 	// List and Networks return nil when the listing could not be had, which is
 	// not the same as an empty machine. A check that reads either has to say
 	// which, and a check that reads both has to have both: with one of them
@@ -147,6 +147,22 @@ func Run(w io.Writer, rt Runner, dnsDomain string, project *compose.Project, hos
 	return allOK
 }
 
+// Fixer is what `doctor --fix` may do about a failed check. Only the DNS domain has a fix, and the fix asks first: DNSDomain is given the domain that is not
+// registered and asks whether to create it (internal/dnsoffer: at a terminal, on a yes). What it came to is not reported back: the report that follows is made
+// from what is there. Where it is nil nothing is fixed.
+type Fixer struct {
+	DNSDomain func(domain string)
+}
+
+// Fix offers the one fix there is, before the report is made: where the DNS domain is not registered — and not where the listing could not be had, which is not
+// a missing domain — fix.DNSDomain is asked to create it. The report that follows is of what is there after (the check is made again, so a domain that was
+// created is reported as registered and one that was not is reported as it was, with the command to type), in text or in JSON alike.
+func Fix(rt Runner, dnsDomain string, fix Fixer) {
+	if fix.DNSDomain != nil && dnsDomain != "" && rt.DNSDomainState(dnsDomain) == runtime.DNSAbsent {
+		fix.DNSDomain(dnsDomain)
+	}
+}
+
 // RunJSON executes the checks against rt and writes a machine-readable Report to
 // w as indented JSON. It returns false if any check failed (mirroring Run's exit
 // signal) plus any encoding error. See runChecks for the parameters.
@@ -209,8 +225,14 @@ func checkRuntime(rt Runner) check {
 }
 
 func checkDNS(rt Runner, domain string) check {
-	if rt.DNSDomainExists(domain) {
+	switch rt.DNSDomainState(domain) {
+	case runtime.DNSPresent:
 		return check{"dns", ok, fmt.Sprintf("DNS domain %q is registered", domain), ""}
+	case runtime.DNSUnknown:
+		// The listing failed: not a domain that is missing, so not one to create (`doctor --fix` does not offer it either).
+		return check{"dns", warn,
+			fmt.Sprintf("could not list the DNS domains, so %q is not known to be registered", domain),
+			"container system dns list"}
 	}
 	return check{"dns", fail,
 		fmt.Sprintf("DNS domain %q isn't registered — services can't resolve each other by name", domain),

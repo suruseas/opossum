@@ -21,7 +21,7 @@ type mergeTag struct {
 
 // innerNode is a place inside an anchored mapping: a key written with a `!reset` or `!override`
 // (tagged), a key whose value is a mapping with some inside (kids), a key whose value is an alias to an anchored mapping (target), or a
-// merge key to one (merge, with target).
+// merge key to one (merge, with target), or to one that is tagged (merge and tagged, with no target: the tag stands on the mapping that holds the merge key).
 type innerNode struct {
 	key    string
 	tagged bool
@@ -77,6 +77,10 @@ func takeMergeTags(one interpolated) (interpolated, []mergeTag, error) {
 	if root == nil {
 		return one, nil, nil
 	}
+	// Before the walk takes the tags off: an `!override` value that holds a merge key to a list is refused, wherever the tag stands.
+	if a := firstOverrideListMerge(doc); a != nil {
+		return one, nil, fmt.Errorf("line %d: `<<: *%s` stands for a list, inside a value written with `!override`, which docker compose refuses (`map merge requires map or sequence of maps as the value`); under `!reset`, and without a tag, it is read", a.Line, a.Value)
+	}
 	// The tags the anchors were written with, before the walk takes them off: an alias reads the
 	// tag of its anchor where it is used, however many times, and the walk may have been through
 	// the anchor's own place already.
@@ -110,8 +114,17 @@ func takeMergeTags(one interpolated) (interpolated, []mergeTag, error) {
 		for i := 0; i+1 < len(m.Content); i += 2 {
 			k, v := m.Content[i], m.Content[i+1]
 			if k.Value == "<<" {
-				if t := mergedMapping(v); t != nil && anchored[t] == "" {
-					out = append(out, innerNode{merge: true, target: t})
+				if t := mergedMapping(v); t != nil {
+					switch anchored[t] {
+					case "":
+						out = append(out, innerNode{merge: true, target: t})
+					case "!override", "!reset":
+						// A merge key to an anchor that is itself written `!override` or `!reset`, inside an anchor that is not: docker compose reads the tag as on the
+						// mapping that holds the merge key, and that mapping stands where the anchor is used, whole, as a mapping that merges the tagged anchor itself does
+						// (`x-c: &c !override {labels: {z: '9'}}`, `x-b: &b {<<: *c}`, `s: {<<: *b}`: `s` stands whole over the earlier files', #1825, #1926). What a
+						// `!reset` anchor holds is not brought in, as it is not where the tagged anchor is merged by the service itself.
+						out = append(out, innerNode{merge: true, tagged: true})
+					}
 				}
 				continue
 			}
@@ -223,6 +236,9 @@ func takeMergeTags(one interpolated) (interpolated, []mergeTag, error) {
 					}
 					delete(active, n.target)
 				} else if n.tagged {
+					if n.merge {
+						here = prefix // the tag stands on the mapping that uses the anchor, and not on a key of it
+					}
 					tags = append(tags, mergeTag{path: here})
 				} else {
 					expand(n.kids, here)
@@ -344,6 +360,85 @@ func takeMergeTags(one interpolated) (interpolated, []mergeTag, error) {
 	return interpolated{node: doc, raw: one.raw, written: one.written}, tags, nil
 }
 
+// firstOverrideListMerge is the first alias, inside any value written with `!override` (in a mapping, as an item of a list, as the value of a merge key,
+// in an `x-` field), that a merge key holds and that stands for a list (`<<: *e` over `x-e: &e [{A: "1"}]`), or nil. docker compose refuses it there
+// (`map merge requires map or sequence of maps as the value`, v5.5.1), in a block or a service inside the value, in one file and in a later `-f` file,
+// in an extended service and in an included file, where under `!reset` and without a tag it reads it as the merge of the mappings in the list.
+//
+// What decides it is where the block holding the merge key is read, measured over where it is written (plainly, under `!override`, under `!reset`) and where
+// an alias uses it (outside every tag, inside an `!override`, inside a `!reset`): it is refused when it is read inside an `!override` and nowhere outside one.
+// It is read where it is written, if that is outside every tag or inside an `!override` (not under a `!reset` that is read outside every tag, which is thrown
+// away), and where an alias to it stands, if the alias itself is read there — outside every tag, or inside an `!override` — and not inside a `!reset` that is
+// read outside every tag. Inside an `!override` the tags are not read, so a `!reset` is looked through there unless the block holding it is also read outside
+// every tag: docker compose takes the `!reset` children out of every block it reads outside a tag before anything reads the block again, so an `!override`
+// that reads the same block afterwards does not find them (#1860).
+func firstOverrideListMerge(doc *yaml.Node) *yaml.Node {
+	plain := map[*yaml.Node]bool{}    // read outside every tag
+	override := map[*yaml.Node]bool{} // read inside an `!override`
+	var roots []*yaml.Node            // the `!override` values met outside every tag, read once everything outside a tag has been
+	var readPlain, readOverride func(n *yaml.Node)
+	readPlain = func(n *yaml.Node) {
+		if n == nil || plain[n] || n.Tag == "!reset" {
+			return
+		}
+		if n.Tag == "!override" {
+			roots = append(roots, n)
+			return
+		}
+		plain[n] = true
+		if n.Kind == yaml.AliasNode {
+			readPlain(n.Alias)
+			return
+		}
+		for _, c := range n.Content {
+			readPlain(c)
+		}
+	}
+	readOverride = func(n *yaml.Node) {
+		if n == nil || override[n] {
+			return
+		}
+		override[n] = true
+		if n.Kind == yaml.AliasNode {
+			readOverride(n.Alias)
+			return
+		}
+		for _, c := range n.Content {
+			// A `!reset` child of a block that is read outside every tag is gone by now, and so is an alias to a node written with `!reset`: docker compose takes it out
+			// as it does the node (#1895).
+			if plain[n] && (c.Tag == "!reset" || c.Kind == yaml.AliasNode && c.Alias != nil && c.Alias.Tag == "!reset") {
+				continue
+			}
+			readOverride(c)
+		}
+	}
+	readPlain(doc)
+	for _, r := range roots {
+		readOverride(r)
+	}
+	var first *yaml.Node
+	var find func(n *yaml.Node)
+	find = func(n *yaml.Node) {
+		if n == nil || first != nil {
+			return
+		}
+		if n.Kind == yaml.MappingNode && override[n] && !plain[n] {
+			for i := 0; i+1 < len(n.Content); i += 2 {
+				if v := n.Content[i+1]; n.Content[i].ShortTag() == "!!merge" && v.Kind == yaml.AliasNode && v.Alias != nil && v.Alias.Kind == yaml.SequenceNode {
+					first = v
+					return
+				}
+			}
+		}
+		for _, c := range n.Content {
+			find(c)
+		}
+	}
+	// Every node of the tree, an anchor under a tag too (this runs before the tags are taken off): the first merge key in the order the file writes them is the one said.
+	find(doc)
+	return first
+}
+
 // mergedMapping is the mapping an alias stands for, nil where it is not an alias to one.
 func mergedMapping(v *yaml.Node) *yaml.Node {
 	if v.Kind == yaml.AliasNode && v.Alias != nil && v.Alias.Kind == yaml.MappingNode {
@@ -352,14 +447,14 @@ func mergedMapping(v *yaml.Node) *yaml.Node {
 	return nil
 }
 
-// withoutItemTags is the tags without those on an item of a section the parent merges with the included file's (a service of `services`,
-// a network, volume, config or secret by its name): docker compose reads a `!reset` or `!override` on such an item over an earlier `-f`
-// file, but not over an `include` — there the item is merged with the included one as it is written, and a tag on a key under it is read
-// (measured, v5.5.1, for `networks`, `volumes`, `configs`, `secrets` as for `services`).
+// withoutItemTags is the tags without those on a section the parent merges with the included file's (`services`, `networks`, `volumes`,
+// `configs`, `secrets`) or on an item of one (a service, or a network, volume, config or secret by its name): docker compose reads a
+// `!reset` or `!override` on such a section or item over an earlier `-f` file, but not over an `include` — there the section or item is
+// merged with the included one as it is written, and a tag on a key under an item is read (measured, v5.5.1, for each of the five).
 func withoutItemTags(tags []mergeTag) []mergeTag {
 	var kept []mergeTag
 	for _, t := range tags {
-		if len(t.path) == 2 {
+		if len(t.path) == 1 || len(t.path) == 2 {
 			switch t.path[0] {
 			case "services", "networks", "volumes", "configs", "secrets":
 				continue

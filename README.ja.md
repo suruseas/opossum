@@ -110,6 +110,8 @@ sudo container system dns create opossum
 
 別の名前を使いたい場合は、その名前で作成して `--dns-domain <name>` を指定します。不要になったら `sudo container system dns delete opossum` で削除できます。
 
+このドメインが無いまま、端末で `opossum up`（または `opossum doctor --fix`、あるいは one-off に要る service を `up` と同じ方法で起動する `opossum run`）を実行すると、無いことを伝えたうえで、コマンドを代わりに実行してよいかを**聞きます**：`Create it now? This runs: sudo container system dns create opossum [y/N]`。`y` か `yes` のときだけ実行し、パスワードは `sudo` 自身が聞きます。Enter・それ以外の答え・端末でない実行（CI・パイプ・エージェント）では、何も実行せず、警告と、打つコマンドを出すだけです。聞かずに答える設定はありません。
+
 ## Docker Compose を使ったことがない方へ
 
 `docker compose` を使ったことがない、または既存の file ではなく空のディレクトリから始める場合は、[Getting started](docs/getting-started.md)（英語）をどうぞ。準備の整った状態から、web サーバとデータベースを一緒に動かし、止めてコンテナ・ネットワーク・データを消すところまでを順に説明しています。AI エージェントに任せる場合は [`AGENTS.md`](AGENTS.md) を渡し、動かしたいものを言葉で伝えてください。その ["Starting from nothing"](AGENTS.md#starting-from-nothing) の節がそのために書かれています。
@@ -130,6 +132,8 @@ opossum up --from-docker-compose   # ビルド済みイメージを Docker か�
 ```
 
 ビルド済みイメージの名前は `docker compose` も opossum も同じで（service に `image:` があればその名前、無ければ `<project>-<service>` 形式）、プロジェクト名もどちらも同じ所から決めます（`-p`、`COMPOSE_PROJECT_NAME`、compose の `name:`、ディレクトリ名の順）。そのため取り込んだイメージがそのまま `up` で使われます。ただしディレクトリ名に `_` や `.` が含まれると2つのツールで正規化が食い違います。opossum は `-p` の値でもこれらの文字を書き換えるので（`-p my_app` は opossum では `my-app`、docker compose では `my_app`）、その場合は両方のコマンドに、`_` も `.` も含まない小文字だけの **同じ** `-p <name>` を渡してください（大文字を含む `-p` を docker compose は断り、opossum は黙って小文字にします）。
+
+素の `opossum up` は、持っていないイメージの service をビルドします。その名前のイメージが Docker にあるときは、ビルドの前に、Docker がそれをいつ作ったか（何日前か）と、取り込むコマンド（`opossum import <service>`）を言い、そのままビルドします。勝手に取り込むことはしません。
 
 これだけで、同じプロジェクトが Apple `container` の上で動きます。操作コマンドも見慣れたものです：
 

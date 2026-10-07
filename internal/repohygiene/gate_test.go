@@ -93,7 +93,7 @@ func TestTheChangelogGateAsksForANoteAboutEverythingThatShips(t *testing.T) {
 	// while it goes on passing, and this check's own definition of "shipped" is a
 	// cheaper place to lose one than the gate's exclusion list is.
 	want := []string{
-		"cmd/opossum", "internal/compose", "internal/doctor",
+		"cmd/opossum", "internal/compose", "internal/dnsoffer", "internal/doctor",
 		"internal/orchestrator", "internal/runtime", "internal/workspace",
 	}
 	if strings.Join(packages, " ") != strings.Join(want, " ") {

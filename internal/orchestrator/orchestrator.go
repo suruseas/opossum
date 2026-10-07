@@ -49,6 +49,9 @@ type Orchestrator struct {
 	// supervisorHandled is the project whose supervisor the command has already asked (#1406).
 	stopSupervisor    func(project string) (stopped, attempted bool)
 	supervisorHandled string
+	// heldLock is the lock of a project a command took before this was built and gives to `Down` (AdoptProjectLock), which does not take it a second time:
+	// a second flock of the same file is refused, by this process, as another command's.
+	heldLock *HeldProjectLock
 	// afterUpLocked is what `up` runs when it is done (whatever it came to), before it lets go of the project's lock: the
 	// start of the restart supervisor, which has to be in place, claimed, before a `down` can be let in (#1740).
 	afterUpLocked func(upErr error)
@@ -60,9 +63,12 @@ type Orchestrator struct {
 	imageWorkdirs map[string]string
 	Project       *compose.Project
 	DNSDomain     string // local DNS domain enabling bare-name service discovery
-	rt            *runtime.Runtime
-	out           interface{ Write([]byte) (int, error) }
-	sleep         func(time.Duration) // overridable so tests don't wait in real time
+	// OfferDNSDomain, where set, is asked when the DNS domain is not there, with its name, and reports whether it is there now (the user said yes and it
+	// was created). It is set by the command, which knows whether this is a terminal; where it is nil nothing is asked (#1907).
+	OfferDNSDomain func(domain string) bool
+	rt             *runtime.Runtime
+	out            interface{ Write([]byte) (int, error) }
+	sleep          func(time.Duration) // overridable so tests don't wait in real time
 	// holdPort binds one host port and holds it until the closer runs: port 0
 	// asks the operating system to choose, any other number asks whether that
 	// one can be bound. Overridable so a test can answer with a port the
@@ -119,14 +125,16 @@ type Orchestrator struct {
 
 // upOptions holds the `up` recreate/build flags.
 type upOptions struct {
-	forceRecreate bool   // --force-recreate: recreate even if unchanged
-	build         bool   // --build: (re)build images even if present
-	noBuild       bool   // --no-build: never build (error if an image is missing)
-	removeOrphans bool   // --remove-orphans: remove containers for services no longer in the compose
-	fromDocker    bool   // --from-docker-compose: import a build service's image from Docker instead of building it
-	noDeps        bool   // don't pull in depends_on services (used by rebuild-on-watch to touch only the named service)
-	dryRun        bool   // --dry-run: resolve and print the plan, but execute nothing against the runtime
-	oneOffOf      string // the service a `run` is starting dependencies for: it waits on them though it is not among what this Up starts
+	forceRecreate bool // --force-recreate: recreate even if unchanged
+	build         bool // --build: (re)build images even if present
+	noBuild       bool // --no-build: never build (error if an image is missing)
+	removeOrphans bool // --remove-orphans: remove containers for services no longer in the compose
+	fromDocker    bool // --from-docker-compose: import a build service's image from Docker instead of building it
+	noDeps        bool // don't pull in depends_on services (used by rebuild-on-watch to touch only the named service)
+	dryRun        bool // --dry-run: resolve and print the plan, but execute nothing against the runtime
+	// dockerProbeSlow is that Docker did not answer in time when this `up` asked it whether it holds an image (#1905); it is not asked again in the same `up`.
+	dockerProbeSlow bool
+	oneOffOf        string // the service a `run` is starting dependencies for: it waits on them though it is not among what this Up starts
 }
 
 // orphans returns the project's containers (by label) whose names don't match any
@@ -200,6 +208,12 @@ func (o *Orchestrator) SetUpOptions(forceRecreate, build, noBuild, removeOrphans
 // down in between and the supervisor would then claim a project nothing was left in. A dry run takes no lock and runs
 // nothing.
 func (o *Orchestrator) SetAfterUpLocked(f func(upErr error)) { o.afterUpLocked = f }
+
+// AdoptProjectLock gives `Down` the lock of a project the command took before it read the compose file (HoldProjectLock): `Down` goes on under it where the
+// project it takes down is that one, and takes the lock of another project (the name the file gives) itself. The command releases the one it holds.
+func (o *Orchestrator) AdoptProjectLock(h *HeldProjectLock) {
+	o.heldLock = h
+}
 
 // SetSupervisorStopper replaces how a stop of the restart supervisor is asked (StopSupervisor), for
 // a caller that asked it before the project was loaded and wants the same one asked here.
@@ -1706,11 +1720,21 @@ func (o *Orchestrator) checkProjectLoads(named map[string]bool, canName bool) er
 func (o *Orchestrator) checkNamedDeps(services []string) error {
 	named := namedSet(services)
 	active := o.activeServices(named)
+	// A service the run reads without a name is held to the services it reads without a name: naming a service does not carry a dependency to an
+	// unrelated one (docker compose v5.5.1, measured, #1831: `stop web` on web[g] -> db[g] with `other` (no profile) -> db refuses for `other`).
+	unnamedActive := o.activeServices(nil)
 	// The services this reads the dependencies of: the named ones, and every one a dependency carries on to that is active here
 	// (docker compose follows them all, measured v5.5.1, #1711: `a` -> `b` -> a service the file does not define refuses for `a`, and so
 	// does one more step, and one through a service that has no `profiles:`). An optional dependency behind a profile that is not
 	// active is not followed, and not asked about.
-	queue := append([]string(nil), services...)
+	type step struct {
+		name   string
+		narrow bool // read without a name: judged by what the run reads without one. Its dependencies are not followed: those it can reach that are active are read without a name themselves, and queued as such below.
+	}
+	queue := make([]step, 0, len(services))
+	for _, name := range services {
+		queue = append(queue, step{name: name})
+	}
 	// …and every service the run reads without a name: no `profiles:`, or a profile turned on by `--profile` or COMPOSE_PROFILES. docker compose
 	// reads the dependencies of an unrelated one of those too (measured, v5.5.1, #1801: `stop web` with `--profile g` on and a broken `other`
 	// refuses, whether `other` is optional, behind an inactive profile, or one step further on).
@@ -1721,17 +1745,22 @@ func (o *Orchestrator) checkNamedDeps(services []string) error {
 	sort.Strings(all) // the refusal named must not ride on the order a map hands them back
 	for _, name := range all {
 		if o.enabled(name, nil) {
-			queue = append(queue, name)
+			queue = append(queue, step{name: name, narrow: true})
 		}
 	}
-	seen := map[string]bool{}
+	seen := map[step]bool{}
 	for len(queue) > 0 {
-		name := queue[0]
+		cur := queue[0]
 		queue = queue[1:]
-		if seen[name] {
+		if seen[cur] {
 			continue
 		}
-		seen[name] = true
+		seen[cur] = true
+		name := cur.name
+		active := active
+		if cur.narrow {
+			active = unnamedActive
+		}
 		svc := o.Project.Services[name]
 		if err := o.checkLinkedRefs(name); err != nil {
 			return err
@@ -1750,15 +1779,18 @@ func (o *Orchestrator) checkNamedDeps(services []string) error {
 			// (same as validateProfileDeps and checkProjectLoads) — up does not refuse it, so
 			// none of these may.
 			if dep.Optional {
-				if _, ok := o.Project.Services[dep.Name]; ok && active[dep.Name] {
-					queue = append(queue, dep.Name)
+				if _, ok := o.Project.Services[dep.Name]; ok && active[dep.Name] && !cur.narrow {
+					queue = append(queue, step{name: dep.Name})
 				}
 				continue
 			}
 			if !active[dep.Name] {
-				return gatedDependencyRefusal(name, dep.Name, true)
+				// Naming the dependency does not help a service the run reads without a name (it is judged by what the run reads without one).
+				return gatedDependencyRefusal(name, dep.Name, !cur.narrow)
 			}
-			queue = append(queue, dep.Name)
+			if !cur.narrow {
+				queue = append(queue, step{name: dep.Name})
+			}
 		}
 	}
 	return nil
@@ -2489,11 +2521,23 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 		o.started = survivors
 	}()
 
-	if o.DNSDomain != "" && !o.rt.DNSDomainExists(o.DNSDomain) {
-		o.warnf(codeDNSDomainAbsent, "DNS domain %q not found — services won't resolve each other by name.\n"+
-			"         Create it once with:  sudo container system dns create %s\n",
-			o.DNSDomain, o.DNSDomain)
+	if o.DNSDomain != "" {
+		switch o.rt.DNSDomainState(o.DNSDomain) {
+		case runtime.DNSAbsent:
+			// At a terminal it is asked whether to create it (#1907), and only a yes does; what was said before is what is said when it is not asked, or
+			// the answer is not a yes, or the command did not work. A dry-run asks nothing and runs nothing.
+			if o.up.dryRun || o.OfferDNSDomain == nil || !o.OfferDNSDomain(o.DNSDomain) {
+				o.warnf(codeDNSDomainAbsent, "DNS domain %q not found — services won't resolve each other by name.\n"+
+					"         Create it once with:  sudo container system dns create %s\n",
+					o.DNSDomain, o.DNSDomain)
+			}
+		case runtime.DNSUnknown:
+			// The listing failed: the domain may well be there, and creating it is not something to suggest over a question that was not answered.
+			o.logf("Note: could not list the DNS domains (`container system dns list` failed), so %q is not known to be there — if services do not resolve each other by name, run `opossum doctor`\n", o.DNSDomain)
+		}
 	}
+
+	o.up.dockerProbeSlow = false // Docker is asked afresh by each `up`
 
 	// One service at a time, in dependency order, even for services that don't
 	// depend on each other. docker compose starts independent services
@@ -2541,6 +2585,13 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 			case o.up.noBuild && !have:
 				return fmt.Errorf("service %q: image %q is not built and --no-build was given", name, image)
 			case need:
+				// An image that is missing is a build that is about to start: the one time to say that Docker may hold it already, and `import` is the way to
+				// take it. Nothing is imported from here (Docker's image may be older than the source, and what `up` writes to the store is the user's to say),
+				// and `--build` asked for the build, so it is not answered with a way round it.
+				// need without --build is the store lacking the image.
+				if !o.up.build {
+					o.hintDockerImage(name, image)
+				}
 				o.logf("Building %s\n", name)
 				// `opossum up` even when this runs for a one-off's dependency: the
 				// dependency is broken on the up side, and `opossum up <dep>` is
@@ -4986,9 +5037,12 @@ func (o *Orchestrator) waitHealthy(name string, hc *compose.Healthcheck) error {
 func (o *Orchestrator) Down(removeVolumes bool, rmi string, removeOrphans bool) error {
 	// Same lock as Up: a `down` under an `up` would remove what the `up` is
 	// starting, and the `up` would report it started.
-	lock, err := lockProject(o.Project.Name)
-	if err != nil {
-		return err
+	var lock *projectLock // nil where the command holds it already, and releases it
+	if o.heldLock == nil || o.heldLock.project != o.Project.Name {
+		var err error
+		if lock, err = lockProject(o.Project.Name); err != nil {
+			return err
+		}
 	}
 	defer lock.release()
 	// Before anything is torn down: a supervisor watching this project would see
@@ -7554,6 +7608,51 @@ func (o *Orchestrator) Import(services ...string) error {
 		o.logf("No build services to import.\n")
 	}
 	return nil
+}
+
+// hintDockerImage says, before a service is built, that Docker holds an image of the name the build would give it, when it does, and how long ago Docker built
+// it, so that the one who knows how old the source is can tell whether to take it: `opossum import <service>` is the way, which is the name `import` looks for
+// (serviceImage). It asks Docker read-only and briefly (runtime.DockerImageCreated), and says nothing when it cannot be told — no docker, a daemon that is not
+// there or slow, no such image, a dry-run — so that the build starts as it did, in the time it took.
+func (o *Orchestrator) hintDockerImage(service, image string) {
+	// Once Docker has not answered in time it is not asked again in this `up`: the wait is three seconds each, which for four services is twelve seconds spent
+	// on a word that was not going to be said.
+	if o.up.dockerProbeSlow {
+		return
+	}
+	created, probe := o.rt.DockerImageCreated(image)
+	switch probe {
+	case runtime.DockerProbeSlow:
+		o.up.dockerProbeSlow = true
+		return
+	case runtime.DockerProbeNothing:
+		return
+	}
+	o.logf("%s: found a Docker-built image (%s, built %s ago)\n     to reuse it and skip this build, run: opossum import %s\n",
+		service, image, ageWords(time.Since(created)), service)
+}
+
+// ageWords is a time spent, in the largest whole unit that is not nothing: "less than a minute", "5 minutes", "3 hours", "3 days", "2 months", "1 year".
+func ageWords(d time.Duration) string {
+	unit := func(n int64, word string) string {
+		if n == 1 {
+			return "1 " + word
+		}
+		return fmt.Sprintf("%d %ss", n, word)
+	}
+	switch {
+	case d < time.Minute:
+		return "less than a minute"
+	case d < time.Hour:
+		return unit(int64(d/time.Minute), "minute")
+	case d < 24*time.Hour:
+		return unit(int64(d/time.Hour), "hour")
+	case d < 30*24*time.Hour:
+		return unit(int64(d/(24*time.Hour)), "day")
+	case d < 365*24*time.Hour:
+		return unit(int64(d/(30*24*time.Hour)), "month")
+	}
+	return unit(int64(d/(365*24*time.Hour)), "year")
 }
 
 // buildFailed wraps a build error with a pointer to the Docker-import fallback,

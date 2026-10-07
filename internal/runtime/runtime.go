@@ -35,9 +35,14 @@ type Runtime struct {
 	// (e.g. Ctrl-C during `up`), an in-flight build/run/exec is killed so the
 	// caller can roll back promptly. nil means no cancellation (background).
 	Ctx context.Context
-	// DockerBin is the docker CLI used only by ImportFromDocker (empty = "docker").
-	// It's a seam for tests; the normal path never shells out to docker.
+	// DockerBin is the docker CLI (empty = "docker"). What brings an image into the runtime's store from Docker is ImportFromDocker, run by `import` and by
+	// `up --from-docker-compose` and by nothing else; `up` runs it as well, read-only and with a short timeout, to ask whether Docker holds an image it is about to
+	// build (DockerImageCreated), and writes nothing from it. It's a seam for tests too.
 	DockerBin string
+	// DockerProbeTimeout is how long DockerImageCreated waits for the docker CLI (0 = three seconds).
+	DockerProbeTimeout time.Duration
+	// SudoBin is the sudo CLI that CreateDNSDomain runs (empty = "sudo"). It's a seam for tests.
+	SudoBin string
 	// Out redirects a streamed child's stdout (nil = os.Stdout). `run` sets it to
 	// stderr while starting dependencies and building, so the one-off's own stdout
 	// (e.g. an MCP server's JSON-RPC over stdio) stays clean.
@@ -111,10 +116,15 @@ func (r *Runtime) stdoutW() io.Writer {
 	return os.Stdout
 }
 
-// dockerBin returns the docker CLI to invoke for image import.
+// dockerBin returns the docker CLI to invoke, for an image import and for asking Docker when it built an image.
 func (r *Runtime) dockerBin() string {
 	if r.DockerBin != "" {
 		return r.DockerBin
+	}
+	// What New reads, for a Runtime that was not made by it (a test's): the one place that names a docker for the process, so that a suite can say once that there
+	// is none and no Runtime it builds asks the machine's.
+	if bin := os.Getenv("OPOSSUM_DOCKER_BIN"); bin != "" {
+		return bin
 	}
 	return "docker"
 }
@@ -166,8 +176,8 @@ func needsQuote(a string) bool {
 }
 
 // New returns a Runtime. The binary can be overridden with OPOSSUM_CONTAINER_BIN,
-// and the docker CLI used by `import` with OPOSSUM_DOCKER_BIN (both useful for
-// tests or a fake shim, or to point `import` at docker on a nonstandard path).
+// and the docker CLI with OPOSSUM_DOCKER_BIN — the one `import` and `up --from-docker-compose` bring an image over with, and the one `up` asks, read-only,
+// whether Docker holds an image it is about to build (both useful for tests or a fake shim, or to point at docker on a nonstandard path).
 func New() *Runtime {
 	bin := os.Getenv("OPOSSUM_CONTAINER_BIN")
 	if bin == "" {
@@ -1202,21 +1212,6 @@ func lastNonEmptyLine(s string) string {
 // diagnostics (`doctor`) that interpret the CLI's output.
 func (r *Runtime) Output(args ...string) (string, error) {
 	return r.capture(args...)
-}
-
-// DNSDomainExists reports whether a local DNS domain has been created (via
-// `sudo container system dns create <domain>`).
-func (r *Runtime) DNSDomainExists(domain string) bool {
-	out, err := r.capture("system", "dns", "list")
-	if err != nil {
-		return false
-	}
-	for _, line := range strings.Split(out, "\n") {
-		if strings.TrimSpace(line) == domain {
-			return true
-		}
-	}
-	return false
 }
 
 // BuildOptions describes a `container build` invocation.

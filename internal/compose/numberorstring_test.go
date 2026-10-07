@@ -40,6 +40,10 @@ func TestALimitWrittenAsAListAMappingOrABlankIsRefused(t *testing.T) {
 		{"limits.cpus blank", svc + "    deploy:\n      resources:\n        limits:\n          cpus: \"\"\n", "deploy.resources.limits.cpus is blank — write a count, as in `0.5`, or remove the key"},
 		{"reservations.memory blank", svc + "    deploy:\n      resources:\n        reservations:\n          memory: \" \"\n", "deploy.resources.reservations.memory is blank"},
 		{"reservations.cpus blank", svc + "    deploy:\n      resources:\n        reservations:\n          cpus: \"\"\n", "deploy.resources.reservations.cpus is blank"},
+		// A size with a space around it is one docker compose refuses (v5.5.1) and opossum used to trim and take (#1497).
+		{"mem_limit padded", svc + "    mem_limit: \" 512m \"\n", "services.web.mem_limit is a byte size docker compose does not read"},
+		{"limits.memory padded", svc + "    deploy:\n      resources:\n        limits:\n          memory: \" 1g\"\n", "services.web.deploy.resources.limits.memory is a byte size docker compose does not read"},
+		{"reservations.memory padded", svc + "    deploy:\n      resources:\n        reservations:\n          memory: \"1g \"\n", "services.web.deploy.resources.reservations.memory is a byte size docker compose does not read"},
 		// Bare, the bare-key check names it, as before.
 		{"cpus bare", svc + "    cpus:\n", "cpus: expected a number or a string, got nothing"},
 	} {
@@ -61,7 +65,6 @@ func TestALimitWrittenAsAListAMappingOrABlankIsRefused(t *testing.T) {
 		{"a quoted size", svc + "    mem_limit: \"1.5g\"\n", "1536M", ""},
 		{"a bare number of bytes", svc + "    mem_limit: 1048576\n", "1M", ""},
 		{"zero bytes is no limit", svc + "    mem_limit: \"0\"\n", "", ""},
-		{"a padded size (docker refuses; taken here, trimmed)", svc + "    mem_limit: \" 512m \"\n", "512M", ""},
 		{"the deploy limits", svc + "    deploy:\n      resources:\n        limits:\n          memory: 256m\n          cpus: \"0.5\"\n", "256M", "1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

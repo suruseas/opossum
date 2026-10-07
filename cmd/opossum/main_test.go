@@ -105,6 +105,10 @@ func TestMain(m *testing.M) {
 		os.RemoveAll(d)
 		panic(fmt.Sprintf("building fake shim: %v\n%s", berr, out))
 	}
+	// No docker, for every command this suite runs, in the process or as a child: `up` asks Docker, read-only, whether it holds an image it is about to build
+	// (#1905), and a test that does not say what Docker holds must not be answered by the machine it runs on. A test that wants a Docker sets
+	// OPOSSUM_DOCKER_BIN itself.
+	os.Setenv("OPOSSUM_DOCKER_BIN", filepath.Join(d, "no-docker"))
 	// What opossum reads from the environment to decide which project and which
 	// files a command is about is taken out of it: left set in a developer's
 	// shell or on a runner, COMPOSE_FILE alone sends every test here to another
@@ -287,7 +291,7 @@ func runningSupervisors() (pids []int, looked bool) {
 // supervisorPattern is what runningSupervisors asks pgrep for: a supervisor
 // (the word every one of them carries) whose command line names one of the
 // roots — a supervisor's argv[0] is the binary it was started from (the probes
-// in the tests below are scripts, so theirs is /bin/sh and the root is argv[1];
+// in the tests below are scripts, so theirs is /bin/bash and the root is argv[1];
 // the match is anywhere on the line), and that is where the roots appear
 // (measured: with the compose file found by discovery,
 // the argv is `__supervise -p … --dns-domain … --watch-service …` and names no
@@ -1376,13 +1380,11 @@ func TestImportCLI(t *testing.T) {
 	}
 }
 
-// --from-docker is the old name for --from-docker-compose. It must keep working
-// identically (published examples and agents that learned the old name still use
-// it), and it must steer the caller to the new name. This drives a real `up` with
-// each spelling through the same fakes and compares the commands the runtime
-// actually issued — equivalence at the argv level, not just "both exit 0".
-func TestFromDockerComposeLegacyAlias(t *testing.T) {
-	upWith := func(flag string) (calls, stderr string) {
+// --from-docker was the old name of --from-docker-compose and is removed. Typing it is refused, and the refusal names the new flag (published docs and agents
+// that learned the old name still use it); nothing is started, and no command is issued to either runtime. The new name does what it did. Any use counts,
+// `--from-docker=false` too.
+func TestFromDockerIsRefusedAndNamesTheNewFlag(t *testing.T) {
+	upWith := func(flag string, more ...string) (calls, stderr string, err error) {
 		t.Helper()
 		dir := t.TempDir()
 		logPath := filepath.Join(dir, "calls.log")
@@ -1403,47 +1405,60 @@ func TestFromDockerComposeLegacyAlias(t *testing.T) {
 		var so, se strings.Builder
 		root.SetOut(&so)
 		root.SetErr(&se)
-		root.SetArgs([]string{"-f", compose, "up", flag})
-		if err := root.Execute(); err != nil {
-			t.Fatalf("up %s: %v", flag, err)
-		}
+		root.SetArgs(append([]string{"-f", compose, "up", flag}, more...))
+		err = root.Execute()
 		log, _ := os.ReadFile(logPath)
-		// The notice must go to stderr, never stdout (callers parse stdout).
-		if strings.Contains(so.String(), "deprecated") {
-			t.Errorf("the deprecation notice must not go to stdout, got:\n%s", so.String())
-		}
 		// Sorted: the import is a pipe (`docker image save | container image load`),
-		// so those two processes append to the shared log concurrently and their
-		// relative order isn't deterministic. Compare the commands as a multiset —
-		// that still catches a missing, extra, or differently-argued command, which
-		// is what "the two spellings do the same thing" means here.
+		// so those two processes append to the shared log concurrently.
 		lines := strings.Split(strings.TrimRight(string(log), "\n"), "\n")
 		sort.Strings(lines)
-		return strings.Join(lines, "\n"), se.String()
+		return strings.Join(lines, "\n"), so.String() + se.String(), err
 	}
 
-	newCalls, newErr := upWith("--from-docker-compose")
-	oldCalls, oldErr := upWith("--from-docker")
-
-	// The import actually ran (otherwise the comparison below is vacuous).
+	// The new name imports from Docker, as it did (otherwise the refusals below prove nothing about what they stop).
+	newCalls, _, newErr := upWith("--from-docker-compose")
+	if newErr != nil {
+		t.Fatalf("up --from-docker-compose: %v", newErr)
+	}
 	if !strings.Contains(newCalls, "docker image save demo-web:latest") {
 		t.Fatalf("--from-docker-compose should import from Docker, calls:\n%s", newCalls)
 	}
-	// The same commands, with the same arguments, for both spellings.
-	if newCalls != oldCalls {
-		t.Errorf("--from-docker must drive the identical commands as --from-docker-compose\nnew:\n%s\nold:\n%s", newCalls, oldCalls)
-	}
-	// Only the old spelling is called out, and it names the new flag.
-	if !strings.Contains(oldErr, "--from-docker is deprecated") || !strings.Contains(oldErr, "--from-docker-compose") {
-		t.Errorf("--from-docker should warn and name the new flag, stderr:\n%s", oldErr)
-	}
-	if strings.Contains(newErr, "deprecated") {
-		t.Errorf("--from-docker-compose must not warn, stderr:\n%s", newErr)
+
+	for _, tc := range []struct {
+		name, flag string
+		more       []string
+	}{
+		{"--from-docker", "--from-docker", nil},
+		{"--from-docker=true", "--from-docker=true", nil},
+		{"--from-docker=false", "--from-docker=false", nil},
+		// With a service named after it, or before it: a service is not what lets it through.
+		{"--from-docker web", "--from-docker", []string{"web"}},
+		{"web --from-docker=false", "web", []string{"--from-docker=false"}},
+	} {
+		flag := tc.flag
+		t.Run(tc.name, func(t *testing.T) {
+			calls, out, err := upWith(flag, tc.more...)
+			if err == nil {
+				t.Fatalf("up %s is accepted", flag)
+			}
+			if !strings.Contains(err.Error(), "--from-docker was removed") || !strings.Contains(err.Error(), "--from-docker-compose") {
+				t.Errorf("up %s should say it was removed and name the new flag, got: %v", flag, err)
+			}
+			if strings.Contains(err.Error(), "unknown flag") {
+				t.Errorf("up %s should not be left an unknown flag: %v", flag, err)
+			}
+			if calls != "" {
+				t.Errorf("up %s started something, calls:\n%s", flag, calls)
+			}
+			if strings.Contains(out, "deprecated") {
+				t.Errorf("the old name is refused, not deprecated: %q", out)
+			}
+		})
 	}
 }
 
-// The old name is hidden from `up --help` (the new name is the one to advertise),
-// but still accepted — a hidden flag must not become an unknown flag.
+// The removed name is hidden from `up --help` (the new name is the one to advertise);
+// it stays a flag that refuses, so that typing it is told the new name.
 func TestFromDockerComposeHelpAdvertisesNewNameOnly(t *testing.T) {
 	out, err := run(t, "up", "--help")
 	if err != nil {
@@ -1454,7 +1469,7 @@ func TestFromDockerComposeHelpAdvertisesNewNameOnly(t *testing.T) {
 	}
 	// The old name appears nowhere on its own (only as the new name's prefix).
 	if strings.Contains(strings.ReplaceAll(out, "--from-docker-compose", ""), "--from-docker") {
-		t.Errorf("up --help should not advertise the deprecated --from-docker, got:\n%s", out)
+		t.Errorf("up --help should not advertise the removed --from-docker, got:\n%s", out)
 	}
 }
 
@@ -5611,7 +5626,7 @@ func TestTheLeakCheckCanSeeARunningProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	bin := filepath.Join(dir, "opossum-leak-probe")
-	if err := os.WriteFile(bin, []byte("#!/bin/sh\nsleep 60 &\nwait\n"), 0o755); err != nil {
+	if err := os.WriteFile(bin, []byte("#!/bin/bash\nsleep 60 &\nwait\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	cmd := startProbe(t, bin)
@@ -5741,7 +5756,7 @@ func groupMembers(t *testing.T, pgid int) []int {
 // when something has already gone wrong.
 func TestTheLeakedProcessesAreNamedByWhatTheyAreRunning(t *testing.T) {
 	bin := filepath.Join(t.TempDir(), "opossum-describe-probe")
-	if err := os.WriteFile(bin, []byte("#!/bin/sh\nsleep 60 &\nwait\n"), 0o755); err != nil {
+	if err := os.WriteFile(bin, []byte("#!/bin/bash\nsleep 60 &\nwait\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	cmd := startProbe(t, bin)
@@ -5784,7 +5799,7 @@ func TestTheLeakReportOffersACommandAShellWillTake(t *testing.T) {
 	}
 	// Run it, with a shell, against a process that is really there.
 	bin := filepath.Join(t.TempDir(), "opossum-kill-probe")
-	if err := os.WriteFile(bin, []byte("#!/bin/sh\nsleep 60 &\nwait\n"), 0o755); err != nil {
+	if err := os.WriteFile(bin, []byte("#!/bin/bash\nsleep 60 &\nwait\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	cmd := startProbe(t, bin)
@@ -6052,12 +6067,16 @@ func TestTheSupervisorSearchIsBoundedByThisRunsTempDir(t *testing.T) {
 			}
 			t.Setenv("TMPDIR", tmpdir)
 
-			script := "#!/bin/sh\nsleep 60 &\nwait\n"
+			// bash and not sh: on macOS /bin/sh is a launcher that runs /bin/bash by exec'ing it again, and for a moment of the second exec (a few hundred
+			// microseconds; up to ten milliseconds with the machine busy; measured) the process's arguments cannot be read, so a search that looked then passed
+			// it by. With the machine busy that failed a row that must be seen in a few runs in a hundred, and let a row that must not be seen pass with its
+			// search broken (a few in a hundred; with bash, none of a hundred) (#1812).
+			script := "#!/bin/bash\nsleep 60 &\nwait\n"
 			var cmd *exec.Cmd
 			if tc.fileOnly {
-				// argv[0] is /bin/sh, and nothing before `__supervise` is under
+				// argv[0] is /bin/bash, and nothing before `__supervise` is under
 				// a root; only the file after it is.
-				cmd = exec.Command("/bin/sh", "-c", "sleep 60 & wait", "sh", "__supervise", "-p", "probe", "-f", filepath.Join(probeDir, "compose.yaml"))
+				cmd = exec.Command("/bin/bash", "-c", "sleep 60 & wait", "bash", "__supervise", "-p", "probe", "-f", filepath.Join(probeDir, "compose.yaml"))
 			} else {
 				bin := filepath.Join(probeDir, "opossum-supervise-probe")
 				if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {

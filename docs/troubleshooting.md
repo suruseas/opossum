@@ -7,7 +7,7 @@ about it — plus the limits worth knowing before you hit them.
 
 (see [Differences from docker compose](compatibility.md#where-it-differs-from-docker-compose)):
 
-1. **DNS domain not registered** → services can't resolve each other by name. Run the one-time setup from the README: `sudo container system dns create opossum`.
+1. **DNS domain not registered** → services can't resolve each other by name. Run the one-time setup from the README: `sudo container system dns create opossum` — or run `opossum up` (or `opossum run`, for the services it starts) or `opossum doctor --fix` at a terminal, which asks first (`y` or `yes` only; nothing is run without a terminal or without an answer).
 2. **Postgres on a volume opossum didn't create** → `initdb` refuses it, naming `lost+found`. Volumes opossum creates are cleared of it, so recreating the volume (`opossum down -v`, then `up`) is the fix; `PGDATA=/var/lib/postgresql/data/pgdata` still works if you'd rather keep the volume.
 3. **Host port already in use** → `up` names the port and service; on macOS a taken 5000/7000 is often the **AirPlay Receiver** (turn it off in System Settings › General › AirDrop & Handoff, or remap the host port).
 

@@ -92,24 +92,47 @@ case "$1" in
             printf 'Error: invalid network name: %s\n' "$name" >&2; exit 1 ;;
         esac
         if [ "${#name}" -gt 63 ]; then printf 'Error: invalid network name: %s\n' "$name" >&2; exit 1; fi
-        # A label key the runtime refuses (1.5.0, rc 1; it takes lower-case words and digits joined by `.`, `/` or `-`, so
-        # a key that starts with `-`, is empty, or holds a space or a control character is among them, and an upper-case letter or a
-        # `_` is another that this fake lets through) is named in the metadata as it was written (testdata/real-cli-output.md).
+        # A label the runtime refuses (1.5.0, rc 1; testdata/real-cli-output.md, #1817). A label with no `=` is a key alone, and is taken. Otherwise the key is what
+        # is before the first `=` — except where it is empty or the value is, where the whole label is named as the key (`=1`, `k=`). The checks are made in this
+        # order and the first that fails is the one said: the key's length (128), the key's content (words of lower-case letters, digits and hyphens that start
+        # and end with a letter or a digit, joined by a single `.` or `/`), and the whole label's length (4096). The lengths are counted by the shell, in
+        # characters where its locale counts them so and in bytes where it does not (dash), which differs from the runtime for a multibyte label alone.
+        # A value that is its own argument and starts with `-` is read as another flag, so the option has no value (rc 64, measured on 1.5.0, #1730):
+        # opossum passes `--label=<k=v>` joined (#1423) and never reaches this.
+        prev=""
+        for a in "$@"; do
+          case "$prev" in
+            --label) case "$a" in -?*) printf "Error: Missing value for '--label <label>'\n" >&2; exit 64 ;; esac ;;
+          esac
+          prev=$a
+        done
         for a in "$@"; do
           case "$a" in
             --label=*)
-              k=${a#--label=}; k=${k%%=*}
-              case "$k" in
-                ''|-*|*[[:space:][:cntrl:]]*) bad=1 ;;
-                *) bad="" ;;
-              esac
-              [ "${a#--label=}" = "$k=" ] && bad=1  # a label written with no value: the runtime names the whole `k=`
-              if [ -n "$bad" ]; then
-                  { [ -n "$k" ] && [ "${a#--label=}" != "$k=" ]; } || k=${a#--label=}  # an empty key or no value: the whole `=value` or `k=`
-                  # the runtime writes a tab as `\t` and another control character as `\u{01}`
-                  k=$(printf '%s' "$k" | sed -e "s/$(printf '\t')/\\\\t/g" -e "s/$(printf '\001')/\\\\u{01}/g")
-                  printf 'Error: LabelError(code: ContainerResource.AppErrorCode(rawValue: "invalid_label_key_content"), metadata: ["key": "%s"])\n' "$k" >&2; exit 1
-              fi ;;
+              l=${a#--label=}
+              case "$l" in
+                *=*) k=${l%%=*}; v=${l#*=}
+                     { [ -z "$k" ] || [ -z "$v" ]; } && k=$l
+                     code=""
+                     if [ "${#k}" -gt 128 ]; then code=length
+                     else
+                       case "$k" in
+                         *[[:space:][:cntrl:]]*) code=content ;;
+                         *) printf '%s\n' "$k" | grep -Eq '^[a-z0-9]([a-z0-9-]*[a-z0-9])?([./][a-z0-9]([a-z0-9-]*[a-z0-9])?)*$' || code=content ;;
+                       esac
+                       [ -z "$code" ] && [ "${#l}" -gt 4096 ] && code=total
+                     fi
+                     if [ -n "$code" ]; then
+                       # the runtime writes a tab as `\t` and another control character as `\u{01}`
+                       shown() { printf '%s' "$1" | sed -e "s/$(printf '\t')/\\\\t/g" -e "s/$(printf '\001')/\\\\u{01}/g"; }
+                       case "$code" in
+                         length) printf 'Error: LabelError(code: ContainerResource.AppErrorCode(rawValue: "invalid_label_key_length"), metadata: ["key": "%s", "maxLength": "128"])\n' "$(shown "$k")" >&2 ;;
+                         content) printf 'Error: LabelError(code: ContainerResource.AppErrorCode(rawValue: "invalid_label_key_content"), metadata: ["key": "%s"])\n' "$(shown "$k")" >&2 ;;
+                         total) printf 'Error: LabelError(code: ContainerResource.AppErrorCode(rawValue: "invalid_label_length"), metadata: ["label": "%s", "maxLength": "4096"])\n' "$(shown "$l")" >&2 ;;
+                       esac
+                       exit 1
+                     fi ;;
+              esac ;;
           esac
         done
         # The labels it was made with are what a later `inspect` answers with
@@ -201,7 +224,24 @@ case "$1" in
       *) printf 'ID  IMAGE  OS  ARCH  STATE\n' ;;
     esac
     ;;
-  build)   echo "built image" ;;
+  build)
+    # An option that takes a value, given one that starts with `-` as its own argument, has none (rc 64, measured on 1.5.0, #1730): opossum passes
+    # these joined (`--build-arg=<k=v>`, #1423) and never reaches this. The metavars are the CLI's own.
+    prev=""
+    for a in "$@"; do
+      case "$prev" in
+        --target)    meta="--target <stage>" ;;
+        --build-arg) meta="--build-arg <key=val>" ;;
+        --label)     meta="--label <key=val>" ;;
+        --tag)       meta="--tag <name>" ;;
+        *)           meta="" ;;
+      esac
+      if [ -n "$meta" ]; then
+        case "$a" in -?*) printf "Error: Missing value for '%s'\n" "$meta" >&2; exit 64 ;; esac
+      fi
+      prev=$a
+    done
+    echo "built image" ;;
   image)
     # What the real CLI refuses before it does anything (container 1.5.0, testdata/real-cli-output.md):
     # a subcommand it does not have is rc 64, and so is a subcommand that needs an image or a reference
@@ -294,11 +334,15 @@ case "$1" in
           case "$a" in -?*) printf "Error: Missing value for '--name <name>'\n" >&2; exit 64 ;; esac
           name=$a; given=1
         fi
+        if [ "$want" = label ]; then
+          case "$a" in -?*) printf "Error: Missing value for '--label <label>'\n" >&2; exit 64 ;; esac
+        fi
         want=; continue
       fi
       case "$a" in
         -d|--detach|-i|--interactive|-t|--tty|--init|--no-dns|--read-only|--rm|--remove|--rosetta|--ssh|--virtualization) : ;;
         --name) want=name ;;
+        --label) want=label ;;
         # A long flag opossum passes as one `--flag=value` argument (#996) is
         # already complete — unlike a short flag or one given a separate value,
         # it does not consume the next word too, so a `--name` after it is not
@@ -378,10 +422,23 @@ case "$1" in
     for a in "$@"; do
       if [ "$prev" = -p ] || [ "$prev" = --publish ]; then
         s=${a%%/*}
+        # A `-p` that names no host port at all is refused in the runtime's own words for each spelling (container 1.5.0): one that starts with `:`
+        # is no publish value, an IPv4 address with nothing after it a missing host port, an IPv6 one an IPv4 address that is none. opossum sends none.
+        case "$a" in
+          :*) printf 'Error: invalid publish value: %s\n' "$a" >&2; exit 1 ;;
+          \[*\]::*) printf 'Error: invalid publish IPv4 address: %s\n' "$a" >&2; exit 1 ;;
+          *[!0-9.:]*::*|'') ;;
+          [0-9.]*::*) case "${s%%::*}" in ''|*[!0-9.]*) ;; *) case "${s#*::}" in *:*) ;; *) printf 'Error: invalid publish host port: %s:\n' "${s%%::*}" >&2; exit 1 ;; esac ;; esac ;;
+        esac
         case "$s" in \[*) s=${s#*]}; s=${s#:} ;; esac
         case "$s" in
           *:*)
             ctr=${s##*:}; rest=${s%:*}; host=${rest##*:}
+            # A host range that starts at 0 (`0:80`, `0-1:80`, `127.0.0.1:0:80`) is refused before the counts are asked
+            # (container 1.5.0, rc 1: `Error: invalid publish host port range: <host>`).
+            # An empty host is not a 0: the forms with no host port at all were refused above, in the runtime's other words.
+            lo=${host%%-*}; lo=${lo#+}
+            case "$lo" in ''|*[!0]*) ;; *) printf 'Error: invalid publish host port range: %s\n' "$host" >&2; exit 1 ;; esac
             hc=1 cc=1
             case "$host" in *-*) hc=$(( ${host#*-} - ${host%%-*} + 1 )) ;; esac
             case "$ctr" in *-*) cc=$(( ${ctr#*-} - ${ctr%%-*} + 1 )) ;; esac
@@ -530,6 +587,16 @@ case "$1" in
     if [ -n "$c" ]; then rm -f "$c"; fi
     ;;
   volume)
+    # A `--label` given a value of its own that starts with `-` has none (rc 64, measured on 1.5.0, #1932).
+    if [ "$2" = create ]; then
+      prev=""
+      for a in "$@"; do
+        if [ "$prev" = --label ]; then
+          case "$a" in -?*) printf "Error: Missing value for '--label <label>'\n" >&2; exit 64 ;; esac
+        fi
+        prev=$a
+      done
+    fi
     if [ "$2" = delete ] || [ "$2" = rm ]; then
       # $INSPECT_STRICT: a volume nothing here made is not one the runtime has, and the real CLI
       # refuses to delete it (container 1.4.1, testdata/real-cli-output.md); without it every name

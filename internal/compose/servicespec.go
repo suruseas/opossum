@@ -42,6 +42,9 @@ type specNode struct {
 	Minimum           *float64             `json:"minimum"`
 	Maximum           *float64             `json:"maximum"`
 	UniqueItems       bool                 `json:"uniqueItems"`
+	// Closed is that the object takes no key beside the ones it names (`additionalProperties: false`), and Required the keys it must have.
+	Closed   bool     `json:"closed"`
+	Required []string `json:"required"`
 
 	kinds []string
 	re    *regexp.Regexp
@@ -959,6 +962,86 @@ func (n *specNode) own(v any, where string) string {
 	return ""
 }
 
+// strictMismatch asks only what the schema forbids of the shape of an object — a key it does not name where it takes no other (`closed`), a key it requires and
+// the value lacks — through the keys, the items and the branch of a `oneOf` that takes the value's kind. The kinds, the patterns and the bounds are asked
+// of each file (mismatch); this is asked of the service the files made (checkStrictShapes), as docker compose puts the schema to the merged project.
+func (n *specNode) strictMismatch(v any, where string) string {
+	if n == nil || v == nil {
+		return ""
+	}
+	if len(n.OneOf) > 0 {
+		first := ""
+		for _, o := range n.OneOf {
+			if len(o.kinds) > 0 && !o.kindOK(v) {
+				continue
+			}
+			msg := o.strictMismatch(v, where)
+			if msg == "" {
+				return ""
+			}
+			if first == "" {
+				first = msg
+			}
+		}
+		return first
+	}
+	switch x := v.(type) {
+	case []any:
+		if n.Items != nil {
+			for i, item := range x {
+				if msg := n.Items.strictMismatch(item, fmt.Sprintf("%s[%d]", where, i)); msg != "" {
+					return msg
+				}
+			}
+		}
+	case map[string]any:
+		for _, name := range n.Required {
+			if _, ok := x[name]; !ok {
+				return fmt.Sprintf("%s has no %q, which docker compose requires there", where, name)
+			}
+		}
+		keys := make([]string, 0, len(x))
+		for k := range x {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			child := n.Properties[k]
+			xPattern := false
+			if child == nil {
+				for _, p := range n.pats {
+					if p.re.MatchString(k) {
+						child = p.node
+						break
+					}
+				}
+			}
+			for _, p := range n.pats {
+				if p.re.MatchString("x-") {
+					xPattern = true
+				}
+			}
+			if child == nil {
+				child = n.Additional
+			}
+			if child == nil && n.Closed {
+				// Where the node takes an `x-` key, the way to keep a note is to write one; where it does not (`blkio_config`), it is refused too.
+				if xPattern && !strings.HasPrefix(k, "x-") {
+					return fmt.Sprintf("%s: %q is not a key docker compose takes — check the spelling, or write it as `x-%s` to keep it as a note", where, k, k)
+				}
+				return fmt.Sprintf("%s: %q is not a key docker compose takes — check the spelling", where, k)
+			}
+			if child == nil {
+				continue
+			}
+			if msg := child.strictMismatch(x[k], where+"."+k); msg != "" {
+				return msg
+			}
+		}
+	}
+	return ""
+}
+
 func (n *specNode) kindOK(v any) bool {
 	for _, k := range n.kinds {
 		switch k {
@@ -1866,31 +1949,85 @@ func markNegativeZeroModes(doc *yaml.Node) {
 		if services.Kind != yaml.MappingNode {
 			continue
 		}
-		for j := 0; j+1 < len(services.Content); j += 2 {
-			svc := unalias(services.Content[j+1])
-			if svc.Kind != yaml.MappingNode {
-				continue
-			}
-			for k := 0; k+1 < len(svc.Content); k += 2 {
-				if key := svc.Content[k].Value; key != "secrets" && key != "configs" {
+		// The services the `services:` mapping holds, and those a merge key of it brings (`services: {<<: *sv}`); the keys of each service, and those a
+		// merge key of it brings (`web: {<<: *common}`). A merged key an own key overrides is marked too: a mark that nothing keeps does no harm.
+		for _, group := range mergedMappings(services, map[*yaml.Node]bool{}) {
+			for j := 0; j+1 < len(group.Content); j += 2 {
+				svc := unalias(group.Content[j+1])
+				if svc.Kind != yaml.MappingNode {
 					continue
 				}
-				list := unalias(svc.Content[k+1])
-				if list.Kind != yaml.SequenceNode {
-					continue
-				}
-				for _, item := range list.Content {
-					entry := unalias(item)
-					if entry.Kind != yaml.MappingNode {
-						continue
-					}
-					for m := 0; m+1 < len(entry.Content); m += 2 {
-						if entry.Content[m].Value != "mode" {
+				for _, one := range mergedMappings(svc, map[*yaml.Node]bool{}) {
+					for k := 0; k+1 < len(one.Content); k += 2 {
+						if key := one.Content[k].Value; key != "secrets" && key != "configs" {
 							continue
 						}
-						if v := unalias(entry.Content[m+1]); v.Kind == yaml.ScalarNode && v.Tag == "!!int" && v.Value == "-0" {
-							entry.Content[m+1] = &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: negZeroMode, Line: v.Line, Column: v.Column}
+						list := unalias(one.Content[k+1])
+						if list.Kind != yaml.SequenceNode {
+							continue
 						}
+						for _, item := range list.Content {
+							entry := unalias(item)
+							if entry.Kind != yaml.MappingNode {
+								continue
+							}
+							markNegativeZeroModeIn(entry, map[*yaml.Node]bool{})
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// mergedMappings is a mapping and the mappings its merge keys hold, at any depth (`<<: {…}`, `<<: [{…}, {…}]`, `<<: *m`, `<<: [*m]`): the places a key of it
+// may be written. A mapping met twice is given once.
+func mergedMappings(n *yaml.Node, seen map[*yaml.Node]bool) []*yaml.Node {
+	if n == nil || n.Kind != yaml.MappingNode || seen[n] {
+		return nil
+	}
+	seen[n] = true
+	out := []*yaml.Node{n}
+	for m := 0; m+1 < len(n.Content); m += 2 {
+		if n.Content[m].ShortTag() != "!!merge" {
+			continue
+		}
+		held := unalias(n.Content[m+1])
+		switch held.Kind {
+		case yaml.MappingNode:
+			out = append(out, mergedMappings(held, seen)...)
+		case yaml.SequenceNode:
+			for _, item := range held.Content {
+				out = append(out, mergedMappings(unalias(item), seen)...)
+			}
+		}
+	}
+	return out
+}
+
+// markNegativeZeroModeIn marks the `mode` of one mapping, and of the mappings a merge key of it holds (`<<: {mode: -0}`, `<<: [{…}, {mode: -0}]`, `<<: *m`,
+// `<<: [*m]`), which docker compose refuses as it does a `mode` written there (measured, v5.5.1). A mapping met twice is marked once: a guard against a
+// merge that holds itself, which the decode refuses before this is reached (`anchor 'a' value contains itself`, `excessive aliasing`), so no file reaches it.
+func markNegativeZeroModeIn(entry *yaml.Node, seen map[*yaml.Node]bool) {
+	if seen[entry] {
+		return
+	}
+	seen[entry] = true
+	for m := 0; m+1 < len(entry.Content); m += 2 {
+		switch {
+		case entry.Content[m].Value == "mode":
+			if v := unalias(entry.Content[m+1]); v.Kind == yaml.ScalarNode && v.Tag == "!!int" && v.Value == "-0" {
+				entry.Content[m+1] = &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: negZeroMode, Line: v.Line, Column: v.Column}
+			}
+		case entry.Content[m].ShortTag() == "!!merge":
+			held := unalias(entry.Content[m+1])
+			switch held.Kind {
+			case yaml.MappingNode:
+				markNegativeZeroModeIn(held, seen)
+			case yaml.SequenceNode:
+				for _, item := range held.Content {
+					if one := unalias(item); one.Kind == yaml.MappingNode {
+						markNegativeZeroModeIn(one, seen)
 					}
 				}
 			}
@@ -2018,6 +2155,87 @@ func checkBuildModel(name string, services map[string]any, declared map[string]a
 		if !ok {
 			continue
 		}
+		// A block opossum takes as it comes, held to the keys the schema gives it and the ones it requires (#1644): asked of the service the files made
+		// — an extending service that writes the missing key makes the file fine; a later `-f` file does not take a refusal of an earlier step away
+		// (checkStrictShapesStep) — of a service a profile leaves out as of any, and not of one nothing takes (which is not in the merged project).
+		if spec, err := loadServiceSpec(); err == nil {
+			props := make([]string, 0, len(svc))
+			for k := range svc {
+				props = append(props, k)
+			}
+			sort.Strings(props)
+			for _, k := range props {
+				if node := spec.Properties[k]; node != nil && heldToTheSchema[k] {
+					if msg := node.strictMismatch(svc[k], "services."+n+"."+k); msg != "" {
+						return fmt.Errorf("%s: %s", name, msg)
+					}
+				}
+			}
+		}
+		// A service's `extra_hosts` entry is `host=ip` or `host:ip`, as the build's is (#1644; measured, v5.5.1): asked of the merged project, of a service a
+		// profile leaves out as of any, and not of one nothing takes.
+		if hosts, ok := svc["extra_hosts"].([]any); ok {
+			for i, h := range hosts {
+				if str, isString := h.(string); isString && strings.IndexAny(str, "=:") <= 0 {
+					return fmt.Errorf("%s: services.%s.extra_hosts[%d] %q is not a `host=ip` entry — write the name of the host, `=` or `:`, and its address", name, n, i, str)
+				}
+			}
+		}
+		// A byte size or a duration docker compose casts of the service the files made (#1497; measured, v5.5.1): a later file or an extending service that writes a good
+		// one makes the file fine, a service a profile leaves out is asked as any, and one nothing takes is not. `mem_limit` and the memory of `deploy` are read by
+		// opossum itself, which takes a space before the number that docker compose refuses; `healthcheck.start_interval` is not read at all.
+		for _, c := range []struct {
+			path []string
+			kind string
+		}{
+			{[]string{"mem_limit"}, "bytes"},
+			{[]string{"healthcheck", "start_interval"}, "duration"},
+			{[]string{"deploy", "resources", "limits", "memory"}, "bytes"},
+			{[]string{"deploy", "resources", "reservations", "memory"}, "bytes"},
+		} {
+			var v any = svc
+			for _, step := range c.path {
+				m, ok := v.(map[string]any)
+				if !ok {
+					v = nil
+					break
+				}
+				v = m[step]
+			}
+			switch x := v.(type) {
+			case string:
+				if !castOK(c.kind, x) {
+					// A size opossum reads itself that it cannot read is refused in its own words (a value example, and nothing of the value read back); what is
+					// left is a size it takes and docker compose refuses — a space around the number, or a unit only opossum reads (`1ib`) — which is said here,
+					// without the value.
+					if c.kind == "bytes" {
+						if _, err := parseMemoryBytes(x); err != nil {
+							continue
+						}
+						return fmt.Errorf("%s: services.%s.%s is a byte size docker compose does not read (a space around the number, or a unit it has not) — write it as `512m`, with no space", name, n, strings.Join(c.path, "."))
+					}
+					return fmt.Errorf("%s: services.%s.%s %q does not read as %s", name, n, strings.Join(c.path, "."), x, castKindNames[c.kind])
+				}
+			case int, int64, uint64, float64, bool:
+				if c.kind == "duration" {
+					return fmt.Errorf("%s: services.%s.%s must be a string, as in `10s`", name, n, strings.Join(c.path, "."))
+				}
+			}
+		}
+		// The rate of a device limit is a byte size, in `device_read_bps` and `device_write_bps` and in `device_read_iops` and `device_write_iops` alike
+		// (#1497; measured, v5.5.1), asked of the merged service: the entries of a list are put together by the files, so a bad one stays whatever a later file
+		// writes beside it, and goes with a `!reset` or an `!override` of the block or the list.
+		if blk, ok := svc["blkio_config"].(map[string]any); ok {
+			for _, list := range []string{"device_read_bps", "device_write_bps", "device_read_iops", "device_write_iops"} {
+				entries, _ := blk[list].([]any)
+				for i, e := range entries {
+					entry, _ := e.(map[string]any)
+					if str, isString := entry["rate"].(string); isString && !castOK("bytes", str) {
+						return fmt.Errorf("%s: services.%s.blkio_config.%s[%d].rate %q does not read as a byte size", name, n, list, i, str)
+					}
+				}
+			}
+		}
 		b, ok := svc["build"].(map[string]any)
 		if !ok {
 			continue
@@ -2088,8 +2306,55 @@ func checkBuildModel(name string, services map[string]any, declared map[string]a
 					bad = true
 				}
 				if bad {
-					return fmt.Errorf("%s: services.%s.build.secrets[%d].mode %s is not a mode docker compose can read — write a whole number, or an octal string such as \"0440\"", name, n, i, describeYAMLValue(mode))
+					shown := describeYAMLValue(mode)
+					if mode == negZeroMode { // an anchor shared with a `secrets` or `configs` entry, whose `-0` was marked there
+						shown = "-0 (which docker compose reads as a float)"
+					}
+					return fmt.Errorf("%s: services.%s.build.secrets[%d].mode %s is not a mode docker compose can read — write a whole number, or an octal string such as \"0440\"", name, n, i, shown)
 				}
+			}
+		}
+	}
+	return nil
+}
+
+// checkStrictShapesStep asks the services the files made so far what checkBuildModel asks of the final ones: the keys a block held to the schema may have and
+// the ones it requires (#1644). docker compose puts the schema to the project after each file it adds, so a block that lacks a required key at one step is
+// refused naming that file, whatever a later file gives it. The first fault is kept in the sink of a read that goes on past refusals, and returned
+// otherwise.
+func checkStrictShapesStep(path string, merged map[string]any, values *[]error) error {
+	services, _ := merged["services"].(map[string]any)
+	spec, err := loadServiceSpec()
+	if err != nil {
+		return err
+	}
+	names := make([]string, 0, len(services))
+	for n := range services {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		svc, ok := services[n].(map[string]any)
+		if !ok {
+			continue
+		}
+		keys := make([]string, 0, len(svc))
+		for k := range svc {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			node := spec.Properties[k]
+			if node == nil || !heldToTheSchema[k] {
+				continue
+			}
+			if msg := node.strictMismatch(svc[k], "services."+n+"."+k); msg != "" {
+				err := fmt.Errorf("compose file %s: %s", path, msg)
+				if values == nil {
+					return err
+				}
+				*values = append(*values, err)
+				return nil
 			}
 		}
 	}

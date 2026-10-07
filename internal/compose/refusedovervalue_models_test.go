@@ -9,9 +9,10 @@ import (
 // A `models` and an entry of `extra_hosts` that hold nothing are refused by docker compose whatever an earlier file holds
 // (#1593; every row measured with `docker compose config -q`, v5.5.1): a later `-f` file that writes `models:` or `extra_hosts:
 // {h: }` over a value is refused as one that has no value before it, where a null that another key takes is "not given" over a value
-// and read. A value a later file writes over a null is read. known marks the rows left as they were, in other layers: a model a service
-// refers to that is not declared, a key of a service's `models` entry that docker compose does not take, and an `extra_hosts` item
-// that is neither `host=ip` nor `host:ip` (#1783); a known row says what docker compose does where this reads otherwise, and goes red the day that is fixed (the row is then to be turned).
+// and read. A value a later file writes over a null is read. An `extra_hosts` item that is neither `host=ip` nor `host:ip`, and a key of a
+// model that docker compose does not take, are refused here too (#1783, #1644). known marks the rows left as they were, in another layer: a model
+// a service refers to that is not declared; a known row says what docker compose does where this reads otherwise, and goes red the day that is
+// fixed (the row is then to be turned).
 func TestAModelsOrExtraHostsEntryThatHoldsNothingIsRefusedOverAValue(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
@@ -34,7 +35,7 @@ func TestAModelsOrExtraHostsEntryThatHoldsNothingIsRefusedOverAValue(t *testing.
 		{"models: x", map[string]string{"compose.yaml": "services:\n  a:\n    image: x\n    models: x\n"}, []string{"compose.yaml"}, true, false},
 		{"models: 1", map[string]string{"compose.yaml": "services:\n  a:\n    image: x\n    models: 1\n"}, []string{"compose.yaml"}, true, false},
 		{"models: {m: {endpoint_var: 1}}", map[string]string{"compose.yaml": "services:\n  a:\n    image: x\n    models: {m: {endpoint_var: 1}}\n"}, []string{"compose.yaml"}, true, false},
-		{"models: {m: {a: 1}}", map[string]string{"compose.yaml": "services:\n  a:\n    image: x\n    models: {m: {a: 1}}\n"}, []string{"compose.yaml"}, false, true},
+		{"models: {m: {a: 1}}", map[string]string{"compose.yaml": "services:\n  a:\n    image: x\n    models: {m: {a: 1}}\n"}, []string{"compose.yaml"}, true, false},
 		{"extra_hosts: ~", map[string]string{"compose.yaml": "services:\n  a:\n    image: x\n    extra_hosts: ~\n"}, []string{"compose.yaml"}, true, false},
 		{"extra_hosts: {a: ~}", map[string]string{"compose.yaml": "services:\n  a:\n    image: x\n    extra_hosts: {a: ~}\n"}, []string{"compose.yaml"}, true, false},
 		{"extra_hosts: {a: 1}", map[string]string{"compose.yaml": "services:\n  a:\n    image: x\n    extra_hosts: {a: 1}\n"}, []string{"compose.yaml"}, true, false},
@@ -43,7 +44,7 @@ func TestAModelsOrExtraHostsEntryThatHoldsNothingIsRefusedOverAValue(t *testing.
 		{"extra_hosts: {a: [~]}", map[string]string{"compose.yaml": "services:\n  a:\n    image: x\n    extra_hosts: {a: [~]}\n"}, []string{"compose.yaml"}, true, false},
 		{"extra_hosts: {a: [1]}", map[string]string{"compose.yaml": "services:\n  a:\n    image: x\n    extra_hosts: {a: [1]}\n"}, []string{"compose.yaml"}, true, false},
 		{"extra_hosts: {a: {b: 1}}", map[string]string{"compose.yaml": "services:\n  a:\n    image: x\n    extra_hosts: {a: {b: 1}}\n"}, []string{"compose.yaml"}, true, false},
-		{"extra_hosts: [x]", map[string]string{"compose.yaml": "services:\n  a:\n    image: x\n    extra_hosts: [x]\n"}, []string{"compose.yaml"}, false, true},
+		{"extra_hosts: [x]", map[string]string{"compose.yaml": "services:\n  a:\n    image: x\n    extra_hosts: [x]\n"}, []string{"compose.yaml"}, true, false},
 		{"extra_hosts: [\"a=b\"]", map[string]string{"compose.yaml": "services:\n  a:\n    image: x\n    extra_hosts: [\"a=b\"]\n"}, []string{"compose.yaml"}, false, false},
 		{"extra_hosts: [\"a:b\"]", map[string]string{"compose.yaml": "services:\n  a:\n    image: x\n    extra_hosts: [\"a:b\"]\n"}, []string{"compose.yaml"}, false, false},
 		{"extra_hosts: [~]", map[string]string{"compose.yaml": "services:\n  a:\n    image: x\n    extra_hosts: [~]\n"}, []string{"compose.yaml"}, true, false},

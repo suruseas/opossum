@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -188,11 +189,22 @@ func TestUpDoesNotWaitOutTheWholeTimeForAWatcherThatHasClaimed(t *testing.T) {
 			fmt.Fprintln(os.Stderr, "helper claim:", err)
 			os.Exit(3)
 		}
-		time.Sleep(30 * time.Second)
+		// Stays until told to go, and then returns, so TestMain gets to remove the directory it made: a helper
+		// that is killed leaves it behind, and the run's leftovers check then fails (#1839).
+		term := make(chan os.Signal, 1)
+		signal.Notify(term, syscall.SIGTERM)
+		select {
+		case <-term:
+		case <-time.After(30 * time.Second):
+		}
 		return
 	}
 	state := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", state)
+	// The helper's TestMain makes a directory in the temp directory; here it is a place of its own, so what it leaves
+	// can be seen.
+	helperTmp := t.TempDir()
+	t.Setenv("TMPDIR", helperTmp)
 	const project = "claimsatonce"
 	t.Setenv("OPOSSUM_TEST_CLAIMING_WATCHER_STATE", state)
 	t.Setenv("OPOSSUM_SELF_BIN", os.Args[0])
@@ -206,11 +218,22 @@ func TestUpDoesNotWaitOutTheWholeTimeForAWatcherThatHasClaimed(t *testing.T) {
 		t.Fatal(err)
 	}
 	pid, err := StartSupervisor(project, wd, []string{"-test.run=^TestUpDoesNotWaitOutTheWholeTimeForAWatcherThatHasClaimed$"})
-	t.Cleanup(func() {
-		if pid > 0 {
-			syscall.Kill(pid, syscall.SIGKILL)
+	stopped := false
+	stop := func() {
+		if pid <= 0 || stopped {
+			return
 		}
-	})
+		stopped = true
+		// Asked to go, and given time to clean up after itself; killed only if it does not.
+		syscall.Kill(pid, syscall.SIGTERM)
+		for end := time.Now().Add(10 * time.Second); time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
+			if syscall.Kill(pid, 0) != nil {
+				return
+			}
+		}
+		syscall.Kill(pid, syscall.SIGKILL)
+	}
+	t.Cleanup(stop)
 	if err != nil {
 		t.Fatalf("StartSupervisor: %v", err)
 	}
@@ -219,6 +242,16 @@ func TestUpDoesNotWaitOutTheWholeTimeForAWatcherThatHasClaimed(t *testing.T) {
 	}
 	if got := SupervisorPID(project); got != pid {
 		t.Errorf("SupervisorPID = %d, want the watcher that was started (%d)", got, pid)
+	}
+	// A helper that is told to go removes the directory its TestMain made; one that is killed leaves it, and the
+	// run's leftovers check fails on it (#1839).
+	// Seen while it runs, so that finding nothing after is not a directory looked for in the wrong place.
+	if during, _ := filepath.Glob(filepath.Join(helperTmp, "opossum-orch-test-*")); len(during) != 1 {
+		t.Errorf("while the helper runs, %v in its temp directory; want the one its TestMain made", during)
+	}
+	stop()
+	if left, _ := filepath.Glob(filepath.Join(helperTmp, "opossum-orch-test-*")); len(left) > 0 {
+		t.Errorf("the helper left %v behind", left)
 	}
 }
 

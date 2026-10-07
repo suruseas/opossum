@@ -168,6 +168,33 @@ var contract = []struct {
 		{argv: []string{"run", "-d", "--name", "NAME", "-p", "47010-47012:80", "alpine"}, rc: 1, has: "publish host and container port counts are not equal: 47010-47012:80"},
 		{argv: []string{"run", "-d", "--name", "NAME", "-p", "47020:80-82", "alpine"}, rc: 1, has: "counts are not equal: 47020:80-82"},
 		{argv: []string{"run", "-d", "--name", "NAME", "-p", "47030-47031:80-83", "alpine"}, rc: 1, has: "counts are not equal: 47030-47031:80-83"},
+		// A host range that starts at 0 is refused before the counts are asked (container 1.5.0, #1820; a host port of nothing but 0 is the engine
+		// choosing one, which the runtime does not do), with an address in front too, and `10` is a port like any other.
+		{argv: []string{"run", "-d", "--name", "NAME", "-p", "0:80", "alpine"}, rc: 1, has: "invalid publish host port range: 0"},
+		{argv: []string{"run", "-d", "--name", "NAME", "-p", "0-1:80", "alpine"}, rc: 1, has: "invalid publish host port range: 0-1"},
+		{argv: []string{"run", "-d", "--name", "NAME", "-p", "127.0.0.1:0:80", "alpine"}, rc: 1, has: "invalid publish host port range: 0", lacks: "127.0.0.1"},
+		{argv: []string{"run", "-d", "--name", "NAME", "-p", "47110:80", "alpine"}, lacks: "invalid publish"},
+		{argv: []string{"delete", "--force", "NAME"}},
+		// Whatever the spelling of the 0 at the low end, with the spelling carried in the message (container 1.5.0, measured 2026-10-07; docker
+		// compose reads the first four as the one port 0 too, #1840). The control is a number with a leading zero that is not 0.
+		{argv: []string{"run", "-d", "--name", "NAME", "-p", "00:80", "alpine"}, rc: 1, has: "invalid publish host port range: 00"},
+		{argv: []string{"run", "-d", "--name", "NAME", "-p", "000:80/udp", "alpine"}, rc: 1, has: "invalid publish host port range: 000", lacks: "/udp"},
+		{argv: []string{"run", "-d", "--name", "NAME", "-p", "00-00:80", "alpine"}, rc: 1, has: "invalid publish host port range: 00-00"},
+		{argv: []string{"run", "-d", "--name", "NAME", "-p", "0-0:80", "alpine"}, rc: 1, has: "invalid publish host port range: 0-0"},
+		{argv: []string{"run", "-d", "--name", "NAME", "-p", "00-01:80", "alpine"}, rc: 1, has: "invalid publish host port range: 00-01"},
+		{argv: []string{"run", "-d", "--name", "NAME", "-p", "+0:80", "alpine"}, rc: 1, has: "invalid publish host port range: +0"},
+		{argv: []string{"run", "-d", "--name", "NAME", "-p", "127.0.0.1:00:80", "alpine"}, rc: 1, has: "invalid publish host port range: 00", lacks: "127.0.0.1"},
+		// A `-p` with no host port at all is refused in the runtime's own words for each spelling, and not as a host range of nothing (container 1.5.0,
+		// measured 2026-10-07; opossum sends none of them, a host port left out is given the container port first, #1854).
+		{argv: []string{"run", "-d", "--name", "NAME", "-p", ":80", "alpine"}, rc: 1, has: "invalid publish value: :80", lacks: "host port range"},
+		{argv: []string{"run", "-d", "--name", "NAME", "-p", ":80/udp", "alpine"}, rc: 1, has: "invalid publish value: :80/udp"},
+		{argv: []string{"run", "-d", "--name", "NAME", "-p", ":80-82", "alpine"}, rc: 1, has: "invalid publish value: :80-82"},
+		{argv: []string{"run", "-d", "--name", "NAME", "-p", "::80", "alpine"}, rc: 1, has: "invalid publish value: ::80"},
+		{argv: []string{"run", "-d", "--name", "NAME", "-p", "127.0.0.1::80", "alpine"}, rc: 1, has: "invalid publish host port: 127.0.0.1:", lacks: "host port range"},
+		{argv: []string{"run", "-d", "--name", "NAME", "-p", "0.0.0.0::80/udp", "alpine"}, rc: 1, has: "invalid publish host port: 0.0.0.0:", lacks: "/udp"},
+		{argv: []string{"run", "-d", "--name", "NAME", "-p", "[::1]::80", "alpine"}, rc: 1, has: "invalid publish IPv4 address: [::1]::80"},
+		{argv: []string{"run", "-d", "--name", "NAME", "-p", "047111:80", "alpine"}, lacks: "invalid publish"},
+		{argv: []string{"delete", "--force", "NAME"}},
 		// With an address and a protocol in front and behind, on either family:
 		// the sides are the last two fields, and the number of colons in an
 		// address is not a reason to read them wrong.
@@ -551,6 +578,86 @@ var contract = []struct {
 		{argv: []string{"network", "create", "--label=k=", "demo-k7"}, rc: 1, has: `metadata: ["key": "k="])`},
 		{argv: []string{"network", "create", "--label=k", "demo-k8"}, lacks: "LabelError"},
 		{argv: []string{"network", "create", "--label=x=y=1", "demo-k4"}, lacks: "LabelError"},
+	}},
+	// An option given, as its own argument, a value that starts with `-` has none: the value is read as another flag, and the CLI says so (rc 64, `Missing value for
+	// '<flag> <metavar>'`, container 1.5.0, measured, #1730) before it looks at any label. opossum passes the value joined (`--label=<k=v>`, #1423), so this is
+	// what keeps the joined form from being turned back into two arguments unseen. The joined form, and a value that does not start with `-`, are taken as before.
+	{"a network create refuses a --label whose value is its own argument and starts with a dash", nil, []step{
+		{argv: []string{"network", "create", "--label", "-x=1", "demo-d1"}, rc: 64, has: "Error: Missing value for '--label <label>'"},
+		{argv: []string{"network", "create", "--label", "--label=b=2", "demo-d2"}, rc: 64, has: "Error: Missing value for '--label <label>'"},
+		{argv: []string{"network", "create", "--label=A=1", "--label", "-x=1", "demo-d3"}, rc: 64, has: "Missing value for '--label <label>'"},
+		{argv: []string{"network", "create", "--label", "-x=1", "--label=A=1", "demo-d4"}, rc: 64, has: "Missing value for '--label <label>'"},
+		{argv: []string{"network", "create", "--label", "tier=back", "demo-d5"}, lacks: "Missing value"},
+		{argv: []string{"network", "create", "--label=-x=1", "demo-d6"}, rc: 1, has: `"invalid_label_key_content"), metadata: ["key": "-x"])`},
+	}},
+	{"a build refuses an option whose value is its own argument and starts with a dash", nil, []step{
+		{argv: []string{"build", "--target", "-x", "."}, rc: 64, has: "Error: Missing value for '--target <stage>'"},
+		{argv: []string{"build", "--build-arg", "-X=1", "."}, rc: 64, has: "Error: Missing value for '--build-arg <key=val>'"},
+		{argv: []string{"build", "--label", "-x=1", "."}, rc: 64, has: "Error: Missing value for '--label <key=val>'"},
+		{argv: []string{"build", "--tag", "-x", "."}, rc: 64, has: "Error: Missing value for '--tag <name>'"},
+		{argv: []string{"build", "--target", "stage", "--build-arg", "A=1", "--label", "k=v", "--tag", "img", "."}, lacks: "Missing value"},
+		{argv: []string{"build", "--target=-x", "--build-arg=-X=1", "."}, lacks: "Missing value"},
+		// A lone `-` is a value, not a flag (measured on 1.5.0: `build --target -` and `build --label -` go on to build).
+		{argv: []string{"build", "--target", "-", "."}, lacks: "Missing value"},
+		{argv: []string{"build", "--label", "-", "."}, lacks: "Missing value"},
+	}},
+	// The same of `volume create` and `run` (container 1.5.0, measured on the parse that stops them, #1932; `create` is not a command opossum uses, and no fake has it).
+	// Only what follows the flags of a run counts: the image, and the command after it, are not read for flags. A lone `-` is not measured here (it would make a volume, or run).
+	{"a volume create and a run refuse a --label whose value is its own argument and starts with a dash", nil, []step{
+		{argv: []string{"volume", "create", "--label", "-x=1", "demo-vol"}, rc: 64, has: "Error: Missing value for '--label <label>'"},
+		{argv: []string{"volume", "create", "--label", "tier=back", "--label=-x=1", "demo-vol2"}, lacks: "Missing value"},
+		{argv: []string{"run", "-d", "--label", "-x=1", "--name", "NAME", "alpine"}, rc: 64, has: "Error: Missing value for '--label <label>'"},
+		{argv: []string{"run", "-d", "--name", "NAME", "--label", "--label=b=2", "alpine"}, rc: 64, has: "Error: Missing value for '--label <label>'"},
+		{argv: []string{"run", "-d", "--name", "NAME", "--label", "tier=back", "--label=-x=1", "alpine"}, lacks: "Missing value"},
+		{argv: []string{"run", "-d", "--name", "OTHER", "alpine", "echo", "--label", "-x"}, lacks: "Missing value"},
+	}},
+	// The rule for the rest of a key (container 1.5.0, measured on the real CLI, #1817: `network create --label` alone — `volume create` and `create` take any of
+	// these): words of lower-case letters, digits and hyphens that start and end with a letter or a digit (`a--b` is one), joined by a single `.` or `/`. An
+	// upper-case letter, a `_`, a `:`, a letter outside a-z, a key that starts or ends with `.`, `/` or `-`, two separators in a row (`a..b`, `a//b`, `a./b`, `a.-b`,
+	// `a-.b`, `a/-b`) are refused, and the key is named as written.
+	{"a network refuses a label key outside the runtime's rule and takes one inside it", nil, []step{
+		{argv: []string{"network", "create", "--label=A=1", "demo-r1"}, rc: 1, has: `"invalid_label_key_content"), metadata: ["key": "A"])`},
+		{argv: []string{"network", "create", "--label=aB=1", "demo-r2"}, rc: 1, has: `"invalid_label_key_content"), metadata: ["key": "aB"])`},
+		{argv: []string{"network", "create", "--label=a_b=1", "demo-r3"}, rc: 1, has: `"invalid_label_key_content"), metadata: ["key": "a_b"])`},
+		{argv: []string{"network", "create", "--label=_a=1", "demo-r4"}, rc: 1, has: `"invalid_label_key_content"), metadata: ["key": "_a"])`},
+		{argv: []string{"network", "create", "--label=a:b=1", "demo-r5"}, rc: 1, has: `"invalid_label_key_content"), metadata: ["key": "a:b"])`},
+		{argv: []string{"network", "create", "--label=é=1", "demo-r6"}, rc: 1, has: `"invalid_label_key_content"), metadata: ["key": "é"])`},
+		{argv: []string{"network", "create", "--label=.a=1", "demo-r7"}, rc: 1, has: `"invalid_label_key_content"), metadata: ["key": ".a"])`},
+		{argv: []string{"network", "create", "--label=a-=1", "demo-r8"}, rc: 1, has: `"invalid_label_key_content"), metadata: ["key": "a-"])`},
+		{argv: []string{"network", "create", "--label=/a=1", "demo-r9"}, rc: 1, has: `"invalid_label_key_content"), metadata: ["key": "/a"])`},
+		{argv: []string{"network", "create", "--label=a..b=1", "demo-r10"}, rc: 1, has: `"invalid_label_key_content"), metadata: ["key": "a..b"])`},
+		{argv: []string{"network", "create", "--label=a//b=1", "demo-r11"}, rc: 1, has: `"invalid_label_key_content"), metadata: ["key": "a//b"])`},
+		{argv: []string{"network", "create", "--label=a./b=1", "demo-r12"}, rc: 1, has: `"invalid_label_key_content"), metadata: ["key": "a./b"])`},
+		{argv: []string{"network", "create", "--label=a.-b=1", "demo-r13"}, rc: 1, has: `"invalid_label_key_content"), metadata: ["key": "a.-b"])`},
+		{argv: []string{"network", "create", "--label=a-.b=1", "demo-r14"}, rc: 1, has: `"invalid_label_key_content"), metadata: ["key": "a-.b"])`},
+		{argv: []string{"network", "create", "--label=a/-b=1", "demo-r15"}, rc: 1, has: `"invalid_label_key_content"), metadata: ["key": "a/-b"])`},
+		{argv: []string{"network", "create", "--label=a/.b=1", "demo-r16"}, rc: 1, has: `"invalid_label_key_content"), metadata: ["key": "a/.b"])`},
+		{argv: []string{"network", "create", "--label=a=1", "demo-r17"}, lacks: "LabelError"},
+		{argv: []string{"network", "create", "--label=z=1", "demo-r18"}, lacks: "LabelError"},
+		{argv: []string{"network", "create", "--label=0=1", "demo-r19"}, lacks: "LabelError"},
+		{argv: []string{"network", "create", "--label=a1=1", "demo-r20"}, lacks: "LabelError"},
+		{argv: []string{"network", "create", "--label=1a=1", "demo-r21"}, lacks: "LabelError"},
+		{argv: []string{"network", "create", "--label=a.b=1", "demo-r22"}, lacks: "LabelError"},
+		{argv: []string{"network", "create", "--label=a-b=1", "demo-r23"}, lacks: "LabelError"},
+		{argv: []string{"network", "create", "--label=a--b=1", "demo-r24"}, lacks: "LabelError"},
+		{argv: []string{"network", "create", "--label=a.b.c=1", "demo-r25"}, lacks: "LabelError"},
+		{argv: []string{"network", "create", "--label=a/b=1", "demo-r26"}, lacks: "LabelError"},
+		{argv: []string{"network", "create", "--label=a.b/c=1", "demo-r27"}, lacks: "LabelError"},
+		{argv: []string{"network", "create", "--label=a.b-c.d=1", "demo-r28"}, lacks: "LabelError"},
+		{argv: []string{"network", "create", "--label=0.0=1", "demo-r29"}, lacks: "LabelError"},
+	}},
+	// The lengths (container 1.5.0, #1817): a key of 128 characters is taken and one of 129 is refused for its length, naming the key and `"maxLength": "128"`; a
+	// label of 4096 characters in all (`key=value`) is taken and one of 4097 is refused for its length, naming the label and `"maxLength": "4096"`. Where a label
+	// fails more than one, the first of these is the one said: the key's length, the key's content, the label's length.
+	{"a network refuses a label by its length, and says the first thing that is wrong with it", nil, []step{
+		{argv: []string{"network", "create", "--label=" + strings.Repeat("x", 128) + "=v", "demo-len1"}, lacks: "LabelError"},
+		{argv: []string{"network", "create", "--label=" + strings.Repeat("x", 129) + "=v", "demo-len2"}, rc: 1, has: `"invalid_label_key_length"), metadata: ["key": "` + strings.Repeat("x", 129) + `", "maxLength": "128"])`},
+		{argv: []string{"network", "create", "--label=k=" + strings.Repeat("v", 4094), "demo-len3"}, lacks: "LabelError"},
+		{argv: []string{"network", "create", "--label=k=" + strings.Repeat("v", 4095), "demo-len4"}, rc: 1, has: `"invalid_label_length"), metadata: ["label": "k=` + strings.Repeat("v", 4095) + `", "maxLength": "4096"])`},
+		{argv: []string{"network", "create", "--label=" + strings.Repeat("A", 129) + "=v", "demo-len5"}, rc: 1, has: `"invalid_label_key_length"`, lacks: `invalid_label_key_content`},
+		{argv: []string{"network", "create", "--label=A=" + strings.Repeat("v", 5000), "demo-len6"}, rc: 1, has: `"invalid_label_key_content"), metadata: ["key": "A"])`, lacks: `invalid_label_length`},
+		{argv: []string{"network", "create", "--label=" + strings.Repeat("x", 129) + "=" + strings.Repeat("v", 4090), "demo-len7"}, rc: 1, has: `"invalid_label_key_length"`, lacks: `invalid_label_length`},
+		{argv: []string{"network", "create", "--label==" + strings.Repeat("v", 5000), "demo-len8"}, rc: 1, has: `"invalid_label_key_length"`},
 	}},
 	// A network already deleted is not there to delete a second time: the real
 	// CLI fails (1.4.1: `Error: failed to delete one or more networks:

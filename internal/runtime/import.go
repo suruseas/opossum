@@ -14,8 +14,9 @@ import (
 // does, so both callers pass one name twice — and the retag stays for a caller
 // that wants the image under another name.
 //
-// docker is invoked ONLY here: opossum's normal path never shells out to docker,
-// and this reports a clear message when the CLI is missing.
+// This is the one thing that writes to the runtime's store from Docker, and it is run by `import` and by `up --from-docker-compose` and by nothing else:
+// `up` also runs docker, read-only, to ask whether Docker holds an image it is about to build (DockerImageCreated). It reports a clear message when the CLI is
+// missing.
 func (r *Runtime) ImportFromDocker(dockerRef, targetTag string) error {
 	// A dry-run must not touch Docker or the runtime store. Import runs its
 	// `docker image save | container image load` (+ tag) directly, outside the

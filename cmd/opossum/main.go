@@ -20,6 +20,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/suruseas/opossum/internal/compose"
+	"github.com/suruseas/opossum/internal/dnsoffer"
 	"github.com/suruseas/opossum/internal/doctor"
 	"github.com/suruseas/opossum/internal/orchestrator"
 	"github.com/suruseas/opossum/internal/runtime"
@@ -176,13 +177,24 @@ func cmdSkipsRuntimePreflight(cmd *cobra.Command) bool {
 	return false
 }
 
+// loadWatchOrchestrator is loadOrchestratorChecked for `watch`, which does not ask about the DNS domain (#1907): a rebuild runs `up` over again, and a question
+// that comes with each is one that Ctrl-C does not end (the signal handler only cancels what is running), asked in a command that is left running.
+func loadWatchOrchestrator(out io.Writer) (*orchestrator.Orchestrator, error) {
+	o, err := loadOrchestratorChecked(out)
+	if err != nil {
+		return nil, err
+	}
+	o.OfferDNSDomain = nil
+	return o, nil
+}
+
 func watchCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "watch",
 		Short: "Sync host file changes into running containers per each service's develop.watch rules",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			o, err := loadOrchestratorChecked(cmd.OutOrStdout())
+			o, err := loadWatchOrchestrator(cmd.OutOrStdout())
 			if err != nil {
 				return err
 			}
@@ -365,6 +377,7 @@ var errEnvUnhealthy = errors.New("environment checks failed (see the report abov
 
 func doctorCmd() *cobra.Command {
 	var format string
+	var fix bool
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Diagnose the environment for common problems (runtime, DNS, network, builder, storage, leftover networks, memory)",
@@ -381,6 +394,17 @@ func doctorCmd() *cobra.Command {
 				// asking "will this project fit" wants to know.
 				proj = o.Project
 			}
+			// --fix is the one place doctor changes anything, and only the DNS domain, and only by asking first (#1907): where it is not asked, which is
+			// where this is not a terminal, nothing is run, and the report says what to type as it always did.
+			// The format is checked before anything is asked: a `--fix --format bogus` is not a question about running sudo that ends in an error about the format.
+			if format != "text" && format != "json" {
+				return fmt.Errorf("unknown --format %q (want \"text\" or \"json\")", format)
+			}
+			if fix {
+				offer := dnsOffer(rt)
+				fixer := doctor.Fixer{DNSDomain: func(domain string) { offer.Ask(domain) }}
+				doctor.Fix(rt, dnsDomain, fixer)
+			}
 			var healthy bool
 			switch format {
 			case "text":
@@ -390,8 +414,6 @@ func doctorCmd() *cobra.Command {
 				if healthy, err = doctor.RunJSON(cmd.OutOrStdout(), rt, dnsDomain, proj, hostMemMB()); err != nil {
 					return err
 				}
-			default:
-				return fmt.Errorf("unknown --format %q (want \"text\" or \"json\")", format)
 			}
 			if !healthy {
 				// A failed check (❌ / status:"fail") means the environment isn't ready —
@@ -404,6 +426,7 @@ func doctorCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&format, "format", "text", `output format: "text" (default, human-readable) or "json" (machine-readable)`)
+	cmd.Flags().BoolVar(&fix, "fix", false, "offer to create the DNS domain when it is missing (asks first, at a terminal: it runs sudo; every other check is only reported)")
 	return cmd
 }
 
@@ -510,21 +533,24 @@ func quoted(msg string) string {
 
 func upCmd() *cobra.Command {
 	var foreground bool
-	var forceRecreate, build, noBuild, removeOrphans, fromDockerCompose, fromDockerLegacy, dryRun, noSupervisor bool
+	var forceRecreate, build, noBuild, removeOrphans, fromDockerCompose, fromDockerRemoved, dryRun, noSupervisor bool
 	cmd := &cobra.Command{
 		Use:   "up [service...]",
 		Short: "Build and start services in dependency order (all, or the named services plus their dependencies)",
+		// --from-docker was the old name of --from-docker-compose and was removed. A hidden flag that refuses, rather than an unknown flag, so that whoever types
+		// the name published docs once gave (an agent that learned it, a script) is told the new name. It is refused with the arguments, before the runtime is
+		// looked at or started: nothing is started. Any use counts, `--from-docker=false` too.
+		Args: func(cmd *cobra.Command, args []string) error {
+			if cmd.Flags().Changed("from-docker") {
+				return fmt.Errorf("--from-docker was removed — use --from-docker-compose")
+			}
+			return nil
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if build && noBuild {
 				return fmt.Errorf("--build and --no-build are mutually exclusive")
 			}
-			// --from-docker is the old name for --from-docker-compose. Accept it
-			// (same behaviour) and point at the new name rather than failing: the old
-			// name is in published docs an agent may have learned.
-			if fromDockerLegacy {
-				fmt.Fprintln(cmd.ErrOrStderr(), "opossum: --from-docker is deprecated — use --from-docker-compose (same behaviour)")
-			}
-			fromDocker := fromDockerCompose || fromDockerLegacy
+			fromDocker := fromDockerCompose
 			announceOverlay(cmd.ErrOrStderr())
 			o, err := loadOrchestrator(cmd.OutOrStdout())
 			if err != nil {
@@ -625,15 +651,8 @@ func upCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&noBuild, "no-build", false, "don't build images (error if one is missing)")
 	cmd.Flags().BoolVar(&removeOrphans, "remove-orphans", false, "remove containers for services no longer in the compose file")
 	cmd.Flags().BoolVar(&fromDockerCompose, "from-docker-compose", false, "bring an existing docker compose project up here: for services with a build, import the image from Docker instead of building it (needs the docker CLI)")
-	// The old name, kept working so published examples and agents that learned it
-	// don't break. Hidden from --help (the new name is the one to advertise), with
-	// the run-time notice above steering to it. MarkHidden rather than
-	// MarkDeprecated because the notice is hand-rolled: MarkDeprecated would print
-	// its own on top of ours, and ours is worded for this migration ("same
-	// behaviour") and pinned to cmd.ErrOrStderr() — so it stays on stderr even if a
-	// caller redirects the command's out-writer. Both mark it hidden and keep it
-	// accepted, so nothing is lost.
-	cmd.Flags().BoolVar(&fromDockerLegacy, "from-docker", false, "deprecated alias for --from-docker-compose")
+	// The removed name: hidden from --help (the new name is the one to advertise) and refused by Args above, so that typing it is told the new name.
+	cmd.Flags().BoolVar(&fromDockerRemoved, "from-docker", false, "removed: use --from-docker-compose")
 	_ = cmd.Flags().MarkHidden("from-docker")
 	cmd.Flags().BoolVar(&noSupervisor, "no-supervisor", false, "don't leave a background process watching `restart:` services (they won't be brought back automatically)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "resolve and print the plan (startup order and the container commands that would run) without executing anything")
@@ -669,6 +688,18 @@ func downCmd() *cobra.Command {
 			// or renaming the file would otherwise strand a process the user has no
 			// opossum command to remove.
 			earlyStopped := ""
+			// The project's lock is taken before the supervisor is stopped, and `Down` goes on under it: an `up` that has not let go of the lock yet (it is
+			// still seeing its new supervisor claim) must not have that supervisor killed by a `down` that is then refused for the lock (#1822). A lock held
+			// elsewhere refuses this `down` here, before anything is touched.
+			var held *orchestrator.HeldProjectLock
+			if name := projectNameWithoutCompose(); name != "" {
+				h, herr := orchestrator.HoldProjectLock(name)
+				if herr != nil {
+					return herr
+				}
+				held = h
+				defer held.Release()
+			}
 			if name := projectNameWithoutCompose(); name != "" {
 				unchecked := orchestrator.SupervisorUncheckedPID(name) // before the stop: it decides whether the supervisor is asked
 				stopped, attempted := stopSupervisorFn(name)
@@ -686,7 +717,7 @@ func downCmd() *cobra.Command {
 				// A file that cannot be read is no reason to leave what it started
 				// running: an earlier opossum may have started this project from a
 				// file the current one refuses.
-				if handled, derr := downByLabel(cmd, err, volumes, rmi); handled {
+				if handled, derr := downByLabel(cmd, err, volumes, rmi, held); handled {
 					return derr
 				}
 				if name := projectNameWithoutCompose(); name != "" {
@@ -703,6 +734,7 @@ func downCmd() *cobra.Command {
 			// directory's — and for one the first ask found stopped or absent (#1406).
 			o.SetSupervisorStopper(stopSupervisorFn)
 			o.NoteSupervisorHandled(earlyStopped)
+			o.AdoptProjectLock(held)
 			return o.Down(volumes, rmi, removeOrphans)
 		},
 	}
@@ -726,7 +758,7 @@ func downCmd() *cobra.Command {
 // is the folder's unless the file says otherwise, and the file is what could not
 // be read: taking it down would guess, and a wrong guess removes another
 // project's containers. The reader is told the command that names it.
-func downByLabel(cmd *cobra.Command, loadErr error, volumes bool, rmi string) (handled bool, err error) {
+func downByLabel(cmd *cobra.Command, loadErr error, volumes bool, rmi string, projectLock *orchestrator.HeldProjectLock) (handled bool, err error) {
 	name := explicitProjectName()
 	if name == "" {
 		return false, nil
@@ -755,6 +787,8 @@ func downByLabel(cmd *cobra.Command, loadErr error, volumes bool, rmi string) (h
 	}
 	o := orchestrator.New(&compose.Project{Name: name, Services: map[string]*compose.Service{}}, rt, dnsDomain, cmd.OutOrStdout())
 	o.SetRunFlags(thisRunFlags())
+	o.SetSupervisorStopper(stopSupervisorFn)
+	o.AdoptProjectLock(projectLock) // the lock of this name, taken before the supervisor was stopped
 	return true, o.Down(false, "", true)
 }
 
@@ -1874,7 +1908,38 @@ func loadOrchestratorAs(out io.Writer, softValues bool) (*orchestrator.Orchestra
 	rt.Verbose = verbose
 	o := orchestrator.New(proj, rt, dnsDomain, out)
 	o.SetRunFlags(thisRunFlags())
+	offer := dnsOffer(rt)
+	o.OfferDNSDomain = func(domain string) bool { return offer.Ask(domain) == dnsoffer.Created }
 	return o, nil
+}
+
+// stderrIsTerminal reports whether our stderr is an interactive terminal; a var so that tests can force the terminal case, as for stdinIsTerminal.
+var stderrIsTerminal = func() bool {
+	return term.IsTerminal(int(os.Stderr.Fd()))
+}
+
+// dnsOfferOut is where the question about the DNS domain is written: the stderr this process has, which is the terminal the question must reach (a var for tests).
+var dnsOfferOut io.Writer = os.Stderr
+
+// dnsOfferIn is where the answer is read from: the stdin this process has (a var for tests).
+var dnsOfferIn io.Reader = os.Stdin
+
+// createDNSDomain is what a yes runs: the runtime's `sudo container system dns create` (a var for tests, which must not run sudo). No environment variable or
+// setting names the sudo, or says yes; the one that names the `container` it runs (OPOSSUM_CONTAINER_BIN, which every command reads) is shown in the question as
+// the full command that a yes runs.
+var createDNSDomain = func(rt *runtime.Runtime) func(domain string) error { return rt.CreateDNSDomain }
+
+// dnsOffer is the question of whether to create the DNS domain, for `up` and `doctor --fix` (#1907): asked only where both stdin and stderr are a terminal, and
+// answered yes only by `y` or `yes` (internal/dnsoffer holds that, and that nothing sets it to yes). The command it runs, and shows, is the runtime's.
+func dnsOffer(rt *runtime.Runtime) *dnsoffer.Offer {
+	return &dnsoffer.Offer{
+		Interactive: func() bool { return stdinIsTerminal() && stderrIsTerminal() },
+		In:          dnsOfferIn,
+		Out:         dnsOfferOut,
+		Valid:       runtime.ValidDNSDomainName,
+		Command:     rt.DNSCreateCommand,
+		Create:      createDNSDomain(rt),
+	}
 }
 
 // withTakeDownWithoutFile adds to a refusal of the compose file the command that takes the project down without it, by naming it.

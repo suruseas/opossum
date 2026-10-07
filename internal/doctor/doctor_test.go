@@ -21,6 +21,7 @@ type mock struct {
 	ctrs                       []runtime.ContainerSummary
 	statusErr                  bool
 	dns                        bool
+	dnsUnknown                 bool // `container system dns list` did not answer
 }
 
 func (m mock) List() []runtime.ContainerSummary   { return m.ctrs }
@@ -58,7 +59,15 @@ func (m mock) Output(args ...string) (string, error) {
 	return "", nil
 }
 
-func (m mock) DNSDomainExists(string) bool { return m.dns }
+func (m mock) DNSDomainState(string) runtime.DNSState {
+	if m.dnsUnknown {
+		return runtime.DNSUnknown
+	}
+	if m.dns {
+		return runtime.DNSPresent
+	}
+	return runtime.DNSAbsent
+}
 
 func TestDoctorAllHealthy(t *testing.T) {
 	m := mock{status: "status running\n", dns: true, probe: "DNS-OK\nIP-OK\n", builder: "buildkit img running 4 8192 MB\n"}
@@ -389,4 +398,80 @@ func TestRuntimeCheckReadsTheJSONStatusFirst(t *testing.T) {
 			t.Errorf("want ok without a mismatch against an empty server version, got %+v", c)
 		}
 	})
+}
+
+// The dns check has three answers, and a listing that did not come is not a domain that is missing: it warns with the command that lists them, and `--fix`
+// does not offer to create anything over it (#1907).
+func TestDoctorDNSCheckTellsAbsentFromUnknown(t *testing.T) {
+	base := mock{status: "status running\n", probe: "DNS-OK\nIP-OK\n", builder: "buildkit img running 4 8192 MB\n"}
+	for _, tc := range []struct {
+		name       string
+		m          func(m mock) mock
+		wantMark   string
+		wantFix    string
+		wantHealth bool
+	}{
+		{"registered", func(m mock) mock { m.dns = true; return m }, "✅ dns", "", true},
+		{"missing", func(m mock) mock { return m }, "❌ dns", "sudo container system dns create opossum", false},
+		{"the listing failed", func(m mock) mock { m.dnsUnknown = true; return m }, "⚠️", "container system dns list", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var b bytes.Buffer
+			healthy := Run(&b, tc.m(base), "opossum", nil, 16384)
+			s := b.String()
+			// The mark and the name are on one line, whatever the blanks between them are.
+			found := false
+			for _, line := range strings.Split(s, "\n") {
+				if strings.Contains(line, tc.wantMark) && strings.Contains(line, " dns ") {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("want %q on the dns line in:\n%s", tc.wantMark, s)
+			}
+			if tc.wantFix != "" && !strings.Contains(s, tc.wantFix) {
+				t.Errorf("want the fix %q in:\n%s", tc.wantFix, s)
+			}
+			if tc.name == "the listing failed" && strings.Contains(s, "dns create") {
+				t.Errorf("a listing that failed is not a reason to create the domain:\n%s", s)
+			}
+			if healthy != tc.wantHealth {
+				t.Errorf("healthy = %v, want %v:\n%s", healthy, tc.wantHealth, s)
+			}
+		})
+	}
+}
+
+// Fix offers the domain only where it is missing, once, with its name; and nothing where it is registered, where the listing failed, where there is no domain to
+// speak of, and where nothing can fix it.
+func TestDoctorFixOffersOnlyAMissingDNSDomain(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		m      mock
+		domain string
+		fixer  func(asked *[]string) Fixer
+		want   int
+	}{
+		{"missing", mock{}, "opossum", func(a *[]string) Fixer {
+			return Fixer{DNSDomain: func(d string) { *a = append(*a, d) }}
+		}, 1},
+		{"registered", mock{dns: true}, "opossum", func(a *[]string) Fixer {
+			return Fixer{DNSDomain: func(d string) { *a = append(*a, d) }}
+		}, 0},
+		{"the listing failed", mock{dnsUnknown: true}, "opossum", func(a *[]string) Fixer {
+			return Fixer{DNSDomain: func(d string) { *a = append(*a, d) }}
+		}, 0},
+		{"no domain", mock{}, "", func(a *[]string) Fixer {
+			return Fixer{DNSDomain: func(d string) { *a = append(*a, d) }}
+		}, 0},
+		{"nothing can fix it", mock{}, "opossum", func(a *[]string) Fixer { return Fixer{} }, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var asked []string
+			Fix(tc.m, tc.domain, tc.fixer(&asked))
+			if len(asked) != tc.want || (tc.want > 0 && asked[0] != tc.domain) {
+				t.Errorf("fix asked %v, want %d time(s) with the domain", asked, tc.want)
+			}
+		})
+	}
 }

@@ -15,7 +15,7 @@ import (
 // service that is not taken is read for none of that but the counts and the list of labels it casts; a service an extends takes
 // from another file is put to the schema once it is merged with the service that extends it. known marks the differences
 // left open, with what is done on purpose: a string that reads as infinity or NaN as `reservations.cpus` (docker compose reads
-// it as a float; refused here as a limit of `cpus` is, since it would set no limit in silence), and a size `-1`, `1e3` or ` 1` as
+// it as a float; refused here as a limit of `cpus` is, since it would set no limit in silence), and a size `-1` or `1e3` as
 // `reservations.memory` (the size of `limits.memory` and `mem_limit` is read the same way here).
 func TestTheBlocksOfDeployAreReadAsDockerComposeReadsThem(t *testing.T) {
 	for _, tc := range []struct {
@@ -714,7 +714,7 @@ func TestTheBlocksOfDeployAreReadAsDockerComposeReadsThem(t *testing.T) {
 		{"resources.reservations.cpus: \"-Inf\"", map[string]string{"compose.yaml": "services:\n  a:\n    image: x\n    deploy:\n      resources:\n        reservations:\n          cpus: \"-Inf\"\n"}, []string{"compose.yaml"}, true, true},
 		{"resources.reservations.memory: \"-1\"", map[string]string{"compose.yaml": "services:\n  a:\n    image: x\n    deploy:\n      resources:\n        reservations:\n          memory: \"-1\"\n"}, []string{"compose.yaml"}, true, true},
 		{"resources.reservations.memory: \"1e3\"", map[string]string{"compose.yaml": "services:\n  a:\n    image: x\n    deploy:\n      resources:\n        reservations:\n          memory: \"1e3\"\n"}, []string{"compose.yaml"}, true, true},
-		{"resources.reservations.memory: \" 1\"", map[string]string{"compose.yaml": "services:\n  a:\n    image: x\n    deploy:\n      resources:\n        reservations:\n          memory: \" 1\"\n"}, []string{"compose.yaml"}, false, true},
+		{"resources.reservations.memory: \" 1\"", map[string]string{"compose.yaml": "services:\n  a:\n    image: x\n    deploy:\n      resources:\n        reservations:\n          memory: \" 1\"\n"}, []string{"compose.yaml"}, true, false},
 		{"a service of the extended file that is not taken: max_failure_ratio: inf", map[string]string{"base.yaml": "services:\n  base:\n    image: x\n  other:\n    image: x\n    deploy:\n      update_config:\n        max_failure_ratio: inf\n", "compose.yaml": "services:\n  a:\n    extends: {file: base.yaml, service: base}\n"}, []string{"compose.yaml"}, false, false},
 		{"a service of the extended file that is not taken: max_failure_ratio: Infinity", map[string]string{"base.yaml": "services:\n  base:\n    image: x\n  other:\n    image: x\n    deploy:\n      rollback_config:\n        max_failure_ratio: Infinity\n", "compose.yaml": "services:\n  a:\n    extends: {file: base.yaml, service: base}\n"}, []string{"compose.yaml"}, false, false},
 		{"a service of the extended file that is not taken: update_config two counts, the first bad", map[string]string{"base.yaml": "services:\n  base:\n    image: x\n  other:\n    image: x\n    deploy:\n      update_config: {parallelism: x, max_failure_ratio: 1}\n", "compose.yaml": "services:\n  a:\n    extends: {file: base.yaml, service: base}\n"}, []string{"compose.yaml"}, true, false},

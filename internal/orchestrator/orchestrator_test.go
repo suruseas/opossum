@@ -170,6 +170,10 @@ func TestMain(m *testing.M) {
 	// that also writes state did not, and wrote into a real home. Tests that want
 	// their own still set it, and this is only the floor.
 	os.Setenv("XDG_STATE_HOME", filepath.Join(d, "state"))
+	// No docker, for every Runtime this suite makes, however it makes it: `up` asks Docker, read-only, whether it holds an image it is about to build (#1905), and
+	// a test that does not say what Docker holds must not be answered by what the machine it runs on does (which differs from one runner to the next, and
+	// is slow when a daemon is starting). A test that wants a Docker sets DockerBin on its Runtime.
+	os.Setenv("OPOSSUM_DOCKER_BIN", filepath.Join(d, "no-docker"))
 
 	fakeShimBin = filepath.Join(d, "fakeshim")
 	if out, err := exec.Command("go", "build", "-o", fakeShimBin, "./testdata/fakeshim").CombinedOutput(); err != nil {

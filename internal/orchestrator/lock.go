@@ -75,6 +75,39 @@ func lockProject(project string) (*projectLock, error) {
 	return &projectLock{f: f}, nil
 }
 
+// HeldProjectLock is a project's lock taken before an Orchestrator exists, by a command that has something to do under it before it has read the
+// compose file: `down` stops the restart supervisor first, and an `up` that has not let go of the lock yet must not have its new supervisor killed
+// by a `down` that is then refused (#1822).
+type HeldProjectLock struct {
+	project string
+	l       *projectLock
+}
+
+// HoldProjectLock takes the lock of a project as lockProject does, and is refused as it is (OPSM-208) while another command holds it. A project with no
+// state directory has never been started by `up`: there is no supervisor to protect and nothing to hold, and none is made for a name that only
+// stands for a directory (nil, nil; a nil one is handed on and released as any).
+func HoldProjectLock(project string) (*HeldProjectLock, error) {
+	dir, err := projectStateDir(project)
+	if err != nil {
+		return nil, err
+	}
+	if _, serr := os.Stat(dir); os.IsNotExist(serr) {
+		return nil, nil
+	}
+	l, err := lockProject(project)
+	if err != nil {
+		return nil, err
+	}
+	return &HeldProjectLock{project: project, l: l}, nil
+}
+
+// Release lets the lock go; a nil one is nothing to let go of.
+func (h *HeldProjectLock) Release() {
+	if h != nil {
+		h.l.release()
+	}
+}
+
 // release lets the lock go. Closing the file releases the flock; the file
 // stays, so the next holder's pid overwrites it.
 func (l *projectLock) release() {

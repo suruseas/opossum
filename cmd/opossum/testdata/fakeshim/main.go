@@ -13,12 +13,14 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 func main() {
@@ -389,7 +391,15 @@ func main() {
 		}
 	case "system":
 		if arg(1) == "dns" && arg(2) == "list" {
-			fmt.Print("DOMAIN\nopossum\n")
+			// The domains in $DNS_DOMAINS (space-separated) where it is set, `opossum` where it is not: a test that creates one lists it from then on (#1907).
+			domains := "opossum"
+			if v, ok := os.LookupEnv("DNS_DOMAINS"); ok {
+				domains = v
+			}
+			fmt.Println("DOMAIN")
+			for _, d := range strings.Fields(domains) {
+				fmt.Println(d)
+			}
 		}
 		// `system status` is the daemon-liveness probe; report running (or stopped
 		// under SYSTEM_STOPPED until `system start` runs). The running table is
@@ -420,6 +430,12 @@ func main() {
 			}
 			fmt.Println("started")
 		}
+	case "build":
+		// Nothing is built here; what is refused before it is: an option given a value of its own that starts with `-` (#1730).
+		if msg := dashValueRefusal(os.Args[2:], map[string]string{"--target": "--target <stage>", "--build-arg": "--build-arg <key=val>", "--label": "--label <key=val>", "--tag": "--tag <name>"}); msg != "" {
+			fmt.Fprintln(os.Stderr, msg)
+			os.Exit(64)
+		}
 	case "network":
 		// `network ls --format json` is how doctor finds the networks nothing is
 		// running on. $NETWORK_LS is the JSON document to answer with; empty
@@ -447,6 +463,10 @@ func main() {
 				fmt.Fprintln(os.Stderr, "Error: Missing expected argument '<name>'")
 				os.Exit(64)
 			}
+			if msg := dashValueRefusal(os.Args[2:], map[string]string{"--label": "--label <label>"}); msg != "" {
+				fmt.Fprintln(os.Stderr, msg)
+				os.Exit(64)
+			}
 			if !validNetworkName(name) {
 				fmt.Fprintf(os.Stderr, "Error: invalid network name: %s\n", name)
 				os.Exit(1)
@@ -456,34 +476,11 @@ func main() {
 			if stateDir != "" {
 				_ = os.Remove(gonePath("network", name))
 			}
-			// A label key the runtime refuses (1.5.0, rc 1; it takes lower-case words and digits joined by `.`, `/` or `-`, so
-			// a key that starts with `-`, is empty, or holds a space or a control character is among them, and an upper-case letter or a
-			// `_` is another that this fake lets through) is named in the metadata as it was written (testdata/real-cli-output.md).
+			// A label the runtime refuses (1.5.0, rc 1; testdata/real-cli-output.md): labelRefusal says which and how.
 			for _, a := range os.Args[1:] {
 				if v, ok := strings.CutPrefix(a, "--label="); ok {
-					key, _, _ := strings.Cut(v, "=")
-					bad := key == "" || key[0] == '-' || strings.ContainsFunc(key, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) })
-					if v == key+"=" {
-						bad = true // a label written with no value: the runtime names the whole `k=`
-					}
-					if bad {
-						if key == "" || v == key+"=" {
-							key = v // an empty key: the runtime names the whole `=value`
-						}
-						var shown strings.Builder // the runtime writes a tab as `\t` and another control character as `\u{01}`
-						for _, r := range key {
-							switch {
-							case r == '\t':
-								shown.WriteString(`\t`)
-							case r == '\n':
-								shown.WriteString(`\n`)
-							case unicode.IsControl(r):
-								fmt.Fprintf(&shown, `\u{%02X}`, r)
-							default:
-								shown.WriteRune(r)
-							}
-						}
-						fmt.Fprintf(os.Stderr, "Error: LabelError(code: ContainerResource.AppErrorCode(rawValue: \"invalid_label_key_content\"), metadata: [\"key\": \"%s\"])\n", shown.String())
+					if msg := labelRefusal(v); msg != "" {
+						fmt.Fprintln(os.Stderr, msg)
 						os.Exit(1)
 					}
 				}
@@ -574,6 +571,12 @@ func main() {
 		}
 		fmt.Println(doc)
 	case "volume":
+		if arg(1) == "create" {
+			if msg := dashValueRefusal(os.Args[2:], map[string]string{"--label": "--label <label>"}); msg != "" {
+				fmt.Fprintln(os.Stderr, msg)
+				os.Exit(64)
+			}
+		}
 		// `volume ls` is a table whose first column is the name; opossum reads it to
 		// decide whether a volume exists. $VOLUME_LS is that table.
 		// `rm` is `delete`'s alias on 1.4.1 (opossum itself only ever issues
@@ -1033,6 +1036,12 @@ func containerNameRefused(args []string) (msg string, code int, refused bool) {
 			}
 			name, given = v, true
 		}
+		// A `--label` given a value of its own that starts with `-` has none (rc 64, measured on 1.5.0, #1932).
+		if a == "--label" {
+			if v := args[i+1]; len(v) > 1 && strings.HasPrefix(v, "-") {
+				return "Error: Missing value for '--label <label>'", 64, true
+			}
+		}
 		i++ // the flag's value
 	}
 	if given && !validContainerName(name) {
@@ -1137,6 +1146,9 @@ func publishCountsRefused(args []string) (msg string, refused bool) {
 		if j := strings.LastIndex(s, "/"); j >= 0 {
 			s = s[:j] // the protocol
 		}
+		if m := publishWithNoHostPort(a, s); m != "" {
+			return m, true
+		}
 		if strings.HasPrefix(s, "[") { // an IPv6 address
 			if j := strings.Index(s, "]"); j >= 0 {
 				s = strings.TrimPrefix(s[j+1:], ":")
@@ -1147,11 +1159,46 @@ func publishCountsRefused(args []string) (msg string, refused bool) {
 			continue // a bare container port
 		}
 		host, ctr := parts[len(parts)-2], parts[len(parts)-1]
+		// A host range that starts at 0 (`0:80`, `0-1:80`, `127.0.0.1:0:80`) is refused before the counts are asked
+		// (container 1.5.0, rc 1: `Error: invalid publish host port range: <host>`).
+		if hostRangeStartsAtZero(host) {
+			return "Error: invalid publish host port range: " + host, true
+		}
 		if publishCount(host) != publishCount(ctr) {
 			return "Error: publish host and container port counts are not equal: " + host + ":" + ctr, true
 		}
 	}
 	return "", false
+}
+
+// publishWithNoHostPort answers a `-p` that names no host port at all, in the words the runtime has for each spelling (container 1.5.0, measured):
+// one that starts with `:` is no publish value (`:80`, with the protocol it carries: `invalid publish value: :80/udp`); an IPv4 address with
+// nothing after it is a missing host port (`127.0.0.1::80` is `invalid publish host port: 127.0.0.1:`); an IPv6 one is read as an IPv4 address that is
+// none (`[::1]::80` is `invalid publish IPv4 address: [::1]::80`). a is the spelling as given, s the same without its protocol. opossum sends none of
+// them: a host port left out is given the container port first.
+func publishWithNoHostPort(a, s string) string {
+	switch {
+	case strings.HasPrefix(a, ":"):
+		return "Error: invalid publish value: " + a
+	case strings.HasPrefix(s, "["):
+		if j := strings.Index(s, "]"); j >= 0 && strings.HasPrefix(s[j+1:], "::") {
+			return "Error: invalid publish IPv4 address: " + a
+		}
+	default:
+		if ip, ctr, ok := strings.Cut(s, "::"); ok && ip != "" && strings.Trim(ip, "0123456789.") == "" && !strings.Contains(ctr, ":") {
+			return "Error: invalid publish host port: " + ip + ":"
+		}
+	}
+	return ""
+}
+
+// hostRangeStartsAtZero is a host side of `-p` whose low end is the port 0, however it is spelled: `0`, `00`,
+// `+0`, `0-1`, `00-01` (container 1.5.0 refuses each of them alike). An empty host is not a 0: the forms with no host port at all are refused
+// before this, in the runtime's other words (publishWithNoHostPort).
+func hostRangeStartsAtZero(host string) bool {
+	lo, _, _ := strings.Cut(host, "-")
+	lo = strings.TrimPrefix(lo, "+")
+	return lo != "" && strings.Trim(lo, "0") == ""
 }
 
 // publishCount is how many ports one side of a `-p` names: `80` is one, `80-82` three.
@@ -1274,3 +1321,56 @@ func refuseEmptyLoad(args []string) {
 // execTakesValue are the flags of `container exec` that take their value as the next argument (container 1.5.0).
 var execTakesValue = map[string]bool{"-e": true, "--env": true, "--env-file": true, "--gid": true, "--uid": true, "-u": true, "--user": true,
 	"-w": true, "--workdir": true, "--cwd": true, "--ulimit": true}
+
+// labelKeyPattern is a label key the runtime takes (container 1.5.0, `network create --label`, measured on the real CLI: #1817): words of lower-case letters, digits
+// and hyphens that start and end with a letter or a digit (`a--b` is one), joined by a single `.` or `/`.
+var labelKeyPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?([./][a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
+
+// labelRefusal is what the runtime says of a label it refuses, and "" of one it takes. A label with no `=` is a key alone, and is taken. Otherwise the key is what is
+// before the first `=` — except where it is empty or the value is, where the whole label is named as the key (`=1`, `k=`). The checks are made in this order, and the
+// first that fails is the one said: the key's length (128, in characters), the key's content, and the whole label's length (4096, in characters).
+func labelRefusal(label string) string {
+	key, value, hasValue := strings.Cut(label, "=")
+	if !hasValue {
+		return ""
+	}
+	if key == "" || value == "" {
+		key = label
+	}
+	show := func(s string) string { // the runtime writes a tab as `\t` and another control character as `\u{01}`
+		var b strings.Builder
+		for _, r := range s {
+			switch {
+			case r == '\t':
+				b.WriteString(`\t`)
+			case r == '\n':
+				b.WriteString(`\n`)
+			case unicode.IsControl(r):
+				fmt.Fprintf(&b, `\u{%02X}`, r)
+			default:
+				b.WriteRune(r)
+			}
+		}
+		return b.String()
+	}
+	switch {
+	case utf8.RuneCountInString(key) > 128:
+		return fmt.Sprintf(`Error: LabelError(code: ContainerResource.AppErrorCode(rawValue: "invalid_label_key_length"), metadata: ["key": "%s", "maxLength": "128"])`, show(key))
+	case !labelKeyPattern.MatchString(key):
+		return fmt.Sprintf(`Error: LabelError(code: ContainerResource.AppErrorCode(rawValue: "invalid_label_key_content"), metadata: ["key": "%s"])`, show(key))
+	case utf8.RuneCountInString(label) > 4096:
+		return fmt.Sprintf(`Error: LabelError(code: ContainerResource.AppErrorCode(rawValue: "invalid_label_length"), metadata: ["label": "%s", "maxLength": "4096"])`, show(label))
+	}
+	return ""
+}
+
+// dashValueRefusal is what the runtime says of an option given, as its own argument, a value that starts with `-`: the value is read as another flag, so the option has none
+// (rc 64, measured on 1.5.0, #1730). opossum passes these values joined (`--label=<k=v>`, #1423) and never reaches it. metavars maps an option to its place in the message.
+func dashValueRefusal(args []string, metavars map[string]string) string {
+	for i := 0; i+1 < len(args); i++ {
+		if meta, ok := metavars[args[i]]; ok && len(args[i+1]) > 1 && strings.HasPrefix(args[i+1], "-") {
+			return "Error: Missing value for '" + meta + "'"
+		}
+	}
+	return ""
+}

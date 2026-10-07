@@ -149,6 +149,15 @@ sudo container system dns create opossum
 Use a different name with `--dns-domain <name>` (and create that name instead).
 Remove it later with `sudo container system dns delete opossum`.
 
+If you run `opossum up` (or `opossum doctor --fix`, or `opossum run`, which starts
+the services a one-off needs the way `up` does) at a terminal before that, it
+tells you the domain is missing and **asks** whether to run the command for you:
+`Create it now? This runs: sudo container system dns create opossum [y/N]`. Only
+`y` or `yes` runs it, with `sudo` asking for your password itself; Enter, anything
+else, or a run that is not at a terminal (CI, a pipe, an agent) runs nothing and
+leaves the warning with the command to type. There is no setting that answers for
+you.
+
 ## New to Docker Compose?
 
 If you have never used `docker compose`, or you are starting from an empty
@@ -186,6 +195,11 @@ characters in a `-p` value as well (`-p my_app` is `my-app` to opossum and
 `my_app` to docker compose), so pass both commands the **same** `-p <name>`, in
 lowercase with neither character in it (docker compose refuses a `-p` with
 capitals; opossum lowercases it without a word).
+
+Plain `opossum up` builds a service whose image it does not have; where Docker
+holds an image of that name, it says so first, with how long ago Docker built it
+and the command that takes it (`opossum import <service>`), and builds all the
+same — it never imports on its own.
 
 That's it — the same project, running on Apple `container`. Work with it using
 the verbs you already know:

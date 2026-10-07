@@ -997,7 +997,7 @@ func loadFilesEnvDir(paths []string, envFiles []string, envDir string, soft bool
 		// against the service it extends (resolveSameFileExtends).
 		var tags []mergeTag
 		if doc, tags, err = takeMergeTags(doc); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("compose file %s: %w", paths[0], err)
 		}
 		// The file is read as written first — every shape check names the
 		// service and the line the reader wrote — and only then is a
@@ -1058,6 +1058,11 @@ func loadFilesEnvDir(paths []string, envFiles []string, envDir string, soft bool
 			}
 			if merged == nil {
 				merged = m
+				// What the files made so far is put to the keys and the required keys of a block as each file is added (docker compose, measured: the
+				// files before it merged, the extends read, then the schema, the refusal naming the file just added).
+				if err := checkStrictShapesStep(path, merged, scope.values); err != nil {
+					return nil, err
+				}
 			} else {
 				// A key this file tagged `!reset` or `!override` leaves the
 				// earlier files' value out of the merge.
@@ -1066,6 +1071,9 @@ func loadFilesEnvDir(paths []string, envFiles []string, envDir string, soft bool
 				dropGone(merged, mixed)
 				markMixed(merged, m, mixed)
 				merged = mergeMap(merged, m, "")
+				if err := checkStrictShapesStep(path, merged, scope.values); err != nil {
+					return nil, err
+				}
 				// An `extra_hosts` (or `build.extra_hosts`) that was a mapping, that this file writes, and that holds no entry once it is merged
 				// in (its `!reset` took each one out) is refused naming this file (measured, v5.5.1: `must be a mapping`), where the
 				// other mappings that are left empty are read.
@@ -2218,7 +2226,7 @@ func SanitizeName(s string) string {
 // normalizePort maps a bare container-port ports entry ("3000", "3000/udp",
 // "3000-3005") to the host:container form Apple's `container` requires
 // ("3000:3000", …) — it has no random-host-port option, so the host port
-// mirrors the container port. Specs that already name a host port
+// mirrors the container port, as it does for a host port of `0`. Specs that already name a host port
 // ("8080:80", "127.0.0.1:8080:80", "8080:80/udp") pass through unchanged.
 // mirrored is true when opossum supplied the host port itself (the compose file
 // named only a container port), which is what lets `up` move it if the mirrored
@@ -2232,6 +2240,13 @@ func normalizePort(spec string) (norm string, mirrored bool) {
 	if i := strings.LastIndexByte(s, '/'); i >= 0 {
 		proto = s[i:] // keep the "/tcp" or "/udp" suffix
 		s = s[:i]
+	}
+	// A host port of 0 asks the engine for a free port (docker compose reads `0:80` as that: `published: "0"`), which the runtime
+	// refuses (`invalid publish host port range: 0`, container 1.5.0): left to the runtime to choose it is not, so it is
+	// the same as a host port left out — the container port, moved if it is taken.
+	if parts := strings.Split(s, ":"); len(parts) >= 2 && hostPortIsZero(parts[len(parts)-2]) {
+		parts[len(parts)-2] = parts[len(parts)-1]
+		return strings.Join(parts, ":") + proto, true
 	}
 	switch {
 	case !strings.Contains(s, ":"):
@@ -2251,6 +2266,15 @@ func normalizePort(spec string) (norm string, mirrored bool) {
 		}
 	}
 	return s + proto, mirrored
+}
+
+// hostPortIsZero reports whether a host port, as written, is the port 0: `0`, and the spellings docker compose
+// reads as the same number (`00`, `000`, and the range of one `0-0` or `00-00`; measured, v5.5.1: published
+// "0"). A range that goes on past 0 (`0-1`) is not: it is left as written, and the runtime refuses it.
+func hostPortIsZero(host string) bool {
+	lo, hi, isRange := strings.Cut(host, "-")
+	zero := func(n string) bool { return n != "" && strings.Trim(n, "0") == "" }
+	return zero(lo) && (!isRange || zero(hi))
 }
 
 // portKey is how two published-port specs are compared for being the same
@@ -2412,6 +2436,16 @@ func validateOne(path string, one interpolated, earlier map[string]any, values *
 		}
 		doc = &parsed
 	}
+	spreadSequenceMerges(doc)
+	// A file whose block merges itself is refused where a project is read, as docker compose refuses it. A command that takes a project down reads it all the same
+	// with the merge key that brings the block in by itself taken out, and keeps the refusal (#1475), as it does for an alias that holds its own block.
+	if cyc := selfMerging(doc, values != nil); cyc != nil {
+		err := fmt.Errorf("compose file %s: %w", path, errSelfMerging(cyc))
+		if values == nil {
+			return err
+		}
+		*values = append(*values, err)
+	}
 	asRead := doc
 	if err := checkTopLevel(path, documentRoot(doc), earlier, override); err != nil {
 		return err
@@ -2425,6 +2459,7 @@ func validateOne(path string, one interpolated, earlier map[string]any, values *
 		doc = withoutNotGivenInExtending(doc)
 	}
 	doc = withoutUntakenDeploy(doc, only)
+	doc = withoutNullInUntaken(doc, only)
 	doc = withoutNotGivenInTaken(doc, only)
 	doc = withoutDeferredTypes(doc, only)
 	doc = withoutNegativeRetries(doc)
@@ -3244,7 +3279,7 @@ func extendedServiceFromFile(where, name, path, target string, lookup varLookup,
 	}
 	doc, tags, err := takeMergeTags(doc)
 	if err != nil {
-		return nil, false, err
+		return nil, false, fmt.Errorf("compose file %s: %w", path, err)
 	}
 	if err := validateOne(path, doc, nil, values, target); err != nil {
 		return nil, false, err
@@ -3864,7 +3899,7 @@ func loadUnitRaw(path string, raw []byte, projectDir string, scope envScope, ear
 	}
 	one, tags, err := takeMergeTags(one)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, fmt.Errorf("compose file %s: %w", path, err)
 	}
 	var m map[string]any
 	if err := one.intoMarked(&m); err != nil {
@@ -3981,7 +4016,7 @@ func loadUnitRaw(path string, raw []byte, projectDir string, scope envScope, ear
 	if group != nil {
 		// A key this file tagged `!reset` or `!override` leaves the included
 		// files' value out, as it does an earlier -f file's — a field of a service, of a network, a volume,
-		// a config or a secret; not the item itself (a service, or one of those by its name), which docker
+		// a config or a secret; not the item itself (a service, or one of those by its name) nor the whole section (`networks:`, `services:`…), which docker
 		// compose merges with the included one whatever it is tagged with (measured, v5.5.1: `web: !override {…}`,
 		// `web: !reset null`, `n: !reset null`, an alias or a merge key to a tagged mapping).
 		applyMergeTags(group, withoutItemTags(tags), true)
@@ -4039,6 +4074,78 @@ func validateMerged(path string, merged map[string]any, read readAs) error {
 		return decodeErr(path, read, blameService(doc, err))
 	}
 	return nil
+}
+
+// refusedNullInUntaken are the keys docker compose refuses with nothing after them in a service nothing takes, as it does in one taken
+// (measured, v5.5.1: a sweep of every key of the service schema). `extends` is refused there too and is read by opossum as it was (a known
+// difference, left alone), and `pid` is read.
+var refusedNullInUntaken = map[string]bool{"build": true, "depends_on": true, "env_file": true, "gpus": true, "ports": true}
+
+// withoutNullInUntaken copies a file that is only extended from (`only` names the service taken) without the keys that hold nothing
+// in the services docker compose does not take: it reads a key with nothing after it there (`user: ~`, `image:`, `restart: ~`;
+// measured, v5.5.1: all but five keys of a service, for a service nothing takes), where it refuses the same in a service taken.
+// The five it refuses there too stay (refusedNullInUntaken). A file read whole is returned as it is.
+func withoutNullInUntaken(doc *yaml.Node, only string) *yaml.Node {
+	if only == "" {
+		return doc
+	}
+	root := documentRoot(doc)
+	if root == nil || root.Kind != yaml.MappingNode {
+		return doc
+	}
+	var generic struct {
+		Services map[string]any `yaml:"services"`
+	}
+	if err := doc.Decode(&generic); err != nil {
+		return doc
+	}
+	taken := takenServices(generic.Services, only)
+	newRoot := copyMapping(root)
+	changed := false
+	for i := 0; i+1 < len(newRoot.Content); i += 2 {
+		if newRoot.Content[i].Value != "services" || newRoot.Content[i+1].Kind != yaml.MappingNode {
+			continue
+		}
+		services := copyMapping(newRoot.Content[i+1])
+		for j := 0; j+1 < len(services.Content); j += 2 {
+			// The service as it comes to be read: through an alias (`other: *a`) and with its merge keys taken in (`<<: *a`), where a key
+			// that holds nothing may come from.
+			svc := unalias(services.Content[j+1])
+			if taken[services.Content[j].Value] || svc == nil || svc.Kind != yaml.MappingNode {
+				continue
+			}
+			pairs := svc.Content
+			if resolved, err := mergedPairs(svc); err == nil {
+				pairs = resolved
+			}
+			var kept []*yaml.Node
+			dropped := false
+			for k := 0; k+1 < len(pairs); k += 2 {
+				if !refusedNullInUntaken[unalias(pairs[k]).Value] && isNothing(pairs[k+1]) {
+					dropped = true
+					continue
+				}
+				kept = append(kept, pairs[k], pairs[k+1])
+			}
+			if !dropped {
+				continue
+			}
+			svcCopy := copyMapping(svc)
+			svcCopy.Content = kept
+			services.Content[j+1] = svcCopy
+			changed = true
+		}
+		newRoot.Content[i+1] = services
+	}
+	if !changed {
+		return doc
+	}
+	if root == doc {
+		return newRoot
+	}
+	out := *doc
+	out.Content = []*yaml.Node{newRoot}
+	return &out
 }
 
 // withoutNotGivenInTaken is a file that is only extended from (only names the service taken from it) without the keys of that
@@ -4375,18 +4482,29 @@ func withoutUntakenDeploy(doc *yaml.Node, only string) *yaml.Node {
 		}
 		services := copyMapping(newRoot.Content[i+1])
 		for j := 0; j+1 < len(services.Content); j += 2 {
-			svc := services.Content[j+1]
-			if taken[services.Content[j].Value] || svc.Kind != yaml.MappingNode {
+			// The service as it comes to be read: through an alias (`other: *o`) and with its merge keys taken in (`<<: *d`), where a `deploy` may come from.
+			svc := unalias(services.Content[j+1])
+			if taken[services.Content[j].Value] || svc == nil || svc.Kind != yaml.MappingNode {
 				continue
 			}
-			if !hasKey(svc, "deploy") {
+			pairs := svc.Content
+			if resolved, err := mergedPairs(svc); err == nil {
+				pairs = resolved
+			}
+			hasDeploy := false
+			for k := 0; k+1 < len(pairs); k += 2 {
+				if unalias(pairs[k]).Value == "deploy" {
+					hasDeploy = true
+				}
+			}
+			if !hasDeploy {
 				continue
 			}
 			svcCopy := copyMapping(svc)
-			svcCopy.Content = svcCopy.Content[:0]
-			for k := 0; k+1 < len(svc.Content); k += 2 {
-				if svc.Content[k].Value != "deploy" {
-					svcCopy.Content = append(svcCopy.Content, svc.Content[k], svc.Content[k+1])
+			svcCopy.Content = nil
+			for k := 0; k+1 < len(pairs); k += 2 {
+				if unalias(pairs[k]).Value != "deploy" {
+					svcCopy.Content = append(svcCopy.Content, pairs[k], pairs[k+1])
 					continue
 				}
 				// The number of replicas, and the few counts and labels that docker compose reads into its model
@@ -4407,7 +4525,7 @@ func withoutUntakenDeploy(doc *yaml.Node, only string) *yaml.Node {
 				if err := kept.Encode(keptDeploy); err != nil {
 					continue
 				}
-				svcCopy.Content = append(svcCopy.Content, svc.Content[k], &kept)
+				svcCopy.Content = append(svcCopy.Content, pairs[k], &kept)
 			}
 			services.Content[j+1] = svcCopy
 			changed = true
@@ -4675,6 +4793,10 @@ func withoutDeferredTypes(doc *yaml.Node, only string) *yaml.Node {
 					// (measured, v5.5.1), where the mapping form and a scalar are asked of the service that results.
 					svcCopy.Content = append(svcCopy.Content, key, val)
 				case deferredTypedKeys[key.Value], !isTaken && readAsItIsWhereNotTaken[key.Value]:
+					continue
+				case !isTaken && key.Value == "cpus" && (unalias(val).Kind == yaml.SequenceNode || unalias(val).Kind == yaml.MappingNode):
+					// docker compose casts a number or a word of `cpus` before it knows the service is not taken (`abc` is refused there, #1574),
+					// and reads a list or a mapping as it is (measured, v5.5.1: `[1]`, `[]` and `{a: 1}`, in a service nothing takes).
 					continue
 				case (key.Value == "stop_grace_period" || key.Value == "shm_size") && val.Kind == yaml.ScalarNode:
 					// A number or a word (`5`, `abc`) is read by docker compose in the service the extends results in; a list is
