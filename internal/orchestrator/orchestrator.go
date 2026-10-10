@@ -428,6 +428,9 @@ func (o *Orchestrator) validateProfileDeps(names []string, named map[string]bool
 				return gatedDependencyRefusal(name, dep.Name, named != nil)
 			}
 		}
+		if err := o.Project.HealthcheckFault(name); err != nil {
+			return err
+		}
 		if err := checkVolumesFromRefs(o.Project, name); err != nil {
 			return err
 		}
@@ -1668,13 +1671,26 @@ func (o *Orchestrator) checkProjectLoads(named map[string]bool, canName bool) er
 		active = append(active, name)
 	}
 	sort.Strings(active)
+	// A service the run reads without a name (no `profiles:`, or a profile turned on) is held to the services it reads without a name: naming the gated service it depends on
+	// is no way out (docker compose v5.5.1, measured, #1973: `up other db` on `other` -> `db`[g] refuses as `up other` does, and so does `--profile a up db web` on `web`[a] -> `db`[b]).
+	unnamed := o.activeServices(nil)
 	for _, name := range active {
 		for _, dep := range o.Project.Services[name].DependsOn.Names() {
 			if _, ok := o.Project.Services[dep]; !ok {
 				return fmt.Errorf("service %q depends on unknown service %q — define %q under services: or remove it from depends_on", name, dep, dep)
 			}
 			if !set[dep] {
-				return gatedDependencyRefusal(name, dep, canName)
+				// Naming the dependency helps a service that only a name enables, and none the run reads without one.
+				return gatedDependencyRefusal(name, dep, canName && !o.enabled(name, nil))
+			}
+		}
+		// A dependency written `required: false` is not a fault whatever it points at, and naming it is fine (docker compose v5.5.1, measured: `up db`, `up other db`, `build db`,
+		// `pull db` and `run db` on `other` -> `db`[g] with `required: false` all go on).
+		if o.enabled(name, nil) {
+			for _, dep := range o.Project.Services[name].DependsOn {
+				if _, ok := o.Project.Services[dep.Name]; ok && !dep.Optional && !unnamed[dep.Name] {
+					return gatedDependencyRefusal(name, dep.Name, false)
+				}
 			}
 		}
 		if err := checkVolumesFromRefs(o.Project, name); err != nil {
@@ -1785,15 +1801,25 @@ func (o *Orchestrator) checkNamedDeps(services []string) error {
 				continue
 			}
 			if !active[dep.Name] {
-				// Naming the dependency does not help a service the run reads without a name (it is judged by what the run reads without one).
-				return gatedDependencyRefusal(name, dep.Name, !cur.narrow)
+				// Naming the dependency does not help a service the run reads without a name, which is what the narrow steps are (it is judged by what the run reads
+				// without one), and not one that is named and is such a service either: it is read without the name as well (docker compose v5.5.1, measured: `stop other db`
+				// refuses for `other` as `stop other` does, #1870).
+				return gatedDependencyRefusal(name, dep.Name, !o.enabled(name, nil))
 			}
 			if !cur.narrow {
 				queue = append(queue, step{name: dep.Name})
 			}
 		}
 	}
-	return nil
+	// A dependency cycle among the services the run reads without a name is refused, whichever service is named, even one the cycle does not touch (docker compose v5.5.1,
+	// measured, #1871: `stop free` on a cycle of `c1` and `c2` refuses, with a profile turned on for a cycle behind it too). One behind a profile that is not on is not read, until
+	// the name of a service that carries it turns it on, where `stop` refuses and `kill` and `logs` go on; that is not asked here.
+	read := make([]string, 0, len(unnamedActive))
+	for name := range unnamedActive {
+		read = append(read, name)
+	}
+	sort.Strings(read)
+	return o.cycleAmong(read)
 }
 
 // checkVolumesFromRefs refuses, for one active service, a `volumes_from`
@@ -5162,6 +5188,12 @@ func (o *Orchestrator) removeImages(order []string, all bool) {
 			// with no build at all is included too (unchanged from before this
 			// switch existed: the prior `if all || (built && ...)` removed on
 			// `all` alone, regardless of `built`).
+			if ref == "" {
+				// A service the compose files as merged give neither an image nor a build: take-down reads such files (an earlier opossum, which did not read a later file's
+				// `!override` or `!reset`, started the service from the image an earlier file named), and there is no name to remove for it. Saying so is better than leaving the
+				// image it was started from without a word (#1953).
+				o.logf("Service %s names no image and no build in the compose files as merged, so --rmi all has no image to remove for it\n", name)
+			}
 			remove(ref)
 		case !built:
 			// nothing built under this name to remove

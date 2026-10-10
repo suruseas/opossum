@@ -527,13 +527,13 @@ func checkServiceShapes(path string, services map[string]any, values *[]error, o
 			// docker compose refuses are read as far as they go, on purpose (see buildWithoutContexts).
 			if k == "build" {
 				if bnode := spec.Properties[k]; bnode != nil {
-					if msg := bnode.mismatch(buildWithoutContexts(svc[k]), "services."+name+".build"); msg != "" {
+					if msg := bnode.mismatch(buildForSchema(svc[k], notTaken), "services."+name+".build"); msg != "" {
 						if err := fault(fmt.Errorf("compose file %s: %s", path, msg)); err != nil {
 							return err
 						}
 					}
 				}
-				if err := buildFormRules(path, "services."+name+".build", svc[k], fault); err != nil {
+				if err := buildFormRules(path, "services."+name+".build", svc[k], notTaken, only != "", fault); err != nil {
 					return err
 				}
 			}
@@ -611,6 +611,14 @@ func checkServiceShapes(path string, services map[string]any, values *[]error, o
 							return err
 						}
 					}
+				}
+			}
+			// `pull_policy` is an enum, which docker compose asks of each file it reads and not of the merged project: a date in a file it reads on its own is refused whatever a
+			// later file writes over it or takes it out for (measured, v5.5.1, #1982). The file an extends takes the service from is read by the extender's merge first, and
+			// is not asked (checkDatesRefused asks what is left).
+			if _, isDate := svc[k].(time.Time); isDate && k == "pull_policy" && only == "" {
+				if err := fault(fmt.Errorf("compose file %s: services.%s.pull_policy is a date, which is no pull policy — write one, such as always, never or missing", path, name)); err != nil {
+					return err
 				}
 			}
 			// A key of these blocks written with nothing after it, where the schema gives it no null
@@ -706,6 +714,94 @@ func checkServiceShapes(path string, services map[string]any, values *[]error, o
 	return nil
 }
 
+// checkGpusEntries refuses an entry of `gpus` docker compose refuses (measured, v5.5.1, #1975) in a service of the project the files make: a `count` that is a string but
+// not `all` (any case) or a whole number (`abc`, `"all "`, `"1e2"`, `"0x1"`), and a `count` beside `device_ids`. The files put their lists of `gpus` together and docker compose asks the
+// result, so an entry that a later file leaves in place is refused, and one that it resets or overrides is not.
+func checkGpusEntries(name string, services map[string]any) error {
+	names := make([]string, 0, len(services))
+	for n := range services {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		svc, ok := services[n].(map[string]any)
+		if !ok {
+			continue
+		}
+		list, _ := svc["gpus"].([]any)
+		for i, e := range list {
+			if msg := gpusEntryFault(e); msg != "" {
+				return fmt.Errorf("%s: services.%s.gpus[%d] %s", name, n, i, msg)
+			}
+		}
+	}
+	return nil
+}
+
+// gpusEntryFault says what is wrong with an entry of `gpus` that docker compose refuses (the other shapes are asked by the schema), or "".
+func gpusEntryFault(e any) string {
+	m, ok := e.(map[string]any)
+	if !ok {
+		return ""
+	}
+	count, hasCount := m["count"]
+	if str, isString := count.(string); isString && !strings.EqualFold(str, "all") {
+		if _, err := strconv.Atoi(str); err != nil {
+			return fmt.Sprintf("has a count of %q — write `all` or a whole number", str)
+		}
+	}
+	if _, hasIDs := m["device_ids"]; hasIDs && hasCount && count != nil {
+		return "has both a `count` and `device_ids` — write one of them"
+	}
+	return ""
+}
+
+// checkDatesRefused refuses a date written without quotes (`2024-01-01`, `2024-01-01T10:00:00Z`) that is the value of one of datesRefused in a service of the project the files
+// make: docker compose asks it of the merged project, so a date that a later file or the extender writes over, or takes out, is read, and one that a service an extends takes
+// from another file brings is refused (measured, v5.5.1, #1963). A list holds it where the files merge `dns`, `dns_search` and `label_file`, and is not asked.
+func checkDatesRefused(name string, services map[string]any) error {
+	names := make([]string, 0, len(services))
+	for n := range services {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		svc, ok := services[n].(map[string]any)
+		if !ok {
+			continue
+		}
+		keys := make([]string, 0, len(svc))
+		for k := range svc {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		if build, ok := svc["build"].(map[string]any); ok {
+			for _, key := range []string{"network", "pull", "no_cache", "isolation", "privileged"} {
+				if _, isDate := build[key].(time.Time); isDate {
+					return fmt.Errorf("%s: services.%s.build.%s is a date, which docker compose refuses here — write it in quotes to have it as text", name, n, key)
+				}
+			}
+		}
+		for _, k := range keys {
+			if _, isDate := svc[k].(time.Time); isDate && datesRefused[k] {
+				if k == "pull_policy" {
+					return fmt.Errorf("%s: services.%s.pull_policy is a date, which is no pull policy — write one, such as always, never or missing", name, n)
+				}
+				return fmt.Errorf("%s: services.%s.%s is a date, which docker compose refuses here — write it in quotes to have it as text", name, n, k)
+			}
+		}
+	}
+	return nil
+}
+
+// datesRefused are the keys of a service docker compose takes that refuse a date (a timestamp) written without quotes (measured, v5.5.1, `config -q`, every key of the
+// service schema with `2024-01-01` in a service taken directly, by a second file and by an extends; #1963). `dns`, `dns_search` and `label_file` are refused for it too
+// where nothing else gives them a value, but docker compose puts the values of the files together in a list and reads the date then, which the merge of the files here does not
+// (it writes one over the other), so they are left out: a date for them is read, as it was.
+var datesRefused = map[string]bool{
+	"attach": true, "cgroup_parent": true, "container_name": true, "cpu_count": true, "cpu_percent": true, "cpu_period": true, "cpu_quota": true, "cpu_rt_period": true, "cpu_rt_runtime": true, "cpu_shares": true, "cpuset": true, "domainname": true, "hostname": true, "ipc": true, "isolation": true, "oom_kill_disable": true, "oom_score_adj": true, "pid": true, "pids_limit": true, "privileged": true, "pull_policy": true, "runtime": true, "scale": true, "stdin_open": true, "stop_grace_period": true, "stop_signal": true, "userns_mode": true, "uts": true,
+}
+
 // readAsItIsWhereNotTaken are the service keys docker compose asks nothing of in a service it does
 // not take (a service of a file that is only extended from, which the extending service does not
 // name): measured, v5.5.1, `config -q`, for each of the keys below at every place the schema gives it,
@@ -738,12 +834,30 @@ var nullChecked = map[string]bool{"deploy": true, "build": true, "healthcheck": 
 // (see TestAdditionalContextsAreReadForTheirNames) since the key is not acted on; and without the keys of a mapping that hold
 // nothing, which nullChecked asks (refused in a file, read where the extender writes over them). A copy.
 func buildWithoutContexts(v any) any {
+	return buildForSchema(v, false)
+}
+
+// buildForSchema is buildWithoutContexts, and for a service an extends does not take also without what its `build.secrets` entries hold: docker compose reads no key of an entry there (a
+// boolean, a list, a mapping or nothing as the `mode` or the `target` is rc 0 in a service that is not taken, and rc 1 in one that is taken), while an item that is no mapping and no string is
+// refused in both (measured, v5.5.1, #2000).
+func buildForSchema(v any, notTaken bool) any {
 	m, ok := v.(map[string]any)
 	if !ok {
 		return v
 	}
 	out := withoutNullValues(m)
 	delete(out, "additional_contexts")
+	if items, isList := out["secrets"].([]any); notTaken && isList {
+		// The items that are mappings are not read (their keys may be anything); an item of another kind is still refused.
+		kept := make([]any, len(items))
+		for i, item := range items {
+			if _, isMap := item.(map[string]any); isMap {
+				item = map[string]any{"source": "s"}
+			}
+			kept[i] = item
+		}
+		out["secrets"] = kept
+	}
 	return out
 }
 
@@ -1335,8 +1449,10 @@ func checkSecretModes(name string, services map[string]any) error {
 				}
 				if bad {
 					shown := describeYAMLValue(m["mode"])
-					if m["mode"] == negZeroMode {
+					if text, _ := m["mode"].(string); text == negZeroMode {
 						shown = "-0 (which docker compose reads as a float)"
+					} else if strings.HasPrefix(text, notAModeMark) {
+						shown = strings.TrimPrefix(text, notAModeMark) + " (which docker compose does not read as a whole number)"
 					}
 					return fmt.Errorf("%s: services.%s.%s[%d].mode %s is not a mode docker compose can read — write a whole number, or an octal string such as \"0440\"", name, n, kind, i, shown)
 				}
@@ -1815,6 +1931,17 @@ func isBoundFault(err error) bool {
 func typesThatStay(where, name string, svc map[string]any) error {
 	// A key with nothing after it is nullsThatStay's to say, in its own words.
 	svc = withoutNullValues(svc)
+	// A string for `gpus` that stays is not refused here: docker compose reads it in the service an extends results in (measured, v5.5.1, #1959), where it refuses
+	// it in a file read on its own (which the extender's own file is asked as, and the extended file by withoutDeferredTypes).
+	if _, ok := svc["gpus"].(string); ok {
+		kept := make(map[string]any, len(svc))
+		for k, v := range svc {
+			if k != "gpus" {
+				kept[k] = v
+			}
+		}
+		svc = kept
+	}
 	var faults []error
 	if err := checkServiceShapes(where, map[string]any{name: svc}, &faults, ""); err != nil {
 		return err
@@ -1934,6 +2061,11 @@ func overriddenAbove(tags []mergeTag, path []string) bool {
 // character, so not an octal number and not a word a file is likely to hold, and checkSecretModes refuses it where it stays.
 const negZeroMode = "\ue002-0"
 
+// notAModeMark is the private-use character in front of the text of a `mode` that docker compose reads as something a mode cannot be, which the merged tree would otherwise read as a
+// whole number or lose the way it was written: a float (`0.0`, `1.0`, `!!float -0`: a file read on its own refuses it, and the files merged are written out again as the integer),
+// `-0` (a float to it), and a sign after the prefix of an octal or binary number (`0o-0`, `0o+1`, `0b-1`: its parser takes the sign before the prefix only).
+const notAModeMark = "\ue002"
+
 // markNegativeZeroModes rewrites, in a document, the `mode` of a `secrets` or `configs` entry of a service that is the bare integer `-0` to the word
 // negZeroMode.
 func markNegativeZeroModes(doc *yaml.Node) {
@@ -1959,23 +2091,50 @@ func markNegativeZeroModes(doc *yaml.Node) {
 				}
 				for _, one := range mergedMappings(svc, map[*yaml.Node]bool{}) {
 					for k := 0; k+1 < len(one.Content); k += 2 {
-						if key := one.Content[k].Value; key != "secrets" && key != "configs" {
-							continue
-						}
-						list := unalias(one.Content[k+1])
-						if list.Kind != yaml.SequenceNode {
-							continue
-						}
-						for _, item := range list.Content {
-							entry := unalias(item)
-							if entry.Kind != yaml.MappingNode {
-								continue
+						key := one.Content[k].Value
+						// The `secrets` of a `build` take a `mode` the same way (measured, v5.5.1, #1865), in the `build` and in the mappings its merge keys bring.
+						if key == "build" {
+							if built := unalias(one.Content[k+1]); built.Kind == yaml.MappingNode {
+								for _, b := range mergedMappings(built, map[*yaml.Node]bool{}) {
+									for m := 0; m+1 < len(b.Content); m += 2 {
+										if b.Content[m].Value == "secrets" {
+											markNegativeZeroModesOfList(unalias(b.Content[m+1]))
+										}
+									}
+								}
 							}
-							markNegativeZeroModeIn(entry, map[*yaml.Node]bool{})
+							continue
 						}
+						if key != "secrets" && key != "configs" {
+							continue
+						}
+						markNegativeZeroModesOfList(unalias(one.Content[k+1]))
 					}
 				}
 			}
+		}
+	}
+}
+
+// signAfterPrefix says that an integer is written with a sign after its `0o` or `0b` prefix (`0o-0`, `0o+1`, `0b-1`), which docker compose's number parser refuses. A sign in front of
+// the prefix (`-0o1`) is read, and one on both sides is no integer to the YAML reader.
+func signAfterPrefix(t string) bool {
+	return len(t) > 2 && t[0] == '0' && (t[1] == 'o' || t[1] == 'O' || t[1] == 'b' || t[1] == 'B') && (t[2] == '-' || t[2] == '+')
+}
+
+// markNegativeZeroModesOfList marks the `mode` of each mapping entry of a list. An entry that needs a mark is replaced by a copy that carries it: the node may be an anchor that
+// something else reads (`x-m: &m {mode: 1.0}` also used as `environment: *m`), which must go on reading what was written.
+func markNegativeZeroModesOfList(list *yaml.Node) {
+	if list.Kind != yaml.SequenceNode {
+		return
+	}
+	for i, item := range list.Content {
+		entry := unalias(item)
+		if entry.Kind != yaml.MappingNode {
+			continue
+		}
+		if marked, changed := markedModes(entry, map[*yaml.Node]bool{}); changed {
+			list.Content[i] = marked
 		}
 	}
 }
@@ -2005,34 +2164,63 @@ func mergedMappings(n *yaml.Node, seen map[*yaml.Node]bool) []*yaml.Node {
 	return out
 }
 
-// markNegativeZeroModeIn marks the `mode` of one mapping, and of the mappings a merge key of it holds (`<<: {mode: -0}`, `<<: [{…}, {mode: -0}]`, `<<: *m`,
-// `<<: [*m]`), which docker compose refuses as it does a `mode` written there (measured, v5.5.1). A mapping met twice is marked once: a guard against a
-// merge that holds itself, which the decode refuses before this is reached (`anchor 'a' value contains itself`, `excessive aliasing`), so no file reaches it.
-func markNegativeZeroModeIn(entry *yaml.Node, seen map[*yaml.Node]bool) {
+// markedModes is the mapping with the `mode` of it, and of the mappings a merge key of it holds (`<<: {mode: -0}`, `<<: [{…}, {mode: -0}]`, `<<: *m`, `<<: [*m]`), marked, which docker
+// compose refuses as it does a `mode` written there (measured, v5.5.1); changed says whether any was. What is marked is a copy, and a mapping nothing was marked in is the one given: the nodes
+// of the tree are shared by the aliases that point at them. A mapping met twice is looked at once: a guard against a merge that holds itself, which the decode refuses before this is
+// reached (`anchor 'a' value contains itself`, `excessive aliasing`), so no file reaches it.
+func markedModes(entry *yaml.Node, seen map[*yaml.Node]bool) (*yaml.Node, bool) {
 	if seen[entry] {
-		return
+		return entry, false
 	}
 	seen[entry] = true
-	for m := 0; m+1 < len(entry.Content); m += 2 {
+	out := *entry
+	out.Anchor = ""
+	out.Content = append([]*yaml.Node(nil), entry.Content...)
+	changed := false
+	for m := 0; m+1 < len(out.Content); m += 2 {
 		switch {
-		case entry.Content[m].Value == "mode":
-			if v := unalias(entry.Content[m+1]); v.Kind == yaml.ScalarNode && v.Tag == "!!int" && v.Value == "-0" {
-				entry.Content[m+1] = &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: negZeroMode, Line: v.Line, Column: v.Column}
+		case out.Content[m].Value == "mode":
+			if v := unalias(out.Content[m+1]); v.Kind == yaml.ScalarNode && (v.Tag == "!!int" && (v.Value == "-0" || signAfterPrefix(v.Value)) || v.Tag == "!!float") {
+				value := notAModeMark + v.Value
+				if v.Value == "-0" {
+					value = negZeroMode
+				}
+				out.Content[m+1] = &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value, Line: v.Line, Column: v.Column}
+				changed = true
 			}
-		case entry.Content[m].ShortTag() == "!!merge":
-			held := unalias(entry.Content[m+1])
+		case out.Content[m].ShortTag() == "!!merge":
+			held := unalias(out.Content[m+1])
 			switch held.Kind {
 			case yaml.MappingNode:
-				markNegativeZeroModeIn(held, seen)
+				if marked, ok := markedModes(held, seen); ok {
+					out.Content[m+1] = marked
+					changed = true
+				}
 			case yaml.SequenceNode:
-				for _, item := range held.Content {
+				items := append([]*yaml.Node(nil), held.Content...)
+				touched := false
+				for k, item := range items {
 					if one := unalias(item); one.Kind == yaml.MappingNode {
-						markNegativeZeroModeIn(one, seen)
+						if marked, ok := markedModes(one, seen); ok {
+							items[k] = marked
+							touched = true
+						}
 					}
+				}
+				if touched {
+					seq := *held
+					seq.Anchor = ""
+					seq.Content = items
+					out.Content[m+1] = &seq
+					changed = true
 				}
 			}
 		}
 	}
+	if !changed {
+		return entry, false
+	}
+	return &out, true
 }
 
 // checkSecretTarget says why a secret's target is no file's path, nil when it is one: a name, a path of names under /run/secrets, or an
@@ -2068,13 +2256,47 @@ func SecretPath(target string) string {
 // included (measured, v5.5.1: `config -q`; a later file or an extending service that writes the value over does not take the refusal away): an `ssh` list
 // entry is `default` or has an `=`, and none is written twice, and a `ulimits` limit is not a word, a fraction or a boolean (#1783). The rest is asked of the
 // merged project (checkBuildModel).
-func buildFormRules(path, where string, v any, fault func(error) error) error {
+func buildFormRules(path, where string, v any, notTaken, extendedFrom bool, fault func(error) error) error {
 	b, ok := v.(map[string]any)
 	if !ok {
 		return nil
 	}
 	say := func(at, msg string) error {
 		return fault(fmt.Errorf("compose file %s: %s.%s %s", path, where, at, msg))
+	}
+	// A key docker compose does not take in a long-form entry of `build.secrets` (`additional properties 'bogus' not allowed`; measured, v5.5.1, #2037), in a service that is taken: a
+	// service nothing takes has its entries left unread (#2000). In a file that is only extended from it is asked of the service the extends results in (buildSecretKeyFault, typesThatStay),
+	// where the extender may write the list over.
+	if !notTaken && !extendedFrom {
+		if at, msg := buildSecretKeyFault(v); at != "" {
+			if err := say(at, msg); err != nil {
+				return err
+			}
+		}
+	}
+	// Nothing after `ssh`, or after a limit of `ulimits`, in a service nothing takes: docker compose refuses it there (measured, v5.5.1, #1977), where the other keys of a
+	// `build` with nothing after them are read. In a service that is taken it is asked by the rules of a key with nothing after it, which an extender that writes the key
+	// over is not asked (docker compose refuses it then too: a difference left).
+	if notTaken {
+		if _, has := b["ssh"]; has && b["ssh"] == nil {
+			if err := say("ssh", "has nothing after it — write the value, or remove the key"); err != nil {
+				return err
+			}
+		}
+		if limits, ok := b["ulimits"].(map[string]any); ok {
+			names := make([]string, 0, len(limits))
+			for ln := range limits {
+				names = append(names, ln)
+			}
+			sort.Strings(names)
+			for _, ln := range names {
+				if limits[ln] == nil {
+					if err := say("ulimits."+ln, "has nothing after it — write a whole number, or a mapping of a whole `soft` and a whole `hard`"); err != nil {
+						return err
+					}
+				}
+			}
+		}
 	}
 	if limits, ok := b["ulimits"].(map[string]any); ok {
 		limitNames := make([]string, 0, len(limits))
@@ -2084,10 +2306,39 @@ func buildFormRules(path, where string, v any, fault func(error) error) error {
 		sort.Strings(limitNames)
 		for _, ln := range limitNames {
 			switch x := limits[ln].(type) {
-			case string, float64, bool:
-				// A limit that is a word, a fraction or a boolean is refused wherever it is written (a sibling an extends does not take too).
+			case string, float64, bool, time.Time:
+				// A limit that is a word, a fraction, a boolean or a date is refused wherever it is written (a sibling an extends does not take too).
 				if err := say("ulimits."+ln, fmt.Sprintf("is %s — write a whole number, or a mapping of a whole `soft` and a whole `hard`", describeYAMLValue(x))); err != nil {
 					return err
+				}
+			}
+		}
+	}
+	// An item of these lists that is a date written without quotes is refused wherever it is written, a service nothing takes included (measured, v5.5.1, #1977):
+	// the others are read, a word or a number of them.
+	// In a service that is taken, a date as an item of `cache_from`, `cache_to`, `platforms` and `entitlements` is refused too, in each file (a service nothing takes reads
+	// them; measured, v5.5.1, #1989). A date for `network`, `pull`, `no_cache`, `isolation` or `privileged` is asked of the project the files make (checkDatesRefused); `extra_hosts` is not (docker compose turns the mappings of several files into a list and reads a date then).
+	if !notTaken {
+		for _, key := range []string{"cache_from", "cache_to", "platforms", "entitlements"} {
+			if list, ok := b[key].([]any); ok {
+				for i, e := range list {
+					if _, isDate := e.(time.Time); isDate {
+						if err := say(fmt.Sprintf("%s[%d]", key, i), "is a date, which docker compose does not read there — write it in quotes"); err != nil {
+							return err
+						}
+					}
+				}
+			}
+		}
+
+	}
+	for _, key := range []string{"labels", "secrets", "ssh", "tags"} {
+		if list, ok := b[key].([]any); ok {
+			for i, e := range list {
+				if _, isDate := e.(time.Time); isDate {
+					if err := say(fmt.Sprintf("%s[%d]", key, i), "is a date, which docker compose does not read there — write it in quotes"); err != nil {
+						return err
+					}
 				}
 			}
 		}
@@ -2216,7 +2467,8 @@ func checkBuildModel(name string, services map[string]any, declared map[string]a
 					}
 					return fmt.Errorf("%s: services.%s.%s %q does not read as %s", name, n, strings.Join(c.path, "."), x, castKindNames[c.kind])
 				}
-			case int, int64, uint64, float64, bool:
+			case int, int64, uint64, float64, bool, time.Time, []any, map[string]any:
+				// A duration is text: a number, a boolean, a date, a list and a mapping are refused alike (docker compose, measured, v5.5.1, #1991).
 				if c.kind == "duration" {
 					return fmt.Errorf("%s: services.%s.%s must be a string, as in `10s`", name, n, strings.Join(c.path, "."))
 				}
@@ -2226,6 +2478,18 @@ func checkBuildModel(name string, services map[string]any, declared map[string]a
 		// (#1497; measured, v5.5.1), asked of the merged service: the entries of a list are put together by the files, so a bad one stays whatever a later file
 		// writes beside it, and goes with a `!reset` or an `!override` of the block or the list.
 		if blk, ok := svc["blkio_config"].(map[string]any); ok {
+			// A weight is a number: docker compose refuses a string for it (`"10"` too, as a word, a date or `""`) and a negative one, asked of the merged service like the rates,
+			// so a later file or an extender that writes a number over a string reads, and a string in a list entry stays whatever is written beside it (measured, v5.5.1; #1862).
+			if reason := blkioWeightFault(blk["weight"]); reason != "" {
+				return fmt.Errorf("%s: services.%s.blkio_config.weight %s", name, n, reason)
+			}
+			devices, _ := blk["weight_device"].([]any)
+			for i, e := range devices {
+				entry, _ := e.(map[string]any)
+				if reason := blkioWeightFault(entry["weight"]); reason != "" {
+					return fmt.Errorf("%s: services.%s.blkio_config.weight_device[%d].weight %s", name, n, i, reason)
+				}
+			}
 			for _, list := range []string{"device_read_bps", "device_write_bps", "device_read_iops", "device_write_iops"} {
 				entries, _ := blk[list].([]any)
 				for i, e := range entries {
@@ -2307,8 +2571,10 @@ func checkBuildModel(name string, services map[string]any, declared map[string]a
 				}
 				if bad {
 					shown := describeYAMLValue(mode)
-					if mode == negZeroMode { // an anchor shared with a `secrets` or `configs` entry, whose `-0` was marked there
+					if text, _ := mode.(string); text == negZeroMode { // an anchor shared with a `secrets` or `configs` entry, whose `-0` was marked there
 						shown = "-0 (which docker compose reads as a float)"
+					} else if strings.HasPrefix(text, notAModeMark) {
+						shown = strings.TrimPrefix(text, notAModeMark) + " (which docker compose does not read as a whole number)"
 					}
 					return fmt.Errorf("%s: services.%s.build.secrets[%d].mode %s is not a mode docker compose can read — write a whole number, or an octal string such as \"0440\"", name, n, i, shown)
 				}
@@ -2359,4 +2625,262 @@ func checkStrictShapesStep(path string, merged map[string]any, values *[]error) 
 		}
 	}
 	return nil
+}
+
+// blkioWeightFault says what is wrong with the value of a blkio weight, "" when docker compose reads it: a string of any kind is not a number to it, and a negative number is
+// not a weight.
+func blkioWeightFault(v any) string {
+	switch x := v.(type) {
+	case string:
+		return fmt.Sprintf("is %q, which is text — the weight must be a number", x)
+	case time.Time:
+		return "is a date — write the weight as a number"
+	case int:
+		if x < 0 {
+			return "must not be negative"
+		}
+	case float64:
+		if x < 0 {
+			return "must not be negative"
+		}
+	}
+	return ""
+}
+
+// checkDependencyConditions refuses, in the services of one file, a dependency whose `condition` is not one of the three words docker compose takes (a word of another spelling,
+// an empty string, a number, a boolean). A condition with nothing after it is left to the checks of bare keys.
+func checkDependencyConditions(path string, services map[string]any) error {
+	names := make([]string, 0, len(services))
+	for name := range services {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		svc, _ := services[name].(map[string]any)
+		deps, _ := svc["depends_on"].(map[string]any)
+		depNames := make([]string, 0, len(deps))
+		for dep := range deps {
+			depNames = append(depNames, dep)
+		}
+		sort.Strings(depNames)
+		for _, dep := range depNames {
+			entry, _ := deps[dep].(map[string]any)
+			cond, has := entry["condition"]
+			if !has || cond == nil {
+				continue
+			}
+			if c, isString := cond.(string); isString && (c == ConditionStarted || c == ConditionHealthy || c == ConditionCompleted) {
+				continue
+			}
+			// The dependency, not the value it was given: it can have come from a `${...}` reference.
+			return fmt.Errorf("compose file %s: service %q: unsupported depends_on condition for %q — use service_started, service_healthy, or service_completed_successfully", path, name, dep)
+		}
+	}
+	return nil
+}
+
+// checkModelRefs refuses a service whose `models` names a model the project does not declare under the top-level `models`, as docker compose does (`service "web" refers to undefined
+// model m`; measured, v5.5.1): the names are the items of a list or the keys of a mapping, the model of the project the files make (the top-level `models` of a file an `extends` takes
+// a service from does not come with it, and those of an included file do), and a service that has `profiles:` is asked when its profile is on, which is not known here. The key is not
+// acted on, so only its names are read.
+func checkModelRefs(name string, services, models map[string]any) error {
+	names := make([]string, 0, len(services))
+	for n := range services {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		svc, _ := services[n].(map[string]any)
+		var refs []string
+		switch v := svc["models"].(type) {
+		case []any:
+			for _, item := range v {
+				ref, isString := item.(string)
+				if !isString {
+					refs = nil
+					break
+				}
+				refs = append(refs, ref)
+			}
+		case map[string]any:
+			for ref := range v {
+				refs = append(refs, ref)
+			}
+			sort.Strings(refs)
+		}
+		if profiles, _ := svc["profiles"].([]any); len(profiles) > 0 {
+			continue
+		}
+		for _, ref := range refs {
+			if _, declared := models[ref]; !declared {
+				return fmt.Errorf("%s: service %q refers to undefined model %q — declare it under top-level models:, or remove the reference", name, n, ref)
+			}
+		}
+	}
+	return nil
+}
+
+// checkModelDuplicates refuses, in the services of one file, a `models` list that names a model twice, where no earlier file (or file it includes) gave the service a `models`: docker compose
+// puts the lists of the files together without repeats, so the same name written again over one that is there is read (measured, v5.5.1).
+func checkModelDuplicates(path string, services, earlier map[string]any) error {
+	earlierServices, _ := earlier["services"].(map[string]any)
+	names := make([]string, 0, len(services))
+	for n := range services {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		svc, _ := services[n].(map[string]any)
+		list, _ := svc["models"].([]any)
+		if before, _ := earlierServices[n].(map[string]any); before != nil {
+			if _, given := before["models"]; given {
+				continue
+			}
+		}
+		seen := map[string]bool{}
+		for _, item := range list {
+			ref, isString := item.(string)
+			if !isString {
+				continue
+			}
+			if seen[ref] {
+				return fmt.Errorf("compose file %s: services.%s.models names %q twice — list each model once", path, n, ref)
+			}
+			seen[ref] = true
+		}
+	}
+	return nil
+}
+
+// checkHealthcheckTests refuses a `healthcheck.test` that is a list whose first item is not `NONE`, `CMD` or `CMD-SHELL` (in capitals), as docker compose refuses it of the service the files
+// make (measured, v5.5.1: `[a]`, `[cmd, x]`, `[a, b]`; a string, an empty list and the three words are read), so an extending service or a later file that writes a good test over a bad one makes the files fine.
+func checkHealthcheckTests(name string, services map[string]any) (error, map[string]error) {
+	var gated map[string]error
+	names := make([]string, 0, len(services))
+	for n := range services {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		svc, _ := services[n].(map[string]any)
+		hc, _ := svc["healthcheck"].(map[string]any)
+		test, _ := hc["test"].([]any)
+		if len(test) == 0 {
+			continue
+		}
+		first, isString := test[0].(string)
+		if isString && (first == "NONE" || first == "CMD" || first == "CMD-SHELL") {
+			continue
+		}
+		if !isString {
+			continue // a first item that is not text is refused as the list of strings it must be
+		}
+		fault := fmt.Errorf("%s: services.%s.healthcheck.test starts with %q — a list starts with NONE, CMD or CMD-SHELL; write the command as a string to run it through the shell", name, n, first)
+		if profiles, _ := svc["profiles"].([]any); len(profiles) > 0 {
+			// docker compose asks it of the service the profiles turn on (measured, v5.5.1), so a gated one is kept for HealthcheckFault.
+			if gated == nil {
+				gated = map[string]error{}
+			}
+			gated[n] = fault
+			continue
+		}
+		return fault, gated
+	}
+	return nil, gated
+}
+
+// gpusStringClash reports whether a service's `gpus` is a string (`all`, or any word) over a `gpus` the service already holds: docker compose reads the string as a count of every device and cannot
+// put it over a list or another string (`cannot override services.x.gpus`; measured, v5.5.1, #2036), where a list written over either merges. A `!override` or `!reset` takes the earlier value
+// out before this is asked.
+func gpusStringClash(before, own map[string]any) (string, bool) {
+	text, isString := own["gpus"].(string)
+	if !isString || before["gpus"] == nil {
+		return "", false
+	}
+	return text, true
+}
+
+// gpusStringOverAValue asks gpusStringClash of each service a file adds to the files merged so far and writes a string `gpus` itself (own).
+func gpusStringOverAValue(path string, merged, added map[string]any, own map[string]bool) error {
+	mergedServices, _ := merged["services"].(map[string]any)
+	addedServices, _ := added["services"].(map[string]any)
+	names := make([]string, 0, len(addedServices))
+	for n := range addedServices {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		if !own[n] {
+			continue // the string, if any, came in through an extends
+		}
+		before, _ := mergedServices[n].(map[string]any)
+		after, _ := addedServices[n].(map[string]any)
+		if _, clash := gpusStringClash(before, after); clash {
+			return fmt.Errorf("compose file %s: services.%s.gpus is a string over the gpus an earlier file gives it — docker compose cannot override a list with a string; write the entries as a list", path, n)
+		}
+	}
+	return nil
+}
+
+// buildSecretKeyFault names, for a service's `build`, the first entry of `build.secrets` that has a key docker compose does not take (`secrets[0]`) and what to say of it, or "" when there is none.
+func buildSecretKeyFault(v any) (at, msg string) {
+	b, ok := v.(map[string]any)
+	if !ok {
+		return "", ""
+	}
+	entries, _ := b["secrets"].([]any)
+	for i, e := range entries {
+		entry, isMap := e.(map[string]any)
+		if !isMap {
+			continue
+		}
+		keys := make([]string, 0, len(entry))
+		for k := range entry {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if !specKnows("services.*.build.secrets[]", k) {
+				advice := "check the spelling"
+				if k != "" {
+					advice += fmt.Sprintf(", or write it as `x-%s` to keep it as a note", k)
+				}
+				return fmt.Sprintf("secrets[%d]", i), fmt.Sprintf("has the key %q, which docker compose does not take there — %s", k, advice)
+			}
+		}
+	}
+	return "", ""
+}
+
+// extendsKindClash reports a key of a service that an extends cannot merge: a `healthcheck` that is a mapping over one that is a list (the extended service's `healthcheck: [1]`: `cannot
+// override`), and an `extra_hosts` that is a list or a mapping over a string that is no host entry (`abc`, `""`, `a b`: the entry is refused as it is merged; measured, v5.5.1, #1945). A value
+// that holds nothing merges.
+func extendsKindClash(base, own map[string]any) (string, bool) {
+	if _, isList := base["healthcheck"].([]any); isList {
+		if _, isMap := own["healthcheck"].(map[string]any); isMap {
+			return "healthcheck", true
+		}
+	}
+	if text, isString := base["extra_hosts"].(string); isString && strings.IndexAny(text, "=:") <= 0 {
+		// docker compose reads the string as one host entry and refuses that entry (`invalid additional host`), as it does a list entry without a name or an address (servicespec's `extra_hosts` rule);
+		// a string it can read as `host=ip` or `host:ip` is merged under the list or the mapping (measured, v5.5.1).
+		switch own["extra_hosts"].(type) {
+		case []any, map[string]any:
+			return "extra_hosts", true
+		}
+	}
+	return "", false
+}
+
+// extendsKindName is the kind of a value in the words the refusal uses.
+func extendsKindName(v any) string {
+	switch v.(type) {
+	case []any:
+		return "list"
+	case map[string]any:
+		return "mapping"
+	case string:
+		return "string"
+	}
+	return "value"
 }

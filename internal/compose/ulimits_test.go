@@ -1,6 +1,7 @@
 package compose
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -132,6 +133,80 @@ func TestShmSizeAndUlimitsRefusals(t *testing.T) {
 			_, err := Load(writeTemp(t, tc.body))
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("want an error containing %q, got: %v", tc.want, err)
+			}
+		})
+	}
+}
+
+// `-1` is a limit's "no limit" to docker compose, which reads any whole number as written (measured, v5.5.1), and to the runtime of Apple's container for every limit but
+// `nofile` (measured on container 1.5.0, #1967: the process sees `unlimited` for memlock, nproc, core, stack and the rest; `nofile=-1` makes the container fail to start with
+// "Operation not permitted"; any other negative number is refused by the runtime: "must be a non-negative integer or 'unlimited'"). So `-1` goes on to the runtime for a limit
+// that is not `nofile`, and is refused for `nofile` with the reason; another negative number is refused with the runtime's.
+func TestMinusOneIsAUlimitForEveryNameButNofile(t *testing.T) {
+	for _, tc := range []struct {
+		name, limit string
+		want        []string // what Args renders, for a limit that is read
+	}{
+		{"memlock, the usual", "memlock: -1", []string{"memlock=-1"}},
+		{"nproc", "nproc: -1", []string{"nproc=-1"}},
+		{"core", "core: -1", []string{"core=-1"}},
+		{"a mapping with both -1", "memlock: {soft: -1, hard: -1}", []string{"memlock=-1"}},
+		{"a soft number and a hard -1", "memlock: {soft: 1024, hard: -1}", []string{"memlock=1024:-1"}},
+		{"a quoted -1", `memlock: "-1"`, []string{"memlock=-1"}},
+		{"-1 beside a number for another limit", "memlock: -1\n      nofile: 1024", []string{"memlock=-1", "nofile=1024"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := Load(writeTemp(t, "services:\n  web:\n    image: a\n    ulimits:\n      "+tc.limit+"\n"))
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if got := p.Services["web"].Ulimits.Args(); !slices.Equal(got, tc.want) {
+				t.Errorf("Args = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name, limit, reason string
+	}{
+		{"nofile -1", "nofile: -1", "docker compose reads -1 as no limit, but Apple's container cannot set one for nofile"},
+		{"nofile soft -1", "nofile: {soft: -1, hard: 2}", "cannot set one for nofile"},
+		{"nofile hard -1", "nofile: {soft: 1, hard: -1}", "cannot set one for nofile"},
+		{"nofile quoted -1", `nofile: "-1"`, "cannot set one for nofile"},
+		{"memlock -2", "memlock: -2", "Apple's container refuses it"},
+		{"nofile -2", "nofile: -2", "Apple's container refuses a negative number for nofile"},
+		{"nofile hard -5", "nofile: {soft: 1, hard: -5}", "Apple's container refuses a negative number for nofile"},
+		{"a very negative number", "nproc: -100", "must be -1 (no limit) or a non-negative whole number"},
+	} {
+		t.Run("refuses "+tc.name, func(t *testing.T) {
+			_, err := Load(writeTemp(t, "services:\n  web:\n    image: a\n    ulimits:\n      "+tc.limit+"\n"))
+			if err == nil || !strings.Contains(err.Error(), tc.reason) {
+				t.Errorf("want a refusal saying %q, got: %v", tc.reason, err)
+			}
+		})
+	}
+	// What is said of `nofile: -1` is why: the container fails to start (the core of the reason); and what is said of another negative number for `nofile` is not to write -1, which
+	// is refused for it too.
+	t.Run("nofile -1 says the container fails to start", func(t *testing.T) {
+		_, err := Load(writeTemp(t, "services:\n  web:\n    image: a\n    ulimits:\n      nofile: -1\n"))
+		if err == nil || !strings.Contains(err.Error(), `the container fails to start with "Operation not permitted"`) {
+			t.Errorf("want the reason that the container fails to start, got: %v", err)
+		}
+	})
+	for _, limit := range []string{"nofile: -2", "nofile: {soft: 1, hard: -5}"} {
+		t.Run("not to write -1 for nofile: "+limit, func(t *testing.T) {
+			_, err := Load(writeTemp(t, "services:\n  web:\n    image: a\n    ulimits:\n      "+limit+"\n"))
+			if err == nil || strings.Contains(err.Error(), "-1 (no limit)") {
+				t.Errorf("want a refusal that does not advise -1 (which is refused for nofile), got: %v", err)
+			}
+		})
+	}
+	// A word, a fraction and minus zero are no limit at all, and are told only that.
+	for _, value := range []string{"abc", "1.5", "-0"} {
+		t.Run("not a number: "+value, func(t *testing.T) {
+			_, err := Load(writeTemp(t, "services:\n  web:\n    image: a\n    ulimits:\n      memlock: "+value+"\n"))
+			if err == nil || !strings.Contains(err.Error(), "must be a non-negative whole number") ||
+				strings.Contains(err.Error(), "no limit") {
+				t.Errorf("want only that %s is not a whole number, got: %v", value, err)
 			}
 		})
 	}

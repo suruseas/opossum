@@ -49,9 +49,13 @@ type Project struct {
 	// (CheckDeclaredNames); nil when there is none.
 	nameFault error
 
-	// valueFault is the first value a LoadFilesEnvDirSoft read went on past
-	// (CheckValueFaults); nil when there is none.
+	// valueFault is the first value, or service with neither an image nor a build,
+	// a LoadFilesEnvDirSoft read went on past (CheckValueFaults); nil when there is none.
 	valueFault error
+
+	// gatedHealthchecks is, for a service behind `profiles:`, the refusal of its healthcheck test: docker compose asks it only of a service the profiles
+	// turn on, which is not known when the file is read (HealthcheckFault).
+	gatedHealthchecks map[string]error
 
 	// docNameFault is set where the documents of a file disagree about the project's
 	// name (CheckDocumentName); nil when they do not.
@@ -1797,6 +1801,8 @@ func (p *Ports) UnmarshalYAML(value *yaml.Node) error {
 		if p := strings.ToLower(lf.Protocol); p != "" && p != "tcp" && p != "udp" && p != "sctp" {
 			return keyErr("protocol", "must be tcp, udp or sctp")
 		}
+		// A plus sign in front of a port is read as no part of it (docker compose: `published: "+80"` is the host port 80).
+		target, pub = withoutPlus(target), withoutPlus(pub)
 		spec := target
 		switch {
 		case lf.HostIP != "":
@@ -3894,7 +3900,24 @@ func (u *Ulimits) UnmarshalYAML(value *yaml.Node) error {
 				return 0, fmt.Errorf("ulimits %s must be a non-negative whole number, as in 65536 (got %q)", what, n.Value)
 			}
 			c, err := strconv.ParseInt(text, 10, 64)
-			if err != nil || c < 0 {
+			if err == nil && c < 0 {
+				// docker compose reads a negative limit as written (`-1` is the limit's "no limit" to docker). The runtime of Apple's container reads `-1` as no limit for
+				// every limit but `nofile`, where the container fails to start ("Operation not permitted"), and refuses any other negative number: "must be a
+				// non-negative integer or 'unlimited'" (measured on container 1.5.0, #1923, #1967).
+				switch {
+				case c == -1 && name != "nofile":
+					return c, nil
+				case c == -1:
+					return 0, fmt.Errorf("ulimits %s must be a non-negative whole number, as in 65536 (got %q): docker compose reads -1 as no limit, but Apple's container cannot set one for nofile — "+
+						"the container fails to start with \"Operation not permitted\" — so write the number to allow", what, n.Value)
+				case name == "nofile":
+					// -1 is not an answer for nofile: it is refused above, with the reason.
+					return 0, fmt.Errorf("ulimits %s must be a non-negative whole number, as in 65536 (got %q): docker compose reads it as written, and Apple's container refuses a negative number for nofile", what, n.Value)
+				default:
+					return 0, fmt.Errorf("ulimits %s must be -1 (no limit) or a non-negative whole number, as in 65536 (got %q): docker compose reads it as written, and Apple's container refuses it", what, n.Value)
+				}
+			}
+			if err != nil {
 				return 0, fmt.Errorf("ulimits %s must be a non-negative whole number, as in 65536 (got %q)", what, n.Value)
 			}
 			return c, nil

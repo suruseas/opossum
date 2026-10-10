@@ -58,6 +58,11 @@ func normalizePortSpec(spec string) string {
 	// A range as wide as one port is that port (`47100-47100:80` is `47100:80`, `80:80-80` is `80:80`; docker compose
 	// reads `published: "47100"` and `target: 80`, measured on v5.5.1), so a later question about the port — is it taken by
 	// another entry, which one does the file name — sees one port and not a range it has to know to read as one.
+	// A plus sign in front of a port is no part of it (`+80:80` is `80:80`, `+80-+81:80-81` is `80-81:80-81`; docker compose reads `published: "80"`, measured on v5.5.1), and the
+	// runtime does not take one.
+	for i := max(0, len(parts)-2); i < len(parts); i++ {
+		parts[i] = withoutPlus(parts[i])
+	}
 	for i := max(0, len(parts)-2); i < len(parts); i++ {
 		if lo, hi, isRange := strings.Cut(parts[i], "-"); isRange {
 			// By number, as docker compose reads it: `08080-8080` is the one port 8080, the first written as it was.
@@ -144,8 +149,18 @@ func checkPortSpec(spec string) error {
 	return nil
 }
 
-// portRange reads `n` or `low-high`: digits only (no sign, space or hex),
-// each between min and 65535, low not above high.
+// withoutPlus is a port or a range of them without the plus sign in front of each end of it.
+func withoutPlus(s string) string {
+	lo, hi, isRange := strings.Cut(s, "-")
+	lo = strings.TrimPrefix(lo, "+")
+	if !isRange {
+		return lo
+	}
+	return lo + "-" + strings.TrimPrefix(hi, "+")
+}
+
+// portRange reads `n` or `low-high`: digits, each with a plus sign or none (`+80` is 80 to docker compose, as `-80` is not), no space or hex, each between min and 65535,
+// low not above high.
 func portRange(s string, min int) (low, high int, err error) {
 	word := func() (int, int, error) {
 		if min == 0 {
@@ -157,12 +172,13 @@ func portRange(s string, min int) (low, high int, err error) {
 		if t == "" {
 			return 0, false
 		}
-		for _, c := range t {
+		digits := strings.TrimPrefix(t, "+")
+		for _, c := range digits {
 			if c < '0' || c > '9' {
 				return 0, false
 			}
 		}
-		n, err := strconv.Atoi(t)
+		n, err := strconv.Atoi(digits)
 		return n, err == nil && n >= min && n <= 65535
 	}
 	lowS, highS, isRange := strings.Cut(s, "-")

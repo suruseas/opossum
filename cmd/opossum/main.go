@@ -720,7 +720,7 @@ func downCmd() *cobra.Command {
 				if handled, derr := downByLabel(cmd, err, volumes, rmi, held); handled {
 					return derr
 				}
-				if name := projectNameWithoutCompose(); name != "" {
+				if name := projectNameToSuggest(); name != "" {
 					// Not taken down, since the name is a guess (see downByLabel) — but
 					// the way to say it is not.
 					return withTakeDownWithoutFile(err, name)
@@ -1961,7 +1961,7 @@ func loadOrchestratorToTakeDown(out, stderr io.Writer, verb string) (*orchestrat
 		// `down` says this where it handles the same failure; the others have no way down by name of their own, and a file
 		// this version refuses may be one an earlier version started the project from (#1481).
 		if verb != "down" {
-			if name := projectNameWithoutCompose(); name != "" {
+			if name := projectNameToSuggest(); name != "" {
 				err = withTakeDownWithoutFile(err, name)
 			}
 		}
@@ -2684,7 +2684,21 @@ func chooseFiles() (chosenFiles, error) {
 // load reads it (see below), from the paths as written and not looked at, so
 // that a project whose file has gone or been moved is still found. What stays out
 // of reach is a project the file itself names (`name:`), which needs the file.
-func projectNameWithoutCompose() string {
+func projectNameWithoutCompose() string { return projectNameFor(false) }
+
+// projectNameToSuggest is the project a refused compose file is to be taken down as, for the command that is suggested: the name the files write is before the directory's,
+// as docker compose names a project (-p, COMPOSE_PROJECT_NAME, `name:`, the directory). The lock and the supervisor of a take-down are not found by it, they are by the
+// directory's name before the file is read (projectNameWithoutCompose), and the name the file writes is handled after it.
+func projectNameToSuggest() string { return projectNameFor(true) }
+
+// projectNameFor is projectNameWithoutCompose, with the name the files write (`name:`) before the directory's where withWritten.
+func projectNameFor(withWritten bool) string {
+	written := func(dir string, paths []string) string {
+		if !withWritten {
+			return ""
+		}
+		return compose.WrittenProjectName(dir, paths)
+	}
 	if projectName != "" {
 		return compose.SanitizeName(projectName)
 	}
@@ -2712,12 +2726,20 @@ func projectNameWithoutCompose() string {
 			if name, err := compose.EnvProjectName(dir, envFiles); err == nil && name != "" {
 				return compose.SanitizeName(name)
 			}
+			if name := written(dir, paths); name != "" {
+				return compose.SanitizeName(name)
+			}
 			return compose.SanitizeName(filepath.Base(dir))
 		}
 	}
 	// An env file that cannot be read is the load's to report, not this
 	// lookup's: it falls through to the directory.
 	if name, err := compose.EnvProjectName(wd, envFiles); err == nil && name != "" {
+		return compose.SanitizeName(name)
+	}
+	// The name the files write comes before the directory's, as docker compose reads it (-p, COMPOSE_PROJECT_NAME, `name:`, the directory).
+	paths, _ := composeFilePaths()
+	if name := written(wd, paths); name != "" {
 		return compose.SanitizeName(name)
 	}
 	return compose.SanitizeName(filepath.Base(wd))

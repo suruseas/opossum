@@ -105,6 +105,15 @@ type envScope struct {
 	// (LoadFilesEnvDirSoft). It is for the commands that take a project down: an
 	// earlier opossum passed such a value on, and a project may be running on it.
 	values *[]error
+
+	// mixedInside, when not nil, is where the list-or-mapping keys that an `include` or an `extends` of the file being read merged are noted (markMixed): docker compose
+	// holds them as a list once two sources have written them, wherever the sources are, so a `!reset` in a later file reaches none of their names (#1794). The files
+	// the includes read share it.
+	mixedInside map[string]mixedKey
+
+	// ownGpusStrings, when not nil, is filled with the names of the services a file writes a string `gpus` for itself, before its `extends` are read (a string that an extends brings in
+	// is not the file's own: docker compose puts it under the earlier file's value). gpusStringOverAValue asks only those.
+	ownGpusStrings map[string]bool
 }
 
 // firstFault is the first name a `.env` line refused, or nil.

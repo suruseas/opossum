@@ -92,3 +92,60 @@ func TestTheCommandsThatTakeAProjectDownSayHowToNameItWhenTheFileIsRefused(t *te
 		}
 	})
 }
+
+// The way down a refusal says is the project the file writes (`name: xb`), and the directory's name only where the file writes none: the order docker compose names a project
+// in (-p, COMPOSE_PROJECT_NAME, `name:`, the directory). A name that cannot be known (a variable in it) is the directory's (#1953).
+func TestTheWayDownIsTheNameTheFileWritesBeforeTheDirectorys(t *testing.T) {
+	fakeShim(t)
+	for _, tc := range []struct {
+		name, compose string
+		env           map[string]string
+		args          []string
+		want, notWant string
+	}{
+		{"the name the file writes", "name: xb\nservices:\n  s:\n    image: a\n    networks: [nope]\n", nil, []string{"stop"}, "`opossum -p xb down`", ""},
+		{"no name: the directory's", "services:\n  s:\n    image: a\n    networks: [nope]\n", nil, []string{"stop"}, "`opossum -p wherever down`", ""},
+		{"a name with a variable: the directory's", "name: ${P:-x}\nservices:\n  s:\n    image: a\n    networks: [nope]\n", nil, []string{"stop"}, "`opossum -p wherever down`", ""},
+		{"COMPOSE_PROJECT_NAME is before the name the file writes", "name: xb\nservices:\n  s:\n    image: a\n    networks: [nope]\n", map[string]string{"COMPOSE_PROJECT_NAME": "fromenv"}, []string{"stop"}, "`opossum -p fromenv down`", "-p xb"},
+		{"-p is before the name the file writes", "name: xb\nservices:\n  s:\n    image: a\n    networks: [nope]\n", nil, []string{"-p", "given", "stop"}, "`opossum -p given down`", "-p xb"},
+		{"a name with capitals is written the way a project is named", "name: My_App\nservices:\n  s:\n    image: a\n    networks: [nope]\n", nil, []string{"stop"}, "`opossum -p my-app down`", ""},
+		{"-f names the file in the directory: its name, not the other file's", "name: one\nservices:\n  s:\n    image: a\n    networks: [nope]\n", nil, []string{"-f", "alt.yaml", "stop"}, "`opossum -p two down`", "-p one"},
+		{"a file in another directory: its name", "name: one\nservices:\n  s:\n    image: a\n    networks: [nope]\n", nil, []string{"-f", "sub/c.yaml", "stop"}, "`opossum -p three down`", "-p one"},
+		{"the .env's COMPOSE_PROJECT_NAME is before the name the file writes", "name: xb\nservices:\n  s:\n    image: a\n    networks: [nope]\n", nil, []string{"stop"}, "`opossum -p fromdotenv down`", "-p xb"},
+		{"down says it too", "name: xb\nservices:\n  s:\n    image: a\n    networks: [nope]\n", nil, []string{"down"}, "`opossum -p xb down`", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setOrUnset(t, "COMPOSE_PROJECT_NAME", nil)
+			for k, v := range tc.env {
+				v := v
+				setOrUnset(t, k, &v)
+			}
+			dir := filepath.Join(t.TempDir(), "wherever")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte(tc.compose), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			bad := "services:\n  s:\n    image: a\n    networks: [nope]\n"
+			os.MkdirAll(filepath.Join(dir, "sub"), 0o755)
+			os.WriteFile(filepath.Join(dir, "alt.yaml"), []byte("name: two\n"+bad), 0o644)
+			os.WriteFile(filepath.Join(dir, "sub", "c.yaml"), []byte("name: three\n"+bad), 0o644)
+			if strings.Contains(tc.name, ".env") {
+				os.WriteFile(filepath.Join(dir, ".env"), []byte("COMPOSE_PROJECT_NAME=fromdotenv\n"), 0o644)
+			}
+			t.Chdir(dir)
+			out, err := run(t, tc.args...)
+			if err == nil {
+				t.Fatalf("no refusal:\n%s", out)
+			}
+			said := err.Error() + out
+			if !strings.Contains(said, tc.want) {
+				t.Errorf("want %s in:\n%s", tc.want, said)
+			}
+			if tc.notWant != "" && strings.Contains(said, tc.notWant) {
+				t.Errorf("did not want %s in:\n%s", tc.notWant, said)
+			}
+		})
+	}
+}

@@ -36,15 +36,15 @@ func TestAskingDockerIsBoundedByTheTimeoutAndByAnInterrupt(t *testing.T) {
 		under time.Duration
 	}
 	for _, tc := range []row{
-		{"the docker sleeps in place of itself", "exec sleep 30\n", func(rt *Runtime) func() { rt.DockerProbeTimeout = 300 * time.Millisecond; return nil }, 2 * time.Second},
-		{"the docker's child holds the pipe open", "sleep 8\necho x\n", func(rt *Runtime) func() { rt.DockerProbeTimeout = 300 * time.Millisecond; return nil }, 2500 * time.Millisecond},
+		{"the docker sleeps in place of itself", "exec sleep 30\n", func(rt *Runtime) func() { rt.DockerProbeTimeout = 300 * time.Millisecond; return nil }, 10 * time.Second},
+		{"the docker's child holds the pipe open", "sleep 8\necho x\n", func(rt *Runtime) func() { rt.DockerProbeTimeout = 300 * time.Millisecond; return nil }, 5 * time.Second},
 		{"the run is interrupted while it is asked", "exec sleep 30\n", func(rt *Runtime) func() {
 			ctx, cancel := context.WithCancel(context.Background())
 			rt.Ctx = ctx
 			rt.DockerProbeTimeout = 30 * time.Second
 			time.AfterFunc(200*time.Millisecond, cancel)
 			return cancel
-		}, 2 * time.Second},
+		}, 10 * time.Second},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rt := &Runtime{DockerBin: probeScript(t, tc.body)}

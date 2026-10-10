@@ -1142,12 +1142,19 @@ func publishCountsRefused(args []string) (msg string, refused bool) {
 		if i == 0 || (args[i-1] != "-p" && args[i-1] != "--publish") {
 			continue
 		}
-		s := a
-		if j := strings.LastIndex(s, "/"); j >= 0 {
-			s = s[:j] // the protocol
-		}
+		s, proto, hasProto := strings.Cut(a, "/") // the protocol is what follows the first `/`
 		if m := publishWithNoHostPort(a, s); m != "" {
 			return m, true
+		}
+		// A spelling with no `:` at all is no publish value (a bare container port included: `-p 47999`, `-p 47999/udp`), and the protocol is tcp or udp, in either case, and asked
+		// before the ports are (`a:b/sctp` is a protocol error), as the runtime does (container 1.5.0, measured: `invalid publish value: <as written>`, `invalid publish protocol: <lower case>`).
+		if !strings.Contains(s, ":") {
+			return "Error: invalid publish value: " + a, true
+		}
+		if hasProto {
+			if low := strings.ToLower(proto); low != "tcp" && low != "udp" {
+				return "Error: invalid publish protocol: " + low, true
+			}
 		}
 		if strings.HasPrefix(s, "[") { // an IPv6 address
 			if j := strings.Index(s, "]"); j >= 0 {
@@ -1159,10 +1166,23 @@ func publishCountsRefused(args []string) (msg string, refused bool) {
 			continue // a bare container port
 		}
 		host, ctr := parts[len(parts)-2], parts[len(parts)-1]
-		// A host range that starts at 0 (`0:80`, `0-1:80`, `127.0.0.1:0:80`) is refused before the counts are asked
-		// (container 1.5.0, rc 1: `Error: invalid publish host port range: <host>`).
-		if hostRangeStartsAtZero(host) {
+		// A side that is not a port or a range of ports (a word, a space in it, `1e3`, `0x10`, more than one `-`, a number above 65535, nothing at all in the container side) is
+		// `invalid publish host port: <side>` or `invalid publish container port: <side>`, the host side first (container 1.5.0, measured). A range written high-low is the range
+		// error for its side, with the ones that start at 0 or 1 below, once both sides have been read.
+		if m := publishPortRefused("host", host); m != "" {
+			return m, true
+		}
+		if m := publishPortRefused("container", ctr); m != "" {
+			return m, true
+		}
+		// A range written high-low (`5-1`) and one that starts at 0 or at 1 (`0:80`, `0-1:80`, `1:80`, `01:80`, `127.0.0.1:0:80`; `80:1`, `80-81:1-2`) is refused before the counts are asked, the host side
+		// first and then the container side (container 1.5.0, rc 1: `Error: invalid publish host port range: <host>`, `Error: invalid publish container port range: <container>`;
+		//ot copy, as opossum sends none of them).
+		if rangeStartsAtOneOrLess(host) || rangeReversed(host) {
 			return "Error: invalid publish host port range: " + host, true
+		}
+		if rangeStartsAtOneOrLess(ctr) || rangeReversed(ctr) {
+			return "Error: invalid publish container port range: " + ctr, true
 		}
 		if publishCount(host) != publishCount(ctr) {
 			return "Error: publish host and container port counts are not equal: " + host + ":" + ctr, true
@@ -1192,13 +1212,63 @@ func publishWithNoHostPort(a, s string) string {
 	return ""
 }
 
-// hostRangeStartsAtZero is a host side of `-p` whose low end is the port 0, however it is spelled: `0`, `00`,
-// `+0`, `0-1`, `00-01` (container 1.5.0 refuses each of them alike). An empty host is not a 0: the forms with no host port at all are refused
+// publishPortRefused answers one side of a `-p` (which: host or container) that is not a port or a range of ports — a word, a space in it, `1e3`, `0x10`, `5-6-7`, a `+` anywhere but
+// the front of an end, a number above 65535, nothing at all in the container side — in the runtime's words (container 1.5.0, measured: `Error: invalid publish host port: <side>`,
+// `Error: invalid publish container port: <side>`). Spellings the runtime reads in its own way (`5-`, `-5`, `5--6`) are not asked about.
+func publishPortRefused(which, side string) string {
+	if side == "" {
+		if which == "container" {
+			return "Error: invalid publish container port: "
+		}
+		return ""
+	}
+	// More than one `-` is no range (`5-6-7`), but `5--6` is read by the runtime in its own way (counts that differ), which is not asked about here.
+	bad := strings.Trim(side, "0123456789+-") != "" || strings.Count(side, "-") > 1 && !strings.Contains(side, "--")
+	lo, hi, _ := strings.Cut(side, "-")
+	for _, part := range []string{lo, hi} {
+		digits := strings.TrimPrefix(part, "+")
+		// A `+` goes in front of an end and nowhere else (`+5`, not `5+`, `++5` or a `+` alone), and a number is 65535 at most, however many digits it is written with.
+		if part == "+" || strings.Contains(digits, "+") {
+			bad = true
+		}
+		if digits != "" && strings.Trim(digits, "0123456789") == "" {
+			if n, err := strconv.Atoi(digits); err != nil || n > 65535 {
+				bad = true
+			}
+		}
+	}
+	if bad {
+		return "Error: invalid publish " + which + " port: " + side
+	}
+	return ""
+}
+
+// rangeStartsAtOneOrLess is a side of `-p` (host or container) whose low end is the port 0 or 1, however it is spelled: `0`, `00`,
+// `+0`, `1`, `01`, `0-1`, `1-2`, `00-01` (container 1.5.0 refuses each of them alike). An empty host is not a 0: the forms with no host port at all are refused
 // before this, in the runtime's other words (publishWithNoHostPort).
-func hostRangeStartsAtZero(host string) bool {
-	lo, _, _ := strings.Cut(host, "-")
+// rangeReversed is a side of `-p` written high-low (`5-1`), which the runtime refuses as the range it is, after the sides have been read as ports.
+func rangeReversed(side string) bool {
+	lo, hi, isRange := strings.Cut(side, "-")
+	if !isRange || lo == "" || hi == "" {
+		return false
+	}
+	lo, hi = strings.TrimPrefix(lo, "+"), strings.TrimPrefix(hi, "+")
+	if strings.Trim(lo, "0123456789") != "" || strings.Trim(hi, "0123456789") != "" {
+		return false // `5--6` and the like are read in the runtime's own way
+	}
+	l, errL := strconv.Atoi(lo)
+	h, errH := strconv.Atoi(hi)
+	return errL == nil && errH == nil && l > h
+}
+
+func rangeStartsAtOneOrLess(side string) bool {
+	lo, _, _ := strings.Cut(side, "-")
 	lo = strings.TrimPrefix(lo, "+")
-	return lo != "" && strings.Trim(lo, "0") == ""
+	if lo == "" || strings.Trim(lo, "0123456789") != "" {
+		return false
+	}
+	n, err := strconv.Atoi(lo)
+	return err == nil && n <= 1
 }
 
 // publishCount is how many ports one side of a `-p` names: `80` is one, `80-82` three.

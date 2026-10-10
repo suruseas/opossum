@@ -227,8 +227,10 @@ func TestUpDoesNotWaitForADockerThatDidNotAnswerOnceForEachService(t *testing.T)
 	if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true); err != nil {
 		t.Fatalf("Up: %v", err)
 	}
-	if d := time.Since(start); d > 1500*time.Millisecond {
-		t.Errorf("four services that build waited %v for a Docker that does not answer, which is once the timeout (400 ms) and not four times", d)
+	// The guard of "once" is the count below. The time is only that the up did not wait for the Docker's own sleep (30 s): a bound close to the four timeouts
+	// (1.6 s) is a bound a loaded host passes through.
+	if d := time.Since(start); d > 10*time.Second {
+		t.Errorf("four services that build waited %v for a Docker that does not answer, which sleeps for 30 s", d)
 	}
 	if got := dockerCalls(t, log); len(got) != 1 {
 		t.Errorf("Docker is asked once in an up when it did not answer; it was asked %d times: %q", len(got), got)

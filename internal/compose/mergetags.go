@@ -114,6 +114,15 @@ func takeMergeTags(one interpolated) (interpolated, []mergeTag, error) {
 		for i := 0; i+1 < len(m.Content); i += 2 {
 			k, v := m.Content[i], m.Content[i+1]
 			if k.Value == "<<" {
+				// A mapping or a list written in place after the merge key with `!override` or `!reset` stands where the anchor is used, whole, as one that an anchor carries does
+				// (`x-b: &b {<<: !override {labels: {z: '9'}}}`, `s: {<<: *b}`; measured, v5.5.1, #1929).
+				if v.Tag == "!override" || v.Tag == "!reset" {
+					out = append(out, innerNode{merge: true, tagged: true})
+				}
+				// An anchor that is a list written `!override` or `!reset` is read the same, wherever it is merged from.
+				if v.Kind == yaml.AliasNode && v.Alias != nil && v.Alias.Kind == yaml.SequenceNode && anchored[v.Alias] != "" {
+					out = append(out, innerNode{merge: true, tagged: true})
+				}
 				if t := mergedMapping(v); t != nil {
 					switch anchored[t] {
 					case "":
@@ -294,7 +303,7 @@ func takeMergeTags(one interpolated) (interpolated, []mergeTag, error) {
 								tags = append(tags, mergeTag{path: append([]string(nil), path...)})
 							}
 							continue
-						case tag == "!override" && (mergedMapping(v) != nil || v.Kind == yaml.MappingNode):
+						case tag == "!override" && (mergedMapping(v) != nil || v.Kind == yaml.MappingNode || v.Kind == yaml.SequenceNode || v.Kind == yaml.AliasNode && v.Alias != nil && v.Alias.Kind == yaml.SequenceNode):
 							if path != nil {
 								tags = append(tags, mergeTag{path: append([]string(nil), path...)})
 							}
@@ -621,6 +630,28 @@ func markMixed(merged, next map[string]any, mixed map[string]mixedKey) {
 				mixed[k.name()] = k
 			}
 		}
+	}
+}
+
+// markMixedService is markMixed for the one service an `extends` merges into the service that extends it: the keys both write are noted under the extending service's name.
+func markMixedService(name string, base, own map[string]any, mixed map[string]mixedKey) {
+	if mixed == nil || base == nil || own == nil {
+		return
+	}
+	for _, path := range listOrMappingKeys {
+		if has(base, path) && has(own, path) {
+			k := mixedKey{name, path}
+			mixed[k.name()] = k
+		}
+	}
+}
+
+// takeMixedInside moves the keys the includes and the extends of the file just merged noted (inside) into mixed, which a later file's tags are read against, and empties
+// inside for the next file. A key the merged files no longer hold is forgotten by dropGone when that file is merged in, as for any other.
+func takeMixedInside(inside, mixed map[string]mixedKey) {
+	for name, k := range inside {
+		mixed[name] = k
+		delete(inside, name)
 	}
 }
 

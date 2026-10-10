@@ -94,8 +94,15 @@ func TestDownTakesAProjectDownByLabelWhenItsFileCannotBeRead(t *testing.T) {
 			if !strings.Contains(strings.Join(tc.args, " "), "other") {
 				if err == nil {
 					t.Errorf("a guess was refused with no error at all:\n%s", stderr)
-				} else if !strings.Contains(err.Error(), "`opossum -p demo down`") {
-					t.Errorf("the refusal should say how to name the project, got: %v", err)
+				} else {
+					// The way down names the project the file writes (`name: other`) where it writes one, the directory's ("demo") where not (#1953).
+					want := "`opossum -p demo down`"
+					if strings.Contains(tc.files["compose.yaml"], "name: other") {
+						want = "`opossum -p other down`"
+					}
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("the refusal should say how to name the project (%s), got: %v", want, err)
+					}
 				}
 			}
 		})

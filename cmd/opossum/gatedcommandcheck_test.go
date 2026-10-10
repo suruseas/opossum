@@ -62,6 +62,17 @@ services:
     profiles: [g]
     volumes_from: ['container:other']
 `
+	const badHealthcheckTest = `
+name: demo
+services:
+  web:
+    image: alpine:3.20
+  broken:
+    image: alpine:3.20
+    profiles: [g]
+    healthcheck:
+      test: [curl, -f, http://x]
+`
 	commands := []struct {
 		name string
 		args []string
@@ -86,6 +97,7 @@ services:
 		{"an undefined dependency", undefined, `service "broken" depends on unknown service "nosuch"`},
 		{"a dependency behind another inactive profile", inactiveProfile, `service "broken" depends on "gy", whose profile is not active`},
 		{"an undefined volumes_from holder", undefinedVolumesFrom, `service "broken" depends on undefined service "nosuch"`},
+		{"a healthcheck test list that starts with none of NONE, CMD and CMD-SHELL", badHealthcheckTest, `services.broken.healthcheck.test starts with "curl"`},
 		{"a volumes_from container: entry", containerVolumesFrom, `service "broken": volumes_from "container:other" names a container outside this compose file`},
 	} {
 		for _, tc := range commands {

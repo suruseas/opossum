@@ -10,8 +10,7 @@ package compose
 // host port; no container port (`:`, `80:`). opossum used to pass every one
 // of these to `container run -p` as written (`ports: [a]` became `a:a`).
 //
-// Stricter than docker, on purpose, and named here: `+80` (docker's integer
-// parser takes a sign) and, in the long form, `target: 0`/`65536`, a
+// Stricter than docker, on purpose, and named here: in the long form, `target: 0`/`65536`, a
 // `published` that is not a port or a range (`a`, `8080:80`), and a
 // `protocol` docker does not check there — each key is checked by its own
 // name, and each of those fails at `up` under docker anyway. A key the long
@@ -42,7 +41,6 @@ func TestAPortIsCheckedAtLoadTheWayDockerChecksIt(t *testing.T) {
 		{"container port padded after the colon", `"80: 80"`, ctr},
 		{"container port in hex", `"0x50"`, ctr},
 		{"container port is a boolean", `true`, ctr},
-		{"container port with a sign", `"+80"`, ctr},
 		{"container range written high-low", `"8080:90-80"`, ctr},
 		{"host port is a word", `"a:80"`, host},
 		{"host port 65536", `"65536:80"`, host},

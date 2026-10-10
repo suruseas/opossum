@@ -27,6 +27,7 @@ package orchestrator_test
 import (
 	"bytes"
 	"fmt"
+	"math/rand"
 	"strings"
 	"testing"
 
@@ -253,17 +254,15 @@ func splitPublished(spec string) (network, address, hostPort string, ok bool) {
 // the top only by a range below.
 func freePortWithNeighbours(t *testing.T) int {
 	t.Helper()
-	for try := 0; try < 40; try++ {
-		p := freePort(t)
-		if p < 1024+2 || p > 65535-3 {
-			continue
-		}
-		free := true
+	// Below the ports the machine gives to the connections it makes out (Linux: 32768-60999, macOS: 49152-65535): any process on the runner that
+	// opens one holds a port of it for as long as the connection lasts, and a run of six drawn from there is a run one of them takes between the
+	// check and the `up` — the notice then names another reason than the row is about (#1940).
+	for try := 0; try < 400; try++ {
+		// The run is p-2 .. p+3: drawn so that all six lie inside the range (a p of 20000 or 20001 put p-2 under it, and the row below failed one run in 170).
+		p := neighbourPortLow + 2 + rand.Intn(neighbourPortHigh-neighbourPortLow-2)
+		free := portFreeWhereItIsChecked(p)
 		for _, n := range []int{p - 2, p - 1, p + 1, p + 2, p + 3} {
-			if !portFreeWhereItIsChecked(n) {
-				free = false
-				break
-			}
+			free = free && portFreeWhereItIsChecked(n)
 		}
 		if free {
 			return p
@@ -273,6 +272,12 @@ func freePortWithNeighbours(t *testing.T) int {
 		"\"below\" and \"above\" cannot be built without one")
 	return 0
 }
+
+// The range freePortWithNeighbours draws from: under every system's ports for outgoing connections.
+const (
+	neighbourPortLow  = 20000
+	neighbourPortHigh = 30000
+)
 
 // bare reports whether a spec is one the loader wrote back from a bare
 // container port: it publishes on the host side what the container side
@@ -288,4 +293,19 @@ func bare(spec string) bool {
 	}
 	host, container, found := strings.Cut(spec, ":")
 	return found && host == container
+}
+
+// The run of six is drawn from under the ports the machine gives to the connections it makes out, and every port of it is free (#1940).
+func TestARunOfSixFreePortsIsDrawnFromUnderThePortsOfOutgoingConnections(t *testing.T) {
+	for i := 0; i < 30; i++ {
+		p := freePortWithNeighbours(t)
+		if p-2 < neighbourPortLow || p+3 >= neighbourPortHigh+3 || p >= 32768 {
+			t.Fatalf("the run around %d is not under the ports of outgoing connections (32768 and up on Linux)", p)
+		}
+		for _, n := range []int{p - 2, p - 1, p, p + 1, p + 2, p + 3} {
+			if !portFreeWhereItIsChecked(n) {
+				t.Fatalf("port %d of the run around %d is not free", n, p)
+			}
+		}
+	}
 }

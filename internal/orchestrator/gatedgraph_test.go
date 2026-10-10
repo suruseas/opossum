@@ -260,7 +260,9 @@ func TestAGatedFaultDoesNotStopTheCommandsThatReadOrTakeDown(t *testing.T) {
 	// services in order whether or not they were given names, and some take
 	// the names as the whole answer and build no order — which is what
 	// decides whether a cycle is read. The rows are both sides of that.
-	readsNoOrderWhenNamed := map[string]bool{"stop web": true, "logs web": true, "restart web": true}
+	// `stop web` and `logs web` read a cycle among the services the run reads without a name all the same, whichever service they name (docker compose
+	// v5.5.1, measured, #1871); `restart web` reads none here, where docker compose refuses it too (a known difference of its own).
+	readsNoOrderWhenNamed := map[string]bool{"restart web": true}
 	// #1385, #1431: unlike restart web, stop web (and kill, untested by this table — it has no
 	// "kill web" row), logs web and start web check the named service's own dependency, whether or
 	// not a container exists for it, the same way up already does (checkProjectLoads). This only

@@ -14,6 +14,48 @@
 # three.
 echo "container $*" >> "${FAKE_LOG:-/dev/null}"
 
+# publish_side_refused answers one side of a `-p` (which: host or container): it prints the runtime's words and returns 1 when the side is not a port or a range of
+# ports — a word, a space in it, `1e3`, `0x10`, more than one `-`, a number above 65535, nothing at all in the container side — and returns 0 otherwise
+# (container 1.5.0, measured: `Error: invalid publish host port: <side>`, `Error: invalid publish container port: <side>`). Spellings the runtime reads in its own
+# way (`5-`, `-5`) are not asked about.
+publish_side_refused() {
+  _which=$1 _side=$2
+  if [ -z "$_side" ]; then
+    [ "$_which" = container ] || return 0
+    printf 'Error: invalid publish container port: \n' >&2; return 1
+  fi
+  _bad=0
+  case "$_side" in *[!0-9+-]*) _bad=1 ;; esac
+  # More than one `-` is no range (`5-6-7`), but `5--6` is read by the runtime in its own way (counts that differ), which is not asked about here.
+  case "$_side" in *-*) case "${_side#*-}" in *-*) case "$_side" in *--*) ;; *) _bad=1 ;; esac ;; esac ;; esac
+  if [ "$_bad" = 0 ]; then
+    for _part in "${_side%%-*}" "${_side#*-}"; do
+      # A `+` goes in front of an end and nowhere else (`+5`, not `5+`, `++5` or a `+` alone), and a number is 65535 at most, however many digits it is written with.
+      [ "$_part" = + ] && _bad=1
+      _digits=${_part#+}
+      case "$_digits" in *+*) _bad=1 ;; esac
+      case "$_digits" in ''|*[!0-9]*) continue ;; esac
+      _digits=$(printf '%s' "$_digits" | sed 's/^0*//')
+      if [ "${#_digits}" -gt 5 ] || { [ -n "$_digits" ] && [ "$_digits" -gt 65535 ]; }; then _bad=1; fi
+    done
+  fi
+  [ "$_bad" = 0 ] && return 0
+  printf 'Error: invalid publish %s port: %s\n' "$_which" "$_side" >&2
+  return 1
+}
+
+# publish_range_reversed says that a side of a `-p` is a range written high-low (`5-1`), which the runtime refuses as the range it is.
+publish_range_reversed() {
+  case "$1" in
+    *-*) _lo=${1%%-*} _hi=${1#*-} ;;
+    *) return 1 ;;
+  esac
+  _lo=${_lo#+} _hi=${_hi#+}
+  case "$_lo$_hi" in ''|*[!0-9]*) return 1 ;; esac
+  [ -n "$_lo" ] && [ -n "$_hi" ] || return 1
+  [ "$_lo" -gt "$_hi" ]
+}
+
 # publishedJSON turns the `-p` specs a run was given into the objects the real
 # `container inspect` answers with. A range comes back as ONE object holding the
 # low port and a `count`, which is what the runtime does (measured on 1.4.1) —
@@ -430,15 +472,35 @@ case "$1" in
           *[!0-9.:]*::*|'') ;;
           [0-9.]*::*) case "${s%%::*}" in ''|*[!0-9.]*) ;; *) case "${s#*::}" in *:*) ;; *) printf 'Error: invalid publish host port: %s:\n' "${s%%::*}" >&2; exit 1 ;; esac ;; esac ;;
         esac
+        # No `:` at all is no publish value (a bare container port included), and the protocol after the first `/` is tcp or udp in either case, asked before the
+        # ports are (container 1.5.0, measured: `invalid publish value: <as written>`, `invalid publish protocol: <lower case>`).
+        case "$s" in *:*) ;; *) printf 'Error: invalid publish value: %s\n' "$a" >&2; exit 1 ;; esac
+        case "$a" in
+          */*) proto=$(printf '%s' "${a#*/}" | tr 'A-Z' 'a-z')
+            case "$proto" in tcp|udp) ;; *) printf 'Error: invalid publish protocol: %s\n' "$proto" >&2; exit 1 ;; esac ;;
+        esac
         case "$s" in \[*) s=${s#*]}; s=${s#:} ;; esac
         case "$s" in
           *:*)
             ctr=${s##*:}; rest=${s%:*}; host=${rest##*:}
-            # A host range that starts at 0 (`0:80`, `0-1:80`, `127.0.0.1:0:80`) is refused before the counts are asked
-            # (container 1.5.0, rc 1: `Error: invalid publish host port range: <host>`).
+            # A side that is not a port or a range is refused as such, the host side first, before the range questions below.
+            publish_side_refused host "$host" || exit 1
+            publish_side_refused container "$ctr" || exit 1
+            # A range written high-low (`5-1`) and one that starts at 0 or at 1 (`0:80`, `0-1:80`, `1:80`, `01:80`, `127.0.0.1:0:80`; `80:1`, `80-81:1-2`) is refused before the counts are asked,
+            # the host side first and then the container side (container 1.5.0, rc 1: `Error: invalid publish host port range: <host>`,
+            # `Error: invalid publish container port range: <container>`; 2 and above are taken when the range is the right way round and the sides are ports.
             # An empty host is not a 0: the forms with no host port at all were refused above, in the runtime's other words.
-            lo=${host%%-*}; lo=${lo#+}
-            case "$lo" in ''|*[!0]*) ;; *) printf 'Error: invalid publish host port range: %s\n' "$host" >&2; exit 1 ;; esac
+            for side in host ctr; do
+              case "$side" in host) v=$host ;; *) v=$ctr ;; esac
+              if publish_range_reversed "$v"; then
+                printf 'Error: invalid publish %s port range: %s\n' "$([ "$side" = host ] && echo host || echo container)" "$v" >&2; exit 1
+              fi
+              lo=${v%%-*}; lo=${lo#+}
+              case "$lo" in ''|*[!0-9]*) ;; *)
+                lz=${lo#"${lo%%[!0]*}"}
+                case "$lz" in ''|1) printf 'Error: invalid publish %s port range: %s\n' "$([ "$side" = host ] && echo host || echo container)" "$v" >&2; exit 1 ;; esac ;;
+              esac
+            done
             hc=1 cc=1
             case "$host" in *-*) hc=$(( ${host#*-} - ${host%%-*} + 1 )) ;; esac
             case "$ctr" in *-*) cc=$(( ${ctr#*-} - ${ctr%%-*} + 1 )) ;; esac

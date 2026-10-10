@@ -180,6 +180,14 @@ func TestANocopyVolumesTakeBackSaysWhatItLeftBehindToo(t *testing.T) {
 	for i := 0; i < 1500 && indexOf(log(), "--name "+seedName+" ") < 0; i++ {
 		time.Sleep(2 * time.Millisecond)
 	}
+	// The shim logs a run as it starts and records the volume that run mounts a moment later (as in the test above): a cancel between the two takes back a clearing that
+	// made nothing, and the message has neither the container nor the volume (CI failed here after 0.09 s). Wait for the volume, and say so when it never comes.
+	for i := 0; i < 1500 && !rt.VolumeExists("demo_data"); i++ {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if !rt.VolumeExists("demo_data") {
+		t.Fatalf("the clearing started but the volume was never made, got %v", log())
+	}
 	cancel()
 	err := <-done
 	if err == nil || !strings.Contains(err.Error(), "container delete --force "+seedName) {

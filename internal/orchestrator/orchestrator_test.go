@@ -2943,8 +2943,9 @@ func TestUpProfilesDependencyOnDisabledErrors(t *testing.T) {
 	err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true)
 	// Held with both names in their places: which service depends and which
 	// is gated is what the reader acts on, and exchanged they read as sound
-	// English pointing at the wrong service (#559).
-	if want := `service "web" depends on "helper", whose profile is not active — name it explicitly, or enable its profile beside the ones this run has active: with another --profile in a run that has one, or in COMPOSE_PROFILES in a run with no --profile — where this run reads it, since a COMPOSE_PROFILES in the shell replaces one in the .env, as the flag replaces both (none of them add up)`; err == nil || !strings.Contains(err.Error(), want) {
+	// English pointing at the wrong service (#559). `web` has no profile, so it is read
+	// without a name and naming helper is no way out: the refusal does not say to (#1973).
+	if want := `service "web" depends on "helper", whose profile is not active — enable its profile beside the ones this run has active: with another --profile in a run that has one, or in COMPOSE_PROFILES in a run with no --profile — where this run reads it, since a COMPOSE_PROFILES in the shell replaces one in the .env, as the flag replaces both (none of them add up)`; err == nil || !strings.Contains(err.Error(), want) {
 		t.Fatalf("expected a disabled-dependency error saying %q, got %v", want, err)
 	}
 }

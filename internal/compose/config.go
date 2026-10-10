@@ -237,7 +237,7 @@ func RenderConfig(p *Project) (string, error) {
 		}
 		if hc := svc.Healthcheck; hc != nil {
 			cs.Healthcheck = &configHealthcheck{
-				Test:     hc.Test,
+				Test:     healthcheckTestForConfig(hc.Test),
 				Retries:  hc.Retries,
 				Disabled: hc.Disabled,
 			}
@@ -480,4 +480,16 @@ func entrypointForConfig(svc *Service) any {
 		return []string{}
 	}
 	return nil
+}
+
+// healthcheckTestForConfig is a healthcheck's argv written back the way a compose file spells it (docker compose writes the same): a list starts with `CMD` or `CMD-SHELL`, and a shell
+// form, which was read as `sh -c <command>`, comes back as `CMD-SHELL`. An argv with no `sh -c` in front is a `CMD`.
+func healthcheckTestForConfig(argv []string) []string {
+	if len(argv) == 0 {
+		return nil
+	}
+	if len(argv) == 3 && argv[0] == "sh" && argv[1] == "-c" {
+		return []string{"CMD-SHELL", argv[2]}
+	}
+	return append([]string{"CMD"}, argv...)
 }

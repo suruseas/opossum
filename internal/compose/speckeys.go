@@ -142,6 +142,15 @@ func specKeysFromSchema(data []byte) (map[string][]string, error) {
 			out["services.*."+k] = p
 		}
 	}
+	// The long form of an entry of `build.secrets`: the build is a string or an object, and the object's `secrets` is a list of them.
+	if alts, ok := resolve(get(svcProps, "build"))["oneOf"].([]any); ok {
+		for _, a := range alts {
+			obj, _ := a.(map[string]any)
+			if p := props(get(get(obj, "properties"), "secrets")); p != nil {
+				out["services.*.build.secrets[]"] = p
+			}
+		}
+	}
 	dep := resolve(get(svcProps, "deploy"))
 	res := get(get(dep, "properties"), "resources")
 	out["services.*.deploy.resources"] = props(res)
@@ -188,7 +197,7 @@ func specKeysFromSchema(data []byte) (map[string][]string, error) {
 	}
 	out["services.*.depends_on.*"] = patternProps(get(svcProps, "depends_on"))
 	out["services.*.networks.*"] = patternProps(get(svcProps, "networks"))
-	for _, k := range []string{"volume", "network", "secret", "config"} {
+	for _, k := range []string{"volume", "network", "secret", "config", "model"} {
 		out[k+"s.*"] = props(get(defs, k))
 	}
 	net, _ := defs["network"].(map[string]any)

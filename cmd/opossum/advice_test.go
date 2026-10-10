@@ -148,8 +148,9 @@ func TestServiceArgsSpellsNamesAsWords(t *testing.T) {
 // refusal says how to enable it — and what it says has to hold in the run that
 // got it. None of the places profiles come from add up: `--profile` replaces
 // COMPOSE_PROFILES, and COMPOSE_PROFILES in the shell replaces the `.env`'s.
-// Naming the service is a way out only for `up` (`config` reads no names;
-// `run` takes the one it runs). Each row is a run that is refused — its
+// Naming the service is no way out of any of these: every row has `web` turned on by a profile, so the run reads it without a name (docker compose v5.5.1, measured, #1973: `up db web`
+// is refused as `up` is; for a `web` that only its name enables, `up web db` is the way out, TestNamingTheGatedDependencyIsUpsWayOutOnlyForAServiceANameEnables).
+// Each row is a run that is refused — its
 // profiles from one of those places — then what following the refusal, in the
 // place the run reads, comes to.
 func TestTheGatedDependencysRefusalHoldsInTheRunThatGotIt(t *testing.T) {
@@ -176,13 +177,13 @@ func TestTheGatedDependencysRefusalHoldsInTheRunThatGotIt(t *testing.T) {
 		// "" is refused still, with the same refusal, and "-" is no service.
 		wantServices string
 	}{
-		{"up, given --profile: another --profile", []string{"up", "--dry-run", "--no-build"}, true,
+		{"up, given --profile: another --profile", []string{"up", "--dry-run", "--no-build"}, false,
 			given{args: []string{"--profile", "a"}}, given{args: []string{"--profile", "a", "--profile", "b"}}, "db,web"},
 		// COMPOSE_PROFILES beside --profile changes nothing (docker compose
 		// does not read it either): the refusal says so, and this row is that.
-		{"up, given --profile: COMPOSE_PROFILES changes nothing", []string{"up", "--dry-run", "--no-build"}, true,
+		{"up, given --profile: COMPOSE_PROFILES changes nothing", []string{"up", "--dry-run", "--no-build"}, false,
 			given{args: []string{"--profile", "a"}}, given{args: []string{"--profile", "a"}, shell: ptr("a,b")}, ""},
-		{"up, given COMPOSE_PROFILES in the shell: the other profile there as well", []string{"up", "--dry-run", "--no-build"}, true,
+		{"up, given COMPOSE_PROFILES in the shell: the other profile there as well", []string{"up", "--dry-run", "--no-build"}, false,
 			given{shell: ptr("a")}, given{shell: ptr("a,b")}, "db,web"},
 		{"config, given COMPOSE_PROFILES in the shell: the other profile there as well", []string{"config", "--services"}, false,
 			given{shell: ptr("a")}, given{shell: ptr("a,b")}, "db,web"},
@@ -199,9 +200,9 @@ func TestTheGatedDependencysRefusalHoldsInTheRunThatGotIt(t *testing.T) {
 			given{dotenv: "COMPOSE_PROFILES=a\n"}, given{dotenv: "COMPOSE_PROFILES=a,b\n"}, "db,web"},
 		{"config, given COMPOSE_PROFILES in the .env: in the shell instead, it replaces", []string{"config", "--services"}, false,
 			given{dotenv: "COMPOSE_PROFILES=a\n"}, given{dotenv: "COMPOSE_PROFILES=a\n", shell: ptr("b")}, "db"},
-		{"up, given COMPOSE_PROFILES in an --env-file: the other profile there as well", []string{"up", "--dry-run", "--no-build"}, true,
+		{"up, given COMPOSE_PROFILES in an --env-file: the other profile there as well", []string{"up", "--dry-run", "--no-build"}, false,
 			given{envFile: "COMPOSE_PROFILES=a\n"}, given{envFile: "COMPOSE_PROFILES=a,b\n"}, "db,web"},
-		{"up, given COMPOSE_PROFILES in the .env: the other profile there as well", []string{"up", "--dry-run", "--no-build"}, true,
+		{"up, given COMPOSE_PROFILES in the .env: the other profile there as well", []string{"up", "--dry-run", "--no-build"}, false,
 			given{dotenv: "COMPOSE_PROFILES=a\n"}, given{dotenv: "COMPOSE_PROFILES=a,b\n"}, "db,web"},
 		{"config, given COMPOSE_PROFILES in an --env-file: the other profile there as well", []string{"config", "--services"}, false,
 			given{envFile: "COMPOSE_PROFILES=a\n"}, given{envFile: "COMPOSE_PROFILES=a,b\n"}, "db,web"},
@@ -296,10 +297,10 @@ func TestTheGatedDependencysRefusalHoldsInTheRunThatGotIt(t *testing.T) {
 	}
 }
 
-// Naming the service is `up`'s way out: `up db web` reads db beside web, and
-// starts both — where the refused `up` had web alone, and would not have
-// started at all.
-func TestNamingTheGatedDependencyIsUpsWayOut(t *testing.T) {
+// Naming the dependency is `up`'s way out for a service that only its name enables: `up web db` reads db beside web and starts both, where `up web` is refused. For a service the run
+// reads without a name — `web` behind a profile that `--profile a` turns on — it is not: `up db web` is refused as `up` is, and the refusal does not say to name it (docker compose
+// v5.5.1, measured, #1973); enabling db's profile beside the active ones is the way out, and `--profile a --profile b` accepts it.
+func TestNamingTheGatedDependencyIsUpsWayOutOnlyForAServiceANameEnables(t *testing.T) {
 	fakeShim(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	dir := filepath.Join(t.TempDir(), "proj")
@@ -311,15 +312,84 @@ func TestNamingTheGatedDependencyIsUpsWayOut(t *testing.T) {
 	for _, name := range []string{"COMPOSE_PROJECT_NAME", "COMPOSE_PATH_SEPARATOR", "COMPOSE_FILE", "COMPOSE_PROFILES"} {
 		setOrUnset(t, name, nil)
 	}
-	if _, _, err := runSplit(t, "--profile", "a", "up", "--dry-run", "--no-build"); err == nil || !strings.Contains(err.Error(), "name it explicitly") {
+	// web is enabled by its name alone: naming db is the way out.
+	if _, _, err := runSplit(t, "up", "--dry-run", "--no-build", "web"); err == nil || !strings.Contains(err.Error(), "name it explicitly") {
 		t.Fatalf("want it refused, naming a way out; got: %v", err)
 	}
-	out, err := run(t, "--profile", "a", "up", "--dry-run", "--no-build", "db", "web")
+	out, err := run(t, "up", "--dry-run", "--no-build", "web", "db")
 	if err != nil {
 		t.Fatalf("naming db beside web should be accepted; got: %v\n%s", err, out)
 	}
 	if !strings.Contains(out, "db") || !strings.Contains(out, "web") {
 		t.Errorf("both should be in the plan; got:\n%s", out)
+	}
+	// web is read without a name (--profile a): naming db is no way out, and the refusal does not say it is.
+	if _, _, err := runSplit(t, "--profile", "a", "up", "--dry-run", "--no-build"); err == nil || strings.Contains(err.Error(), "name it explicitly") || !strings.Contains(err.Error(), "whose profile is not active") {
+		t.Fatalf("want it refused, without advice to name it; got: %v", err)
+	}
+	if out, _, err := runSplit(t, "--profile", "a", "up", "--dry-run", "--no-build", "db", "web"); err == nil || !strings.Contains(err.Error(), "whose profile is not active") {
+		t.Fatalf("naming db beside a service the run reads without a name should be refused; got: %v\n%s", err, out)
+	}
+	if out, err := run(t, "--profile", "a", "--profile", "b", "up", "--dry-run", "--no-build"); err != nil || !strings.Contains(out, "db") {
+		t.Fatalf("enabling db's profile beside the active ones should be accepted; got: %v\n%s", err, out)
+	}
+}
+
+// A service with no `profiles:` that depends on a gated one is read without a name whatever `up` is given: `up other db` is refused as `up other` is, and neither says to name db (docker
+// compose v5.5.1, measured, #1973); a dependency that shares the profile the run has on is fine.
+func TestNamingTheGatedDependencyOfAnUngatedServiceIsNoWayOut(t *testing.T) {
+	fakeShim(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	dir := filepath.Join(t.TempDir(), "proj")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(dir, "compose.yaml"), "services:\n  other:\n    image: alpine:3\n    depends_on: [db]\n  db:\n    image: alpine:3\n    profiles: [g]\n")
+	t.Chdir(dir)
+	for _, name := range []string{"COMPOSE_PROJECT_NAME", "COMPOSE_PATH_SEPARATOR", "COMPOSE_FILE", "COMPOSE_PROFILES"} {
+		setOrUnset(t, name, nil)
+	}
+	for _, args := range [][]string{{"up", "--dry-run", "--no-build", "other"}, {"up", "--dry-run", "--no-build", "other", "db"}, {"up", "--dry-run", "--no-build", "db", "other"}} {
+		if _, _, err := runSplit(t, args...); err == nil || strings.Contains(err.Error(), "name it explicitly") || !strings.Contains(err.Error(), `"db", whose profile is not active`) {
+			t.Errorf("%v: want it refused, without advice to name it; got: %v", args, err)
+		}
+	}
+	if out, err := run(t, "--profile", "g", "up", "--dry-run", "--no-build", "other"); err != nil || !strings.Contains(out, "db") {
+		t.Errorf("the profile that enables db should be accepted; got: %v\n%s", err, out)
+	}
+}
+
+// …and `run`, `build` and `pull` hold it the same way, naming the dependency or not (`run db true` on `other` -> `db`[g] is refused as `run other true` is); a dependency written
+// `required: false` is no fault whatever it points at, and naming it is fine (docker compose v5.5.1, measured, #1973).
+func TestTheGatedDependencyOfAServiceReadWithoutANameInRunBuildPullAndWhenOptional(t *testing.T) {
+	fakeShim(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	for _, tc := range []struct {
+		name, deps string
+		args       [][]string
+		refused    bool
+	}{
+		{"required", "[db]", [][]string{{"run", "--rm", "db", "true"}, {"run", "--rm", "other", "true"}, {"up", "--dry-run", "--no-build", "db"}}, true},
+		{"not required", "{db: {condition: service_started, required: false}}", [][]string{{"run", "--rm", "db", "true"}, {"up", "--dry-run", "--no-build", "other", "db"}, {"up", "--dry-run", "--no-build", "db"}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "proj")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			write(t, filepath.Join(dir, "compose.yaml"), "services:\n  other:\n    image: alpine:3\n    depends_on: "+tc.deps+"\n  db:\n    image: alpine:3\n    profiles: [g]\n")
+			t.Chdir(dir)
+			for _, name := range []string{"COMPOSE_PROJECT_NAME", "COMPOSE_PATH_SEPARATOR", "COMPOSE_FILE", "COMPOSE_PROFILES"} {
+				setOrUnset(t, name, nil)
+			}
+			for _, args := range tc.args {
+				_, _, err := runSplit(t, args...)
+				refusedOverIt := err != nil && strings.Contains(err.Error(), `"db", whose profile is not active`)
+				if refusedOverIt != tc.refused {
+					t.Errorf("%v: refused over the gated dependency = %v, docker compose: %v (err %v)", args, refusedOverIt, tc.refused, err)
+				}
+			}
+		})
 	}
 }
 
