@@ -43,6 +43,29 @@ type Fragment struct {
 	Body   string // the entry, trimmed, starting with "- "
 }
 
+// Waiting loads the fragments in dir that the changelog at changelogPath is
+// waiting to release. No fragments, and no directory, is a real state (right
+// after a release), and also what Load answers for a directory that is not
+// where the fragments are. The changelog tells the two apart: its [Unreleased]
+// section is made from the fragments, so entries there with none found in dir
+// is an error, not an empty answer.
+func Waiting(changelogPath, dir string) ([]Fragment, error) {
+	b, err := os.ReadFile(changelogPath)
+	if err != nil {
+		return nil, err
+	}
+	frags, err := Load(dir)
+	if err != nil {
+		return nil, err
+	}
+	if len(frags) == 0 && strings.TrimSpace(Unreleased(string(b))) != "" {
+		return nil, fmt.Errorf("%s's [Unreleased] has entries and no fragment was found in %s; "+
+			"the section is made from the fragments, so this is looking in the wrong place",
+			filepath.Base(changelogPath), dir)
+	}
+	return frags, nil
+}
+
 // Load reads every fragment in dir, sorted the way they will be rendered: by
 // number, then slug. Ordering is fixed so the assembled section is reproducible —
 // a changelog that shuffles between runs can't be golden-tested.

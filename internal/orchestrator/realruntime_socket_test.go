@@ -213,8 +213,7 @@ func TestARealSymlinkToASocketIsStillRefused(t *testing.T) {
 // a Docker daemon rather than something else listening on that path.
 //
 // They are declared rather than written into the conditions below, so that
-// what the measurement decides on is one line to read: weakening it means
-// editing this line.
+// what the measurement decides on can be read in one place.
 //
 // The first is not a daemon's mark on its own — any HTTP server answers 200.
 // The second is: the Engine API writes its version header, and a plain server

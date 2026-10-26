@@ -958,9 +958,10 @@ func releaseTarget(t *testing.T, root string) (main, goos, goarch string) {
 }
 
 // A job that has no limit of its own runs for six hours, and a hung test run
-// would hold a runner that long. The limit has two edges: at least 40,
-// so a slow green is not cut (the longest job measured took 17 minutes, and a
-// `go test` package may take 30 of its own), and at most 60, so it is a bound.
+// would hold a runner that long. The limit has two edges: at least 40, so a
+// slow green is not cut (the longest job measured, on the self-hosted runners
+// this used before, took 17 minutes, and a `go test` package may take 30 of
+// its own), and at most 60, so it is a bound.
 // Only these edges are pinned — the figure inside them is a choice.
 func checkJobTimeout(t *testing.T, what string, job map[string]any) {
 	t.Helper()

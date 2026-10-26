@@ -49,9 +49,9 @@ jobs:
     # git) the runner lacks, rather than letting a later step fail on it
     # obliquely.
     runs-on: ubuntu-latest
-    # The longest job measured (of about 600 recent runs) took 17 minutes;
-    # the default limit is 360, so a hung test run would hold a runner for
-    # hours. 45 is about two and a half times the longest, and `go test`
+    # The longest job measured (of about 600 runs on the self-hosted runners
+    # this used before) took 17 minutes; the default limit is 360, so a hung
+    # test run would hold a runner for hours. 45 is about two and a half times the longest, and `go test`
     # has its own per-package timeout inside it. The limit counts from the job
     # starting on a runner, not from the queue.
     timeout-minutes: 45
@@ -154,10 +154,10 @@ jobs:
       # (they must never write to the real one). Made just before the gate
       # and removed after it, whatever the gate said.
       # While the job runs, the host's load is written to a file every 15 s,
-      # and the last step but one prints it. A job on these runners
-      # sometimes takes about four times as long as the same job another day
-      # (`go vet` 8 s against 21-31 s), and what else was running on the
-      # machine at the time left no trace. The sampler is a background shell
+      # and the last step but one prints it. A job on the self-hosted runners
+      # this used before sometimes took about four times as long as the same
+      # job another day (`go vet` 8 s against 21-31 s), and what else was
+      # running on the machine at the time left no trace. The sampler is a background shell
       # the runner removes with the job's other processes; it reads `uptime`
       # and the five busiest processes, so it costs next to nothing.
       - name: the host's load is sampled while the job runs
@@ -536,10 +536,10 @@ jobs:
       - name: build (stable)
         run: go build ./...
       # While the job runs, the host's load is written to a file every 15 s,
-      # and the last step but one prints it. A job on these runners
-      # sometimes takes about four times as long as the same job another day
-      # (`go vet` 8 s against 21-31 s), and what else was running on the
-      # machine at the time left no trace. The sampler is a background shell
+      # and the last step but one prints it. A job on the self-hosted runners
+      # this used before sometimes took about four times as long as the same
+      # job another day (`go vet` 8 s against 21-31 s), and what else was
+      # running on the machine at the time left no trace. The sampler is a background shell
       # the runner removes with the job's other processes; it reads `uptime`
       # and the five busiest processes, so it costs next to nothing.
       - name: the host's load is sampled while the job runs

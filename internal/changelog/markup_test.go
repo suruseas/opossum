@@ -101,12 +101,10 @@ func TestMarkupProblem(t *testing.T) {
 func TestFragmentsRenderAsWritten(t *testing.T) {
 	root := repoRoot(t)
 	dir := filepath.Join(root, "changelog.d")
-	// No fragments, and no directory, is a real state (right after a release),
-	// and one Load also answers for a directory that is not where the fragments
-	// are. CHANGELOG.md tells the two apart: its [Unreleased] section is made
-	// from the fragments, so entries there with none found here is this test
-	// looking in the wrong place.
-	frags := waitingFragments(t, root, dir)
+	frags, err := changelog.Waiting(filepath.Join(root, "CHANGELOG.md"), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(frags) == 0 {
 		t.Skip("no fragments waiting for a release")
 	}
@@ -119,28 +117,6 @@ func TestFragmentsRenderAsWritten(t *testing.T) {
 			t.Errorf("%s: %s", filepath.Base(f.Path), p)
 		}
 	}
-}
-
-// waitingFragments loads the fragments in dir, and fails when CHANGELOG.md at
-// root says there are fragments waiting and none were found there.
-func waitingFragments(t *testing.T, root, dir string) []changelog.Fragment {
-	t.Helper()
-	b, err := os.ReadFile(filepath.Join(root, "CHANGELOG.md"))
-	if err != nil {
-		t.Fatalf("the repository root is not where this test looks: %v", err)
-	}
-	if fi, err := os.Stat(dir); err == nil && !fi.IsDir() {
-		t.Fatalf("%s is not a directory", dir)
-	}
-	frags, err := changelog.Load(dir)
-	if err != nil {
-		t.Fatalf("reading %s: %v", dir, err)
-	}
-	if len(frags) == 0 && strings.TrimSpace(changelog.Unreleased(string(b))) != "" {
-		t.Fatalf("CHANGELOG.md's [Unreleased] has entries and no fragment was found in %s; "+
-			"the section is made from the fragments, so this is looking in the wrong place", dir)
-	}
-	return frags
 }
 
 // A line number names the file's line, not the trimmed entry's: blank lines at
