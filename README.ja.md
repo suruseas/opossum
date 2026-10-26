@@ -261,15 +261,7 @@ docker compose と同じ意味で読みます。
 
 ## 開発
 
-```sh
-make test
-
-# fake shim を使うと、実ランタイムなしでオーケストレーションをスモークテストできます：
-OPOSSUM_CONTAINER_BIN="$PWD/testdata/fake-container.sh" \
-  go run ./cmd/opossum -f examples/compose.yaml up
-```
-
-ユーザに見える変更は [`CHANGELOG.md`](CHANGELOG.md) にまとめています（英語）。
+開発環境の準備、テストの走らせ方（fake のランタイムで走るので Apple `container` は不要です）、PR の送り方は [`CONTRIBUTING.md`](CONTRIBUTING.md)（英語）にまとめています。ユーザに見える変更は [`CHANGELOG.md`](CHANGELOG.md) にまとめています（英語）。
 
 `OPOSSUM_CONTAINER_BIN` は、ランタイムとして呼び出すバイナリを上書きします。fake shim の出力は実際の CLI と同期を保っています（[`testdata/real-cli-output.md`](testdata/real-cli-output.md) 参照）。
 

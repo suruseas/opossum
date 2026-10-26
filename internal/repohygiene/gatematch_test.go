@@ -402,7 +402,7 @@ func TestThePushSieveRunsTheGateOnTheCommittedTree(t *testing.T) {
 // The commands the gate runs, named in full, in the order it runs them. The
 // wrapper is part of each: an earlier version accepted `go run <anything> go
 // test`, so pointing the recipe at a different program — one that runs no
-// tests at all — left this green while CONTRIBUTING went on saying otherwise.
+// tests at all — left this green while the documents went on saying otherwise.
 //
 // Two commands, not one, and the order is load-bearing. cmd/busy measures
 // how much CPU the machine can give, and `go test ./...` runs packages in
@@ -649,8 +649,7 @@ func TestWhatCountsAsRunningTheGate(t *testing.T) {
 // **What it does not reach:** a line that runs the weaker gate through
 // something else (`sh -c "go test ./..."`), which nothing in the tree does; and
 // prose that mentions the command without a line starting with it, which
-// several places do — CONTRIBUTING talks about `go test` at lines 98, 142, 148
-// and 300 without telling anyone to type it, and none of that is read here.
+// several places may do; none of that is read here.
 func TestNoDocumentTellsPeopleToRunTheGateDirectly(t *testing.T) {
 	root := repoRoot(t)
 	out, err := exec.Command("git", "-C", root, "ls-files", "-z", "*.md").Output()

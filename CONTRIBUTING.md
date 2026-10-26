@@ -30,20 +30,26 @@ make build   # builds ./opossum
 make test    # the full test suite
 ```
 
-To try a change against the fake runtime without touching a real one:
+To try a change against the fake runtime without touching a real one, give
+the fake an empty directory to keep its state in (`STATE_DIR`) and ask it to
+know only the containers it started (`INSPECT_STRICT=1`):
 
 ```sh
+STATE_DIR="$(mktemp -d)" INSPECT_STRICT=1 \
 OPOSSUM_CONTAINER_BIN="$PWD/testdata/fake-container.sh" \
   go run ./cmd/opossum -f examples/compose.yaml up
 ```
 
 To run against the real runtime, you need a Mac with Apple silicon and Apple
 `container` installed and running. `make real-conformance` runs the
-measurements that only the real runtime can answer.
+measurements that only the real runtime can answer; one of them also needs a
+Docker daemon running, and fails without one.
 
 `make hooks` (optional, once per clone) wires a commit hook that checks the tree
 builds and is formatted, and a push hook that runs the test suite in a clean
-Linux container (this one needs Docker).
+Linux container. The push hook needs Docker running, and refuses the push when
+it is not. Until the hooks are wired, `make test` prints a line saying so; that
+line is only a reminder.
 
 ## Making a change
 
@@ -76,9 +82,11 @@ fragment in the same pull request. Don't edit `CHANGELOG.md` by hand.
 3. Run `make changelog`, which regenerates the `[Unreleased]` section of
    `CHANGELOG.md` from the fragments, and commit both.
 
-Tests, refactoring and documentation-only changes need no fragment. CI asks for
-one when code that ships changes; if such a change really has nothing to
-announce, put `[skip changelog]` in the pull request description.
+Changes to tests and documentation need no fragment. CI asks for one whenever
+code that ships changes (anything under `cmd/` or `internal/` other than a
+`_test.go` file), refactoring included; if such a change really has nothing to
+announce, put `[skip changelog]` in the pull request description. CI reads the
+description as it was when the run started, so after editing it, push again.
 
 ## Pull requests
 

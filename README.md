@@ -359,15 +359,10 @@ as docker compose reads it.
 
 ## Development
 
-```sh
-make test
-
-# Smoke-test the orchestration without the real runtime using the fake shim:
-OPOSSUM_CONTAINER_BIN="$PWD/testdata/fake-container.sh" \
-  go run ./cmd/opossum -f examples/compose.yaml up
-```
-
-Changes that users would notice are listed in [`CHANGELOG.md`](CHANGELOG.md).
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for setting up, running the tests
+(against a fake runtime, so no Apple `container` is needed) and sending a pull
+request. Changes that users would notice are listed in
+[`CHANGELOG.md`](CHANGELOG.md).
 
 `OPOSSUM_CONTAINER_BIN` overrides which binary is invoked as the runtime. The
 fake shim's output is kept in sync with the real CLI (see

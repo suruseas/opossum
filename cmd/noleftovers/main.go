@@ -43,7 +43,6 @@ const interruptGrace = 500 * time.Millisecond
 // The other shape is t.TempDir's — removed by t.Cleanup, which a killed process
 // never reaches, and carrying no pid, so nothing can ask afterwards whether its
 // maker is still alive (#552). Being told it is there is all that is possible.
-// What both leave out is written down in CONTRIBUTING.md.
 const ours = "opossum-*"
 
 // testTempDirGlob gathers t.TempDir's candidates; testTempDir is the shape that
