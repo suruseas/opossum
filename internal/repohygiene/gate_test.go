@@ -219,44 +219,6 @@ func TestTheChangelogGateAsksForANoteAboutEverythingThatShips(t *testing.T) {
 // `_work/_temp`, which is under the runner user's home, where the suites
 // refuse to put a state directory — so two jobs on one machine do not
 // read each other's leftovers.
-// The prose that says when CI runs is held to the triggers: CONTRIBUTING has
-// to say a push to main runs it while `on.push` is there, and may not say the
-// opposite in any of the spellings it once used. One sentence in the positive,
-// because a list of forbidden spellings only catches the ones already thought
-// of: with the negative alone, a version that added "CI does not run on pushes
-// to main" and a version that deleted the section both passed.
-//
-// Read with the line breaks folded, so that wrapping the paragraph again is
-// not a change of meaning here — and a denial split across two lines is still
-// a denial. Which sentence is required follows the workflow: with `on.push`
-// there, the prose has to say main's pushes run; without it, it may not.
-func TestCONTRIBUTINGSaysWhenCIRuns(t *testing.T) {
-	root := repoRoot(t)
-	contributing := strings.Join(strings.Fields(read(t, root, "CONTRIBUTING.md")), " ")
-	b, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "ci.yml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var top struct {
-		On map[string]any `yaml:"on"`
-	}
-	if err := yaml.Unmarshal(b, &top); err != nil {
-		t.Fatal(err)
-	}
-	_, onPush := top.On["push"]
-	if !strings.Contains(contributing, "CI runs on every push to a pull request, drafted or not") {
-		t.Errorf("CONTRIBUTING.md has to say that CI runs on every push to a pull request, drafted or not (on.pull_request)")
-	}
-	if says := strings.Contains(contributing, "and on every push to main"); says != onPush {
-		t.Errorf("CONTRIBUTING.md says that CI runs on every push to main: %v; the workflow has on.push: %v — the two have to agree", says, onPush)
-	}
-	for _, denial := range []string{"no CI on pushes to main", "does not run on pushes to main", "not run on a push to main", "main is not run"} {
-		if strings.Contains(contributing, denial) == onPush {
-			t.Errorf("CONTRIBUTING.md says %q: %v; the workflow has on.push: %v — the two have to agree", denial, !onPush, onPush)
-		}
-	}
-}
-
 func TestTheTwoJobsKeepTheirPromises(t *testing.T) {
 	root := repoRoot(t)
 	b, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "ci.yml"))
@@ -351,11 +313,8 @@ func TestTheTwoJobsKeepTheirPromises(t *testing.T) {
 			// value is empty, the condition is false, and the step is skipped
 			// — the danger is an empty value used as data.)
 			want := onEveryPullRequest
-			if n, _ := m["name"].(string); n == changelogGateName {
-				want = onEveryPullRequestHere
-			}
 			if cond, _ := m["if"].(string); cond != want {
-				t.Errorf("%s: step %d (%v) reads github.event.pull_request but runs on %q; on a push to main the event carries no pull request, and a gate runs after a red step, so the condition has to be exactly %s (the spelling is pinned; only the changelog fragment gate adds the repository test, and only because the published copy carries no changelog.d/)", name, i, m["name"], cond, want)
+				t.Errorf("%s: step %d (%v) reads github.event.pull_request but runs on %q; on a push to main the event carries no pull request, and a gate runs after a red step, so the condition has to be exactly %s (the spelling is pinned)", name, i, m["name"], cond, want)
 			}
 		}
 	}
@@ -367,10 +326,8 @@ func TestTheTwoJobsKeepTheirPromises(t *testing.T) {
 			t.Errorf("the stable job's first step uses %q; this check treats it as a plain checkout and does not run it", u)
 		}
 	}
-	// Where: the self-hosted runner class, which the reasons at the top of
-	// the file rest on (a job there is not billed by the minute; when a
-	// second runner joins, two share one machine, so the gates keep their
-	// temporary directories apart).
+	// Where: a GitHub-hosted runner, which the reasons at the top of the file
+	// rest on.
 	// Which compiler each job installs. The whole reason there are two of
 	// them is that some of what this code reads — and writes — changes
 	// between compilers: coverage block boundaries moved between Go 1.26 and
@@ -413,14 +370,10 @@ func TestTheTwoJobsKeepTheirPromises(t *testing.T) {
 		}
 	}
 	for _, name := range []string{"ci", "stable"} {
-		if caches[name] != cacheByRepository {
+		if caches[name] != cacheLine {
 			t.Errorf("the %s job's setup-go says cache: %s; this check knows one shape — %s — and "+
-				"nothing else. The line decides whether about 4.4 GB is uploaded and downloaded "+
-				"around every run, and it has to follow the same field the runner does: turned off "+
-				"where the runner keeps its own copy between jobs, on where every run gets a fresh "+
-				"machine that keeps nothing. Written either way round by hand, a run pays for a "+
-				"cache it already has or builds from scratch every time, and neither shows up as a "+
-				"red result", name, caches[name], cacheByRepository)
+				"nothing else. A hosted runner keeps nothing between runs, so without the cache "+
+				"every run builds from scratch, and that does not show up as a red result", name, caches[name], cacheLine)
 		}
 	}
 	if asks["ci"] != "file:go.mod" {
@@ -433,8 +386,8 @@ func TestTheTwoJobsKeepTheirPromises(t *testing.T) {
 		t.Errorf("both jobs install %q; the two exist to run different compilers, and on one compiler neither of the things they are here to catch can show up in a green run", asks["ci"])
 	}
 	for name, job := range map[string]map[string]any{"ci": ci, "stable": stable} {
-		if got := fmt.Sprint(job["runs-on"]); got != runsOnByRepository {
-			t.Errorf("the %s job runs on %s; this check knows one shape — %s — and nothing else. Both jobs carry it: the private repository's self-hosted runners are what the reasons at the top of the file rest on, and the published copy has no runner of its own at all", name, got, runsOnByRepository)
+		if got := fmt.Sprint(job["runs-on"]); got != runsOn {
+			t.Errorf("the %s job runs on %s; this check knows one shape — %s — and nothing else. Both jobs carry it: an outside contributor's pull request runs here, so it runs on a machine of GitHub's, not the maintainer's", name, got, runsOn)
 		}
 	}
 	for name, job := range map[string]map[string]any{"ci": ci, "stable": stable} {
@@ -450,7 +403,7 @@ func TestTheTwoJobsKeepTheirPromises(t *testing.T) {
 			if _, has := m["continue-on-error"]; has && stepName != "validate .goreleaser.yaml" {
 				t.Errorf("%s: step %d (%q) carries continue-on-error: its red would read as the job's green", name, i, stepName)
 			}
-			if run, _ := m["run"].(string); strings.TrimSpace(run) == gateByRepository {
+			if run, _ := m["run"].(string); strings.TrimSpace(run) == gateLine {
 				gates++
 				const want = ""
 				if cond, _ := m["if"].(string); cond != want {
@@ -592,41 +545,23 @@ type gate struct {
 // What the two jobs say about where they run, when the gates run, and which
 // gate they run, in one place, because several checks read them.
 //
-// Where: the private repository carries the self-hosted runners; the copy
-// each release publishes carries none, so a job asking for those labels there
-// waits for a runner that will never take it — a day, and then a cancel — and
-// an outside contributor's pull request gets no answer. The expression falls
-// to the hosted runner when it cannot read the field, so the checks run
-// wherever this lands.
-const runsOnByRepository = `${{ github.event.repository.private && fromJSON('["self-hosted", "Linux", "X64"]') || 'ubuntu-latest' }}`
+// Where: a GitHub-hosted runner, a machine of GitHub's rather than the
+// maintainer's, since an outside contributor's pull request runs here too.
+const runsOn = "ubuntu-latest"
 
-// Which gate: the whole one where the workshop is, the packages the released
-// binary links where only the product is.
-const gateByRepository = `${{ github.event.repository.private && 'make test' || 'make test-shipped' }}`
+// Which gate: the whole of `make test`, the one the pre-push sieve runs.
+const gateLine = "make test"
 
-// Whether setup-go carries the module and build caches across runs, which
-// follows the same field for the same reason the runner does. The self-hosted
-// runner holds both directories on its own disk between jobs, so saving and
-// restoring them moves data the next run already has — 18 minutes of a
-// 23-minute run went to the two uploads, and the 10 GB cache quota filled with
-// copies. A GitHub-hosted runner is a fresh machine each time and keeps
-// nothing, so there the saved copy is the only one there is. The two lines are
-// written the same way round and are pinned here together: written by hand,
-// one of them turns into either a run paying to upload a cache it already has
-// or a run building everything from scratch, and neither of those is a red
-// result anywhere.
-const cacheByRepository = "${{ !github.event.repository.private }}"
+// Whether setup-go carries the module and build caches across runs. A hosted
+// runner is a fresh machine each time and keeps nothing, so the saved copy is
+// the only one there is; turned off by hand, every run builds everything from
+// scratch, and that is not a red result anywhere.
+const cacheLine = "true"
 
 // When: every step that reads `github.event.pull_request` carries this, so
 // that a push to main — which has no pull request — does not run it with
 // empty revisions, and a gate still runs after a red step.
 const onEveryPullRequest = "${{ !cancelled() && github.event_name == 'pull_request' }}"
-
-// The one step that adds to it. The published copy carries no `changelog.d/`,
-// so asking a contributor there for a fragment asks for a file with nowhere
-// to go. The test is the repository, not the directory's absence: a
-// `changelog.d/` deleted by accident here still fails that gate loudly.
-const onEveryPullRequestHere = "${{ !cancelled() && github.event_name == 'pull_request' && github.event.repository.private != false }}"
 
 // The gate step's name, which is how the checks find it.
 const changelogGateName = "a shipped change needs a changelog.d fragment"
@@ -738,10 +673,10 @@ func readGate(t *testing.T, root string) gate {
 	}
 	allowed(t, "the gate step", step, "name", "if", "env", "run")
 	cond, _ := step["if"].(string)
-	if cond != onEveryPullRequestHere {
+	if cond != onEveryPullRequest {
 		t.Fatalf("the gate step runs on %q; this check knows one condition — %s, which is every pull "+
 			"request in this repository, even when an earlier step failed — and a different one may "+
-			"mean it never runs", cond, onEveryPullRequestHere)
+			"mean it never runs", cond, onEveryPullRequest)
 	}
 
 	g := gate{condition: cond, env: map[string]string{}}

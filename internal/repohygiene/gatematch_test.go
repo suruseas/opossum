@@ -74,52 +74,33 @@ import (
 func TestCIRunsTheGateItself(t *testing.T) {
 	root := repoRoot(t)
 	makefile := read(t, root, "Makefile")
-	contributing := read(t, root, "CONTRIBUTING.md")
 	ci := read(t, root, ".github/workflows/ci.yml")
 
-	// Per command: found exactly once in the Makefile's recipe and once in
-	// CONTRIBUTING's shown copy, with the same flags in both places, and with
-	// nothing after it but flags — `|| true` turns a red gate green, and the
+	// Per command: found exactly once in the Makefile's recipe, with nothing
+	// after it but flags — `|| true` turns a red gate green, and the
 	// busy line is exactly the one a flaky week would tempt someone to quiet.
 	// The CI line below has carried this refusal since the fold; the recipe
 	// lines get the same one.
 	perCommand := map[string]map[string]bool{}
 	for _, cmd := range gateCommands {
-		localRest, err1 := restAfter(makefile, cmd, recipeOf("test"), true)
-		shownRest, err3 := restAfter(contributing, cmd, everyLine, false)
-		bad := false
-		for path, err := range map[string]error{"Makefile": err1, "CONTRIBUTING.md": err3} {
-			if err != nil {
-				t.Errorf("%s: %v", path, err)
-				bad = true
-			}
-		}
-		if bad {
+		localRest, err := restAfter(makefile, cmd, recipeOf("test"), true)
+		if err != nil {
+			t.Errorf("Makefile: %v", err)
 			continue
 		}
-		for place, rest := range map[string]string{"Makefile": localRest, "CONTRIBUTING.md": shownRest} {
-			for _, word := range strings.Fields(rest) {
-				if strings.HasPrefix(word, "#") {
-					break
-				}
-				if !strings.HasPrefix(word, "-") {
-					t.Errorf("%s: `%s` runs with %q after it. A word that is not a flag changes "+
-						"what the line does — `|| true` reports every red run green. Run the "+
-						"command with its flags and nothing else, or teach this test the "+
-						"addition on purpose.", place, cmd, word)
-					break
-				}
+		for _, word := range strings.Fields(localRest) {
+			if strings.HasPrefix(word, "#") {
+				break
+			}
+			if !strings.HasPrefix(word, "-") {
+				t.Errorf("Makefile: `%s` runs with %q after it. A word that is not a flag changes "+
+					"what the line does — `|| true` reports every red run green. Run the "+
+					"command with its flags and nothing else, or teach this test the "+
+					"addition on purpose.", cmd, word)
+				break
 			}
 		}
-		local, shown := flagsIn(localRest), flagsIn(shownRest)
-		// CONTRIBUTING shows the recipe rather than pointing at it, so there
-		// are two places to change. A change that exists to stop two places
-		// drifting apart should not quietly leave a third behind.
-		if !reflect.DeepEqual(sortedKeys(shown), sortedKeys(local)) {
-			t.Errorf("CONTRIBUTING says `%s` runs %v and the Makefile runs %v",
-				cmd, sortedKeys(shown), sortedKeys(local))
-		}
-		perCommand[cmd] = local
+		perCommand[cmd] = flagsIn(localRest)
 	}
 	// And the two commands ask for the same things as each other. The split
 	// exists to move busy, not to weaken it: a `-race` dropped from one line
@@ -297,7 +278,7 @@ func TestCIRunsTheGateItself(t *testing.T) {
 // answered for 2 packages out of a cache frozen weeks earlier. The comparison
 // above cannot hold this line: it reads flag names, not values — for every
 // other flag the name is the ask, but `-count=3` is not this ask — so the value
-// is pinned here, in both places that write the recipe out.
+// is pinned here, where the recipe is written out.
 func TestTheGateRunsColdEveryTime(t *testing.T) {
 	root := repoRoot(t)
 	for _, place := range []struct {
@@ -305,7 +286,6 @@ func TestTheGateRunsColdEveryTime(t *testing.T) {
 		scope where
 	}{
 		{"Makefile", recipeOf("test")},
-		{"CONTRIBUTING.md", everyLine},
 	} {
 		for _, cmd := range gateCommands {
 			rest, err := restAfter(read(t, root, place.path), cmd, place.scope, place.path == "Makefile")
@@ -434,13 +414,9 @@ func TestThePushSieveRunsTheGateOnTheCommittedTree(t *testing.T) {
 const (
 	gateSweep = "go run ./cmd/noleftovers go test $$(go list ./... | grep -v '/cmd/busy$$')"
 	gateBusy  = "go run ./cmd/noleftovers go test ./cmd/busy"
-	// What the workflow writes on the gate's line. The gate itself is
-	// `make test`; which one runs is decided where the run happens, because
-	// the published copy of this repository carries the product without the
-	// workshop — no contributor guidance, no changelog fragments — and the
-	// checks that read those files have nothing to read there.
-	ciCommand = `${{ github.event.repository.private && 'make test' || 'make test-shipped' }}`
-	// The other gate, the one the published copy runs. Its set is not written
+	// What the workflow writes on the gate's line.
+	ciCommand = "make test"
+	// The narrower gate: the packages the released binary links. Its set is not written
 	// out: the compiler is asked which packages the released binary links, so
 	// a package added to the binary is tested without anyone remembering to
 	// add it. That is the whole claim, and it lives in this one line — which
@@ -625,11 +601,8 @@ func TestWhatCountsAsRunningTheGate(t *testing.T) {
 			gateBusy, " -race -cover -count=1", true},
 		{"the workflow line", "        run: " + ciCommand,
 			"run: " + ciCommand, "", true},
-		// The gate it names is chosen where the run happens, so the bare
-		// `make test` is no longer the line the workflow writes: a workflow
-		// that went back to it would be running the whole gate on the
-		// published copy, where the files half of it reads are not there.
-		{"the bare command the line used to be", "        run: make test",
+		// The narrower gate is not the line the workflow writes.
+		{"the narrower gate is not this line", "        run: make test-shipped",
 			"run: " + ciCommand, "", false},
 		{"a wrapped recipe is still this line", "\tgo run ./cmd/noleftovers go test ./cmd/busy \\",
 			gateBusy, " \\", true},
@@ -832,14 +805,13 @@ func TestWhatCountsAsTellingSomeoneToRunItDirectly(t *testing.T) {
 	}
 }
 
-// The published copy runs `make test-shipped`, and nothing until now read what
+// `make test-shipped` is the narrower gate, and nothing until now read what
 // that target does. Six one-line changes to its recipe — dropping `-race`,
 // dropping the noleftovers wrapper, narrowing the grep so `cmd/opossum` falls
 // out of the set, replacing the whole `go list -deps` with one package,
 // deleting the target, and adding `|| true` — each changed which packages run
 // or what they are held to, and each left this package's tests green. The gate
-// the private repository runs has its recipe pinned in three places; the one
-// the published binary is checked by had none.
+// CI runs has its recipe pinned in three places; the narrower one had none.
 //
 // One subtest per promise, so that what a red result says is which promise
 // went.
@@ -850,7 +822,7 @@ func TestTheShippedGateRunsWhatTheBinaryLinks(t *testing.T) {
 
 	t.Run("the recipe asks the compiler which packages the binary links", func(t *testing.T) {
 		if err != nil {
-			t.Errorf("Makefile: %v. The published copy's gate is this one line: `%s`. "+
+			t.Errorf("Makefile: %v. The narrower gate is this one line: `%s`. "+
 				"A set written out by hand instead goes stale the first time a package is "+
 				"added to the binary, and a narrower one reports `ok` for the packages it "+
 				"did run", err, shippedGate)

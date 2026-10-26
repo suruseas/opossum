@@ -4,17 +4,10 @@ name: ci
 # fake `container` shim is just Go + /bin/sh), so they run on Linux — fast and
 # cheap. The real-`container` layer needs macOS 26 on Apple silicon with nested
 # virtualization, which GitHub-hosted runners don't provide; that layer is
-# verified on real hardware (see docs/real-runtime-review.md).
+# verified on real hardware (`make real-conformance`).
 #
-# Two jobs, one per compiler, so that they run side by side: two self-hosted
-# runners on one machine take one each. This workflow used to be one job:
-# Actions bills GitHub-hosted jobs separately, one-minute minimum, rounded
-# up, and folded into one job the bill tracked the work. A self-hosted job
-# is not billed by the minute, so the fold's reason is gone and its price is
-# what is left: the two compilers waiting on each other. Measured: one job,
-# 620 s; two jobs on one runner, 591 s (one after the other, 283 s and
-# 301 s); two jobs on two runners, 425 s (side by side, 419 s and 382 s —
-# each slower than alone, the two sharing one machine's CPU).
+# Two jobs, one per compiler, so that they run side by side on two runners
+# rather than one after the other, the two compilers waiting on each other.
 # Each job carries its own checkout and its own compiler; the pull-request
 # gates (the changelog fragment, the released sections) and the
 # release-config check ride with the go.mod compiler's job. Each job's gate
@@ -23,20 +16,10 @@ name: ci
 # directory, and a directory shared with the other job would show it the
 # other job's work in progress.
 # Every push to a pull request runs it, drafted or not (and a reopened pull
-# request runs again: with the ready mark no longer a trigger, reopening is
-# a way to run the same head again without a push), and so does every push
-# to main. It used to skip a draft's pushes and main's altogether: the
-# runner was GitHub-hosted and billed by the minute, the account had 2,000
-# free minutes a month, and a run took about six minutes in its last shape
-# (one job; measured over 2026-09-01..05, the longest job 368 s) and longer
-# in earlier ones — so a draft was left to the push-time sieve (`make
-# sieve`, a fresh Linux container on the developer's own metal, run by the
-# pre-push hook), marking it ready was the request for attestation, and
-# main's tree, the squash of a head already attested, was not run. On the
-# self-hosted runners none of that costs minutes, and what each run gives
-# is worth having: a draft's run finds a broken shape while it is still
-# being worked on, and main's run is a green about main's own tree, so a
-# release cuts its tag over a run that already happened. A `[skip ci]` in a
+# request runs again: reopening is a way to run the same head again without
+# a push), and so does every push to main: a draft's run finds a broken
+# shape while it is still being worked on, and main's run is a green about
+# main's own tree. A `[skip ci]` in a
 # commit's message makes GitHub skip that push's run, on a pull request as
 # on main (measured: a commit whose message merely mentioned the marker got
 # no run); the squash commit's title is the pull request's title (or the
@@ -58,45 +41,19 @@ on:
 
 jobs:
   ci:
-    # A self-hosted runner: the labels name the machine class, not a machine,
-    # so a replacement with the same labels takes over without a change here.
-    # release.yml (a darwin build) and pages.yml (the deploy permission) stay
-    # on GitHub-hosted runners. The runner is expected to carry gcc (-race),
-    # jq (go.mod version reads), make and git; the first step says which one
-    # is missing rather than letting a later step fail on it obliquely — so
-    # if the hosted image below turns out not to carry all four, that step
-    # says which one, rather than a later step failing on it obliquely. No
-    # run has happened on a hosted runner yet; the first one will say.
-    # Where this runs depends on which copy of the repository it is. The
-    # private repository is where the work happens and carries the two
-    # self-hosted runners; the published copy, which each release overwrites
-    # with this tree, has none — a job asking for those labels there waits
-    # for a machine that will never take it and is cancelled unrun (24 hours
-    # after one release's push, 21 minutes after another's), and an outside
-    # contributor's pull request gets no answer either. GitHub-hosted runners
-    # are free for a public repository and are GitHub's machines, not the
-    # maintainer's, so the reason the work is kept off hosted runners here —
-    # a contributor's code running on the maintainer's hardware — does not
-    # apply there.
-    #
-    # The expression falls to `ubuntu-latest` when it cannot read the field,
-    # which is the fallback that runs rather than the one that waits for a
-    # runner that will never take it. What falls with it is the rest of the
-    # switch: an unreadable field also turns the cache on and picks
-    # `make test-shipped`, the narrower gate. The three triggers this
-    # workflow has — pull_request, push and workflow_dispatch — all carry
-    # `repository` in their payload (measured, #1237: a `toJSON(github.event.
-    # repository)` step run once under each trigger, all three showed it
-    # populated), so the field is there to read; this says where the
-    # expression lands if that ever stops being true, not that landing there
-    # is as good.
-    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted", "Linux", "X64"]') || 'ubuntu-latest' }}
+    # A GitHub-hosted runner: free for a public repository, and a machine of
+    # GitHub's rather than the maintainer's, which matters because an outside
+    # contributor's pull request runs here. release.yml (a darwin build) and
+    # pages.yml (the deploy permission) run on hosted runners too. The first
+    # step says which of the tools the steps assume (gcc for -race, jq, make,
+    # git) the runner lacks, rather than letting a later step fail on it
+    # obliquely.
+    runs-on: ubuntu-latest
     # The longest job measured (of about 600 recent runs) took 17 minutes;
     # the default limit is 360, so a hung test run would hold the one runner
     # for hours. 45 is about two and a half times the longest, and `go test`
     # has its own per-package timeout inside it. The limit counts from the job
-    # starting on a runner, not from the queue; it applies to the hosted
-    # runner of the published copy too, whose duration is not measured here.
+    # starting on a runner, not from the queue.
     timeout-minutes: 45
     # The compiler each section installed is the compiler it uses. Left to
     # itself, go reads the `toolchain` line in go.mod and downloads a different
@@ -137,25 +94,14 @@ jobs:
       # takes the version and the file it reads it from as separate inputs, and
       # what it does when both are given, or when one is given empty, is not
       # something this should be relying on.
-      # The cache follows the runner. By default the action saves GOMODCACHE
-      # and GOCACHE to the Actions cache after the job (about 2.2 GB each,
-      # some 9 minutes per step on this runner) and restores them before it.
-      # On the self-hosted runner both directories are on the runner's own
-      # disk and survive between jobs, so the save and the restore move data
-      # the next run already has — 18 of a 23-minute run went to the two
-      # uploads, and the repository's 10 GB cache quota was full of copies.
-      # A GitHub-hosted runner is a fresh machine every time and keeps
-      # nothing, so there the saved copy is the only one there is and the
-      # reason for turning it off is gone. The runner reads the same field,
-      # and a check holds both spellings so that one cannot be changed
-      # without the other; what a hosted run actually costs with the cache
-      # on is not measured here, and the published copy only picks this file
-      # up at the next release. The check is in the same place as the one
-      # holding `runs-on`, and it reads both jobs' lines.
+      # The cache is on: a hosted runner is a fresh machine every time and
+      # keeps nothing, so the module and build caches setup-go saves after
+      # the job and restores before it are the only copy there is. A check
+      # holds this line in both jobs.
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-          cache: ${{ !github.event.repository.private }}
+          cache: true
       # Not a formality. setup-go reads the `go` directive with a pattern of
       # its own that wants a literal space, so a tab or a leading space — both
       # of which the go tool accepts — leave it with nothing; and with nothing
@@ -221,18 +167,14 @@ jobs:
           nohup sh -c 'while :; do date -u +%T; uptime; ps -eo pcpu,pmem,etime,comm --sort=-pcpu 2>/dev/null | head -6; echo; sleep 15; done' >> "$log" 2>&1 &
       - name: a temporary directory of this job's own
         run: mkdir -p "/tmp/opossum-ci-${{ github.run_id }}-${{ github.job }}"
-      # Which gate: the whole one where the workshop is, the product's
-      # packages where only the product is. The published copy carries
-      # neither the contributor guidance nor the changelog fragments, so the
-      # checks that read them have nothing to check there — and a released
-      # binary is what that copy is for. What `make test-shipped` runs is
-      # pinned in the same check that pins `make test`: the set comes from
-      # the compiler, so it follows the binary, and the line that asks for it
-      # is held to the same flags.
+      # The gate is the whole of `make test`, the one the pre-push sieve
+      # runs, not the narrower `make test-shipped`: a pull request here
+      # changes the contributor guidance and the changelog fragments as well
+      # as the product, and the checks that read those are part of the gate.
       - name: test (go.mod version, the same gate as `make test`)
         env:
           TMPDIR: /tmp/opossum-ci-${{ github.run_id }}-${{ github.job }}
-        run: ${{ github.event.repository.private && 'make test' || 'make test-shipped' }}
+        run: make test
       - name: the temporary directory is removed
         if: ${{ always() }}
         run: rm -rf "/tmp/opossum-ci-${{ github.run_id }}-${{ github.job }}"
@@ -249,20 +191,8 @@ jobs:
       # about shipped code — tests, docs and the repo's own tooling don't need
       # an entry. Put `[skip changelog]` in the PR body for the rare shipped
       # change that genuinely has nothing to announce.
-      # Only in the private repository, too: the published copy carries no
-      # `changelog.d/` — the release that writes that copy has already folded
-      # the fragments into a version's section — so an outside contributor's
-      # pull request there would be asked for a file with nowhere to go. The
-      # condition names the repository rather than the directory's absence,
-      # so that a `changelog.d/` deleted by accident here still fails this
-      # check loudly. `!= false` reads the same as the field itself for every
-      # value this can be handed: the expression evaluator compares across
-      # types by converting to a number, so a missing or null field is 0, as
-      # `false` is, and `null != false` is false — the step is skipped, not
-      # run (measured against the evaluator, not inferred). The longer
-      # spelling is kept because it names the one value being tested for.
       - name: a shipped change needs a changelog.d fragment
-        if: ${{ !cancelled() && github.event_name == 'pull_request' && github.event.repository.private != false }}
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
@@ -527,50 +457,13 @@ jobs:
         # don't fail CI on the deprecation notice.
         continue-on-error: true
         run: goreleaser check
-      # The last step of the job, whatever the steps before it said: the
-      # runners keep GOCACHE on their own disk between jobs and nothing else
-      # removes it, so when the cache is larger than the limit this deletes
-      # the cache files whose mtime is more than three hours old. Both jobs
-      # carry it and the two runners share one machine, so what it does while
-      # the other job compiles, and why it deletes files by age and does not
-      # run `go clean -cache`, is written at the top of the script. It never
-      # fails the job (the script exits 0 on every path). Private repository
-      # only: a GitHub-hosted runner is a fresh machine.
-      #
-      # The age is the file's mtime, not its atime (atime is not dependable
-      # under WSL). The go command rewrites the mtime of a cache file it uses,
-      # but only when the file is more than an hour old, so a file whose mtime
-      # is more than 180 minutes old was last used at least 120 minutes ago
-      # (not "three hours ago"): not a file a running job can be holding when
-      # a run takes under twenty minutes. The reasoning reaches as far as a
-      # job that stalls, and a job stops at its `timeout-minutes` (45), well
-      # inside the two hours, so no running job can have files taken from
-      # under it. A job that fails before the
-      # checkout: there is no script to run, this step is red too, and the job
-      # was red before it.
-      #
-      # Only the size of the cache trims, and 20 GiB is a first figure: a cap
-      # on what the cache grows to. The runners are in WSL2, whose `df` on the
-      # cache's own filesystem says 891 GiB free of 1007 GiB while the virtual
-      # disk file is 106.4 GiB on a Windows drive that had 53 GiB free
-      # (2026-10-04); what runs out is that drive, and `df /mnt/c` shows it.
-      # Its free space only warns, below 20 GiB, and never trims: deleting
-      # files inside WSL does not shrink the virtual disk file, so a trim
-      # would not give it back. (Compacting the file is for a person to decide.)
-      - name: the runner's Go cache is trimmed when it is large
-        if: ${{ always() && github.event.repository.private }}
-        env:
-          OPOSSUM_CI_MAX_CACHE_GIB: "20"
-          OPOSSUM_CI_WARN_FREE_PATH: /mnt/c
-          OPOSSUM_CI_WARN_FREE_GIB: "20"
-        run: sh .github/scripts/ci-trim-cache.sh
 
   # The current release's compiler, in a job of its own (see the top of the
   # file): the same runner class, the same environment, its own checkout —
   # nothing here diffs against a base, so the default depth.
   stable:
     # The same switch as the job above, for the same reason.
-    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted", "Linux", "X64"]') || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     # The same limit as the job above, for the same reason.
     timeout-minutes: 45
     env:
@@ -603,7 +496,7 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: stable
-          cache: ${{ !github.event.repository.private }}
+          cache: true
       # When the two sections run the same compiler, everything they exist to
       # catch — coverage boundaries moving, gofmt changing its mind — cannot
       # show up in a green run. In the matrix this claim took two half-checks
@@ -659,7 +552,7 @@ jobs:
       - name: test (stable, the same gate as `make test`)
         env:
           TMPDIR: /tmp/opossum-ci-${{ github.run_id }}-${{ github.job }}
-        run: ${{ github.event.repository.private && 'make test' || 'make test-shipped' }}
+        run: make test
       - name: the temporary directory is removed
         if: ${{ always() }}
         run: rm -rf "/tmp/opossum-ci-${{ github.run_id }}-${{ github.job }}"
@@ -669,40 +562,3 @@ jobs:
           log="/tmp/opossum-ci-load-${{ github.run_id }}-${{ github.job }}.log"
           cat "$log" 2>/dev/null || true
           rm -f "$log"
-      # The last step of the job, whatever the steps before it said: the
-      # runners keep GOCACHE on their own disk between jobs and nothing else
-      # removes it, so when the cache is larger than the limit this deletes
-      # the cache files whose mtime is more than three hours old. Both jobs
-      # carry it and the two runners share one machine, so what it does while
-      # the other job compiles, and why it deletes files by age and does not
-      # run `go clean -cache`, is written at the top of the script. It never
-      # fails the job (the script exits 0 on every path). Private repository
-      # only: a GitHub-hosted runner is a fresh machine.
-      #
-      # The age is the file's mtime, not its atime (atime is not dependable
-      # under WSL). The go command rewrites the mtime of a cache file it uses,
-      # but only when the file is more than an hour old, so a file whose mtime
-      # is more than 180 minutes old was last used at least 120 minutes ago
-      # (not "three hours ago"): not a file a running job can be holding when
-      # a run takes under twenty minutes. The reasoning reaches as far as a
-      # job that stalls, and a job stops at its `timeout-minutes` (45), well
-      # inside the two hours, so no running job can have files taken from
-      # under it. A job that fails before the
-      # checkout: there is no script to run, this step is red too, and the job
-      # was red before it.
-      #
-      # Only the size of the cache trims, and 20 GiB is a first figure: a cap
-      # on what the cache grows to. The runners are in WSL2, whose `df` on the
-      # cache's own filesystem says 891 GiB free of 1007 GiB while the virtual
-      # disk file is 106.4 GiB on a Windows drive that had 53 GiB free
-      # (2026-10-04); what runs out is that drive, and `df /mnt/c` shows it.
-      # Its free space only warns, below 20 GiB, and never trims: deleting
-      # files inside WSL does not shrink the virtual disk file, so a trim
-      # would not give it back. (Compacting the file is for a person to decide.)
-      - name: the runner's Go cache is trimmed when it is large
-        if: ${{ always() && github.event.repository.private }}
-        env:
-          OPOSSUM_CI_MAX_CACHE_GIB: "20"
-          OPOSSUM_CI_WARN_FREE_PATH: /mnt/c
-          OPOSSUM_CI_WARN_FREE_GIB: "20"
-        run: sh .github/scripts/ci-trim-cache.sh

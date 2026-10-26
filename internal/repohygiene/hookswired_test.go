@@ -150,9 +150,6 @@ func TestTheGateAsksWhetherThisCloneIsWired(t *testing.T) {
 			t.Errorf("`%s` should run %q, runs:\n%s", target, want, strings.Join(recipe, "\n"))
 		}
 	}
-	if !strings.Contains(read(t, root, "CONTRIBUTING.md"), "make hooks") {
-		t.Errorf("CONTRIBUTING.md should name `make hooks`")
-	}
 	// Wired before the gate runs, not merely somewhere in the file: after
 	// `exec make test` nothing runs at all.
 	runsh := read(t, root, "sieve/run.sh")

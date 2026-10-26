@@ -21,6 +21,8 @@ func repoRoot(t *testing.T) string {
 	return filepath.Dir(filepath.Dir(wd))
 }
 
+func exists(p string) bool { _, err := os.Lstat(p); return err == nil }
+
 // machO is the 32-bit Mach-O magic — the header of the binary that actually got
 // committed. Using a real magic number rather than "\x00\x00" keeps the fixture
 // honest about what it stands in for.

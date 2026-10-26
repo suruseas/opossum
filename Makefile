@@ -107,13 +107,9 @@ test: wired ## run the full test suite (the regression gate)
 # narrowed by a character tests a fraction of the binary and still prints
 # `ok` for each package it did run.
 #
-# What is left out is this repository's tooling — the checks that read
-# CONTRIBUTING.md, the changelog fragments and the notes from real-runtime
-# review. A published copy has none of those three: the release that writes
-# it folds the fragments into a version's section, and the contributor
-# guidance and the review notes live where the work happens. (The release
-# config is published, so it is not one of them.) Running those checks there
-# asks whether files that were never meant to be shipped are in order.
+# What is left out is this repository's tooling — the checks of the
+# changelog fragments, the workflow and the repository's own files. CI runs the whole of `make test`; this is the narrower gate for
+# asking only about what ships.
 test-shipped: wired ## run the tests of the packages the released binary links
 	@case "$$TMPDIR" in /tmp/opossum-test-*) mkdir -p "$$TMPDIR" ;; esac
 	go run ./cmd/noleftovers go test $$(go list -deps ./cmd/opossum | grep '^github.com/suruseas/opossum') -race -cover -count=1

@@ -422,38 +422,6 @@ func TestSentencesWithoutTheWordingsAreLeftAlone(t *testing.T) {
 	}
 }
 
-// changelog.d/README.md shows a contributor what a report looks like, quoting the
-// wording verbatim. Two copies of a format drift apart silently, and the one that
-// goes stale is the one nobody runs — so the copy in the documentation is checked
-// against the one in the code.
-func TestTheDocumentedReportMatchesTheRealOne(t *testing.T) {
-	b, err := os.ReadFile(filepath.Join(repoRoot(t), "changelog.d", "README.md"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	readme := strings.Join(strings.Fields(string(b)), " ")
-	// The report with its three variable parts marked, so what is left between
-	// the marks is the wording itself.
-	const mark = "zzMARKzz" // survives the %q the report puts the sentence through
-	marked := claimcite.Finding{File: mark, Sentence: mark, Verb: mark}.String()
-	// The report opens with the file, so the first piece between the marks is
-	// empty. Skipping it silently would leave the position of the name — the part
-	// a reader looks for first — checked by nobody.
-	parts := strings.Split(marked, mark)
-	if len(parts) < 2 || parts[0] != "" {
-		t.Errorf("the report no longer opens with the file it is about: %q", marked)
-	}
-	for _, fixed := range parts {
-		fixed = strings.TrimSpace(strings.Join(strings.Fields(fixed), " "))
-		if fixed == "" {
-			continue
-		}
-		if !strings.Contains(readme, fixed) {
-			t.Errorf("changelog.d/README.md shows contributors a report that no longer matches this package: it does not contain %q", fixed)
-		}
-	}
-}
-
 // A release folds the fragments into a version's section and deletes them, and
 // until now nothing read a word of what it left behind. That was the whole
 // lifetime of the check: a sentence had one chance to be looked at, while its
@@ -572,11 +540,13 @@ func TestEveryExemptionIsOneTheCheckWouldOtherwiseReport(t *testing.T) {
 // name its run. Fragments are enumerated by the loader the release uses, so
 // "what counts as a fragment" stays defined in one place.
 func TestEveryChangelogFragmentNamesItsRuns(t *testing.T) {
-	dir := filepath.Join(repoRoot(t), "changelog.d")
+	root := repoRoot(t)
+	dir := filepath.Join(root, "changelog.d")
 	// Load answers "no fragments" for a directory that isn't there, which is the
-	// same answer it gives the day after a release. Asking first means a wrong
-	// path fails instead of skipping in the voice of a healthy repository.
-	if _, err := os.Stat(dir); err != nil {
+	// same answer it gives the day after a release, when the directory is gone
+	// with its last fragment. Asking for CHANGELOG.md beside it means a wrong
+	// root fails instead of skipping in the voice of a healthy repository.
+	if _, err := os.Stat(filepath.Join(root, "CHANGELOG.md")); err != nil {
 		t.Fatalf("looking for the fragments: %v", err)
 	}
 	frags, err := changelog.Load(dir)
