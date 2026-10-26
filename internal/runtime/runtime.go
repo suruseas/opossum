@@ -1252,6 +1252,10 @@ type BuildOptions struct {
 	DockerfileInline string
 	Args             []string
 	Target           string // --target: multi-stage build stage
+	// Platform is the platform the image is built for (`--platform`, e.g.
+	// linux/amd64): the service's `platform:`, so the image it then runs is one
+	// built for that platform rather than for the host's.
+	Platform string
 	// Labels are `key=value` pairs put on the built image (`-l`). An image keeps
 	// them (measured on 1.4.1: `image inspect` answers with them), so they say
 	// afterwards which build made an image — a name alone does not, now that a
@@ -1284,6 +1288,9 @@ func (r *Runtime) Build(o BuildOptions) error {
 		stdin = strings.NewReader(o.DockerfileInline)
 	case o.Dockerfile != "":
 		args = append(args, "-f", o.Dockerfile)
+	}
+	if o.Platform != "" {
+		args = append(args, "--platform="+o.Platform) // joined, as --target: a value that starts with `-` stays the flag's
 	}
 	if o.Target != "" {
 		args = append(args, "--target="+o.Target) // joined (#1423, as #996): the value may start with `-`

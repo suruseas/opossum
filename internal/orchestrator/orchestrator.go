@@ -2768,7 +2768,7 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 				// `opossum up` even when this runs for a one-off's dependency: the
 				// dependency is broken on the up side, and `opossum up <dep>` is
 				// the command that retries it.
-				if err := o.rt.Build(o.buildOptions(image, name, svc.Build, "opossum up")); err != nil {
+				if err := o.rt.Build(o.buildOptions(image, name, svc, "opossum up")); err != nil {
 					// A Ctrl-C during the build is not a Dockerfile the builder
 					// cannot handle, and the Docker-import fallback is no answer to it.
 					if ierr := o.interrupted(); ierr != nil {
@@ -8314,7 +8314,7 @@ func (o *Orchestrator) RunOneOff(service string, command []string, opts RunOneOf
 	image, _ := o.serviceImage(service, svc)
 	if svc.Build != nil {
 		o.logf("Building %s\n", service)
-		if err := o.rt.Build(o.buildOptions(image, service, svc.Build, "opossum run")); err != nil {
+		if err := o.rt.Build(o.buildOptions(image, service, svc, "opossum run")); err != nil {
 			// A Ctrl-C mid-build is not a Dockerfile the builder cannot handle.
 			// Nothing has been started yet, so there is nothing to roll back — say
 			// only what was abandoned.
@@ -8539,7 +8539,7 @@ func (o *Orchestrator) Build(services []string) error {
 		}
 		image, _ := o.serviceImage(name, svc)
 		o.logf("Building %s\n", name)
-		if err := o.rt.Build(o.buildOptions(image, name, svc.Build, "opossum build")); err != nil {
+		if err := o.rt.Build(o.buildOptions(image, name, svc, "opossum build")); err != nil {
 			return buildFailed(name, err)
 		}
 	}
@@ -8847,7 +8847,8 @@ func (o *Orchestrator) Restart(services []string) error {
 // "opossum run", or "opossum build" — echoed in build-failure hints so the
 // retry advice names what the reader actually typed. A parameter, not a field:
 // every new call site has to say which command it serves.
-func (o *Orchestrator) buildOptions(tag, service string, b *compose.Build, redo string) runtime.BuildOptions {
+func (o *Orchestrator) buildOptions(tag, service string, svc *compose.Service, redo string) runtime.BuildOptions {
+	b := svc.Build
 	ctx := b.Context
 	if ctx == "" {
 		ctx = "."
@@ -8879,6 +8880,11 @@ func (o *Orchestrator) buildOptions(tag, service string, b *compose.Build, redo 
 		// `container run -e A` does.
 		Args:   compose.ResolveBareNames(b.Args, os.LookupEnv, false),
 		Target: b.Target,
+		// The service's `platform:`, as docker compose builds for it when
+		// `build.platforms` is not written: `container run` is given it too, and
+		// an image built for the host's arm64 is not what a linux/amd64 service
+		// asked to run.
+		Platform: svc.Platform,
 		// Whose build this is, kept on the image: a built image can carry a name
 		// the compose file chose (`image:`), and a name alone does not say that
 		// this project made what is under it (#1126). Both labels go on every

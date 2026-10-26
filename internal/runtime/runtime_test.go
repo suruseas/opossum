@@ -1361,6 +1361,18 @@ func TestBuildTargetArgv(t *testing.T) {
 	}
 }
 
+// The platform the image is built for reaches `container build` as `--platform`,
+// written as given; none is given when none is asked for (TestBuildTargetArgv).
+func TestBuildPlatformArgv(t *testing.T) {
+	rt, read := loggingShim(t)
+	if err := rt.Build(BuildOptions{Tag: "app:latest", Context: "/ctx", Platform: "linux/amd64", Target: "builder"}); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if got, want := lastLine(t, read), "build --progress plain -t app:latest --platform=linux/amd64 --target=builder /ctx"; got != want {
+		t.Errorf("Build --platform argv = %q, want %q", got, want)
+	}
+}
+
 // A value that starts with `-` is one argument with its flag, as `--user=`, `--env=` and the other
 // flags are written (#996): given apart, `container` reads it as a flag and answers `Missing value
 // for '--label <label>'` (rc 64, measured on 1.5.0) — for a network label, a build target and a
@@ -1388,6 +1400,15 @@ func TestAValueThatStartsWithADashIsJoinedToItsFlag(t *testing.T) {
 			t.Fatalf("Build: %v", err)
 		}
 		if got, want := lastLine(t, read), "build --progress plain -t app:latest --target=-x /ctx"; got != want {
+			t.Errorf("build argv = %q, want %q", got, want)
+		}
+	})
+	t.Run("a build platform", func(t *testing.T) {
+		rt, read := loggingShim(t)
+		if err := rt.Build(BuildOptions{Tag: "app:latest", Context: "/ctx", Platform: "-x"}); err != nil {
+			t.Fatalf("Build: %v", err)
+		}
+		if got, want := lastLine(t, read), "build --progress plain -t app:latest --platform=-x /ctx"; got != want {
 			t.Errorf("build argv = %q, want %q", got, want)
 		}
 	})
