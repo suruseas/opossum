@@ -18,7 +18,9 @@ import (
 // so a platform read from the wrong service, or the same value given to every
 // build, shows; and the rows name more than linux/amd64, so a platform written
 // into the build rather than taken from the service shows too. Each row goes
-// through `up`, `build` and a one-off, the three places a build is asked for.
+// through `up`, `build` and a one-off, the three places a build is asked for,
+// each both run and planned: `--dry-run` prints the build it would run, and that
+// printed line is how the difference was first seen.
 func TestABuildIsForTheServicesPlatform(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -33,9 +35,21 @@ func TestABuildIsForTheServicesPlatform(t *testing.T) {
 		{"no platform", "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			for _, via := range []string{"up", "build", "run"} {
-				t.Run(via, func(t *testing.T) {
+			for _, c := range []struct {
+				via string
+				dry bool
+			}{
+				{"up", false}, {"build", false}, {"run", false},
+				{"up", true}, {"build", true}, {"run", true},
+			} {
+				via := c.via
+				name := via
+				if c.dry {
+					name += " --dry-run"
+				}
+				t.Run(name, func(t *testing.T) {
 					rt, log := fakeShim(t)
+					rt.DryRun = c.dry
 					setShimEnv(rt, "IMAGE_ABSENT=demo-api:latest demo-worker:latest")
 					p := project("demo", map[string]*compose.Service{
 						"api":    {Platform: tc.platform, Build: &compose.Build{Context: "/api"}},
@@ -54,8 +68,14 @@ func TestABuildIsForTheServicesPlatform(t *testing.T) {
 					if err != nil {
 						t.Fatalf("%s: %v", via, err)
 					}
+					// Planned, the build is in the plan and never reaches the
+					// runtime; run, it is the other way round.
+					lines := log()
+					if c.dry {
+						lines = rt.Plan
+					}
 					builds := map[string]string{}
-					for _, l := range log() {
+					for _, l := range lines {
 						if !strings.HasPrefix(l, "build ") {
 							continue
 						}
@@ -67,7 +87,7 @@ func TestABuildIsForTheServicesPlatform(t *testing.T) {
 					}
 					api, ok := builds["/api"]
 					if !ok {
-						t.Fatalf("api was not built: %v", log())
+						t.Fatalf("api was not built: %v", lines)
 					}
 					if got := platformFlag(api); got != tc.want {
 						t.Errorf("api's build was given %q, want %q\n%s", got, tc.want, api)
@@ -78,7 +98,7 @@ func TestABuildIsForTheServicesPlatform(t *testing.T) {
 					}
 					worker, ok := builds["/worker"]
 					if !ok {
-						t.Fatalf("worker was not built: %v", log())
+						t.Fatalf("worker was not built: %v", lines)
 					}
 					if got := platformFlag(worker); got != "" {
 						t.Errorf("worker names no platform, and its build was given %q\n%s", got, worker)
