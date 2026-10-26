@@ -50,8 +50,8 @@ jobs:
     # obliquely.
     runs-on: ubuntu-latest
     # The longest job measured (of about 600 recent runs) took 17 minutes;
-    # the default limit is 360, so a hung test run would hold the one runner
-    # for hours. 45 is about two and a half times the longest, and `go test`
+    # the default limit is 360, so a hung test run would hold a runner for
+    # hours. 45 is about two and a half times the longest, and `go test`
     # has its own per-package timeout inside it. The limit counts from the job
     # starting on a runner, not from the queue.
     timeout-minutes: 45
@@ -148,7 +148,7 @@ jobs:
       # still points at it — once per compiler, and at nothing else.
       #
       # A temporary directory of this run's and this job's own, so two jobs
-      # running side by side on one machine do not read each other's
+      # that share a machine do not read each other's
       # leftovers. Not the runner's `_work/_temp`: that is under the runner
       # user's home, and the suites refuse a state directory under the home
       # (they must never write to the real one). Made just before the gate

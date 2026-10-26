@@ -212,15 +212,9 @@ func TestARealSymlinkToASocketIsStillRefused(t *testing.T) {
 // daemonMarks are the strings the answer has to carry for this to have reached
 // a Docker daemon rather than something else listening on that path.
 //
-// They are declared rather than written into the conditions below so that the
-// record can be held to them. Three rounds of review went into reading them
-// back out of the assertions instead — from calls into `strings`, then from
-// `if` conditions, then following package-level constants — and each shape was
-// escaped by writing the assertion a slightly different way, because "this is
-// the string the test decides on" is a question about where a value flows and
-// not about how the code is arranged. A declaration has no arrangement to
-// vary: weakening the measurement means editing this line, and this line is
-// what `internal/repohygiene` reads.
+// They are declared rather than written into the conditions below, so that
+// what the measurement decides on is one line to read: weakening it means
+// editing this line.
 //
 // The first is not a daemon's mark on its own — any HTTP server answers 200.
 // The second is: the Engine API writes its version header, and a plain server

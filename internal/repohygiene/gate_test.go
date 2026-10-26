@@ -217,8 +217,8 @@ func TestTheChangelogGateAsksForANoteAboutEverythingThatShips(t *testing.T) {
 // runs both), or one of them is a job the other's promises do not cover. Each gate step runs with a
 // `TMPDIR` of this run's and this job's own under /tmp — not the runner's
 // `_work/_temp`, which is under the runner user's home, where the suites
-// refuse to put a state directory — so two jobs on one machine do not
-// read each other's leftovers.
+// refuse to put a state directory — so two jobs that share a machine do
+// not read each other's leftovers.
 func TestTheTwoJobsKeepTheirPromises(t *testing.T) {
 	root := repoRoot(t)
 	b, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "ci.yml"))
@@ -583,8 +583,7 @@ func readGate(t *testing.T, root string) gate {
 	allowed(t, "the workflow", top, "name", "on", "jobs")
 	on, _ := top["on"].(map[string]any)
 	// Three triggers, all pinned: every push to a pull request (drafted or
-	// not — a draft's run finds a broken shape early, now that the runners
-	// are self-hosted and a run costs no minutes), every push to main (a
+	// not — a draft's run finds a broken shape early), every push to main (a
 	// green about main's own tree), and a run by hand. A type or a branch
 	// added or removed here changes when the gate runs, which is exactly
 	// the kind of change that must be taught, not discovered.
@@ -623,8 +622,8 @@ func readGate(t *testing.T, root string) gate {
 	}
 	// What the job may say: no `if` — a condition on the job is a way for
 	// the gate to not run on something that can merge (the draft skip that
-	// used to be here kept a draft's pushes free of billed minutes; the
-	// runners are self-hosted now, and a draft's run is wanted). The
+	// used to be here kept a draft's pushes free of billed minutes; a
+	// draft's run is wanted). The
 	// environment the job hands every script is pinned for the same reason
 	// the keys are: a variable added here reaches the gate's script too, and
 	// this check would be running that script without it.
@@ -959,7 +958,7 @@ func releaseTarget(t *testing.T, root string) (main, goos, goarch string) {
 }
 
 // A job that has no limit of its own runs for six hours, and a hung test run
-// would hold the one runner that long. The limit has two edges: at least 40,
+// would hold a runner that long. The limit has two edges: at least 40,
 // so a slow green is not cut (the longest job measured took 17 minutes, and a
 // `go test` package may take 30 of its own), and at most 60, so it is a bound.
 // Only these edges are pinned — the figure inside them is a choice.

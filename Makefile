@@ -98,10 +98,9 @@ test: wired ## run the full test suite (the regression gate)
 	go run ./cmd/noleftovers go test ./cmd/busy -race -cover -count=1
 	@case "$$TMPDIR" in /tmp/opossum-test-*) rm -rf "$$TMPDIR" ;; esac
 
-# The gate for a copy of this repository that carries the product and not the
-# workshop: the packages the released binary links, and nothing else. Asked
-# of the compiler rather than listed here, so that a package added to the
-# binary is tested without anyone remembering to add it. The gate command
+# The narrower gate: the packages the released binary links, and nothing
+# else. Asked of the compiler rather than listed here, so that a package added
+# to the binary is tested without anyone remembering to add it. The gate command
 # itself is the whole claim and is pinned as one line (the mkdir/rm around
 # it, #1238, are this run's own housekeeping, not the claim), because a grep
 # narrowed by a character tests a fraction of the binary and still prints

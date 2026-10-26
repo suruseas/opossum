@@ -544,14 +544,24 @@ func TestEveryChangelogFragmentNamesItsRuns(t *testing.T) {
 	dir := filepath.Join(root, "changelog.d")
 	// Load answers "no fragments" for a directory that isn't there, which is the
 	// same answer it gives the day after a release, when the directory is gone
-	// with its last fragment. Asking for CHANGELOG.md beside it means a wrong
-	// root fails instead of skipping in the voice of a healthy repository.
-	if _, err := os.Stat(filepath.Join(root, "CHANGELOG.md")); err != nil {
+	// with its last fragment. CHANGELOG.md tells the two apart: its [Unreleased]
+	// section is made from the fragments, so entries there with none found here
+	// is a wrong place, which fails instead of skipping in the voice of a
+	// healthy repository.
+	b, err := os.ReadFile(filepath.Join(root, "CHANGELOG.md"))
+	if err != nil {
 		t.Fatalf("looking for the fragments: %v", err)
+	}
+	if fi, err := os.Stat(dir); err == nil && !fi.IsDir() {
+		t.Fatalf("%s is not a directory", dir)
 	}
 	frags, err := changelog.Load(dir)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(frags) == 0 && strings.TrimSpace(changelog.Unreleased(string(b))) != "" {
+		t.Fatalf("CHANGELOG.md's [Unreleased] has entries and no fragment was found in %s; "+
+			"the section is made from the fragments, so this is looking in the wrong place", dir)
 	}
 	// A release folds the fragments into CHANGELOG.md and deletes them, so between
 	// a release and the next fragment there is nothing here to read. Saying so out
