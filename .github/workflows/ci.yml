@@ -245,7 +245,7 @@ jobs:
           echo "This PR changes shipped code but adds or rewrites no changelog.d/ fragment:"
           echo "$shipped" | sed 's/^/  /'
           echo
-          echo "Add changelog.d/<number>-<slug>.<type>.md (see changelog.d/README.md),"
+          echo "Add changelog.d/<number>-<slug>.<type>.md (see CONTRIBUTING.md, \"Changelog fragments\"),"
           echo "then run 'make changelog'. If the change truly needs no release note,"
           echo "put [skip changelog] in the PR body."
           # The opt-out written into a commit message instead of the body is a
