@@ -13,8 +13,9 @@ import (
 // workflow runs on a version tag, as release.yml does, and by hand. A push to
 // main used to publish it, so the site described behaviour no released version
 // had. Both triggers are pinned, and nothing else may join them; and each job's
-// condition is the repository and nothing else, since a condition on the ref
-// would skip a tag's run and leave the site silently unpublished.
+// condition is the repository and nothing else, and no step has one, since a
+// condition on the ref would skip a tag's run and leave the site silently
+// unpublished.
 func TestTheSiteIsPublishedWithARelease(t *testing.T) {
 	type workflow struct {
 		On   map[string]any            `yaml:"on"`
@@ -59,6 +60,15 @@ func TestTheSiteIsPublishedWithARelease(t *testing.T) {
 	for name, job := range site.Jobs {
 		if got := fmt.Sprint(job["if"]); got != onlyHere {
 			t.Errorf("pages.yml's %s job runs if %q; this knows %q and nothing else — a condition on the ref skips a tag's run, and the site is not published without a word", name, got, onlyHere)
+		}
+		// One level down, the same: a skipped step leaves the job green and the
+		// site unpublished. None of the steps has a condition, and none may.
+		steps, _ := job["steps"].([]any)
+		for i, st := range steps {
+			m, _ := st.(map[string]any)
+			if c, has := m["if"]; has {
+				t.Errorf("pages.yml's %s job, step %d (%v), runs if %v; a step here runs on every run of its job, or a tag's run can skip it with every check green", name, i, m["uses"], c)
+			}
 		}
 	}
 }
