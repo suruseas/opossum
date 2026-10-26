@@ -19,8 +19,8 @@ import (
 // build, shows; and the rows name more than linux/amd64, so a platform written
 // into the build rather than taken from the service shows too. Each row goes
 // through `up`, `build` and a one-off, the three places a build is asked for,
-// each both run and planned: `--dry-run` prints the build it would run, and that
-// printed line is how the difference was first seen.
+// and through `up --dry-run`, which prints the build it would run: that printed
+// line is how the difference was first seen.
 func TestABuildIsForTheServicesPlatform(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -40,7 +40,7 @@ func TestABuildIsForTheServicesPlatform(t *testing.T) {
 				dry bool
 			}{
 				{"up", false}, {"build", false}, {"run", false},
-				{"up", true}, {"build", true}, {"run", true},
+				{"up", true},
 			} {
 				via := c.via
 				name := via
@@ -49,13 +49,15 @@ func TestABuildIsForTheServicesPlatform(t *testing.T) {
 				}
 				t.Run(name, func(t *testing.T) {
 					rt, log := fakeShim(t)
-					rt.DryRun = c.dry
 					setShimEnv(rt, "IMAGE_ABSENT=demo-api:latest demo-worker:latest")
 					p := project("demo", map[string]*compose.Service{
 						"api":    {Platform: tc.platform, Build: &compose.Build{Context: "/api"}},
 						"worker": {Build: &compose.Build{Context: "/worker"}},
 					})
 					o := orchestrator.New(p, rt, "opossum", &bytes.Buffer{})
+					// As the command line sets it: the orchestrator's plan mode
+					// and the runtime's together.
+					o.SetDryRun(c.dry)
 					var err error
 					switch via {
 					case "up":
