@@ -1,10 +1,7 @@
-# External post drafts — kept here untracked; published on their own platforms
+# Local files, not part of the project
 /articles/
 
-# Maintainer-only tooling. What lands in the public repository is the product and
-# what a user of it needs; the scripts that run the release are neither, and
-# publishing them puts internal process into the distribution. Kept here so the
-# maintainer still has them, untracked so nobody else receives them.
+# Local scripts, not part of the project
 /scripts/
 
 # Build output
@@ -16,6 +13,7 @@
 /changelog
 /mutate
 /noleftovers
+/swaps
 /dist/
 
 # Go
@@ -47,7 +45,7 @@ Thumbs.db
 .vscode/
 *.swp
 
-# Claude Code local settings & Plan C agent-runtime (machine-local, not committed)
+# Local tool settings, not part of the project
 .claude/
 CLAUDE.md
 .mcp.json
