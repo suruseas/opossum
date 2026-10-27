@@ -583,3 +583,41 @@ func TestTheCommandIsNotThereUnlessAPartIsAskedFor(t *testing.T) {
 		}
 	})
 }
+
+// flakyPipe hands out its first chunk, then an error once, then the rest:
+// what is left in it after a read is what the writer is still blocked on.
+type flakyPipe struct {
+	chunks []string
+	failed bool
+}
+
+func (p *flakyPipe) Read(b []byte) (int, error) {
+	if len(p.chunks) == 0 {
+		return 0, io.EOF
+	}
+	if len(p.chunks) == 1 && !p.failed {
+		p.failed = true
+		return 0, errors.New("pipe broke")
+	}
+	n := copy(b, p.chunks[0])
+	p.chunks[0] = p.chunks[0][n:]
+	if p.chunks[0] == "" {
+		p.chunks = p.chunks[1:]
+	}
+	return n, nil
+}
+
+func TestAReadThatFailsStillEmptiesThePipe(t *testing.T) {
+	p := &flakyPipe{chunks: []string{"first\n", strings.Repeat("more\n", 1000)}}
+	var got []string
+	err := eachLine(p, func(line string) { got = append(got, line) })
+	if err == nil || !strings.Contains(err.Error(), "pipe broke") {
+		t.Errorf("eachLine returned %v; the failed read is the answer", err)
+	}
+	if len(got) != 1 || got[0] != "first" {
+		t.Errorf("handed on %q before the failure, want the one line", got)
+	}
+	if len(p.chunks) != 0 {
+		t.Errorf("%d chunks left unread after the failure; a writer blocked on them never exits", len(p.chunks))
+	}
+}
