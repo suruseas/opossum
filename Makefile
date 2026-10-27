@@ -92,10 +92,15 @@ build: ## build the opossum binary with the version stamped in
 # seconds of CPU beside it. Measured, three CI runs in a row. Splitting the
 # recipe gives the measuring package the quiet it is measuring; both lines
 # run under the leftovers check, and the gate is red if either is.
+#
+# Both lines go through cmd/shard, which is not there unless
+# OPOSSUM_GATE_SHARD is set: it replaces itself with the `go test` it was
+# given. CI sets it, to run a part of the gate on each of several machines,
+# and checks after them that the parts ran every test once (see cmd/shard).
 test: wired ## run the full test suite (the regression gate)
 	@case "$$TMPDIR" in /tmp/opossum-test-*) mkdir -p "$$TMPDIR" ;; esac
-	go run ./cmd/noleftovers go test $$(go list ./... | grep -v '/cmd/busy$$') -race -cover -count=1
-	go run ./cmd/noleftovers go test ./cmd/busy -race -cover -count=1
+	go run ./cmd/noleftovers go run ./cmd/shard go test $$(go list ./... | grep -v '/cmd/busy$$') -race -cover -count=1
+	go run ./cmd/noleftovers go run ./cmd/shard go test ./cmd/busy -race -cover -count=1
 	@case "$$TMPDIR" in /tmp/opossum-test-*) rm -rf "$$TMPDIR" ;; esac
 
 # The narrower gate: the packages the released binary links, and nothing

@@ -412,8 +412,8 @@ func TestThePushSieveRunsTheGateOnTheCommittedTree(t *testing.T) {
 // second runs cmd/busy on the machine the first has just finished with.
 // Busy last, alone: swapped, the quiet it measures is gone again.
 const (
-	gateSweep = "go run ./cmd/noleftovers go test $$(go list ./... | grep -v '/cmd/busy$$')"
-	gateBusy  = "go run ./cmd/noleftovers go test ./cmd/busy"
+	gateSweep = "go run ./cmd/noleftovers go run ./cmd/shard go test $$(go list ./... | grep -v '/cmd/busy$$')"
+	gateBusy  = "go run ./cmd/noleftovers go run ./cmd/shard go test ./cmd/busy"
 	// What the workflow writes on the gate's line.
 	ciCommand = "make test"
 	// The narrower gate: the packages the released binary links. Its set is not written
@@ -595,23 +595,28 @@ func TestWhatCountsAsRunningTheGate(t *testing.T) {
 		name, line, command, wantRest string
 		wantOK                        bool
 	}{
-		{"the sweep line as it stands", "\tgo run ./cmd/noleftovers go test $$(go list ./... | grep -v '/cmd/busy$$') -race -cover -count=1",
+		{"the sweep line as it stands", "\tgo run ./cmd/noleftovers go run ./cmd/shard go test $$(go list ./... | grep -v '/cmd/busy$$') -race -cover -count=1",
 			gateSweep, " -race -cover -count=1", true},
-		{"the busy line as it stands", "\tgo run ./cmd/noleftovers go test ./cmd/busy -race -cover -count=1",
+		{"the busy line as it stands", "\tgo run ./cmd/noleftovers go run ./cmd/shard go test ./cmd/busy -race -cover -count=1",
 			gateBusy, " -race -cover -count=1", true},
 		{"the workflow line", "        run: " + ciCommand,
 			"run: " + ciCommand, "", true},
 		// The narrower gate is not the line the workflow writes.
 		{"the narrower gate is not this line", "        run: make test-shipped",
 			"run: " + ciCommand, "", false},
-		{"a wrapped recipe is still this line", "\tgo run ./cmd/noleftovers go test ./cmd/busy \\",
+		{"a wrapped recipe is still this line", "\tgo run ./cmd/noleftovers go run ./cmd/shard go test ./cmd/busy \\",
 			gateBusy, " \\", true},
-		{"the silence prefix is make's, not the command's", "\t@go run ./cmd/noleftovers go test ./cmd/busy -race",
+		{"the silence prefix is make's, not the command's", "\t@go run ./cmd/noleftovers go run ./cmd/shard go test ./cmd/busy -race",
 			gateBusy, " -race", true},
 		// busy's package path must not satisfy the sweep's command, or one
 		// line could stand in for both.
-		{"the busy line is not the sweep line", "\tgo run ./cmd/noleftovers go test ./cmd/busy -race",
+		{"the busy line is not the sweep line", "\tgo run ./cmd/noleftovers go run ./cmd/shard go test ./cmd/busy -race",
 			gateSweep, "", false},
+		// Without the splitter, the line runs the whole gate on every machine
+		// CI spreads it over — not a weaker gate, but not the one CI's check
+		// that the parts made a whole is reading either.
+		{"the line without the splitter", "\tgo run ./cmd/noleftovers go test ./cmd/busy -race",
+			gateBusy, "", false},
 		// Everything below is prose about the gate, and none of it is the gate.
 		{"a comment", "\t# go run ./cmd/noleftovers go test ./... -race -cover", gateBusy, "", false},
 		{"an echo", "\t@echo go run ./cmd/noleftovers go test ./... -race -cover", gateBusy, "", false},
@@ -736,7 +741,7 @@ func TestARecipeIsOnlyTheLinesUnderItsOwnTarget(t *testing.T) {
 		"\tgo test ./...",
 		"",
 		"cover: ## coverage",
-		"\tgo run ./cmd/noleftovers go test ./cmd/busy -race -cover",
+		"\tgo run ./cmd/noleftovers go run ./cmd/shard go test ./cmd/busy -race -cover",
 	}, "\n")
 
 	lines, err := recipeOf("test")(strings.Split(body, "\n"))

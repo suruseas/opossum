@@ -6,15 +6,22 @@ name: ci
 # virtualization, which GitHub-hosted runners don't provide; that layer is
 # verified on real hardware (`make real-conformance`).
 #
-# Two jobs, one per compiler, so that they run side by side on two runners
-# rather than one after the other, the two compilers waiting on each other.
-# Each job carries its own checkout and its own compiler; the pull-request
-# gates (the changelog fragment, the released sections) and the
-# release-config check ride with the go.mod compiler's job. Each job's gate
-# runs with a temporary directory of the run's and the job's own (`TMPDIR`,
-# on the gate steps): the leftovers check reads what a run left in that
-# directory, and a directory shared with the other job would show it the
-# other job's work in progress.
+# Two compilers, and the gate for each spread over several machines. The
+# orchestrator package alone took four of a job's six minutes, so splitting
+# by package left the job as long as that package; the gate is split by test
+# instead. `gomod-parts` and `stable-parts` run `make test` with
+# OPOSSUM_GATE_SHARD=k/N, and each of their N machines runs the tests whose
+# names fall in part k (cmd/shard). Then one job per compiler — `ci` and
+# `stable`, the names the branch rules require — reads every part's record
+# and is green only when the parts passed and together ran every test of the
+# gate exactly once. The pull-request gates (the changelog fragment, the
+# released sections) and the release-config check ride with `ci`; they need
+# no compiler and run beside the parts rather than after them.
+#
+# Each part's gate runs with a temporary directory of the run's and the job's
+# own (`TMPDIR`, on the gate step): the leftovers check reads what a run left
+# in that directory, and a directory shared with another job would show it
+# the other job's work in progress.
 # Every push to a pull request runs it, drafted or not (and a reopened pull
 # request runs again: reopening is a way to run the same head again without
 # a push), and so does every push to main: a draft's run finds a broken
@@ -40,7 +47,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  ci:
+  gomod-parts:
+    name: go.mod, part ${{ matrix.part }}
     # A GitHub-hosted runner: free for a public repository, and a machine of
     # GitHub's rather than the maintainer's, which matters because an outside
     # contributor's pull request runs here. release.yml (a darwin build) and
@@ -50,10 +58,11 @@ jobs:
     # obliquely.
     runs-on: ubuntu-latest
     # The longest job measured (of about 600 runs on the self-hosted runners
-    # this used before) took 17 minutes; the default limit is 360, so a hung
-    # test run would hold a runner for hours. 45 is about two and a half times the longest, and `go test`
-    # has its own per-package timeout inside it. The limit counts from the job
-    # starting on a runner, not from the queue.
+    # this used before) took 17 minutes for the whole gate; the default limit
+    # is 360, so a hung test run would hold a runner for hours. 45 is about
+    # two and a half times that, and `go test` has its own per-package timeout
+    # inside it. The limit counts from the job starting on a runner, not from
+    # the queue.
     timeout-minutes: 45
     # The compiler each section installed is the compiler it uses. Left to
     # itself, go reads the `toolchain` line in go.mod and downloads a different
@@ -62,12 +71,17 @@ jobs:
     # same compiler while the log went on naming two.
     env:
       GOTOOLCHAIN: local
+    # The number of parts is the length of this list, and nothing else:
+    # each part is told `${{ matrix.part }}/${{ strategy.job-total }}`, so a
+    # part added or taken away here changes N for all of them at once.
+    # fail-fast off: one red part says nothing about the others' tests, and
+    # cancelling them would leave their records unwritten.
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v7
-        with:
-          # Full history: the changelog-fragment step three-dot diffs against
-          # the PR base, and a shallow clone has no base to diff against.
-          fetch-depth: 0
       - name: the runner has the tools the steps below assume
         run: |
           missing=""
@@ -171,9 +185,11 @@ jobs:
       # runs, not the narrower `make test-shipped`: a pull request here
       # changes the contributor guidance and the changelog fragments as well
       # as the product, and the checks that read those are part of the gate.
-      - name: test (go.mod version, the same gate as `make test`)
+      - name: test (go.mod version, a part of the same gate as `make test`)
         env:
           TMPDIR: /tmp/opossum-ci-${{ github.run_id }}-${{ github.job }}
+          OPOSSUM_GATE_SHARD: ${{ matrix.part }}/${{ strategy.job-total }}
+          OPOSSUM_GATE_SHARD_MANIFEST: /tmp/opossum-ci-part-${{ github.run_id }}.txt
         run: make test
       - name: the temporary directory is removed
         if: ${{ always() }}
@@ -184,6 +200,155 @@ jobs:
           log="/tmp/opossum-ci-load-${{ github.run_id }}-${{ github.job }}.log"
           cat "$log" 2>/dev/null || true
           rm -f "$log"
+      # What this part listed, took and ran, for the `ci` job to check
+      # against the other parts'. Whatever the gate said: a red part's record
+      # still says which of its tests ran.
+      - uses: actions/upload-artifact@v7
+        if: ${{ always() }}
+        with:
+          name: gate-ci-part-${{ matrix.part }}
+          path: /tmp/opossum-ci-part-${{ github.run_id }}.txt
+          if-no-files-found: error
+          retention-days: 1
+
+  # The current release's compiler, in parts of its own: the same runner
+  # class, the same environment, the same parts.
+  stable-parts:
+    name: stable, part ${{ matrix.part }}
+    # The same switch as the job above, for the same reason.
+    runs-on: ubuntu-latest
+    # The same limit as the job above, for the same reason.
+    timeout-minutes: 45
+    env:
+      GOTOOLCHAIN: local
+    # The same parts as the job above, for the same reason.
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v7
+      - name: the runner has the tools the steps below assume
+        run: |
+          missing=""
+          for tool in gcc jq make git; do
+            command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::this runner lacks:$missing — install them on the runner host (apt-get install build-essential jq make git)"
+            exit 1
+          fi
+          echo "runner: $(uname -srm), $(nproc) cpus, tmp=$(dirname "$(mktemp -u)")"
+
+      # ---- the current release -------------------------------------------
+      #
+      # Its own job, so that it reports whatever the go.mod job did: "one
+      # red, one green" says the two versions disagree, "both red" says the
+      # change is broken. The gofmt divergence between 1.26 and 1.27 was
+      # diagnosed from exactly that contrast. Within the job the steps stop
+      # at the first red one, as the go.mod job's compiler steps do: what
+      # the two compilers say of each other is the two jobs' doing, not a
+      # step's. So a red tools check, or a go.mod floor that has caught up
+      # with stable, leaves this job with no test answer at all — the
+      # go.mod job's still stands, and that is the trade accepted here.
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: true
+      # When the two sections run the same compiler, everything they exist to
+      # catch — coverage boundaries moving, gofmt changing its mind — cannot
+      # show up in a green run. In the matrix this claim took two half-checks
+      # in two jobs that could not see each other; here it is a single
+      # comparison, made in this job from go.mod itself.
+      - name: stable is a different compiler than go.mod asks for
+        run: |
+          # Read through the go tool, not with a pattern of our own: it accepts
+          # a tab after the directive, and leading space before it, and a
+          # pattern that misses those comes back empty — which would compare
+          # equal to nothing and pass.
+          go version
+          floor="$(go mod edit -json | jq -r '.Go // empty' | cut -d. -f1,2)"
+          here="$(go version | awk '{print $3}' | sed 's/^go//' | cut -d. -f1,2)"
+          echo "go.mod asks for $floor; stable is $here"
+          if [ -z "$floor" ] || [ -z "$here" ]; then
+            echo "Could not read one of the two versions, so whether they differ is"
+            echo "unknown — and unknown is not the same as fine."
+            exit 1
+          fi
+          if [ "$floor" = "$here" ]; then
+            echo "These parts and the go.mod ones (\`gomod-parts\`) are both Go $here, so the workflow is running"
+            echo "the same compiler twice. The other job follows go.mod, so this means"
+            echo "the version go.mod asks for has caught up with the current"
+            echo "release: either give it a floor that is genuinely older, or drop"
+            echo "these parts and say here why they are no longer needed."
+            exit 1
+          fi
+      - name: gofmt (stable)
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"; echo "$unformatted"; exit 1
+          fi
+      - name: go vet (stable)
+        run: go vet ./...
+      - name: build (stable)
+        run: go build ./...
+      # While the job runs, the host's load is written to a file every 15 s,
+      # and the last step but one prints it. A job on the self-hosted runners
+      # this used before sometimes took about four times as long as the same
+      # job another day (`go vet` 8 s against 21-31 s), and what else was
+      # running on the machine at the time left no trace. The sampler is a background shell
+      # the runner removes with the job's other processes; it reads `uptime`
+      # and the five busiest processes, so it costs next to nothing.
+      - name: the host's load is sampled while the job runs
+        run: |
+          log="/tmp/opossum-ci-load-${{ github.run_id }}-${{ github.job }}.log"
+          : > "$log"
+          nohup sh -c 'while :; do date -u +%T; uptime; ps -eo pcpu,pmem,etime,comm --sort=-pcpu 2>/dev/null | head -6; echo; sleep 15; done' >> "$log" 2>&1 &
+      - name: a temporary directory of this job's own
+        run: mkdir -p "/tmp/opossum-ci-${{ github.run_id }}-${{ github.job }}"
+      - name: test (stable, a part of the same gate as `make test`)
+        env:
+          TMPDIR: /tmp/opossum-ci-${{ github.run_id }}-${{ github.job }}
+          OPOSSUM_GATE_SHARD: ${{ matrix.part }}/${{ strategy.job-total }}
+          OPOSSUM_GATE_SHARD_MANIFEST: /tmp/opossum-ci-part-${{ github.run_id }}.txt
+        run: make test
+      - name: the temporary directory is removed
+        if: ${{ always() }}
+        run: rm -rf "/tmp/opossum-ci-${{ github.run_id }}-${{ github.job }}"
+      - name: the host's load while the job ran
+        if: ${{ always() }}
+        run: |
+          log="/tmp/opossum-ci-load-${{ github.run_id }}-${{ github.job }}.log"
+          cat "$log" 2>/dev/null || true
+          rm -f "$log"
+      # What this part listed, took and ran, for the `stable` job to check
+      # against the other parts'. Whatever the gate said: a red part's record
+      # still says which of its tests ran.
+      - uses: actions/upload-artifact@v7
+        if: ${{ always() }}
+        with:
+          name: gate-stable-part-${{ matrix.part }}
+          path: /tmp/opossum-ci-part-${{ github.run_id }}.txt
+          if-no-files-found: error
+          retention-days: 1
+
+  # The go.mod compiler's verdict, under the name the branch rules require:
+  # every part passed and together they were the whole gate. And the gates
+  # that read the pull request, which need the full history and no compiler.
+  ci:
+    needs: gomod-parts
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history: the changelog-fragment step three-dot diffs against
+          # the PR base, and a shallow clone has no base to diff against.
+          fetch-depth: 0
 
       # ---- a user-facing change carries a changelog fragment -------------
       #
@@ -228,7 +393,7 @@ jobs:
           # same way — that no product code imports it. The checking is not only
           # by hand: internal/repohygiene/gate_test.go pins the set of packages the
           # released binary links, so an exemption that becomes a lie fails there.
-          shipped="$(echo "$changed" | grep -E '^(cmd|internal)/' | grep -v '_test\.go$' | grep -v '/testdata/' | grep -v '^cmd/changelog/' | grep -v '^internal/changelog/' | grep -v '^internal/repohygiene/' | grep -v '^internal/claimcite/' | grep -v '^cmd/mutate/' | grep -v '^internal/mutate/' | grep -v '^cmd/noleftovers/' | grep -v '^cmd/busy/' | grep -v '^internal/suitedir/' | grep -v '^internal/testpair/' | grep -v '^internal/site/' || true)"
+          shipped="$(echo "$changed" | grep -E '^(cmd|internal)/' | grep -v '_test\.go$' | grep -v '/testdata/' | grep -v '^cmd/changelog/' | grep -v '^internal/changelog/' | grep -v '^internal/repohygiene/' | grep -v '^internal/claimcite/' | grep -v '^cmd/mutate/' | grep -v '^internal/mutate/' | grep -v '^cmd/noleftovers/' | grep -v '^cmd/busy/' | grep -v '^cmd/shard/' | grep -v '^internal/suitedir/' | grep -v '^internal/testpair/' | grep -v '^internal/site/' || true)"
           if [ -z "$shipped" ]; then
             echo "No shipped code changed — no fragment needed."; exit 0
           fi
@@ -458,107 +623,78 @@ jobs:
         continue-on-error: true
         run: goreleaser check
 
-  # The current release's compiler, in a job of its own (see the top of the
-  # file): the same runner class, the same environment, its own checkout —
-  # nothing here diffs against a base, so the default depth.
+      # ---- the parts were the whole gate -------------------------------
+      #
+      # Each part ran the tests whose names fell in it; this reads every
+      # part's record and refuses unless together they listed the same
+      # tests, took each exactly once, and ran (passed or skipped) every one
+      # of them (cmd/shard).
+      - uses: actions/setup-go@v7
+        if: ${{ !cancelled() }}
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/download-artifact@v8
+        if: ${{ !cancelled() }}
+        with:
+          pattern: gate-ci-part-*
+          path: /tmp/opossum-ci-parts-${{ github.run_id }}-${{ github.job }}
+      - name: the parts ran every test of the gate once
+        if: ${{ !cancelled() }}
+        run: go run ./cmd/shard -verify "/tmp/opossum-ci-parts-${{ github.run_id }}-${{ github.job }}"
+      # The parts' own verdict. This job runs whatever they said (`always()`
+      # on the job), so that a red part is a red `ci` rather than a
+      # skipped one — and a skipped required check reads as a passed one.
+      - name: every part of the gate passed
+        if: ${{ always() }}
+        env:
+          PARTS: ${{ needs.gomod-parts.result }}
+        run: |
+          echo "the parts of the gate: $PARTS"
+          if [ "$PARTS" != "success" ]; then
+            echo "A part of the gate did not pass (its job says $PARTS); its log has the failure."
+            exit 1
+          fi
+
+  # The stable compiler's verdict, under the name the branch rules require.
   stable:
-    # The same switch as the job above, for the same reason.
+    needs: stable-parts
+    if: ${{ always() }}
     runs-on: ubuntu-latest
-    # The same limit as the job above, for the same reason.
-    timeout-minutes: 45
+    timeout-minutes: 15
     env:
       GOTOOLCHAIN: local
     steps:
       - uses: actions/checkout@v7
-      - name: the runner has the tools the steps below assume
-        run: |
-          missing=""
-          for tool in gcc jq make git; do
-            command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
-          done
-          if [ -n "$missing" ]; then
-            echo "::error::this runner lacks:$missing — install them on the runner host (apt-get install build-essential jq make git)"
-            exit 1
-          fi
-          echo "runner: $(uname -srm), $(nproc) cpus, tmp=$(dirname "$(mktemp -u)")"
-
-      # ---- the current release -------------------------------------------
+      # ---- the parts were the whole gate -------------------------------
       #
-      # Its own job, so that it reports whatever the go.mod job did: "one
-      # red, one green" says the two versions disagree, "both red" says the
-      # change is broken. The gofmt divergence between 1.26 and 1.27 was
-      # diagnosed from exactly that contrast. Within the job the steps stop
-      # at the first red one, as the go.mod job's compiler steps do: what
-      # the two compilers say of each other is the two jobs' doing, not a
-      # step's. So a red tools check, or a go.mod floor that has caught up
-      # with stable, leaves this job with no test answer at all — the
-      # go.mod job's still stands, and that is the trade accepted here.
+      # Each part ran the tests whose names fell in it; this reads every
+      # part's record and refuses unless together they listed the same
+      # tests, took each exactly once, and ran (passed or skipped) every one
+      # of them (cmd/shard).
       - uses: actions/setup-go@v7
+        if: ${{ !cancelled() }}
         with:
-          go-version: stable
+          go-version-file: go.mod
           cache: true
-      # When the two sections run the same compiler, everything they exist to
-      # catch — coverage boundaries moving, gofmt changing its mind — cannot
-      # show up in a green run. In the matrix this claim took two half-checks
-      # in two jobs that could not see each other; here it is a single
-      # comparison, made in this job from go.mod itself.
-      - name: stable is a different compiler than go.mod asks for
-        run: |
-          # Read through the go tool, not with a pattern of our own: it accepts
-          # a tab after the directive, and leading space before it, and a
-          # pattern that misses those comes back empty — which would compare
-          # equal to nothing and pass.
-          go version
-          floor="$(go mod edit -json | jq -r '.Go // empty' | cut -d. -f1,2)"
-          here="$(go version | awk '{print $3}' | sed 's/^go//' | cut -d. -f1,2)"
-          echo "go.mod asks for $floor; stable is $here"
-          if [ -z "$floor" ] || [ -z "$here" ]; then
-            echo "Could not read one of the two versions, so whether they differ is"
-            echo "unknown — and unknown is not the same as fine."
-            exit 1
-          fi
-          if [ "$floor" = "$here" ]; then
-            echo "This job and the go.mod one (\`ci\`) are both Go $here, so the workflow is running"
-            echo "the same compiler twice. The other job follows go.mod, so this means"
-            echo "the version go.mod asks for has caught up with the current"
-            echo "release: either give it a floor that is genuinely older, or drop"
-            echo "this job and say here why it is no longer needed."
-            exit 1
-          fi
-      - name: gofmt (stable)
-        run: |
-          unformatted="$(gofmt -l .)"
-          if [ -n "$unformatted" ]; then
-            echo "These files need gofmt:"; echo "$unformatted"; exit 1
-          fi
-      - name: go vet (stable)
-        run: go vet ./...
-      - name: build (stable)
-        run: go build ./...
-      # While the job runs, the host's load is written to a file every 15 s,
-      # and the last step but one prints it. A job on the self-hosted runners
-      # this used before sometimes took about four times as long as the same
-      # job another day (`go vet` 8 s against 21-31 s), and what else was
-      # running on the machine at the time left no trace. The sampler is a background shell
-      # the runner removes with the job's other processes; it reads `uptime`
-      # and the five busiest processes, so it costs next to nothing.
-      - name: the host's load is sampled while the job runs
-        run: |
-          log="/tmp/opossum-ci-load-${{ github.run_id }}-${{ github.job }}.log"
-          : > "$log"
-          nohup sh -c 'while :; do date -u +%T; uptime; ps -eo pcpu,pmem,etime,comm --sort=-pcpu 2>/dev/null | head -6; echo; sleep 15; done' >> "$log" 2>&1 &
-      - name: a temporary directory of this job's own
-        run: mkdir -p "/tmp/opossum-ci-${{ github.run_id }}-${{ github.job }}"
-      - name: test (stable, the same gate as `make test`)
+      - uses: actions/download-artifact@v8
+        if: ${{ !cancelled() }}
+        with:
+          pattern: gate-stable-part-*
+          path: /tmp/opossum-ci-parts-${{ github.run_id }}-${{ github.job }}
+      - name: the parts ran every test of the gate once
+        if: ${{ !cancelled() }}
+        run: go run ./cmd/shard -verify "/tmp/opossum-ci-parts-${{ github.run_id }}-${{ github.job }}"
+      # The parts' own verdict. This job runs whatever they said (`always()`
+      # on the job), so that a red part is a red `stable` rather than a
+      # skipped one — and a skipped required check reads as a passed one.
+      - name: every part of the gate passed
+        if: ${{ always() }}
         env:
-          TMPDIR: /tmp/opossum-ci-${{ github.run_id }}-${{ github.job }}
-        run: make test
-      - name: the temporary directory is removed
-        if: ${{ always() }}
-        run: rm -rf "/tmp/opossum-ci-${{ github.run_id }}-${{ github.job }}"
-      - name: the host's load while the job ran
-        if: ${{ always() }}
+          PARTS: ${{ needs.stable-parts.result }}
         run: |
-          log="/tmp/opossum-ci-load-${{ github.run_id }}-${{ github.job }}.log"
-          cat "$log" 2>/dev/null || true
-          rm -f "$log"
+          echo "the parts of the gate: $PARTS"
+          if [ "$PARTS" != "success" ]; then
+            echo "A part of the gate did not pass (its job says $PARTS); its log has the failure."
+            exit 1
+          fi

@@ -200,26 +200,24 @@ func TestTheChangelogGateAsksForANoteAboutEverythingThatShips(t *testing.T) {
 	}
 }
 
-// The two jobs' standing promises, read from the YAML. First: no step may
+// The parts jobs' standing promises, read from the YAML. First: no step may
 // quietly ignore its own failure — `continue-on-error` on a checking step
-// turns its red into the job's green. The one exception is named: the
-// goreleaser validation has carried it since before the jobs were folded,
-// deliberately, for a deprecation notice. Second: each compiler's gate is a
-// job of its own, so that both always report — "one red, one green" says
-// the two compilers disagree, "both red" says the change is broken. In
-// each job the compiler's steps, up to the rm after the gate, stop at the
+// turns its red into the job's green. Second: each compiler's gate is a set
+// of parts of its own, so that both always report — "one red, one green"
+// says the two compilers disagree, "both red" says the change is broken. In
+// each part the compiler's steps, up to the rm after the gate, stop at the
 // first red one: none carries a condition (a mkdir skipped by a red gofmt
 // while the gate went on would leave the gate a directory that is not
-// there), and only that rm runs whatever happened; the pull-request gates
-// after it in the go.mod job run after a red step on purpose. The two
-// jobs are twins in what decides where they run: the same runner class, the
-// same environment, and no condition on either (every run of the workflow
-// runs both), or one of them is a job the other's promises do not cover. Each gate step runs with a
+// there), and only that rm runs whatever happened. The two compilers' parts
+// are twins in what decides where they run and how many they are: the same
+// runner class, the same environment, the same parts, and no condition on
+// either (every run of the workflow runs both), or one of them is a job the
+// other's promises do not cover. Each gate step runs with a
 // `TMPDIR` of this run's and this job's own under /tmp — not the runner's
 // `_work/_temp`, which is under the runner user's home, where the suites
 // refuse to put a state directory — so two jobs that share a machine do
 // not read each other's leftovers.
-func TestTheTwoJobsKeepTheirPromises(t *testing.T) {
+func TestThePartsKeepTheirPromises(t *testing.T) {
 	root := repoRoot(t)
 	b, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "ci.yml"))
 	if err != nil {
@@ -230,23 +228,26 @@ func TestTheTwoJobsKeepTheirPromises(t *testing.T) {
 		t.Fatalf("reading the workflow: %v", err)
 	}
 	jobs, _ := top["jobs"].(map[string]any)
-	if len(jobs) != 2 {
-		t.Fatalf("the workflow has %d jobs; this check knows two, one per compiler", len(jobs))
+	if len(jobs) != 4 {
+		t.Fatalf("the workflow has %d jobs; this check knows four: each compiler's parts, and each compiler's verdict", len(jobs))
 	}
-	ci, _ := jobs["ci"].(map[string]any)
-	stable, _ := jobs["stable"].(map[string]any)
+	ci, _ := jobs["gomod-parts"].(map[string]any)
+	stable, _ := jobs["stable-parts"].(map[string]any)
 	if ci == nil || stable == nil {
-		t.Fatalf("the jobs are %v; this check knows `ci` (the go.mod compiler and the pull-request gates) and `stable`", jobs)
+		t.Fatalf("the jobs are %v; this check knows `gomod-parts` and `stable-parts` (each compiler's gate, in parts) beside the verdicts `ci` and `stable`", jobs)
 	}
-	// The keys a job may have: `ci` is read by readGate, and `stable` here,
-	// so that a `continue-on-error` or a `needs` on the job — its red read
-	// as green, or the jobs put back in a line — is a key that is not on
-	// the list.
-	allowed(t, "the stable job", stable, "runs-on", "env", "steps", "timeout-minutes")
-	checkJobTimeout(t, "the stable job", stable)
-	for _, key := range []string{"runs-on", "env", "timeout-minutes"} {
+	// The keys a job may have, so that a `continue-on-error` or a `needs` on
+	// it — its red read as green, or the parts put back in a line — is a key
+	// that is not on the list. (`ci` and `stable` are read by
+	// TestTheVerdictsAreTheWholeGate.)
+	for name, job := range map[string]map[string]any{"gomod-parts": ci, "stable-parts": stable} {
+		allowed(t, "the "+name+" job", job, "name", "runs-on", "env", "strategy", "steps", "timeout-minutes")
+		checkJobTimeout(t, "the "+name+" job", job)
+		checkParts(t, name, job)
+	}
+	for _, key := range []string{"runs-on", "env", "timeout-minutes", "strategy"} {
 		if a, b := fmt.Sprint(ci[key]), fmt.Sprint(stable[key]); a != b {
-			t.Errorf("the two jobs differ in %s (%q vs %q); what decides whether a job runs, and where, is the same for both or one of them is not the twin the other's promises assume", key, a, b)
+			t.Errorf("the two compilers' parts differ in %s (%q vs %q); what decides whether a job runs, and where, is the same for both or one of them is not the twin the other's promises assume", key, a, b)
 		}
 	}
 	// What the stable job checks out: the same action as the go.mod job's,
@@ -258,7 +259,7 @@ func TestTheTwoJobsKeepTheirPromises(t *testing.T) {
 	// the first red one. (What follows the rm in the go.mod job, the
 	// pull-request gates and the release-config check, runs after a red
 	// step on purpose; readGate pins those conditions.)
-	for name, job := range map[string]map[string]any{"ci": ci, "stable": stable} {
+	for name, job := range map[string]map[string]any{"gomod-parts": ci, "stable-parts": stable} {
 		steps, _ := job["steps"].([]any)
 		rm := -1
 		for i, st := range steps {
@@ -295,7 +296,7 @@ func TestTheTwoJobsKeepTheirPromises(t *testing.T) {
 	// `github.event_name == 'pull_request'` in its condition, or it runs on
 	// main with empty revisions. Every step of both jobs, so that a step
 	// added later is held to it too.
-	for name, job := range map[string]map[string]any{"ci": ci, "stable": stable} {
+	for name, job := range map[string]map[string]any{"gomod-parts": ci, "stable-parts": stable} {
 		steps, _ := job["steps"].([]any)
 		for i, st := range steps {
 			m, _ := st.(map[string]any)
@@ -318,12 +319,14 @@ func TestTheTwoJobsKeepTheirPromises(t *testing.T) {
 			}
 		}
 	}
-	stableSteps, _ := stable["steps"].([]any)
-	if len(stableSteps) > 0 {
-		checkout, _ := stableSteps[0].(map[string]any)
-		allowed(t, "the stable job's checkout step", checkout, "uses")
-		if u, _ := checkout["uses"].(string); u != "actions/checkout@v7" {
-			t.Errorf("the stable job's first step uses %q; this check treats it as a plain checkout and does not run it", u)
+	for name, job := range map[string]map[string]any{"gomod-parts": ci, "stable-parts": stable} {
+		steps, _ := job["steps"].([]any)
+		if len(steps) > 0 {
+			checkout, _ := steps[0].(map[string]any)
+			allowed(t, "the "+name+" job's checkout step", checkout, "uses")
+			if u, _ := checkout["uses"].(string); u != "actions/checkout@v7" {
+				t.Errorf("the %s job's first step uses %q; this check treats it as a plain checkout and does not run it", name, u)
+			}
 		}
 	}
 	// Where: a GitHub-hosted runner, which the reasons at the top of the file
@@ -343,7 +346,7 @@ func TestTheTwoJobsKeepTheirPromises(t *testing.T) {
 	// who just installed Go has.
 	asks := map[string]string{}
 	caches := map[string]string{}
-	for name, job := range map[string]map[string]any{"ci": ci, "stable": stable} {
+	for name, job := range map[string]map[string]any{"gomod-parts": ci, "stable-parts": stable} {
 		steps, _ := job["steps"].([]any)
 		for _, st := range steps {
 			m, _ := st.(map[string]any)
@@ -369,28 +372,28 @@ func TestTheTwoJobsKeepTheirPromises(t *testing.T) {
 			}
 		}
 	}
-	for _, name := range []string{"ci", "stable"} {
+	for _, name := range []string{"gomod-parts", "stable-parts"} {
 		if caches[name] != cacheLine {
 			t.Errorf("the %s job's setup-go says cache: %s; this check knows one shape — %s — and "+
 				"nothing else. A hosted runner keeps nothing between runs, so without the cache "+
 				"every run builds from scratch, and that does not show up as a red result", name, caches[name], cacheLine)
 		}
 	}
-	if asks["ci"] != "file:go.mod" {
-		t.Errorf("the ci job installs %q; this check knows one shape — the version go.mod asks for, which is the floor the module claims to work on", asks["ci"])
+	if asks["gomod-parts"] != "file:go.mod" {
+		t.Errorf("the ci job installs %q; this check knows one shape — the version go.mod asks for, which is the floor the module claims to work on", asks["gomod-parts"])
 	}
-	if asks["stable"] != "version:stable" {
-		t.Errorf("the stable job installs %q; this check knows one shape — stable, which is what someone who just installed Go has", asks["stable"])
+	if asks["stable-parts"] != "version:stable" {
+		t.Errorf("the stable job installs %q; this check knows one shape — stable, which is what someone who just installed Go has", asks["stable-parts"])
 	}
-	if asks["ci"] == asks["stable"] {
-		t.Errorf("both jobs install %q; the two exist to run different compilers, and on one compiler neither of the things they are here to catch can show up in a green run", asks["ci"])
+	if asks["gomod-parts"] == asks["stable-parts"] {
+		t.Errorf("both jobs install %q; the two exist to run different compilers, and on one compiler neither of the things they are here to catch can show up in a green run", asks["gomod-parts"])
 	}
-	for name, job := range map[string]map[string]any{"ci": ci, "stable": stable} {
+	for name, job := range map[string]map[string]any{"gomod-parts": ci, "stable-parts": stable} {
 		if got := fmt.Sprint(job["runs-on"]); got != runsOn {
 			t.Errorf("the %s job runs on %s; this check knows one shape — %s — and nothing else. Both jobs carry it: an outside contributor's pull request runs here, so it runs on a machine of GitHub's, not the maintainer's", name, got, runsOn)
 		}
 	}
-	for name, job := range map[string]map[string]any{"ci": ci, "stable": stable} {
+	for name, job := range map[string]map[string]any{"gomod-parts": ci, "stable-parts": stable} {
 		steps, _ := job["steps"].([]any)
 		if len(steps) == 0 {
 			t.Fatalf("no `%s` job steps; the promises this reads live there", name)
@@ -410,8 +413,8 @@ func TestTheTwoJobsKeepTheirPromises(t *testing.T) {
 					t.Errorf("%s: the gate step runs on %q; a condition there is a way for this compiler to be skipped, or run on nothing", name, cond)
 				}
 				env, _ := m["env"].(map[string]any)
-				if len(env) != 1 || env["TMPDIR"] != tmp {
-					t.Errorf("%s: the gate step runs with env %v; this check knows TMPDIR=/tmp/opossum-ci-<run>-<job> (this run's and this job's own, outside the runner user's home, so two jobs on one machine do not share it and the suites' home guard holds) and nothing else", name, env)
+				if len(env) != 3 || env["TMPDIR"] != tmp || env["OPOSSUM_GATE_SHARD"] != partSpec || env["OPOSSUM_GATE_SHARD_MANIFEST"] != partRecord {
+					t.Errorf("%s: the gate step runs with env %v; this check knows TMPDIR=/tmp/opossum-ci-<run>-<job> (this run's and this job's own, outside the runner user's home, so two jobs on one machine do not share it and the suites' home guard holds), OPOSSUM_GATE_SHARD=%s and OPOSSUM_GATE_SHARD_MANIFEST=%s, and nothing else", name, env, partSpec, partRecord)
 				}
 				// The directory is made just before the gate and removed just
 				// after it, whatever the gate said — the same path, spelt
@@ -448,11 +451,11 @@ func TestTheTwoJobsKeepTheirPromises(t *testing.T) {
 // rather than running anything, and knows only the two ways of neutering a job
 // that live in it.
 func TestTheChangelogGateCanStillFailTheBuild(t *testing.T) {
-	// readGate is where this lives now: the job may hold `runs-on`, `env` and
-	// `steps` and nothing else, and the one condition the gate step may carry
-	// is pinned. A `continue-on-error`, a `needs`, a job-level `if`, an extra
-	// key on the gate step — each is a key that is not on the list, and the
-	// list is what fails.
+	// readGate is where this lives now: the job may hold the keys it lists
+	// and nothing else, its `needs` and job-level `if` are pinned, and so is
+	// the one condition the gate step may carry. A `continue-on-error`, an
+	// extra key on the gate step — each is a key that is not on the list, and
+	// the list is what fails.
 	readGate(t, repoRoot(t))
 }
 
@@ -627,8 +630,12 @@ func readGate(t *testing.T, root string) gate {
 	// environment the job hands every script is pinned for the same reason
 	// the keys are: a variable added here reaches the gate's script too, and
 	// this check would be running that script without it.
-	allowed(t, "the job", job, "runs-on", "env", "steps", "timeout-minutes")
-	checkJobTimeout(t, "the job", job)
+	// The job waits for the go.mod compiler's parts and gives their verdict
+	// (TestTheVerdictsAreTheWholeGate), so it has a `needs` and runs
+	// `always()`: any other condition is a way for it to be skipped, and a
+	// skipped required check reads as a passed one.
+	allowed(t, "the job", job, "needs", "if", "runs-on", "env", "steps", "timeout-minutes")
+	checkVerdictJob(t, "the ci job", job, "gomod-parts")
 	jobEnv, _ := job["env"].(map[string]any)
 	if len(jobEnv) != 1 || jobEnv["GOTOOLCHAIN"] != "local" {
 		t.Fatalf("the job hands every script env %v; this check knows GOTOOLCHAIN=local and nothing else", jobEnv)

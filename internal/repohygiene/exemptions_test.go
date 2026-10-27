@@ -37,6 +37,7 @@ func TestTheChangelogGatesExemptionsAreTheOnesWrittenDownHere(t *testing.T) {
 		"internal/mutate":      "the sweep's library: same",
 		"cmd/noleftovers":      "the leftover-directory check: a development tool",
 		"cmd/busy":             "the parallel-test guard: a development tool",
+		"cmd/shard":            "splits the gate over CI's machines: a development tool",
 		"internal/suitedir":    "test-suite directory layout: only tests and tools read it",
 		"internal/testpair":    "a helper that runs a test case with two elements in both orders: only _test.go files import it",
 	}
