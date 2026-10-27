@@ -370,9 +370,10 @@ fake shim's output is kept in sync with the real CLI (see
 
 ## How opossum is developed
 
-opossum is developed primarily by an autonomous AI coding agent, which plans,
-implements, tests, reviews, and self-merges its changes; a human sets direction
-and approves releases.
+opossum is developed primarily by autonomous AI coding agents, which plan,
+implement and test changes and review them independently before they land. A
+human maintainer sets direction, merges every pull request and decides when to
+release.
 
 ## License
 
