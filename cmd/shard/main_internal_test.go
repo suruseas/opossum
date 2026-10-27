@@ -280,6 +280,20 @@ func TestAPartRunsItsOwnTestsAndSaysSo(t *testing.T) {
 			t.Errorf("the record says %v; a test that failed ran, and failed", r.ran)
 		}
 	})
+	t.Run("a verdict on the end of a test's unfinished line is read", func(t *testing.T) {
+		manifest := filepath.Join(t.TempDir(), "rec")
+		f := &fakeGo{answers: []answer{{events: listed("p/a", mine)}, {raw: "=== RUN   " + mine + "\nAddress already in use--- PASS: " + mine + " (0.29s)\nsaid--- FAIL: " + mine + "/sub (0.00s)\nlast wordsok  \tp/a\t0.1s\n"}}}
+		var w bytes.Buffer
+		if code := runPart(p, []string{"./..."}, manifest, f, &w, io.Discard); code != 0 {
+			t.Errorf("exit %d", code)
+		}
+		if r := readManifest(t, manifest); !reflect.DeepEqual(r.ran, map[test]string{{"p/a", mine}: "pass"}) {
+			t.Errorf("the record says %v ran; want the one verdict, in its package, and not the subtest's", r.ran)
+		}
+		if !strings.Contains(w.String(), "Address already in use--- PASS") {
+			t.Errorf("the test's own words were not printed: %q", w.String())
+		}
+	})
 	t.Run("a package's verdicts are its own, not the next one's", func(t *testing.T) {
 		second := ""
 		for i := 0; second == ""; i++ {

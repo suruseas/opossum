@@ -174,13 +174,16 @@ func listTests(t tool, flags, pkgs []string, errw io.Writer) (map[string][]strin
 // stderr gets a different answer than in the plain gate.
 var verboseOnly = regexp.MustCompile(`^\s*(=== (RUN|PAUSE|CONT|NAME)\s|--- (PASS|SKIP): )|^PASS$|^coverage: [^\t]* of statements$`)
 
-// A top-level test's verdict, at the start of its line (a subtest's is
-// indented), and the line that ends a package's run: go prints each
-// package's lines together and then this one, so the verdicts before it are
-// that package's.
+// A top-level test's verdict and the line that ends a package's run: go
+// prints each package's lines together and then the latter, so the verdicts
+// before it are that package's. Neither is looked for only at the start of a
+// line: a test that writes without a final newline leaves the next line go
+// prints on the end of its own (measured: "…Address already in use--- PASS:
+// TestA…"). A subtest's name has a `/` in it, so its verdict is not a
+// top-level one wherever it is.
 var (
-	verdictLine = regexp.MustCompile(`^--- (PASS|FAIL|SKIP): (\S+) \(`)
-	packageEnd  = regexp.MustCompile(`^(?:ok  |FAIL)\t(\S+)`)
+	verdictLine = regexp.MustCompile(`--- (PASS|FAIL|SKIP): ([^\s/]+) \(`)
+	packageEnd  = regexp.MustCompile(`(?:ok  |FAIL)\t(\S+)`)
 )
 
 type test struct{ pkg, name string }
