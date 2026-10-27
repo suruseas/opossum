@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -87,7 +88,13 @@ type answer struct {
 	events []event
 	raw    string
 	code   int
+	// broken, when set, is what reading the output ends with instead of EOF.
+	broken error
 }
+
+type failingReader struct{ err error }
+
+func (r failingReader) Read([]byte) (int, error) { return 0, r.err }
 
 func (f *fakeGo) start(args []string) (io.Reader, func() int, error) {
 	f.calls = append(f.calls, args)
@@ -98,6 +105,9 @@ func (f *fakeGo) start(args []string) (io.Reader, func() int, error) {
 	for _, e := range a.events {
 		j, _ := json.Marshal(e)
 		b.Write(append(j, '\n'))
+	}
+	if a.broken != nil {
+		return io.MultiReader(&b, failingReader{a.broken}), func() int { return a.code }, nil
 	}
 	return &b, func() int { return a.code }, nil
 }
@@ -128,6 +138,19 @@ func TestTheListIsTheNamesGoPrints(t *testing.T) {
 		wantArgs := []string{"test", "-list", "^(Test|Fuzz|Example)", "-json", "-race", "./..."}
 		if !reflect.DeepEqual(f.calls[0], wantArgs) {
 			t.Errorf("asked go %v, want %v — the list is of the binaries the command's own flags build", f.calls[0], wantArgs)
+		}
+	})
+	t.Run("a line longer than any buffer does not stop the list", func(t *testing.T) {
+		f := &fakeGo{answers: []answer{{raw: strings.Repeat("x", 2<<20) + "\n", events: listed("p/a", "TestX")}}}
+		all, err := listTests(f, nil, []string{"./..."}, io.Discard)
+		if err != nil || !reflect.DeepEqual(all, map[string][]string{"p/a": {"TestX"}}) {
+			t.Errorf("got %v, %v", all, err)
+		}
+	})
+	t.Run("a list that cannot be read to the end is refused", func(t *testing.T) {
+		f := &fakeGo{answers: []answer{{events: listed("p/a", "TestX"), broken: errors.New("pipe broke")}}}
+		if _, err := listTests(f, nil, []string{"./..."}, io.Discard); err == nil {
+			t.Error("a list cut off by a read error was taken")
 		}
 	})
 	t.Run("a list that exits non-zero is refused, and what it said is shown", func(t *testing.T) {
@@ -292,6 +315,44 @@ func TestAPartRunsItsOwnTestsAndSaysSo(t *testing.T) {
 		}
 		if !strings.Contains(w.String(), "Address already in use--- PASS") {
 			t.Errorf("the test's own words were not printed: %q", w.String())
+		}
+	})
+	t.Run("a record that cannot be written fails the part", func(t *testing.T) {
+		manifest := filepath.Join(t.TempDir(), "no-such-dir", "rec")
+		f := &fakeGo{answers: []answer{{events: listed("p/a", mine)}, {raw: verbose("p/a", "PASS "+mine)}}}
+		var errw bytes.Buffer
+		if code := runPart(p, []string{"./..."}, manifest, f, io.Discard, &errw); code == 0 {
+			t.Errorf("exit 0 with no record written; the verdict job would find this part missing, and only it would say so")
+		}
+	})
+	t.Run("a line longer than any buffer is printed, and what follows it read", func(t *testing.T) {
+		manifest := filepath.Join(t.TempDir(), "rec")
+		long := strings.Repeat("x", 2<<20)
+		f := &fakeGo{answers: []answer{{events: listed("p/a", mine)}, {raw: long + "\n" + verbose("p/a", "PASS "+mine)}}}
+		var w bytes.Buffer
+		if code := runPart(p, []string{"./..."}, manifest, f, &w, io.Discard); code != 0 {
+			t.Errorf("exit %d", code)
+		}
+		if !strings.Contains(w.String(), long+"\n") {
+			t.Error("the long line was not printed whole")
+		}
+		if r := readManifest(t, manifest); r.ran[test{"p/a", mine}] != "pass" {
+			t.Errorf("the record says %v; the verdict after the long line was lost", r.ran)
+		}
+	})
+	t.Run("output that cannot be read to the end fails the part", func(t *testing.T) {
+		f := &fakeGo{answers: []answer{{events: listed("p/a", mine)}, {raw: verbose("p/a", "PASS "+mine), broken: errors.New("pipe broke")}}}
+		var errw bytes.Buffer
+		if code := runPart(p, []string{"./..."}, filepath.Join(t.TempDir(), "rec"), f, io.Discard, &errw); code == 0 || !strings.Contains(errw.String(), "pipe broke") {
+			t.Errorf("exit %d, said %q; what go said past the break is unknown", code, errw.String())
+		}
+	})
+	t.Run("a last line with no newline is read", func(t *testing.T) {
+		manifest := filepath.Join(t.TempDir(), "rec")
+		f := &fakeGo{answers: []answer{{events: listed("p/a", mine)}, {raw: strings.TrimSuffix(verbose("p/a", "PASS "+mine), "\n")}}}
+		runPart(p, []string{"./..."}, manifest, f, io.Discard, io.Discard)
+		if r := readManifest(t, manifest); r.ran[test{"p/a", mine}] != "pass" {
+			t.Errorf("the record says %v; the package's last line had no newline and was dropped", r.ran)
 		}
 	})
 	t.Run("a package's verdicts are its own, not the next one's", func(t *testing.T) {

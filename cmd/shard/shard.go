@@ -133,13 +133,11 @@ func listTests(t tool, flags, pkgs []string, errw io.Writer) (map[string][]strin
 	all := map[string][]string{}
 	var said []string
 	failed := false
-	sc := bufio.NewScanner(out)
-	sc.Buffer(make([]byte, 1<<20), 1<<20)
-	for sc.Scan() {
+	readErr := eachLine(out, func(line string) {
 		var e event
-		if json.Unmarshal(sc.Bytes(), &e) != nil {
-			said = append(said, sc.Text()+"\n")
-			continue
+		if json.Unmarshal([]byte(line), &e) != nil {
+			said = append(said, line+"\n")
+			return
 		}
 		if e.Output != "" {
 			said = append(said, e.Output)
@@ -150,11 +148,12 @@ func listTests(t tool, flags, pkgs []string, errw io.Writer) (map[string][]strin
 		if e.Action == "fail" {
 			failed = true
 		}
+	})
+	code := wait()
+	if readErr != nil {
+		return nil, fmt.Errorf("reading the list (go exited %d): %v", code, readErr)
 	}
-	if err := sc.Err(); err != nil {
-		return nil, err
-	}
-	if code := wait(); code != 0 || failed {
+	if code != 0 || failed {
 		fmt.Fprint(errw, strings.Join(said, ""))
 		return nil, fmt.Errorf("listing the tests failed (exit %d), so which of them are this part's is unknown", code)
 	}
@@ -185,6 +184,27 @@ var (
 	verdictLine = regexp.MustCompile(`--- (PASS|FAIL|SKIP): ([^\s/]+) \(`)
 	packageEnd  = regexp.MustCompile(`(?:ok  |FAIL)\t(\S+)`)
 )
+
+// eachLine hands f every line of r, however long, without its newline. It
+// reads r to the end whatever happens: a pipe left unread fills, and the
+// process writing it — `go test`, which this then waits for — blocks on the
+// write and never exits.
+func eachLine(r io.Reader, f func(string)) error {
+	br := bufio.NewReader(r)
+	for {
+		line, err := br.ReadString('\n')
+		if line != "" {
+			f(strings.TrimSuffix(line, "\n"))
+		}
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			io.Copy(io.Discard, br)
+			return err
+		}
+	}
+}
 
 type test struct{ pkg, name string }
 
@@ -242,10 +262,7 @@ func runPart(p part, args []string, manifest string, t tool, w, errw io.Writer) 
 		}
 		type verdict struct{ name, action string }
 		var pending []verdict
-		sc := bufio.NewScanner(out)
-		sc.Buffer(make([]byte, 1<<20), 1<<20)
-		for sc.Scan() {
-			line := sc.Text()
+		readErr := eachLine(out, func(line string) {
 			if m := verdictLine.FindStringSubmatch(line); m != nil {
 				pending = append(pending, verdict{m[2], strings.ToLower(m[1])})
 			}
@@ -258,9 +275,9 @@ func runPart(p part, args []string, manifest string, t tool, w, errw io.Writer) 
 			if !verboseOnly.MatchString(line) {
 				fmt.Fprintln(w, line)
 			}
-		}
-		if err := sc.Err(); err != nil {
-			fmt.Fprintf(errw, "shard: reading go test: %v\n", err)
+		})
+		if readErr != nil {
+			fmt.Fprintf(errw, "shard: reading go test: %v\n", readErr)
 			code = 1
 		}
 		if c := wait(); c != 0 {

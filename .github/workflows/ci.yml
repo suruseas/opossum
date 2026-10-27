@@ -15,8 +15,8 @@ name: ci
 # `stable`, the names the branch rules require — reads every part's record
 # and is green only when the parts passed and together ran every test of the
 # gate exactly once. The pull-request gates (the changelog fragment, the
-# released sections) and the release-config check ride with `ci`; they need
-# no compiler and run beside the parts rather than after them.
+# released sections) and the release-config check ride with `ci`, and so run
+# once the parts have finished.
 #
 # Each part's gate runs with a temporary directory of the run's and the job's
 # own (`TMPDIR`, on the gate step): the leftovers check reads what a run left
