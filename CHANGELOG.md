@@ -6,6 +6,10 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- The entry `up --from-docker-compose` writes for an image with an amd64 build and no arm64 one no longer says the image has an amd64 build alone: an image that also lists other builds, such as `s390x`, gets the same entry, which now says it has an amd64 build and no arm64 one.
+
 ## [1.0.1] - 2026-10-28
 
 ### Changed
