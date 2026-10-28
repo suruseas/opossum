@@ -6,6 +6,10 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Verified against Apple `container` 1.6.1. On 1.6.1, an image with no arm64 build runs without `platform: linux/amd64`; `up --from-docker-compose` still writes that entry for such an image, which runs it on 1.5.0 and 1.6.1 alike.
+
 ### Fixed
 
 - A service that builds and names a `platform:` is now built for that platform: `container build` is given `--platform` as `container run` already was. The image was built for the host's arm64 and then run as `linux/amd64` under Rosetta, so a Dockerfile that needs amd64-only packages failed to build where docker compose builds it. An image built before this change is not rebuilt on its own: run `opossum up --build` (or `opossum build`) once for such a service. For `linux/amd64`, its `RUN` steps now go through Rosetta, so the build may take longer than before. For `linux/amd64`, another service that runs the built image by name needs the same `platform:`, as the hint on starting it says (before this change, the service that builds was the one that failed to start).

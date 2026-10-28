@@ -227,6 +227,10 @@ func TestFidelitySystemRunning(t *testing.T) {
 	if !replayShim(t, realStatus131, 0).SystemRunning() {
 		t.Error("SystemRunning should be true for the 1.3.1 `status running` report too")
 	}
+	const realStatus161 = "FIELD               VALUE\nstatus              running\nclient.version      1.6.1\nclient.build        release\nclient.commit       unspecified\nhost.os             Version 27.0.1 (Build 26A434)\nhost.architecture   arm64\nhost.cpus           8\nserver.version      1.6.1\nserver.build        release\nserver.commit       unspecified\nserver.appName      container-apiserver\npaths.appRoot       /Users/<user>/Library/Application Support/com.apple.container/\npaths.installRoot   /opt/homebrew/Cellar/container/1.6.1/\npaths.logRoot       \ncontainers.total    1\ncontainers.running  0\nimages.total        35\n"
+	if !replayShim(t, realStatus161, 0).SystemRunning() {
+		t.Error("SystemRunning should be true for the 1.6.1 `status running` report too")
+	}
 	// 1.4.1 with the daemon down: exit 1 and a sentence, no table.
 	if replayShim(t, "apiserver is not running and not registered with launchd\n", 1).SystemRunning() {
 		t.Error("SystemRunning should be false for the 1.4.1 not-running report")
@@ -255,6 +259,11 @@ func TestFidelitySystemStatusJSON(t *testing.T) {
 	}
 	if st.ContainersRunning != 0 || st.ContainersTotal != 1 || st.Images != 18 {
 		t.Errorf("counts = %d/%d/%d, want 0/1/18", st.ContainersRunning, st.ContainersTotal, st.Images)
+	}
+	// 1.6.1 answers in the same shape (measured 2026-10-28).
+	const realJSON161 = `{"client":{"appName":"container","build":"release","commit":"unspecified","version":"1.6.1"},"host":{"architecture":"arm64","cpus":8,"operatingSystem":"Version 27.0.1 (Build 26A434)"},"paths":{"appRoot":"/Users/<user>/Library/Application Support/com.apple.container/","installRoot":"/opt/homebrew/Cellar/container/1.6.1/"},"resources":{"containersRunning":0,"containersTotal":1,"images":35},"server":{"appName":"container-apiserver","build":"release","commit":"unspecified","version":"1.6.1"},"status":"running"}` + "\n"
+	if st := replayShim(t, realJSON161, 0).SystemStatus(); !st.Running || !st.FromJSON || st.ClientVersion != "1.6.1" || st.ServerVersion != "1.6.1" || st.ContainersTotal != 1 || st.Images != 35 {
+		t.Errorf("the 1.6.1 JSON report should read as running 1.6.1 with 1 container and 35 images: %+v", st)
 	}
 	// Down: exit 1 and `{"status":"unregistered"}`.
 	if st := replayShim(t, "{\"status\":\"unregistered\"}\n", 1).SystemStatus(); st.Running || !st.FromJSON {
