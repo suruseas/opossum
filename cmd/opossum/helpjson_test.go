@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 // helpJSON runs the CLI with args and decodes what it printed as the JSON help.
@@ -310,6 +311,13 @@ func TestOnlyHelpWithFormatJSONIsTaken(t *testing.T) {
 		{"--format=json without --help", []string{"up", "--format=json"}, "opossum: unknown flag: --format\n"},
 		{"another value with --help", []string{"up", "--help", "--format", "yaml"}, "opossum: unknown flag: --format\n"},
 		{"an unknown command", []string{"nope", "--help", "--format", "json"}, "opossum: unknown command \"nope\" for \"opossum\"\n"},
+		// `--help` given, but false: no help is asked for.
+		{"--help=false", []string{"up", "--format", "json", "--help=false"}, "opossum: unknown flag: --format\n"},
+		// `--help` as the value of a flag that takes one is that flag's value, not a request.
+		{"--help as -f's value", []string{"-f", "--help", "up", "--format", "json"}, "opossum: unknown flag: --format\n"},
+		{"--help as -p's value", []string{"up", "-p", "--help", "--format", "json"}, "opossum: unknown flag: --format\n"},
+		// A hidden command has no help to give.
+		{"a hidden command", []string{"__supervise", "--help", "--format", "json"}, "opossum: unknown flag: --format\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, ok := helpJSONRequested(tc.args); ok {
@@ -367,5 +375,127 @@ func TestTheJSONHelpSortsTheCommandsItself(t *testing.T) {
 	}
 	if got, want := helpPaths(doc), []string{"opossum", "opossum aa", "opossum mm", "opossum zz"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// Every command is passed down the persistent flags of each command above it, and
+// only those, however deep it sits (`ws rm` gets the root's and `ws`'s `--path`):
+// `inherited` is not something only the first level gets right.
+func TestEveryCommandInheritsWhatTheCommandsAboveItPassDown(t *testing.T) {
+	want := map[string][]string{}
+	var walk func(c *cobra.Command, passed []string)
+	walk = func(c *cobra.Command, passed []string) {
+		names := append([]string{}, passed...)
+		sort.Strings(names)
+		want[c.CommandPath()] = names
+		mine := append([]string{}, passed...)
+		c.PersistentFlags().VisitAll(func(f *pflag.Flag) {
+			if !f.Hidden && f.Name != "help" {
+				mine = append(mine, f.Name)
+			}
+		})
+		for _, sub := range c.Commands() {
+			walk(sub, mine)
+		}
+	}
+	walk(newRootCmd(), nil)
+	doc, _ := helpJSON(t, "--help", "--format", "json")
+	deep := 0
+	for _, c := range doc.Commands {
+		got := []string{}
+		for _, f := range c.Flags {
+			if f.Inherited {
+				got = append(got, f.Name)
+			}
+		}
+		if strings.Count(c.Path, " ") > 1 {
+			deep++
+		}
+		w := want[c.Path]
+		if w == nil {
+			w = []string{}
+		}
+		if !reflect.DeepEqual(got, w) {
+			t.Errorf("%s inherits %v, want %v", c.Path, got, w)
+		}
+	}
+	if deep == 0 {
+		t.Error("no command two levels down was checked")
+	}
+	if !strings.Contains(" "+strings.Join(want["opossum ws rm"], " ")+" ", " path ") {
+		t.Errorf("the check has no command that inherits from a parent other than the root: ws rm gets %v", want["opossum ws rm"])
+	}
+}
+
+// Each key holds the JSON type schema 1 promises: a list is a list even when it is
+// empty, never null, and `inherited` is a boolean, not a string.
+func TestTheJSONHelpValuesHaveTheirTypes(t *testing.T) {
+	_, raw := helpJSON(t, "--help", "--format", "json")
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		t.Fatal(err)
+	}
+	kind := func(v any) string {
+		switch v.(type) {
+		case string:
+			return "string"
+		case float64:
+			return "number"
+		case bool:
+			return "bool"
+		case []any:
+			return "array"
+		case map[string]any:
+			return "object"
+		case nil:
+			return "null"
+		}
+		return "?"
+	}
+	check := func(where string, m map[string]any, want map[string]string) {
+		for k, v := range m {
+			if w, ok := want[k]; ok && kind(v) != w {
+				t.Errorf("%s.%s is %s, want %s", where, k, kind(v), w)
+			}
+		}
+	}
+	check("top", doc, map[string]string{"schema": "number", "version": "string", "commands": "array"})
+	for _, c := range doc["commands"].([]any) {
+		cm := c.(map[string]any)
+		check(cm["path"].(string), cm, map[string]string{"path": "string", "aliases": "array", "summary": "string", "usage": "string", "flags": "array", "deprecated": "string"})
+		for _, f := range cm["flags"].([]any) {
+			check(cm["path"].(string)+" flag", f.(map[string]any), map[string]string{"name": "string", "shorthand": "string", "type": "string", "default": "string", "description": "string", "inherited": "bool", "deprecated": "string"})
+		}
+	}
+	// Empty lists are lists too: no commands (a hidden one asked about), and a command
+	// with no aliases and no flags.
+	for _, tc := range []struct {
+		cmd  *cobra.Command
+		want []string
+	}{
+		{&cobra.Command{Use: "x", Hidden: true}, []string{`"commands":[]`}},
+		{&cobra.Command{Use: "x", Run: func(*cobra.Command, []string) {}}, []string{`"aliases":[]`, `"flags":[]`}},
+	} {
+		d, err := helpDocFor(tc.cmd)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := json.Marshal(d)
+		for _, w := range tc.want {
+			if !strings.Contains(string(raw), w) {
+				t.Errorf("want %s in %s", w, raw)
+			}
+		}
+	}
+}
+
+// `version` is the running binary's, not a value that happens to match it.
+func TestTheJSONHelpVersionIsTheBinarys(t *testing.T) {
+	was := version
+	version = "9.8.7-test"
+	defer func() { version = was }()
+	doc, _ := helpJSON(t, "--help", "--format", "json")
+	if doc.Version != "9.8.7-test" {
+		t.Errorf("version = %q, want the binary's 9.8.7-test", doc.Version)
 	}
 }

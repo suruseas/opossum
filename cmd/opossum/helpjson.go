@@ -92,8 +92,9 @@ func helpJSONRequested(args []string) (*cobra.Command, bool) {
 		return nil, false
 	}
 	// The command asked about, in the tree the CLI itself runs, with nothing added.
+	// A hidden command has no help to give, so it is left to the CLI as before.
 	real, _, err := newRootCmd().Find(strings.Fields(cmd.CommandPath())[1:])
-	if err != nil {
+	if err != nil || real.Hidden {
 		return nil, false
 	}
 	return real, true
