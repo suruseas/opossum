@@ -89,6 +89,7 @@ func newRootCmd() *cobra.Command {
 		destroyCmd(),
 		superviseCmd(),
 	)
+	withHelpJSONHint(root)
 
 	// Preflight: every runtime-touching command needs Apple's `container` CLI on
 	// PATH. Check once here so all of them fail the same way — a coded, actionable
@@ -471,6 +472,13 @@ func main() { os.Exit(runCLI(os.Args[1:], os.Stdout, os.Stderr)) }
 // main does with a failure can be run by a test. Without the seam the only
 // thing covering this line is that someone read it.
 func runCLI(args []string, out, errOut io.Writer) int {
+	if cmd, ok := helpJSONRequested(args); ok {
+		if err := writeHelpJSON(out, cmd); err != nil {
+			fmt.Fprintln(errOut, "opossum: "+err.Error())
+			return 1
+		}
+		return 0
+	}
 	root := newRootCmd()
 	root.SetOut(out)
 	root.SetErr(errOut)
