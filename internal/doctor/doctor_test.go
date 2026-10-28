@@ -392,6 +392,21 @@ func TestRuntimeCheckReadsTheJSONStatusFirst(t *testing.T) {
 			t.Errorf("want ok without a mismatch against an empty client version, got %+v", c)
 		}
 	})
+	// The reports above have nothing running and, where both versions are given, the
+	// same build on each side, so they cannot tell the server's version from the
+	// client's, or the running count from a constant. These do.
+	t.Run("the version shown is the server's", func(t *testing.T) {
+		c := checkRuntime(mock{statusJSON: `{"status":"running","server":{"version":"1.6.1"}}`})
+		if c.status != ok || c.detail != "Apple container system is running (1.6.1)" {
+			t.Errorf("want the server's version in the detail, got %+v", c)
+		}
+	})
+	t.Run("the running count is the report's", func(t *testing.T) {
+		c := checkRuntime(mock{statusJSON: `{"client":{"version":"1.6.1"},"resources":{"containersRunning":2,"containersTotal":3,"images":5},"server":{"version":"1.6.1"},"status":"running"}`})
+		if c.status != ok || !strings.Contains(c.detail, "2 of 3 containers running, 5 images") {
+			t.Errorf("want the running count, the total and the images from the report, got %+v", c)
+		}
+	})
 	t.Run("JSON with the client version alone does not warn", func(t *testing.T) {
 		c := checkRuntime(mock{statusJSON: `{"status":"running","client":{"version":"1.4.1"}}`})
 		if c.status != ok || strings.Contains(c.detail, "client is") {
