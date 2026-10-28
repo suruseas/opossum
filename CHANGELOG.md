@@ -8,8 +8,7 @@ All notable changes to opossum are documented here. The format follows
 
 ### Changed
 
-- On Apple `container` 1.6.1 and later, `up --from-docker-compose` leaves an image that has an amd64 build and no arm64 one to the runtime, which runs it as docker does: it no longer pulls the image for `linux/arm64` and `linux/amd64` to find that out, and no longer writes `platform: linux/amd64` for the service. On earlier versions, and where the version cannot be read, it does both as before. An overlay written before keeps its entry, which still works on 1.6.1.
-- Verified against Apple `container` 1.6.1.
+- Verified against Apple `container` 1.6.1. On 1.6.1, an image with no arm64 build runs without `platform: linux/amd64`; `up --from-docker-compose` still writes that entry for such an image, which runs it on 1.5.0 and 1.6.1 alike.
 
 ### Fixed
 

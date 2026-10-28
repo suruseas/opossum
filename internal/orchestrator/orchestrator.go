@@ -67,7 +67,6 @@ type Orchestrator struct {
 	planPullsOff bool
 	planNamed    map[string]bool
 	planArch     map[string]archOfImage // what asking each image for its builds came to, so a plan asks each once
-	planVersion  *string                // the runtime's version, asked once for a plan (runtimeRunsAmd64Itself)
 	// imageWorkdirs remembers where each image starts its process, for the same
 	// reason: a crash decode asks once per image, not once per mount.
 	imageWorkdirs map[string]string
