@@ -319,6 +319,27 @@ func TestFidelitySystemStatusJSON(t *testing.T) {
 	}
 }
 
+// An edited copy of the real 1.4.1 report above, not a measured one: the
+// client and server versions differ, and something is running. The unedited
+// report has the same version on both sides and a zero running count, so
+// reading the server's version from the client's field, or writing a constant
+// 0 for the running count, would leave the test above green. One subtest per
+// field so a failure names the field that was misread.
+func TestFidelitySystemStatusJSONDistinctFields(t *testing.T) {
+	const editedJSON = `{"client":{"appName":"container","build":"release","commit":"unspecified","version":"1.4.1"},"host":{"architecture":"arm64","cpus":8,"operatingSystem":"Version 26.6.2 (Build 25G83)"},"paths":{"appRoot":"/Users/<user>/Library/Application Support/com.apple.container/","installRoot":"/opt/homebrew/Cellar/container/1.4.1/"},"resources":{"containersRunning":2,"containersTotal":3,"images":18},"server":{"appName":"container-apiserver","build":"release","commit":"unspecified","version":"1.6.1"},"status":"running"}` + "\n"
+	st := replayShim(t, editedJSON, 0).SystemStatus()
+	t.Run("server version comes from the server field", func(t *testing.T) {
+		if st.ClientVersion != "1.4.1" || st.ServerVersion != "1.6.1" {
+			t.Errorf("versions = %q / %q, want 1.4.1 / 1.6.1", st.ClientVersion, st.ServerVersion)
+		}
+	})
+	t.Run("running count comes from the resources", func(t *testing.T) {
+		if st.ContainersRunning != 2 || st.ContainersTotal != 3 {
+			t.Errorf("counts = %d running / %d total, want 2 / 3", st.ContainersRunning, st.ContainersTotal)
+		}
+	})
+}
+
 // `network inspect` on container 1.4.1: a network made with --subnet carries
 // it under configuration, one the runtime chose only under status, and the
 // IPv6 one under status is written with the gateway's address (`fd00:1::1/64`).
