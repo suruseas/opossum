@@ -6,6 +6,8 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-10-28
+
 ### Changed
 
 - Verified against Apple `container` 1.6.1. On 1.6.1, an image with no arm64 build runs without `platform: linux/amd64`; `up --from-docker-compose` still writes that entry for such an image, which runs it on 1.5.0 and 1.6.1 alike.
@@ -2969,7 +2971,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/suruseas/opossum/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/suruseas/opossum/compare/v0.49.0...v1.0.0
 [0.49.0]: https://github.com/suruseas/opossum/compare/v0.48.2...v0.49.0
 [0.48.2]: https://github.com/suruseas/opossum/compare/v0.48.1...v0.48.2
