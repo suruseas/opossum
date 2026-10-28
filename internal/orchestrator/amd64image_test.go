@@ -53,6 +53,9 @@ while [ $# -gt 0 ]; do
 done
 key=$(printf %s "$ref" | tr '/:@' '___')
 case "$op" in
+"system status")
+  if [ -e "$d/status" ]; then cat "$d/status"; exit 0; fi
+  exit 0 ;;
 "image inspect")
   if [ -e "$d/local_$key" ]; then cat "$d/local_$key"; exit 0; fi
   echo 'Error: image not found' >&2; exit 1 ;;
@@ -94,7 +97,19 @@ exit 0
 	return &archShim{rt: &runtime.Runtime{Bin: shim}, log: log}
 }
 
+// calls is what was asked of images, in order. The runtime's version, asked once for a
+// plan, is left out of it and counted by versionAsks.
 func (a *archShim) calls() []string {
+	var out []string
+	for _, l := range a.allCalls() {
+		if !strings.HasPrefix(l, "system status") {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+func (a *archShim) allCalls() []string {
 	b, _ := os.ReadFile(a.log)
 	var out []string
 	for _, l := range strings.Split(strings.TrimSpace(string(b)), "\n") {
@@ -103,6 +118,16 @@ func (a *archShim) calls() []string {
 		}
 	}
 	return out
+}
+
+func (a *archShim) versionAsks() int {
+	n := 0
+	for _, l := range a.allCalls() {
+		if strings.HasPrefix(l, "system status") {
+			n++
+		}
+	}
+	return n
 }
 
 func (a *archShim) count(prefix string) int {
@@ -416,4 +441,107 @@ func TestAnImageAnotherServiceBuildsIsNotAskedAbout(t *testing.T) {
 	if len(appliedOnly(changes)) != 0 || a.pulls() != 0 {
 		t.Errorf("a name a sibling builds was asked about: %+v, %v", changes, a.calls())
 	}
+}
+
+// statusJSON is `container system status --format json` as 1.6.1 answers it, with the
+// CLI's version replaced (and the apiserver's, to the same).
+func statusJSON(version string) string { return statusJSONOf(version, version) }
+
+func statusJSONOf(client, server string) string {
+	return `{"client":{"appName":"container","build":"release","commit":"unspecified","version":"` + client + `"},"resources":{"containersRunning":0,"containersTotal":1,"images":3},"server":{"appName":"container-apiserver","build":"release","commit":"unspecified","version":"` + server + `"},"status":"running"}` + "\n"
+}
+
+func (a *archShim) setStatus(t *testing.T, report string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(filepath.Dir(a.rt.Bin), "status"), []byte(report), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// From container 1.6.1 the runtime takes the platform from the image and runs one with
+// only an amd64 build, as docker does: the image is not asked about and nothing is
+// written. Before it, or where the version cannot be read, the image is asked and the
+// entry written as before.
+func TestAnAmd64OnlyImageIsLeftToARuntimeThatRunsIt(t *testing.T) {
+	for _, tc := range []struct {
+		name, report string
+		left         bool // left to the runtime: no pull, no entry
+	}{
+		{"1.6.1", statusJSON("1.6.1"), true},
+		{"a later patch", statusJSON("1.6.2"), true},
+		{"a later minor", statusJSON("1.7.0"), true},
+		{"a minor of two digits", statusJSON("1.10.0"), true},
+		{"a later major", statusJSON("2.0.0"), true},
+		{"1.6.0", statusJSON("1.6.0"), false},
+		{"1.5.0", statusJSON("1.5.0"), false},
+		{"an earlier major with a larger minor", statusJSON("0.9.9"), false},
+		{"no patch number", statusJSON("1.6"), false},
+		{"no patch number, a later minor", statusJSON("1.7"), false},
+		{"four numbers", statusJSON("1.6.1.1"), false},
+		{"a negative number", statusJSON("2.-1.0"), false},
+		// The CLI picks the platform, so its version is the one that counts.
+		{"a 1.6.1 CLI with an earlier apiserver", statusJSONOf("1.6.1", "1.5.0"), true},
+		{"an earlier CLI with a 1.6.1 apiserver", statusJSONOf("1.5.0", "1.6.1"), false},
+		{"a suffix", statusJSON("1.6.1-beta"), false},
+		{"a leading v", statusJSON("v1.6.1"), false},
+		{"a leading zero", statusJSON("01.6.1"), false},
+		{"no version", statusJSON(""), false},
+		{"the table, which has no version opossum reads", "FIELD  VALUE\nstatus running\n", false},
+		{"no answer", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newArchShim(t, nil, map[string][]string{"vendor/app:1": {"amd64"}})
+			a.setStatus(t, tc.report)
+			body, changes, _, _ := planAmd64(t, a, "  app:\n    image: vendor/app:1\n")
+			applied := appliedOnly(changes)
+			if tc.left {
+				if a.pulls() != 0 || len(applied) != 0 {
+					t.Errorf("a runtime that runs the image itself: want no pull and no entry, got pulls %v, entries %+v\n%s", a.calls(), applied, body)
+				}
+				return
+			}
+			if a.pulls() != 2 || len(applied) != 1 || applied[0].Code != string(codeImageNoArm64) {
+				t.Errorf("an earlier or unknown runtime: want two pulls and the OPSM-412 entry, got pulls %v, entries %+v\n%s", a.calls(), applied, body)
+			}
+		})
+	}
+}
+
+// The version is asked once for a plan, and only where an image would otherwise be
+// pulled to be asked about.
+func TestTheRuntimeVersionIsAskedOnlyWhereItDecides(t *testing.T) {
+	reg := map[string][]string{"v/a:1": {"amd64"}, "v/b:1": {"amd64"}}
+	t.Run("once for two images", func(t *testing.T) {
+		a := newArchShim(t, nil, reg)
+		a.setStatus(t, statusJSON("1.5.0"))
+		planAmd64(t, a, "  a:\n    image: v/a:1\n  b:\n    image: v/b:1\n")
+		if got := a.versionAsks(); got != 1 {
+			t.Errorf("asked the version %d times, want once: %v", got, a.allCalls())
+		}
+	})
+	t.Run("not under --dry-run", func(t *testing.T) {
+		a := newArchShim(t, nil, reg)
+		a.setStatus(t, statusJSON("1.5.0"))
+		a.rt.DryRun = true
+		planAmd64(t, a, "  a:\n    image: v/a:1\n")
+		if got := a.versionAsks(); got != 0 {
+			t.Errorf("a dry run asked the version: %v", a.allCalls())
+		}
+	})
+	t.Run("not for a service that names its platform", func(t *testing.T) {
+		a := newArchShim(t, nil, reg)
+		a.setStatus(t, statusJSON("1.5.0"))
+		planAmd64(t, a, "  a:\n    image: v/a:1\n    platform: linux/amd64\n")
+		if got := a.versionAsks(); got != 0 {
+			t.Errorf("asked the version for a service that names its platform: %v", a.allCalls())
+		}
+	})
+	t.Run("not for an image held with an arm64 build", func(t *testing.T) {
+		a := newArchShim(t, map[string][]string{"v/a:1": {"arm64"}}, reg)
+		a.setStatus(t, statusJSON("1.5.0"))
+		planAmd64(t, a, "  a:\n    image: v/a:1\n")
+		if got := a.versionAsks(); got != 0 {
+			t.Errorf("asked the version for an image that has an arm64 build here: %v", a.allCalls())
+		}
+	})
 }

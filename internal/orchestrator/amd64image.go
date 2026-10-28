@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/suruseas/opossum/internal/compose"
@@ -30,9 +31,11 @@ const (
 // no arm64 build and has an amd64 one.
 //
 // docker runs such an image without a word, under emulation; Apple `container`
-// refuses it unless the service says which platform to run (OPSM-412), and Rosetta
-// runs the amd64 build. The service then runs the image its file names, as it
-// does under docker, and nothing about what the project means changes.
+// before 1.6.1 refuses it unless the service says which platform to run (OPSM-412),
+// and Rosetta runs the amd64 build. The service then runs the image its file names,
+// as it does under docker, and nothing about what the project means changes. From
+// 1.6.1 the runtime takes the platform from the image and runs it as docker does, so
+// nothing is asked or written there (runtimeRunsAmd64Itself).
 //
 // What the image has is found by asking for it, one platform at a time, because
 // the local store cannot say: `image inspect` lists only the builds it holds, so an
@@ -74,6 +77,9 @@ func (o *Orchestrator) adaptAmd64OnlyImage(name string, svc *compose.Service) []
 	if o.rt.DryRun || o.planPullsOff || (o.planNamed != nil && !o.planNamed[name]) {
 		return nil
 	}
+	if o.runtimeRunsAmd64Itself() {
+		return nil // the runtime runs the amd64 build itself, as docker does
+	}
 	if o.planArch == nil {
 		o.planArch = map[string]archOfImage{}
 	}
@@ -96,7 +102,7 @@ func (o *Orchestrator) adaptAmd64OnlyImage(name string, svc *compose.Service) []
 			fmt.Sprintf("%s service %q: run the amd64 build of its image.", overlayMarker, esc(name)),
 			[]string{
 				fmt.Sprintf("%s has no build for Apple silicon (arm64); it lists amd64 alone.", esc(svc.Image)),
-				fmt.Sprintf("docker runs it anyway, emulated; Apple container does not unless the service says so (%s).", codeImageNoArm64),
+				fmt.Sprintf("docker runs it anyway, emulated; Apple container before 1.6.1 does not unless the service says so (%s).", codeImageNoArm64),
 				"`platform: linux/amd64` runs that build through Rosetta, so the service runs the",
 				"image your file names, as it does under docker. It is slower than a native image,",
 				"and it needs Rosetta: where Rosetta is not installed, or a macOS release stops",
@@ -133,4 +139,43 @@ func (o *Orchestrator) askForArm64(ref string) archOfImage {
 		return archUnknown
 	}
 	return archOnlyAmd64
+}
+
+// runtimeRunsAmd64Itself is whether the runtime, given no platform, takes it from the
+// image, and so runs an image with only an amd64 build as it is: container 1.6.1 and
+// later (measured on 1.6.1: `container run` of such an image answers `uname -m` with
+// x86_64, where 1.5.0 refused it with `Error: platform linux/arm64`). The CLI is what
+// picks the platform, so its version is the one read. A version that cannot be read
+// counts as an earlier one: the entry written then runs the image on 1.5.0 and 1.6.1
+// alike. The runtime is asked once for a plan.
+func (o *Orchestrator) runtimeRunsAmd64Itself() bool {
+	if o.planVersion == nil {
+		v := o.rt.SystemStatus().ClientVersion
+		o.planVersion = &v
+	}
+	return versionAtLeast(*o.planVersion, 1, 6, 1)
+}
+
+// versionAtLeast reports whether v, written major.minor.patch in digits, is at least
+// that version. Anything else is not.
+func versionAtLeast(v string, major, minor, patch int) bool {
+	parts := strings.Split(v, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	var n [3]int
+	for i, p := range parts {
+		x, err := strconv.Atoi(p)
+		if err != nil || x < 0 || p != strconv.Itoa(x) {
+			return false
+		}
+		n[i] = x
+	}
+	want := [3]int{major, minor, patch}
+	for i := range n {
+		if n[i] != want[i] {
+			return n[i] > want[i]
+		}
+	}
+	return true
 }

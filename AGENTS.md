@@ -140,7 +140,8 @@ often getting them wrong costs a retry:
 - **Pick an image with an arm64 build, or add `platform: linux/amd64`.** This
   runtime is Apple silicon only, but an amd64-only image still runs through
   Rosetta once the service says so explicitly (`OPSM-412` gives this same hint
-  when `up` finds no arm64 variant). The official image for a popular piece of
+  when `up` finds no arm64 variant). Container 1.6.1 and later run such an image
+  without being told, taking the platform from the image. The official image for a popular piece of
   software (`postgres`, `redis`, `nginx`, `node`, `python`) almost always
   publishes both; a small or unmaintained one may not.
 - **Give a database its own named volume, and point Postgres's `PGDATA` one

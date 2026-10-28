@@ -1,1 +1,1 @@
-- Verified against Apple `container` 1.6.1. On 1.6.1, an image with no arm64 build runs without `platform: linux/amd64`; `up --from-docker-compose` still writes that entry for such an image, which runs it on 1.5.0 and 1.6.1 alike.
+- Verified against Apple `container` 1.6.1.
