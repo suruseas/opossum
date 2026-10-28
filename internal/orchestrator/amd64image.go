@@ -34,8 +34,10 @@ const (
 // Rosetta runs the amd64 build. 1.6.1 runs an image that lists only an amd64 build
 // without being told (measured), but it takes the platform from the image, and its
 // source refuses one that lists several and no arm64 until a platform is given, so
-// the entry is still written: it runs the image on both. The service then runs the image its file names, as it
-// does under docker, and nothing about what the project means changes.
+// the entry is still written. It runs an image that lists only an amd64 build on
+// both (measured); for one that lists several, the source picks the platform
+// given. The service then runs the image its file names, as it does under docker,
+// and nothing about what the project means changes.
 //
 // What the image has is found by asking for it, one platform at a time, because
 // the local store cannot say: `image inspect` lists only the builds it holds, so an

@@ -141,9 +141,9 @@ often getting them wrong costs a retry:
   runtime is Apple silicon only, but an amd64-only image still runs through
   Rosetta once the service says so explicitly (`OPSM-412` gives this same hint
   when `up` finds no arm64 variant). Container 1.6.1 runs an image that lists
-  only an amd64 build without being told. The official image for a popular piece of
-  software (`postgres`, `redis`, `nginx`, `node`, `python`) almost always
-  publishes both; a small or unmaintained one may not.
+  only an amd64 build without being told. The official image for a popular
+  piece of software (`postgres`, `redis`, `nginx`, `node`, `python`) almost
+  always publishes both; a small or unmaintained one may not.
 - **Give a database its own named volume, and point Postgres's `PGDATA` one
   level below the mount.** A named volume is how data survives `down` (without
   `-v`) and a restart; a bind mount off the project directory works too but
