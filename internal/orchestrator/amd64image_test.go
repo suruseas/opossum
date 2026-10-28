@@ -438,10 +438,10 @@ func TestTheEntrySaysWhatTheImageHas(t *testing.T) {
 			if want := `service "app": image vendor/app:1 has an amd64 build and no arm64 one, so it runs as linux/amd64`; applied[0].Summary != want {
 				t.Errorf("summary = %q, want %q", applied[0].Summary, want)
 			}
-			if !strings.Contains(body, "vendor/app:1 has no build for Apple silicon (arm64); it has an amd64 one.") {
+			if !strings.Contains(body, "vendor/app:1 has no build for Apple silicon (arm64); it has an amd64 one.\n") {
 				t.Errorf("the comment should say the image has an amd64 build and no arm64 one:\n%s", body)
 			}
-			if strings.Contains(body, "alone") || strings.Contains(applied[0].Summary, "only") {
+			if strings.Contains(body, "alone") || strings.Contains(body, "only") || strings.Contains(applied[0].Summary, "only") {
 				t.Errorf("the entry should not say the image has amd64 alone:\n%s\n%s", applied[0].Summary, body)
 			}
 		})
