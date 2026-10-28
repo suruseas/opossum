@@ -417,3 +417,33 @@ func TestAnImageAnotherServiceBuildsIsNotAskedAbout(t *testing.T) {
 		t.Errorf("a name a sibling builds was asked about: %+v, %v", changes, a.calls())
 	}
 }
+
+// What the entry says holds for an image that lists other builds beside amd64: it has
+// an amd64 build and no arm64 one, not an amd64 build alone.
+func TestTheEntrySaysWhatTheImageHas(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		archs []string
+	}{
+		{"amd64 alone", []string{"amd64"}},
+		{"amd64 and another", []string{"amd64", "s390x"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newArchShim(t, nil, map[string][]string{"vendor/app:1": tc.archs})
+			body, changes, _, _ := planAmd64(t, a, "  app:\n    image: vendor/app:1\n")
+			applied := appliedOnly(changes)
+			if len(applied) != 1 {
+				t.Fatalf("want one entry, got %+v\n%s", changes, body)
+			}
+			if want := `service "app": image vendor/app:1 has an amd64 build and no arm64 one, so it runs as linux/amd64`; applied[0].Summary != want {
+				t.Errorf("summary = %q, want %q", applied[0].Summary, want)
+			}
+			if !strings.Contains(body, "vendor/app:1 has no build for Apple silicon (arm64); it has an amd64 one.\n") {
+				t.Errorf("the comment should say the image has an amd64 build and no arm64 one:\n%s", body)
+			}
+			if strings.Contains(body, "alone") || strings.Contains(body, "only") || strings.Contains(applied[0].Summary, "only") {
+				t.Errorf("the entry should not say the image has amd64 alone:\n%s\n%s", applied[0].Summary, body)
+			}
+		})
+	}
+}

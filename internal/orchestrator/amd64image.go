@@ -95,12 +95,12 @@ func (o *Orchestrator) adaptAmd64OnlyImage(name string, svc *compose.Service) []
 		Adaptation: Adaptation{
 			Service: name,
 			Code:    string(codeImageNoArm64),
-			Summary: fmt.Sprintf("service %q: image %s has only an amd64 build, so it runs as linux/amd64", name, svc.Image),
+			Summary: fmt.Sprintf("service %q: image %s has an amd64 build and no arm64 one, so it runs as linux/amd64", name, svc.Image),
 		},
 		comment: commentBlock(
 			fmt.Sprintf("%s service %q: run the amd64 build of its image.", overlayMarker, esc(name)),
 			[]string{
-				fmt.Sprintf("%s has no build for Apple silicon (arm64); it lists amd64 alone.", esc(svc.Image)),
+				fmt.Sprintf("%s has no build for Apple silicon (arm64); it has an amd64 one.", esc(svc.Image)),
 				fmt.Sprintf("docker runs it anyway, emulated; Apple container 1.5.0 does not unless the service says so (%s).", codeImageNoArm64),
 				"`platform: linux/amd64` runs that build through Rosetta, so the service runs the",
 				"image your file names, as it does under docker. It is slower than a native image,",
