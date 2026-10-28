@@ -402,15 +402,22 @@ func TestRuntimeCheckReadsTheJSONStatusFirst(t *testing.T) {
 		}
 	})
 	t.Run("the running count is the report's", func(t *testing.T) {
-		c := checkRuntime(mock{statusJSON: `{"client":{"version":"1.6.1"},"resources":{"containersRunning":2,"containersTotal":3,"images":5},"server":{"version":"1.6.1"},"status":"running"}`})
-		if c.status != ok || !strings.Contains(c.detail, "2 of 3 containers running, 5 images") {
+		c := checkRuntime(mock{statusJSON: `{"client":{"version":"1.6.1"},"resources":{"containersRunning":2,"containersTotal":5,"images":7},"server":{"version":"1.6.1"},"status":"running"}`})
+		if c.status != ok || !strings.Contains(c.detail, "2 of 5 containers running, 7 images") {
 			t.Errorf("want the running count, the total and the images from the report, got %+v", c)
+		}
+	})
+	t.Run("nothing at all is still a count", func(t *testing.T) {
+		c := checkRuntime(mock{statusJSON: `{"client":{"version":"1.6.1"},"resources":{"containersRunning":0,"containersTotal":0,"images":0},"server":{"version":"1.6.1"},"status":"running"}`})
+		if c.status != ok || c.detail != "Apple container system is running (1.6.1; 0 of 0 containers running, 0 images)" {
+			t.Errorf("want the counts shown when they are all 0, got %+v", c)
 		}
 	})
 	t.Run("JSON with the client version alone does not warn", func(t *testing.T) {
 		c := checkRuntime(mock{statusJSON: `{"status":"running","client":{"version":"1.4.1"}}`})
-		if c.status != ok || strings.Contains(c.detail, "client is") {
-			t.Errorf("want ok without a mismatch against an empty server version, got %+v", c)
+		// Nor does it show the client's version: the one shown is the server's.
+		if c.status != ok || c.detail != "Apple container system is running" {
+			t.Errorf("want ok with no version, the server's being unknown, got %+v", c)
 		}
 	})
 }
