@@ -30,9 +30,14 @@ const (
 // no arm64 build and has an amd64 one.
 //
 // docker runs such an image without a word, under emulation; Apple `container`
-// refuses it unless the service says which platform to run (OPSM-412), and Rosetta
-// runs the amd64 build. The service then runs the image its file names, as it
-// does under docker, and nothing about what the project means changes.
+// 1.5.0 refuses it unless the service says which platform to run (OPSM-412), and
+// Rosetta runs the amd64 build. 1.6.1 runs an image that lists only an amd64 build
+// without being told (measured), but it takes the platform from the image, and its
+// source refuses one that lists several and no arm64 until a platform is given, so
+// the entry is still written. It runs an image that lists only an amd64 build on
+// both (measured); for one that lists several, the source picks the platform
+// given. The service then runs the image its file names, as it does under docker,
+// and nothing about what the project means changes.
 //
 // What the image has is found by asking for it, one platform at a time, because
 // the local store cannot say: `image inspect` lists only the builds it holds, so an
@@ -96,7 +101,7 @@ func (o *Orchestrator) adaptAmd64OnlyImage(name string, svc *compose.Service) []
 			fmt.Sprintf("%s service %q: run the amd64 build of its image.", overlayMarker, esc(name)),
 			[]string{
 				fmt.Sprintf("%s has no build for Apple silicon (arm64); it lists amd64 alone.", esc(svc.Image)),
-				fmt.Sprintf("docker runs it anyway, emulated; Apple container does not unless the service says so (%s).", codeImageNoArm64),
+				fmt.Sprintf("docker runs it anyway, emulated; Apple container 1.5.0 does not unless the service says so (%s).", codeImageNoArm64),
 				"`platform: linux/amd64` runs that build through Rosetta, so the service runs the",
 				"image your file names, as it does under docker. It is slower than a native image,",
 				"and it needs Rosetta: where Rosetta is not installed, or a macOS release stops",
