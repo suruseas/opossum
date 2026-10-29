@@ -1,0 +1,98 @@
+# Taken 2026-10-30 on container 1.6.1 (macOS 27.0.1), by asking the runtime directly and then
+# through opossum built from this change. Two local images, built here and removed afterwards:
+# opossum-probe-several:1 lists linux/amd64 and linux/s390x, opossum-probe-noamd:1 lists
+# linux/s390x and linux/ppc64le; neither lists arm64. Both from `FROM alpine:3.20` with
+# `CMD ["uname","-m"]`, built with `container build --platform … --platform …`.
+#
+# 1.6.1 takes the platform from the image: one that lists several and none of them this host's
+# is refused, with the list, until a platform is given (`--rosetta` alone does not do it), and
+# `--platform linux/amd64` runs the amd64 build. The order of the list is not fixed (another
+# run of the first command listed amd64 first). No container is left after a refusal.
+# The service with `platform: linux/amd64` ran and exited at once (its CMD is `uname -m`),
+# which is OPSM-407, not a failure of the platform: its log says x86_64.
+# Only local images were measured: what a first pull of such an image from a registry says has
+# not been.
+
+$ container --version
+container CLI version 1.6.1 (build: release, commit: unspeci)
+
+$ container run --rm --name opossum-probe-run opossum-probe-several:1
+--- exit code: 1
+--- stdout ---
+--- stderr ---
+[0/6] [0s]
+[0/6] [0s]
+Error: image opossum-probe-several:1 has multiple platforms ([ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "s390x"), ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "amd64")]); pass --os/--arch or set a default
+
+$ container run --rm --name opossum-probe-run --rosetta opossum-probe-several:1
+--- exit code: 1
+--- stdout ---
+--- stderr ---
+[0/6] [0s]
+[0/6] [0s]
+Error: image opossum-probe-several:1 has multiple platforms ([ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "s390x"), ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "amd64")]); pass --os/--arch or set a default
+
+$ container run --rm --name opossum-probe-run --platform linux/amd64 opossum-probe-several:1
+--- exit code: 0
+--- stdout ---
+x86_64
+--- stderr ---
+[0/6] [0s]
+[1/6] Fetching image [0s]
+[2/6] Unpacking image [0s]
+[3/6] Fetching kernel [0s]
+[4/6] Fetching init image [0s]
+[5/6] Unpacking init image [0s]
+[6/6] Starting container [0s]
+[6/6] Starting container [0s]
+
+$ container run --rm --name opossum-probe-run opossum-probe-noamd:1
+--- exit code: 1
+--- stdout ---
+--- stderr ---
+[0/6] [0s]
+[0/6] [0s]
+Error: image opossum-probe-noamd:1 has multiple platforms ([ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "ppc64le"), ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "s390x")]); pass --os/--arch or set a default
+
+$ container ls -a (names starting opossum-probe)
+(none)
+
+# opossum up, compose.yaml: services.several.image = opossum-probe-several:1, no platform
+$ opossum up
+--- exit code: 1
+--- stdout ---
+Creating network p9probe-net
+Starting several (opossum-probe-several:1)
+Nothing this `up` started is left running
+--- stderr ---
+[0/6] [0s]
+[0/6] [0s]
+Error: image opossum-probe-several:1 has multiple platforms ([ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "s390x"), ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "amd64")]); pass --os/--arch or set a default
+opossum: starting service "several": exit status 1
+  → [OPSM-412] this image has no build for Apple silicon (arm64). Add `platform: linux/amd64` to the service — opossum runs an amd64 image through Rosetta.
+
+# the same, with platform: linux/amd64
+$ opossum up
+--- exit code: 1
+--- stdout ---
+Creating network p9probe-net
+Starting several (opossum-probe-several:1)
+several.p9probe.opossum
+warning: [OPSM-407] service "several" exited right after starting (state "stopped"); its last log lines:
+  x86_64
+--- stderr ---
+[0/6] [0s]
+[1/6] Fetching image [0s]
+[2/6] Unpacking image [0s]
+[3/6] Fetching kernel [0s]
+[4/6] Fetching init image [0s]
+[5/6] Unpacking init image [0s]
+[6/6] Starting container [0s]
+[6/6] Starting container [0s]
+opossum: [OPSM-407] 1 service(s) exited right after starting: "several" — see the logs above, fix the cause, and run `opossum up` again
+
+$ opossum logs
+--- exit code: 0
+--- stdout ---
+several-1  | x86_64
+--- stderr ---
