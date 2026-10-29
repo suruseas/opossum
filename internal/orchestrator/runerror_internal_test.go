@@ -70,6 +70,25 @@ func TestRunErrorHintPlatform(t *testing.T) {
 			"Error: unsupported platform Platform(osVersion: nil)\n_rawArch: \"arm64\"\n", false},
 		{"the arch on the message but not the missing one's key", "",
 			"Error: unsupported platform Platform(osVersion: nil, arch: \"arm64\")\n", false},
+		// container 1.6.1 takes the platform from the image, and refuses one that
+		// lists several and no arm64 until a platform is given, naming the list
+		// (platform-several-no-arm64-161.txt). With amd64 in it, Rosetta runs it.
+		{"an image listing several platforms, amd64 among them", "",
+			"[0/6] [0s]\n" + severalLine("amd64", "s390x"), true},
+		{"the same list, amd64 last", "", severalLine("s390x", "amd64"), true},
+		// No amd64 in the list: telling anyone to ask for amd64 sends them to a
+		// build the image does not have.
+		{"an image listing several platforms, amd64 not among them", "",
+			severalLine("s390x", "ppc64le"), false},
+		{"several platforms, having already asked for amd64", "linux/amd64",
+			severalLine("amd64", "s390x"), false},
+		// The runtime's own line: it begins the line, and the list is on it.
+		{"a container repeating the several-platforms line", "", "worker: " + severalLine("amd64", "s390x"), false},
+		{"the several-platforms line indented", "", " " + severalLine("amd64", "s390x"), false},
+		{"the list on another line than the message", "",
+			"Error: image x:1 has multiple platforms ([\n" + `_rawArch: "amd64"` + "\n", false},
+		{"amd64 on an error line that is not the several-platforms one", "",
+			"Error: image x:1 is broken (_rawArch: \"amd64\")\n", false},
 		// The older wording does not say which platform was wanted, so the service
 		// has to. Asked for amd64 and told to ask for amd64 is not advice.
 		{"the older wording, having already asked for amd64", "linux/amd64",
@@ -208,6 +227,8 @@ func TestEachDecodedHintCarriesItsCode(t *testing.T) {
 		// arriving as a refusal instead of a warning.
 		{"an amd64-only image that was not local", &compose.Service{},
 			freshPullLine("arm64"), codeImageNoArm64},
+		{"an image listing several platforms and no arm64", &compose.Service{},
+			severalLine("amd64", "s390x"), codeImageNoArm64},
 		{"a bind mount that will not resolve", &compose.Service{},
 			"Error: mount failed with errno 20: failed to resolve '/etc/caddy/Caddyfile' in rootfs", codeBindFilePlaceholder},
 	} {
@@ -242,6 +263,16 @@ func TestAnUndecodedStartFailureCarriesNoCode(t *testing.T) {
 // whole line).
 func freshPullLine(arch string) string {
 	return `Error: unsupported platform Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "` + arch + `")` + "\n"
+}
+
+// severalLine is container 1.6.1's refusal of a local image that lists the given
+// platforms and no arm64, in the shape platform-several-no-arm64-161.txt holds.
+func severalLine(archs ...string) string {
+	var ps []string
+	for _, a := range archs {
+		ps = append(ps, `ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "`+a+`")`)
+	}
+	return "Error: image x:1 has multiple platforms ([" + strings.Join(ps, ", ") + "]); pass --os/--arch or set a default\n"
 }
 
 // The kernel refusing to run what a service starts: `Exec format error`, from a

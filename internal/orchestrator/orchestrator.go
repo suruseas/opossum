@@ -6057,6 +6057,22 @@ func unsupportedPlatformArm64(stderr string) bool {
 	return false
 }
 
+// severalPlatformsWithAmd64 reports whether the runtime refused an image that
+// lists several platforms, none of them this host's, and an amd64 one among them:
+// container 1.6.1 takes the platform from the image, and for such an image asks
+// for one to be given (platform-several-no-arm64-161.txt). The platforms are on
+// the message's own line, which begins the line. One whose list has no amd64 is
+// not one Rosetta runs, so `platform: linux/amd64` is not the answer for it.
+func severalPlatformsWithAmd64(stderr string) bool {
+	for _, line := range strings.Split(stderr, "\n") {
+		if strings.HasPrefix(line, "Error: image ") && strings.Contains(line, " has multiple platforms (") &&
+			strings.Contains(line, `_rawArch: "amd64"`) {
+			return true
+		}
+	}
+	return false
+}
+
 // runMadeNothing asks the runtime whether a run that failed left a container of
 // this name. Asked, not decided from the wording of the failure: whether a
 // failed run leaves one differs from failure to failure (measured on 1.4.1: none
@@ -6215,9 +6231,15 @@ func runErrorHint(svc *compose.Service, holder string, takesItBack bool, err err
 	// is the one that is missing (measured in both directions), so only arm64 is
 	// the case for this hint. Which images say this and which say one of the
 	// wordings above on a first pull has not been measured beyond that.
+	//
+	// A fourth: container 1.6.1 takes the platform from the image, so an image
+	// that lists only an amd64 build runs, and one that lists several and no
+	// arm64 is refused with the list (severalPlatformsWithAmd64). Measured on a
+	// local image; a first pull of such an image from a registry has not been.
 	case strings.Contains(s, "Error: platform linux/arm64"),
 		strings.Contains(s, "does not support required platforms"),
-		unsupportedPlatformArm64(s):
+		unsupportedPlatformArm64(s),
+		severalPlatformsWithAmd64(s):
 		// Except when amd64 is what was asked for and what is missing. The older
 		// wording does not say which platform it wanted, so the service is what
 		// says it: told to add what it already has, a reader is being told to

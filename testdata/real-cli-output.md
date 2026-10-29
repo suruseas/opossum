@@ -29,6 +29,11 @@ and compared with the 1.5.0 files. The sections below were not rewritten; what c
 - An image with no arm64 build runs without `--platform` (the platform now comes from the image). On 1.5.0,
   `container run --rm <amd64-only image> true` failed with `Error: platform linux/arm64`. A pull limited to
   `linux/arm64` of such an image still fails, with `does not support required platforms`.
+- A service with no `platform:` that runs an image another service builds with `platform: linux/amd64` starts,
+  and runs the amd64 build (`uname -m` said `x86_64` in both services; on 1.5.0 the second one failed with
+  `OPSM-412`). With no `platform:` on either, both run arm64, as before.
+- An image that lists several platforms and no arm64 is refused until a platform is given, with a wording
+  of its own (`platform-several-no-arm64-161.txt`, row 2c of the wording table).
 - `container logs -f` of a running container that had written nothing was still following after 4 s (1.4.1
   returned at once).
 - `container stop` of a process that ignores TERM took 8.2 s (5.35 s on 1.5.0).
@@ -511,6 +516,7 @@ HOST FOOTPRINT が黙って `—`／上流はホストのコマンド）。
 | 3 | OPSM-107 | 同上 | `failed to resolve` `in rootfs` | `raw:rootfs-resolve-131.txt` | `raw:rootfs-resolve-131.txt` |
 | 4 | OPSM-201 | 同上 | `Address already in use` | `raw:port-in-use-duplicate-publish-131.txt` | `raw:port-in-use-duplicate-publish-131.txt` |
 | 2b | OPSM-412 | `orchestrator.go` `unsupportedPlatformArm64` | `Error: unsupported platform Platform(` `_rawArch: "arm64"` | `unverified` | `raw:platform-unsupported-fresh-pull-141.txt` |
+| 2c | OPSM-412 | `orchestrator.go` `severalPlatformsWithAmd64` | `Error: image ` ` has multiple platforms (` `_rawArch: "amd64"` | `raw:platform-several-no-arm64-161.txt` | `raw:platform-several-no-arm64-161.txt` |
 | 5 | OPSM-103 | `isStorageAttachmentError` | `VZErrorDomain` `Code=2` `storage device attachment is invalid` | `raw:vzerror-shared-named-volume-131.txt` | `raw:vzerror-shared-named-volume-131.txt` |
 | 5b | image を取れない | `orchestrator.go` `imageFetchFailed` | `Error: HTTP request to ` ` failed with response: ` `/manifests/` `/blobs/` | `unverified` | `raw:image-fetch-refused-141.txt` |
 | 6 | build（cache 破損） | `buildhint.go` | `unable to read root manifest` | `raw:build-cache-path-only-131.txt` | `unverified` |
