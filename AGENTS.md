@@ -245,6 +245,17 @@ where to look in this file if it isn't:
 One line each. `[service…]` means optional service names (default: all). Exit code
 is **0 on success, non-zero on any error** (see Exit codes).
 
+The same list, with every flag, its type and its default, is printed as JSON by
+`opossum --help --format json` (or `opossum <command> --help --format json` for one
+command and the ones under it; `-h` and `opossum help <command>` work too). It holds
+`schema` (1), `version`, and `commands` in path order: each with `path`, `aliases`,
+`summary`, `usage` and `flags`, and `deprecated` when it is. Each flag, in name order,
+has `name`, `shorthand`, `type` (one of `bool`, `string`, `int`, `string-list`),
+`default` (always a string: `"false"`, `"[]"`), `description`, `inherited` (passed
+down from a parent command) and, when it is, `deprecated`. The `help` and
+`completion` commands that the text help lists are not in it, and neither is a
+hidden command or flag; a deprecated flag is, with its note.
+
 | Command | Does |
 |---------|------|
 | `up [service…]` | build (if missing) + start in dependency order. Leaves an unchanged running service alone, but **recreates a stopped or config-changed one** — so after a failed `up` you can just fix the compose and re-run `up` (no `down` first; re-running over a partial/failed bring-up is safe). Flags: `--build`, `--no-build`, `--force-recreate`, `--from-docker-compose` (was `--from-docker`, removed: it is refused and names the new flag), `--remove-orphans`, `--foreground`, `--profile <p>`, `--dry-run` (print the plan — startup order and the `container` commands — without running anything), `--no-supervisor` (don't leave the background process that brings `restart:` services back) |
