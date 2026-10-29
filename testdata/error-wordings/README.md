@@ -1,50 +1,36 @@
-# df478: 診断が一致させている文言を、手で引いた記録
+# Wordings the diagnostics match, captured by hand
 
-`container CLI version 1.2.2`（Homebrew formula `1.2.2_1`）/ 2026-08-23。
-corpus 走査（df476）では発火しなかったものを、**corpus の外で引いた**もの。
-引き方は `testdata/real-cli-output.md` の「診断が一致させている文言と、その引き方」に対応。
+Captured with `container CLI version 1.2.2` (Homebrew formula `1.2.2_1`) on 2026-08-23, unless a file's name or header says another version. These are wordings that running the compose corpus did not trigger, so each was captured outside the corpus. How each one is captured is in `testdata/real-cli-output.md`, in the section on the wordings the diagnostics match.
 
-| ファイル | 引いた文言 | 出た診断 |
+| File | Wording captured | Diagnosis it gave |
 |---|---|---|
 | `rootfs-resolve.txt` | `failed to resolve '…' in rootfs` | OPSM-107 |
-| `port-in-use-duplicate-publish.txt` | `Address already in use` | OPSM-201（**文言一致の側**） |
+| `port-in-use-duplicate-publish.txt` | `Address already in use` | OPSM-201 (**the wording match**) |
 | `vzerror-shared-named-volume.txt` | `VZErrorDomain` + `Code=2` + `storage device attachment is invalid` | OPSM-103 |
 | `platform-image-index-no-arm64.txt` | `Error: platform linux/arm64` | OPSM-412 |
-| `platform-unsupported-fresh-pull-141.txt` | `Error: unsupported platform Platform(` + `_rawArch: "arm64"`（image が手元に無い初回の pull。無いほうの arch が `_rawArch` に入る） | OPSM-412 |
-| `port-attempt-53.txt` | （届かず） | — |
-| `port-attempt-loopback.txt` | （届かず） | — |
-| `volume-in-use.txt` | `in use` | ランタイムの文言（`container volume delete` を直接） |
-| `volume-in-use-via-opossum.txt` | `in use` | **opossum の警告**（`could not remove volume …`） |
-| `image-in-use-not-reached.txt` | （この経路では届かず） | — |
-| `build-disk-full.txt` | `No space left on device`（**busybox が出したもの**） | build の disk full hint（**経路のみ**） |
-| `build-cache-path-only.txt` | `unable to read root manifest`（**自分で書いたもの**） | build の cache hint（**経路のみ**） |
-| `build-resource-path-only.txt` | `rpc error: code = Unavailable`（**自分で書いたもの**） | build の resource hint（**経路のみ**） |
-| `corpus-cs2-old-wording.txt` | `does not support required platforms` | OPSM-412（corpus 走査 df476 から） |
-| `corpus-atlas-old-wording.txt` | 同上 | 同上 |
-| `doctor-inputs.txt` | `system df` の RECLAIMABLE / `builder status` の state・memory | doctor の storage / builder 警告 |
+| `platform-unsupported-fresh-pull-141.txt` | `Error: unsupported platform Platform(` + `_rawArch: "arm64"` (a first pull of an image that is not local; `_rawArch` holds the arch that is missing) | OPSM-412 |
+| `port-attempt-53.txt` | (not reached) | — |
+| `port-attempt-loopback.txt` | (not reached) | — |
+| `volume-in-use.txt` | `in use` | the runtime's wording (`container volume delete` run directly) |
+| `volume-in-use-via-opossum.txt` | `in use` | **opossum's warning** (`could not remove volume …`) |
+| `image-in-use-not-reached.txt` | (not reached this way) | — |
+| `build-disk-full.txt` | `No space left on device` (**printed by busybox**) | the build's disk-full hint (**path only**) |
+| `build-cache-path-only.txt` | `unable to read root manifest` (**written by us**) | the build's cache hint (**path only**) |
+| `build-resource-path-only.txt` | `rpc error: code = Unavailable` (**written by us**) | the build's resource hint (**path only**) |
+| `corpus-cs2-old-wording.txt` | `does not support required platforms` | OPSM-412 (from the corpus run) |
+| `corpus-atlas-old-wording.txt` | the same | the same |
+| `doctor-inputs.txt` | `system df`'s RECLAIMABLE / `builder status`'s state and memory | `doctor`'s storage and builder warnings |
 
-## 届かなかった記録を残す理由
+## Why the attempts that did not reach are kept
 
-**`port-attempt-53.txt`**：ランタイム自身の DNS が握る 53 を publish しても、pre-flight が
-先に捕まえる。`netstat` の証跡を同じファイルに入れてある（ワイルドカードにリスナがある）。
+**`port-attempt-53.txt`**: publishing 53, which the runtime's own DNS holds, is caught first by the pre-flight check. The same file has the `netstat` output showing a listener on the wildcard address.
 
-**注意**：`port-attempt-loopback.txt` のうち、`lsof` と opossum の出力は生出力だが、
-`ワイルドカード listen: 成功` の行は**probe プログラム自身のメッセージ**で、ランタイムや
-opossum の出力ではない。`SO_REUSEADDR` が効いている、という機構の帰属もこのファイルには
-証跡が無い（socket option を出力していない）。結論（この経路は届かない）は機構に依らないが、
-**どの行が生出力でどの行が説明かは分けて読むこと**。
+**Note**: in `port-attempt-loopback.txt`, the `lsof` and opossum lines are raw output, but the `ワイルドカード listen: 成功` ("wildcard listen: succeeded") line is a **message from the probe program itself**, not from the runtime or opossum. The file also has no evidence that `SO_REUSEADDR` is the mechanism (it does not print the socket options). The conclusion (this path is not reached) does not depend on the mechanism, but **read which lines are raw output and which are explanation separately**.
 
-**`port-attempt-loopback.txt`**：pre-flight の死角そのものは実在する（loopback だけを握る
-TCP リスナは、`net.Listen("tcp4", ":port")` のワイルドカード probe から見えない——Go が
-`SO_REUSEADDR` を立てるため）。同じファイルに **`lsof` でリスナが実在した証跡**と、**probe が
-見えなかった出力**を入れてある。**しかしランタイム側も失敗せず、コンテナは起動する。**
+**`port-attempt-loopback.txt`**: the pre-flight's blind spot is real: a TCP listener that holds only the loopback address is not seen by the wildcard probe `net.Listen("tcp4", ":port")`, because Go sets `SO_REUSEADDR`. The same file has **`lsof` output showing the listener was there** and **the probe's output not seeing it**. **But the runtime does not fail either, and the container starts.**
 
-つまり「pre-flight の死角」と「その死角が失敗を生む」は別で、**この経路は届かない**。
-届いたのは重複 publish のほう。**試して届かなかった記録も残す**——次に同じ道を辿る人が、
-同じところで時間を使わないように。
+So "the pre-flight has a blind spot" and "the blind spot causes a failure" are different things, and **this path is not reached**. The duplicate publish is the one that did reach. **Attempts that did not reach are kept too**, so that the next person who tries the same way does not spend time on it.
 
-## 「経路のみ」の3件について
+## The three "path only" captures
 
-`RUN` の出力に文言を書けば hint は出る——**配線は生きている**。だが発火させたのは
-**こちらが書いた文字列**であって、`container` が出したものではない。**上流が言い換えても、
-この3件は永久に緑のまま通る。** 上流の文言を確かめたことにはならない。
+Writing the wording into `RUN`'s output does make the hint appear, so **the wiring is live**. But what triggered it is **a string we wrote**, not one `container` printed. **If upstream rewords it, these three stay green.** They do not show that upstream still uses the wording.
