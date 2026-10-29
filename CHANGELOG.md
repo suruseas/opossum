@@ -6,6 +6,10 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `opossum --help --format json` prints the commands and their flags as JSON, for a program that drives opossum: each command with its path, aliases, summary, usage and flags, and each flag with its name, short form, type, default, description, whether it comes from a parent command, and its deprecation note if it has one. `opossum <command> --help --format json` prints that command and the ones under it; `-h` and `opossum help <command>` work too. The keys are kept while `schema` is 1, and the text help now ends by saying the JSON form exists.
+
 ### Fixed
 
 - The entry `up --from-docker-compose` writes for an image with an amd64 build and no arm64 one no longer says the image has an amd64 build alone: an image that also lists other builds, such as `s390x`, gets the same entry, which now says it has an amd64 build and no arm64 one.
