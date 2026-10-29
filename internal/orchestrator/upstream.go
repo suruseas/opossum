@@ -21,7 +21,7 @@ var UpstreamWordings = []runtime.UpstreamWording{
 	{Site: "unsupportedPlatformArm64", Wording: `_rawArch: "arm64"`},
 	{Site: "severalPlatformsWithAmd64", Wording: "Error: image "},
 	{Site: "severalPlatformsWithAmd64", Wording: " has multiple platforms ("},
-	{Site: "severalPlatformsWithAmd64", Wording: `_rawOS: "linux", _rawArch: "amd64")`},
+	{Site: "severalPlatformsWithAmd64", Wording: `variant: nil, _rawOS: "linux", _rawArch: "amd64")`},
 	{Site: "runErrorHint", Wording: "failed to resolve"},
 	{Site: "runErrorHint", Wording: "in rootfs"},
 	{Site: "runErrorHint", Wording: "Address already in use"},

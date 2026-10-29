@@ -521,7 +521,7 @@ HOST FOOTPRINT が黙って `—`／上流はホストのコマンド）。
 | 3 | OPSM-107 | 同上 | `failed to resolve` `in rootfs` | `raw:rootfs-resolve-131.txt` | `raw:rootfs-resolve-131.txt` |
 | 4 | OPSM-201 | 同上 | `Address already in use` | `raw:port-in-use-duplicate-publish-131.txt` | `raw:port-in-use-duplicate-publish-131.txt` |
 | 2b | OPSM-412 | `orchestrator.go` `unsupportedPlatformArm64` | `Error: unsupported platform Platform(` `_rawArch: "arm64"` | `unverified` | `raw:platform-unsupported-fresh-pull-141.txt` |
-| 2c | OPSM-412 | `orchestrator.go` `severalPlatformsWithAmd64` | `Error: image ` ` has multiple platforms (` `_rawOS: "linux", _rawArch: "amd64")` | `raw:platform-several-no-arm64-161.txt` | `raw:platform-several-no-arm64-161.txt` |
+| 2c | OPSM-412 | `orchestrator.go` `severalPlatformsWithAmd64` | `Error: image ` ` has multiple platforms (` `variant: nil, _rawOS: "linux", _rawArch: "amd64")` | `raw:platform-several-no-arm64-161.txt` | `raw:platform-several-no-arm64-161.txt` |
 | 5 | OPSM-103 | `isStorageAttachmentError` | `VZErrorDomain` `Code=2` `storage device attachment is invalid` | `raw:vzerror-shared-named-volume-131.txt` | `raw:vzerror-shared-named-volume-131.txt` |
 | 5b | image を取れない | `orchestrator.go` `imageFetchFailed` | `Error: HTTP request to ` ` failed with response: ` `/manifests/` `/blobs/` | `unverified` | `raw:image-fetch-refused-141.txt` |
 | 6 | build（cache 破損） | `buildhint.go` | `unable to read root manifest` | `raw:build-cache-path-only-131.txt` | `unverified` |

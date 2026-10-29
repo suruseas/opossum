@@ -6062,15 +6062,19 @@ func unsupportedPlatformArm64(stderr string) bool {
 // container 1.6.1 takes the platform from the image, and for an image that lists
 // several, none of them the default, asks for one to be given
 // (platform-several-no-arm64-161.txt). The platforms are on the message's own
-// line, which begins the line, each with its OS and arch. One whose list has no
-// linux/amd64 is not one Rosetta runs, so `platform: linux/amd64` is not the
-// answer for it. Nor is it for one that lists an arm64 build: the runtime's
-// source refuses a list whose entries differ from the default in any part (an
-// arm64 one with another variant), and that image has a build for this Mac.
+// line, which begins the line, each with its variant, OS and arch. One whose list
+// has no linux/amd64 with no variant is not one `platform: linux/amd64` runs: the
+// runtime's source matches amd64 down to the variant, so an amd64/v2 build alone
+// is not it (not measured). Nor is the advice for one that lists an arm64 build: the runtime's source
+// refuses a list whose entries differ from the default in any part (an arm64 one
+// with a variant other than v8), and that image has a build for this Mac. The
+// arm64 key is not declared in UpstreamWordings: the capture's refusal lists no
+// arm64 entry, and if the runtime wrote its entries another way, the amd64 key
+// would stop matching first and the advice would go quiet, not wrong.
 func severalPlatformsWithAmd64(stderr string) bool {
 	for _, line := range strings.Split(stderr, "\n") {
 		if strings.HasPrefix(line, "Error: image ") && strings.Contains(line, " has multiple platforms (") &&
-			strings.Contains(line, `_rawOS: "linux", _rawArch: "amd64")`) && !strings.Contains(line, `_rawArch: "arm64"`) {
+			strings.Contains(line, `variant: nil, _rawOS: "linux", _rawArch: "amd64")`) && !strings.Contains(line, `_rawArch: "arm64"`) {
 			return true
 		}
 	}

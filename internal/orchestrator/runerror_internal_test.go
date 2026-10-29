@@ -95,9 +95,16 @@ func TestRunErrorHintPlatform(t *testing.T) {
 			"worker: " + platformEntry("linux", "arm64", "nil") + "\n" + severalLine("amd64", "s390x"), true},
 		// An image with an arm64 build has a build for this Mac. The runtime's source
 		// refuses a list none of whose entries is the default exactly (an arm64 one
-		// with another variant, say), and that is not a missing arm64 build.
+		// with a variant other than v8, which it reads as the default's), and that is
+		// not a missing arm64 build.
 		{"several platforms, an arm64 one among them", "",
-			severalLineOf("x:1", platformEntry("linux", "arm64", `Optional("v8")`), platformEntry("linux", "amd64", "nil")), false},
+			severalLineOf("x:1", platformEntry("linux", "arm64", `Optional("v9")`), platformEntry("linux", "amd64", "nil")), false},
+		{"arm64 only in the image's name", "",
+			severalLineOf("org/app-arm64:1", platformEntry("linux", "amd64", "nil"), platformEntry("linux", "s390x", "nil")), true},
+		// The runtime matches amd64 down to the variant, so `platform: linux/amd64`
+		// does not run an image whose only amd64 build is amd64/v2.
+		{"several platforms, amd64 only with a variant", "",
+			severalLineOf("x:1", platformEntry("linux", "amd64", `Optional("v2")`), platformEntry("linux", "s390x", "nil")), false},
 		// The arch is read from the platform's own field, not from anywhere on the
 		// line: an image whose name says amd64 lists what it lists.
 		{"amd64 only in the image's name", "",
