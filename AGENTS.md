@@ -142,7 +142,8 @@ often getting them wrong costs a retry:
   Rosetta once the service says so explicitly (`OPSM-412` gives this same hint
   when `up` finds no arm64 variant). Container 1.6.1 runs an image that lists
   only an amd64 build without being told, and refuses one that lists several
-  platforms and no arm64 until it is (`OPSM-412` again). The official image for a popular
+  platforms and no arm64 until it is (`OPSM-412` again, when amd64 is in the
+  list). The official image for a popular
   piece of software (`postgres`, `redis`, `nginx`, `node`, `python`) almost
   always publishes both; a small or unmaintained one may not.
 - **Give a database its own named volume, and point Postgres's `PGDATA` one
@@ -472,8 +473,8 @@ list; codes are add-only and never change meaning.
   has to change — which is the answer wherever in the order that holder sits, not only
   ahead of the entry.
 - **`[OPSM-412]` … `this image has no build for Apple silicon (arm64)`** → decoded from a
-  failed start under `up` (`does not support required platforms`, or `Error: platform linux/arm64` — 1.2.2 uses both; or, on 1.4.1 for some amd64-only images pulled for the first time, `Error: unsupported platform Platform(… _rawArch: "arm64")`; or, on 1.6.1 for an image that lists several platforms, amd64 among them and no arm64, `Error: image … has multiple platforms (…)`; see `testdata/real-cli-output.md`); a one-off `run` reports
-  the runtime's own wording instead. Add `platform: linux/amd64` to the
+  failed start under `up` (`does not support required platforms`, or `Error: platform linux/arm64` — 1.2.2 uses both; or, on 1.4.1 for some amd64-only images pulled for the first time, `Error: unsupported platform Platform(… _rawArch: "arm64")`; or, on 1.6.1 for an image that lists several platforms, amd64 among them and no arm64, `Error: image … has multiple platforms (…)`; see `testdata/real-cli-output.md`), and from a one-off `run` or
+  `up --foreground` that made no container. Add `platform: linux/amd64` to the
   service and start again: opossum runs an amd64 image under Rosetta. (`up
   --from-docker-compose` writes that line into the overlay itself, for an image whose
   builds are read as amd64 and no arm64.) Check first that the

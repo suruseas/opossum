@@ -86,9 +86,26 @@ func TestRunErrorHintPlatform(t *testing.T) {
 		{"a container repeating the several-platforms line", "", "worker: " + severalLine("amd64", "s390x"), false},
 		{"the several-platforms line indented", "", " " + severalLine("amd64", "s390x"), false},
 		{"the list on another line than the message", "",
-			"Error: image x:1 has multiple platforms ([\n" + `_rawArch: "amd64"` + "\n", false},
+			"Error: image x:1 has multiple platforms ([\n" + platformEntry("linux", "amd64", "nil") + "])\n", false},
 		{"amd64 on an error line that is not the several-platforms one", "",
-			"Error: image x:1 is broken (_rawArch: \"amd64\")\n", false},
+			"Error: image x:1 is broken ([" + platformEntry("linux", "amd64", "nil") + "])\n", false},
+		// What decides is the refusal's own list: arm64 named on another line (here
+		// a container's output from before) does not take the advice away.
+		{"arm64 named on another line than the refusal", "",
+			"worker: " + platformEntry("linux", "arm64", "nil") + "\n" + severalLine("amd64", "s390x"), true},
+		// An image with an arm64 build has a build for this Mac. The runtime's source
+		// refuses a list none of whose entries is the default exactly (an arm64 one
+		// with another variant, say), and that is not a missing arm64 build.
+		{"several platforms, an arm64 one among them", "",
+			severalLineOf("x:1", platformEntry("linux", "arm64", `Optional("v8")`), platformEntry("linux", "amd64", "nil")), false},
+		// The arch is read from the platform's own field, not from anywhere on the
+		// line: an image whose name says amd64 lists what it lists.
+		{"amd64 only in the image's name", "",
+			severalLineOf("org/app:1.2-amd64", platformEntry("linux", "s390x", "nil"), platformEntry("linux", "ppc64le", "nil")), false},
+		// `platform: linux/amd64` asks for a Linux build: an amd64 one for another OS
+		// is not it.
+		{"several platforms, amd64 only for another OS", "",
+			severalLineOf("x:1", platformEntry("windows", "amd64", "nil"), platformEntry("linux", "s390x", "nil")), false},
 		// The older wording does not say which platform was wanted, so the service
 		// has to. Asked for amd64 and told to ask for amd64 is not advice.
 		{"the older wording, having already asked for amd64", "linux/amd64",
@@ -266,13 +283,21 @@ func freshPullLine(arch string) string {
 }
 
 // severalLine is container 1.6.1's refusal of a local image that lists the given
-// platforms and no arm64, in the shape platform-several-no-arm64-161.txt holds.
+// Linux platforms, in the shape platform-several-no-arm64-161.txt holds.
 func severalLine(archs ...string) string {
 	var ps []string
 	for _, a := range archs {
-		ps = append(ps, `ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "`+a+`")`)
+		ps = append(ps, platformEntry("linux", a, "nil"))
 	}
-	return "Error: image x:1 has multiple platforms ([" + strings.Join(ps, ", ") + "]); pass --os/--arch or set a default\n"
+	return severalLineOf("x:1", ps...)
+}
+
+func severalLineOf(image string, entries ...string) string {
+	return "Error: image " + image + " has multiple platforms ([" + strings.Join(entries, ", ") + "]); pass --os/--arch or set a default\n"
+}
+
+func platformEntry(os, arch, variant string) string {
+	return `ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: ` + variant + `, _rawOS: "` + os + `", _rawArch: "` + arch + `")`
 }
 
 // The kernel refusing to run what a service starts: `Exec format error`, from a
