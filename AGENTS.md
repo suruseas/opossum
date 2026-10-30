@@ -311,8 +311,8 @@ interpolation syntax out of comments, or write `$$`.
 
 **Ignored (file still loads):** `container_name`, `dns`, `dns_search`,
 `network_mode` values other than `none` (e.g. `host` → the service joins the
-project network), a service's per-network `aliases` and static IPs
-(`ipv4_address`), the keys of a top-level network's `ipam` other than a `config`
+project network), a service's per-network static IPs (`ipv4_address`) and the
+`aliases` opossum cannot pass (one with a dot), the keys of a top-level network's `ipam` other than a `config`
 entry's `subnet` (the subnet is given to `network create --subnet` /
 `--subnet-v6`),
 `deploy` beyond `resources.limits`, and other unrecognized fields. `up`/`run` print
@@ -321,7 +321,11 @@ took effect); `opossum config` lists each, and `--verbose` warns per field
 (`[OPSM-501]`/`[OPSM-502]`). Per-network settings are named individually —
 `networks.<net>.ipam.driver` for a top-level declaration, `networks.<net>.aliases` /
 `networks.<net>.ipv4_address` under a service — the same way per-volume
-fields are.
+fields are. A one-label alias (`aliases: [cache]`) is passed on Apple
+`container` 1.6.0 and later as `cache.<project>.<domain>`, so peers reach it as
+`cache`; it answers on every network, with the address on the network that
+writes it, and `up` says which aliases it left out
+(`[OPSM-502]`).
 
 **Don't set `dns`/`dns_search` for service discovery — it's automatic and these are
 ignored.** opossum registers every service under the search domain

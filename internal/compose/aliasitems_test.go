@@ -94,9 +94,10 @@ func TestAnAliasToNothingIsAnEmptyItem(t *testing.T) {
 // `networks: *nets` used to make the ignored-field report go quiet: the
 // second decoding pass keeps the value as a yaml.Node, in which an alias
 // stays an alias, so the map-form entries' aliases and addresses were never
-// listed. Written plainly beside it, the same entries are.
+// listed. Written plainly beside it, the same entries are (an alias with a dot
+// is one opossum does not pass, so it is listed).
 func TestIgnoredNetworkFieldsAreReportedThroughAnAlias(t *testing.T) {
-	p, err := Load(writeTemp(t, "x-nets: &nets\n  back:\n    aliases: [db-alias]\nservices:\n  web:\n    image: alpine\n    networks: *nets\n  web2:\n    image: alpine\n    networks:\n      back:\n        aliases: [db-alias]\nnetworks:\n  back: {}\n"))
+	p, err := Load(writeTemp(t, "x-nets: &nets\n  back:\n    aliases: [db.internal]\nservices:\n  web:\n    image: alpine\n    networks: *nets\n  web2:\n    image: alpine\n    networks:\n      back:\n        aliases: [db.internal]\nnetworks:\n  back: {}\n"))
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}

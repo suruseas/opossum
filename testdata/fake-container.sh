@@ -5,6 +5,8 @@
 # (the captured reference these are kept in sync with; the shapes here are a
 # subset of that version's — keys the parsers never read are left out). Overrides:
 #   FAKE_DNS_DOMAIN   domain reported by `system dns list` (default: opossum)
+#   FAKE_CLIENT_VERSION  the client version `system status --format json` reports
+#                     (default: 1.4.1); 1.6.0 and later take network aliases
 #   STATE_DIR         remember what `delete`, `stop` and `volume delete` did, so a
 #                     later `inspect`, `stop` or `delete` answers as the real CLI
 #                     does (stopped; not found, exit 1). Unset, every container is
@@ -733,7 +735,7 @@ case "$1" in
     # `status running` row.
     if [ "$2" = status ]; then
       if [ "$3" = --format ] && [ "$4" = json ]; then
-        printf '{"client":{"appName":"container","build":"release","commit":"unspecified","version":"1.4.1"},"host":{"architecture":"arm64","cpus":8,"operatingSystem":"Version 26.6.2 (Build 25G83)"},"paths":{"appRoot":"/Users/<user>/Library/Application Support/com.apple.container/","installRoot":"/opt/homebrew/Cellar/container/1.4.1/"},"resources":{"containersRunning":0,"containersTotal":1,"images":18},"server":{"appName":"container-apiserver","build":"release","commit":"unspecified","version":"1.4.1"},"status":"running"}\n'
+        printf '{"client":{"appName":"container","build":"release","commit":"unspecified","version":"%s"},"host":{"architecture":"arm64","cpus":8,"operatingSystem":"Version 26.6.2 (Build 25G83)"},"paths":{"appRoot":"/Users/<user>/Library/Application Support/com.apple.container/","installRoot":"/opt/homebrew/Cellar/container/1.4.1/"},"resources":{"containersRunning":0,"containersTotal":1,"images":18},"server":{"appName":"container-apiserver","build":"release","commit":"unspecified","version":"1.4.1"},"status":"running"}\n' "${FAKE_CLIENT_VERSION:-1.4.1}"
       else
         printf 'FIELD               VALUE\nstatus              running\nclient.version      1.4.1\nserver.version      1.4.1\n'
       fi

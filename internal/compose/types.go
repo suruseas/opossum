@@ -175,7 +175,11 @@ type Service struct {
 	Ipc             NamespaceRef    `yaml:"ipc"`          // the same for `ipc: service:<name>`
 	MacAddress      string          `yaml:"mac_address"`  // the container's MAC on its first network (`--network <name>,mac=…`)
 	Labels          Labels          `yaml:"labels"`       // put on the container as `-l key=value`, before opossum's own labels (which win on a clash, as docker compose's own do)
-	Networks        ServiceNetworks `yaml:"networks"`     // declared networks this service joins (one --network each; aliases/static IPs not applied)
+	Networks        ServiceNetworks `yaml:"networks"`     // declared networks this service joins (one --network each; static IPs not applied)
+	// NetworkAliases is each network's `aliases:` as the file writes them, keyed
+	// by the network's key in the file, for a list of strings; `up` decides which
+	// of them it can pass to the runtime. Empty where the service writes none.
+	NetworkAliases map[string][]string `yaml:"-"`
 
 	Deploy  *Deploy  `yaml:"deploy"`  // only deploy.resources.limits.{memory,cpus} is acted on
 	Develop *Develop `yaml:"develop"` // develop.watch drives `opossum watch` (file-change sync)
@@ -1489,15 +1493,18 @@ func (s *Service) UnmarshalYAML(value *yaml.Node) error {
 		}
 	}
 	// `networks` in its map form carries per-network settings (aliases,
-	// ipv4_address, …) that opossum reads past — ServiceNetworks keeps only the
-	// names. Each dropped key is named here as `networks.<net>.<key>`, so an
-	// alias that never resolves was announced rather than discovered.
+	// ipv4_address, …) that opossum mostly reads past — ServiceNetworks keeps
+	// only the names. Each dropped key is named here as `networks.<net>.<key>`,
+	// so an alias that never resolves was announced rather than discovered.
+	// `aliases` is read (NetworkAliases) and named only when some of it cannot
+	// be passed whatever the runtime.
 	if nets, ok := keys["networks"]; ok {
-		more, err := ignoredServiceNetworkFields(nets)
+		more, aliases, err := ignoredServiceNetworkFields(nets)
 		if err != nil {
 			return err
 		}
 		s.Unsupported = append(s.Unsupported, more...)
+		s.NetworkAliases = aliases
 	}
 	if ext, ok := keys["extends"]; ok {
 		s.Extends = decodeExtends(ext)
@@ -1545,20 +1552,22 @@ func decodeExtends(n yaml.Node) *ExtendsRef {
 }
 
 // ignoredServiceNetworkFields lists the keys under a service's map-form
-// `networks:` entries, all of which are dropped (the entry's name is the only
-// thing acted on). A list-form `networks:` carries no keys and yields nothing.
-func ignoredServiceNetworkFields(n yaml.Node) ([]string, error) {
+// `networks:` entries that are dropped (all but the entry's name and its
+// `aliases`), and returns each entry's aliases. A list-form `networks:` carries
+// no keys and yields nothing.
+func ignoredServiceNetworkFields(n yaml.Node) ([]string, map[string][]string, error) {
 	// Decoding into a yaml.Node keeps an alias as an alias, so `networks:
 	// *nets` arrives here unresolved and would be reported as nothing.
 	n = *unalias(&n)
 	if n.Kind != yaml.MappingNode {
-		return nil, nil
+		return nil, nil, nil
 	}
 	var decls map[string]map[string]yaml.Node
 	if n.Decode(&decls) != nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	var out []string
+	var aliases map[string][]string
 	for _, net := range sortedKeys(decls) {
 		fields := decls[net]
 		for _, k := range sortedKeys(fields) {
@@ -1567,14 +1576,61 @@ func ignoredServiceNetworkFields(n yaml.Node) ([]string, error) {
 			}
 			// A key docker compose does not take for a service's network
 			// (`ipv4_adress:`) is refused as it refuses it; the ones it takes
-			// (`aliases`, `ipv4_address`, …) are listed, as before.
+			// (`ipv4_address`, …) are listed, as before.
 			if !specKnows("services.*.networks.*", k) {
-				return nil, unknownKeyErr("networks."+net, k)
+				return nil, nil, unknownKeyErr("networks."+net, k)
+			}
+			if k == "aliases" {
+				names, ok := stringItems(fields[k])
+				if ok {
+					if aliases == nil {
+						aliases = map[string][]string{}
+					}
+					aliases[net] = names
+				}
+				// An alias with a dot in it (`db.internal`) is not passed: Apple
+				// container answers only for names under the DNS domain, and the
+				// domain put after it reaches a peer by the short name only
+				// where the peer's resolver searches a name that has a dot
+				// (glibc does, musl does not; measured on 1.6.1). One that is
+				// not a list of strings is not read at all.
+				if ok && allOneLabel(names) {
+					continue
+				}
 			}
 			out = append(out, fmt.Sprintf("networks.%s.%s", net, k))
 		}
 	}
-	return out, nil
+	return out, aliases, nil
+}
+
+// stringItems is n's items when n is a list of strings; ok is false for any
+// other shape, and for a list with an item that is not a string.
+func stringItems(n yaml.Node) ([]string, bool) {
+	n = *unalias(&n)
+	if n.Kind != yaml.SequenceNode {
+		return nil, false
+	}
+	out := make([]string, 0, len(n.Content))
+	for _, item := range n.Content {
+		item = unalias(item)
+		if item.Kind != yaml.ScalarNode || item.ShortTag() != "!!str" {
+			return nil, false
+		}
+		out = append(out, item.Value)
+	}
+	return out, true
+}
+
+// allOneLabel says whether every name is one DNS label: not empty, and with
+// no dot in it.
+func allOneLabel(names []string) bool {
+	for _, n := range names {
+		if n == "" || strings.Contains(n, ".") {
+			return false
+		}
+	}
+	return true
 }
 
 // tmpfsMarker tags a `type: tmpfs` entry inside the parsed Volumes list so

@@ -67,6 +67,9 @@ type Orchestrator struct {
 	planPullsOff bool
 	planNamed    map[string]bool
 	planArch     map[string]archOfImage // what asking each image for its builds came to, so a plan asks each once
+	// aliasesTaken is whether the runtime takes network aliases, asked once
+	// (nil until then; see networkAliases).
+	aliasesTaken *bool
 	// imageWorkdirs remembers where each image starts its process, for the same
 	// reason: a crash decode asks once per image, not once per mount.
 	imageWorkdirs map[string]string
@@ -312,6 +315,17 @@ func configHash(o runtime.RunOptions) string {
 	// recreated on upgrade — but toggling any of these does recreate.
 	if o.MacAddress != "" {
 		write("mac", o.MacAddress)
+	}
+	if len(o.NetworkAliases) > 0 {
+		nets := make([]string, 0, len(o.NetworkAliases))
+		for n := range o.NetworkAliases {
+			nets = append(nets, n)
+		}
+		sort.Strings(nets)
+		for _, n := range nets {
+			write("alias", n)
+			write(o.NetworkAliases[n]...)
+		}
 	}
 	if o.ShmSize != "" {
 		write("shm", o.ShmSize)
@@ -2782,6 +2796,7 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 
 		mem, cpu, _ := svc.Resources() // validated at load
 		svcNets, dnsDomain, dnsSearch := o.serviceNetworks(svc)
+		aliases := o.networkAliases(name, svc)
 		// The pre-flight above has already refused a service whose env_file
 		// could not be read, so this cannot fail here today. It is asked
 		// through the same door anyway: the alternative is reading Environment
@@ -2809,6 +2824,7 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 			Image:             image,
 			Platform:          svc.Platform,
 			Networks:          svcNets,
+			NetworkAliases:    aliases,
 			DNSDomain:         dnsDomain,
 			DNSSearch:         dnsSearch,
 			MacAddress:        svc.MacAddress,

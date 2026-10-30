@@ -94,7 +94,7 @@ build can starve.
   case is an app + nginx sharing a `public`/assets volume.) `up` **warns** when it
   sees this — use a **bind mount** (a host path, which *is* shareable) for the
   shared data, or bake it into the image.
-- **`networks:` — aliases and static IPs (`ipv4_address`) aren't applied** (a top-level network's `ipam` subnet is), and a container
+- **`networks:` — static IPs (`ipv4_address`) aren't applied** (a top-level network's `ipam` subnet is), aliases only on Apple `container` 1.6.0 and later and only as one label (`cache`, not `db.internal`; an alias answers on every network, with an address only a peer on the network that writes it can reach), and a container
   whose **first** network is `internal:` resolves no name at all (it must address
   peers by IP), while one that joins an internal network after a normal one still
   resolves through the normal one. Multiple networks

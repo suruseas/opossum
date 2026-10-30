@@ -9,6 +9,7 @@ All notable changes to opossum are documented here. The format follows
 ### Added
 
 - `opossum --help --format json` prints the commands and their flags as JSON, for a program that drives opossum: each command with its path, aliases, summary, usage and flags, and each flag with its name, short form, type, default, description, whether it comes from a parent command, and its deprecation note if it has one. `opossum <command> --help --format json` prints that command and the ones under it; `-h` and `opossum help <command>` work too. The keys are kept while `schema` is 1, and the text help now ends by saying the JSON form exists.
+- On Apple `container` 1.6.0 and later, `up` gives a service its network aliases: `aliases: [cache]` under a network is passed as `cache.<project>.<domain>`, so other services in the project reach it as `cache`, as they reach a service by its name. The runtime does not keep names apart by network, so an alias answers on every network, with the address on the network that writes it, which a service on another network cannot reach. An alias with a dot (`db.internal`) is not passed, and stays listed by `config` among the ignored fields; nor is one that is a service's name, one another service takes first, or one that is not a single DNS label. `up` says which aliases it left out and why (`OPSM-502`). With no DNS domain, or an earlier runtime, no alias is passed, as before. A one-off `run` passes none, as `docker compose run` does without `--use-aliases`.
 
 ### Fixed
 

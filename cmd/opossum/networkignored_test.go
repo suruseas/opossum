@@ -13,7 +13,7 @@ import (
 func TestDroppedNetworkFieldsReachTheReader(t *testing.T) {
 	fakeShim(t)
 	dir := t.TempDir()
-	body := "name: p\nservices:\n  web:\n    image: app:1\n    networks:\n      back:\n        aliases: [db-alias]\nnetworks:\n  back:\n    ipam:\n      driver: default\n      config:\n        - subnet: 10.0.0.0/24\n"
+	body := "name: p\nservices:\n  web:\n    image: app:1\n    networks:\n      back:\n        aliases: [db.internal]\nnetworks:\n  back:\n    ipam:\n      driver: default\n      config:\n        - subnet: 10.0.0.0/24\n"
 	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +42,7 @@ func TestDroppedNetworkFieldsReachTheReader(t *testing.T) {
 	}
 
 	over := filepath.Join(dir, "over.yaml")
-	if err := os.WriteFile(over, []byte("services:\n  api:\n    image: app:1\n    networks:\n      back:\n        aliases: [api-alias]\n"), 0o644); err != nil {
+	if err := os.WriteFile(over, []byte("services:\n  api:\n    image: app:1\n    networks:\n      back:\n        aliases: [api.internal]\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	out, err = run(t, "-f", "compose.yaml", "-f", over, "config")

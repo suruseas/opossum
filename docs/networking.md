@@ -121,8 +121,8 @@ opossum -p blog   up       # its own db → db.blog.opossum, no collision
 ```
 
 Bare-name resolution still relies on the one registered domain (see *Setup*);
-`container` exposes no network aliases, so the `<project>` subdomain is what
-keeps names from colliding. As a backstop for the no-DNS-domain case
+the `<project>` subdomain is what keeps names from colliding (a network alias
+is given under it too, so two projects can use the same alias). As a backstop for the no-DNS-domain case
 (`--dns-domain ""`, where containers take bare names), every container is labeled
 `opossum.project=<name>` and opossum **refuses to start** (rather than silently
 replacing) a container another project already owns. `down` leaves such a

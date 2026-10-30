@@ -84,7 +84,13 @@ func run(args []string) int {
 		// rendering); report running (the stopped case is handled above).
 		if arg(1) == "status" {
 			if arg(2) == "--format" && arg(3) == "json" {
-				fmt.Println(`{"client":{"version":"1.4.1"},"resources":{"containersRunning":0,"containersTotal":1,"images":3},"server":{"version":"1.4.1"},"status":"running"}`)
+				// CLIENT_VERSION stands in for a newer CLI (1.6.0 takes network
+				// aliases); the server's is left as it is.
+				client := "1.4.1"
+				if v := os.Getenv("CLIENT_VERSION"); v != "" {
+					client = v
+				}
+				fmt.Printf(`{"client":{"version":%q},"resources":{"containersRunning":0,"containersTotal":1,"images":3},"server":{"version":"1.4.1"},"status":"running"}`+"\n", client)
 			} else {
 				fmt.Println("status running")
 			}
