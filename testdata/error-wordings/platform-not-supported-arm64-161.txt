@@ -1,0 +1,69 @@
+# Taken 2026-10-30 on container 1.6.1 (macOS 27.0.1), by asking the runtime directly and then
+# through opossum built from this change. One local image, built here and removed afterwards:
+# opossum-probe-amd:1, from `FROM alpine:3.20` with `CMD ["uname","-m"]`, built with
+# `container build --platform linux/amd64`, so it lists linux/amd64 alone.
+#
+# Asked for arm64, 1.6.1 says what was asked for and what the image has; on 1.4.1 the same run
+# said `Error: platform linux/arm64` (platform-unsupported-fresh-pull-141.txt). `--arch arm64`
+# alone is written `*/arm64`. With `platform: linux/amd64`, as the advice says, the service
+# runs the amd64 build and exits at once (its CMD is `uname -m`), which is OPSM-407, not a
+# failure of the platform: its log says x86_64. No container is left after a refusal.
+
+$ container --version
+container CLI version 1.6.1 (build: release, commit: unspeci)
+
+# shape 2: local image built for linux/amd64 alone, run as linux/arm64
+$ container run --rm --name opossum-probe-run --platform linux/arm64 opossum-probe-amd:1
+--- exit code: 1
+--- stdout ---
+--- stderr ---
+[0/6] [0s]
+[0/6] [0s]
+Error: image opossum-probe-amd:1 does not support linux/arm64; available: [ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "amd64")]
+
+$ container run --rm --name opossum-probe-run --arch arm64 opossum-probe-amd:1
+--- exit code: 1
+--- stdout ---
+--- stderr ---
+[0/6] [0s]
+[0/6] [0s]
+Error: image opossum-probe-amd:1 does not support */arm64; available: [ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "amd64")]
+
+# opossum up, platform: linux/arm64, image local and amd64 only
+$ opossum up
+--- exit code: 1
+--- stdout ---
+Creating network p29probe-net
+Starting amd (opossum-probe-amd:1)
+Nothing this `up` started is left running
+--- stderr ---
+[0/6] [0s]
+[0/6] [0s]
+Error: image opossum-probe-amd:1 does not support linux/arm64; available: [ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "amd64")]
+opossum: starting service "amd": exit status 1
+  → [OPSM-412] this image has no build for Apple silicon (arm64). Set `platform: linux/amd64` on the service — opossum runs an amd64 image through Rosetta.
+
+# the same, with platform: linux/amd64 as the advice says
+$ opossum up
+Creating network p29probe-net
+Starting amd (opossum-probe-amd:1)
+[0/6] [0s]
+[1/6] Fetching image [0s]
+[2/6] Unpacking image [0s]
+[3/6] Fetching kernel [0s]
+[4/6] Fetching init image [0s]
+[5/6] Unpacking init image [0s]
+[6/6] Starting container [0s]
+[6/6] Starting container [0s]
+amd.p29probe.opossum
+warning: [OPSM-407] service "amd" exited right after starting (state "stopped"); its last log lines:
+  x86_64
+opossum: [OPSM-407] 1 service(s) exited right after starting: "amd" — see the logs above, fix the cause, and run `opossum up` again
+--- exit code: 1
+
+$ opossum logs
+amd-1  | x86_64
+--- exit code: 0
+
+$ container ls -a (names starting opossum-probe / p29probe)
+(none)

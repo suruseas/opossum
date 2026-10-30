@@ -46,13 +46,22 @@ and compared with the 1.5.0 files. The sections below were not rewritten; what c
   `x86_64` in both services; on 1.5.0 the second one failed with `OPSM-412`). With no `platform:` on either,
   both run arm64, as before. One run each; the output was not kept. Without `depends_on` the order is by
   name, and a service that comes first can be run before the image is built: not measured.
+- A first pull from a registry of an image that lists several platforms and no arm64 (`ibmjava:8-jre`:
+  amd64, ppc64le, s390x) is refused with the same wording as a local image. A pull of it limited to
+  `linux/arm64` says `Error: unsupported platform Platform(… variant: Optional("v8") … _rawArch: "arm64")`,
+  which opossum reads as no arm64 build; one limited to `linux/amd64` succeeds
+  (`error-wordings/platform-several-fresh-pull-161.txt`).
+- A service with `platform: linux/arm64` on a local image built for amd64 alone is refused with
+  `Error: image … does not support linux/arm64; available: […]` (`--arch arm64` alone: `*/arm64`), where
+  1.4.1 said `Error: platform linux/arm64`; with `platform: linux/amd64` it runs `x86_64`
+  (`error-wordings/platform-not-supported-arm64-161.txt`, row 2d of the wording table).
 
 **Not measured on 1.6.1:**
 - Keys opossum reads that no capture contains: a container's `publishedPorts` and `mounts[].type.volume.name`,
   an image's labels, every key of `stats --format json` (only the table was captured), a network's
   `configuration.ipv4Subnet`.
 - Commands opossum runs that were not captured: `exec`, `logs -n`, `kill`, `cp`, `image tag`, `build`,
-  `image pull --platform`, `stats --format json`, and `run` with `-p`, `-e`, `--entrypoint`, `--user` or a bind
+  `image pull --platform` (but for the two pulls above), `stats --format json`, and `run` with `-p`, `-e`, `--entrypoint`, `--user` or a bind
   mount; nor the 1.5.0 inventory (parallel starts, bind mounts of a file, a directory and a missing path,
   stopping twice).
 - `system status` with the apiserver down (1.6.1 changed how it asks launchd).
@@ -522,6 +531,7 @@ HOST FOOTPRINT が黙って `—`／上流はホストのコマンド）。
 | 4 | OPSM-201 | 同上 | `Address already in use` | `raw:port-in-use-duplicate-publish-131.txt` | `raw:port-in-use-duplicate-publish-131.txt` |
 | 2b | OPSM-412 | `orchestrator.go` `unsupportedPlatformArm64` | `Error: unsupported platform Platform(` `_rawArch: "arm64"` | `unverified` | `raw:platform-unsupported-fresh-pull-141.txt` |
 | 2c | OPSM-412 | `orchestrator.go` `severalPlatformsWithAmd64` | `Error: image ` ` has multiple platforms (` `variant: nil, _rawOS: "linux", _rawArch: "amd64")` | `raw:platform-several-no-arm64-161.txt` | `raw:platform-several-no-arm64-161.txt` |
+| 2d | OPSM-412 | `orchestrator.go` `arm64NotSupportedWithAmd64` | `Error: image ` ` does not support ` `; available: [` `variant: nil, _rawOS: "linux", _rawArch: "amd64")` | `raw:platform-not-supported-arm64-161.txt` | `raw:platform-not-supported-arm64-161.txt` |
 | 5 | OPSM-103 | `isStorageAttachmentError` | `VZErrorDomain` `Code=2` `storage device attachment is invalid` | `raw:vzerror-shared-named-volume-131.txt` | `raw:vzerror-shared-named-volume-131.txt` |
 | 5b | image を取れない | `orchestrator.go` `imageFetchFailed` | `Error: HTTP request to ` ` failed with response: ` `/manifests/` `/blobs/` | `unverified` | `raw:image-fetch-refused-141.txt` |
 | 6 | build（cache 破損） | `buildhint.go` | `unable to read root manifest` | `raw:build-cache-path-only-131.txt` | `unverified` |
