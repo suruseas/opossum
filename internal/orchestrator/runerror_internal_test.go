@@ -58,6 +58,10 @@ func TestRunErrorHintPlatform(t *testing.T) {
 		{"a fresh pull of an image with no arm64 build", "",
 			"[2/6] Unpacking image [2s]\n" + freshPullLine("arm64"), true},
 		{"a fresh pull of an image with no amd64 build", "", freshPullLine("amd64"), false},
+		// container 1.6.1 writes the arm64 default variant out
+		// (platform-several-fresh-pull-161.txt, a pull limited to linux/arm64).
+		{"a refusal with the arm64 variant written out", "",
+			`Error: unsupported platform Platform(osVersion: nil, osFeatures: nil, variant: Optional("v8"), _rawOS: "linux", _rawArch: "arm64")`, true},
 		// Asked for amd64 and told to ask for amd64 is not advice (the same rule as
 		// the wordings above).
 		{"a fresh pull that missed arm64, having already asked for amd64", "amd64", freshPullLine("arm64"), false},
@@ -120,7 +124,9 @@ func TestRunErrorHintPlatform(t *testing.T) {
 			"[0/6] [0s]\n" + notSupportedLine("linux/arm64", platformEntry("linux", "amd64", "nil")), true},
 		{"asked for arm64 with --arch alone", "",
 			notSupportedLine("*/arm64", platformEntry("linux", "amd64", "nil")), true},
-		{"asked for an arm64 variant", "linux/arm64/v9",
+		// Not a shape the runtime prints (it refuses arm64/v9 as an invalid
+		// variant before this point): it pins that the arch is read as the second part.
+		{"asked for an arm64 variant (made up)", "linux/arm64/v9",
 			notSupportedLine("linux/arm64/v9", platformEntry("linux", "s390x", "nil"), platformEntry("linux", "amd64", "nil")), true},
 		{"asked for arm64, arm64 only in the image's name", "linux/arm64",
 			notSupportedLineOf("org/app-arm64:1", "linux/arm64", platformEntry("linux", "amd64", "nil")), true},
@@ -151,7 +157,7 @@ func TestRunErrorHintPlatform(t *testing.T) {
 		// not take the advice away.
 		{"arm64 named on another line than the not-supported refusal", "linux/arm64",
 			"worker: " + platformEntry("linux", "arm64", "nil") + "\n" + notSupportedLine("linux/arm64", platformEntry("linux", "amd64", "nil")), true},
-		{"asked for arm64 v9, the list has arm64 v8", "linux/arm64/v9",
+		{"asked for arm64 v9 (made up), the list has arm64 v8", "linux/arm64/v9",
 			notSupportedLine("linux/arm64/v9", platformEntry("linux", "arm64", `Optional("v8")`), platformEntry("linux", "amd64", "nil")), false},
 		// The runtime's own line: it begins the line, and the list is on it.
 		{"a container repeating the not-supported line", "linux/arm64",
