@@ -58,6 +58,10 @@ func TestRunErrorHintPlatform(t *testing.T) {
 		{"a fresh pull of an image with no arm64 build", "",
 			"[2/6] Unpacking image [2s]\n" + freshPullLine("arm64"), true},
 		{"a fresh pull of an image with no amd64 build", "", freshPullLine("amd64"), false},
+		// container 1.6.1 writes the arm64 default variant out
+		// (platform-several-fresh-pull-161.txt, a pull limited to linux/arm64).
+		{"a refusal with the arm64 variant written out", "",
+			`Error: unsupported platform Platform(osVersion: nil, osFeatures: nil, variant: Optional("v8"), _rawOS: "linux", _rawArch: "arm64")`, true},
 		// Asked for amd64 and told to ask for amd64 is not advice (the same rule as
 		// the wordings above).
 		{"a fresh pull that missed arm64, having already asked for amd64", "amd64", freshPullLine("arm64"), false},
@@ -113,6 +117,63 @@ func TestRunErrorHintPlatform(t *testing.T) {
 		// is not it.
 		{"several platforms, amd64 only for another OS", "",
 			severalLineOf("x:1", platformEntry("windows", "amd64", "nil"), platformEntry("linux", "s390x", "nil")), false},
+		// container 1.6.1, a service that asks for arm64 run on a local image built
+		// for amd64 alone (platform-not-supported-arm64-161.txt): the runtime says
+		// what was asked for and lists what the image has.
+		{"asked for arm64, the image lists amd64", "linux/arm64",
+			"[0/6] [0s]\n" + notSupportedLine("linux/arm64", platformEntry("linux", "amd64", "nil")), true},
+		{"asked for arm64 with --arch alone", "",
+			notSupportedLine("*/arm64", platformEntry("linux", "amd64", "nil")), true},
+		// Not a shape the runtime prints (it refuses arm64/v9 as an invalid
+		// variant before this point): it pins that the arch is read as the second part.
+		{"asked for an arm64 variant (made up)", "linux/arm64/v9",
+			notSupportedLine("linux/arm64/v9", platformEntry("linux", "s390x", "nil"), platformEntry("linux", "amd64", "nil")), true},
+		{"asked for arm64, arm64 only in the image's name", "linux/arm64",
+			notSupportedLineOf("org/app-arm64:1", "linux/arm64", platformEntry("linux", "amd64", "nil")), true},
+		// What is missing is what was asked for: another arch is not an arm64
+		// problem, whatever the list or the image's name says.
+		{"asked for amd64, the image lists arm64", "linux/amd64",
+			notSupportedLine("linux/amd64", platformEntry("linux", "arm64", `Optional("v8")`)), false},
+		{"asked for another arch, the image lists amd64", "linux/s390x",
+			notSupportedLine("linux/s390x", platformEntry("linux", "amd64", "nil")), false},
+		{"asked for another arch, arm64 in the image's name", "linux/s390x",
+			notSupportedLineOf("org/app-arm64:1", "linux/s390x", platformEntry("linux", "amd64", "nil")), false},
+		{"asked for another arch, /arm64 in the image's name", "linux/s390x",
+			notSupportedLineOf("org/arm64/app:1", "linux/s390x", platformEntry("linux", "amd64", "nil")), false},
+		{"asked for arm64 as the OS part", "",
+			notSupportedLine("arm64/riscv64", platformEntry("linux", "amd64", "nil")), false},
+		{"what was asked for, with no arch part", "",
+			notSupportedLine("arm64", platformEntry("linux", "amd64", "nil")), false},
+		// The list decides as for the several-platforms refusal.
+		{"asked for arm64, no amd64 in the list", "linux/arm64",
+			notSupportedLine("linux/arm64", platformEntry("linux", "s390x", "nil")), false},
+		{"asked for arm64, amd64 only with a variant", "linux/arm64",
+			notSupportedLine("linux/arm64", platformEntry("linux", "amd64", `Optional("v2")`)), false},
+		{"asked for arm64, amd64 only for another OS", "linux/arm64",
+			notSupportedLine("linux/arm64", platformEntry("windows", "amd64", "nil")), false},
+		{"asked for arm64, the list has an arm64 v9 build", "linux/arm64",
+			notSupportedLine("linux/arm64", platformEntry("linux", "arm64", `Optional("v9")`), platformEntry("linux", "amd64", "nil")), false},
+		// What decides is the refusal's own list: arm64 named on another line does
+		// not take the advice away.
+		{"arm64 named on another line than the not-supported refusal", "linux/arm64",
+			"worker: " + platformEntry("linux", "arm64", "nil") + "\n" + notSupportedLine("linux/arm64", platformEntry("linux", "amd64", "nil")), true},
+		{"asked for arm64 v9 (made up), the list has arm64 v8", "linux/arm64/v9",
+			notSupportedLine("linux/arm64/v9", platformEntry("linux", "arm64", `Optional("v8")`), platformEntry("linux", "amd64", "nil")), false},
+		// The runtime's own line: it begins the line, and the list is on it.
+		{"a container repeating the not-supported line", "linux/arm64",
+			"worker: " + notSupportedLine("linux/arm64", platformEntry("linux", "amd64", "nil")), false},
+		{"the not-supported line indented", "linux/arm64",
+			" " + notSupportedLine("linux/arm64", platformEntry("linux", "amd64", "nil")), false},
+		{"the not-supported list on another line", "linux/arm64",
+			"Error: image x:1 does not support linux/arm64; available: [\n" + platformEntry("linux", "amd64", "nil") + "]\n", false},
+		{"arm64 and amd64 on an error line with no list", "linux/arm64",
+			"Error: image x:1 does not support linux/arm64 (" + platformEntry("linux", "amd64", "nil") + ")\n", false},
+		{"an error line with a list and nothing asked for", "linux/arm64",
+			"Error: image x:1 is linux/arm64; available: [" + platformEntry("linux", "amd64", "nil") + "]\n", false},
+		{"the list before what was asked for", "linux/arm64",
+			"Error: image x:1; available: [" + platformEntry("linux", "amd64", "nil") + "] does not support linux/arm64\n", false},
+		{"arm64 and amd64 on an error line that does not name the image", "linux/arm64",
+			"Error: pull does not support linux/arm64; available: [" + platformEntry("linux", "amd64", "nil") + "]\n", false},
 		// The older wording does not say which platform was wanted, so the service
 		// has to. Asked for amd64 and told to ask for amd64 is not advice.
 		{"the older wording, having already asked for amd64", "linux/amd64",
@@ -153,6 +214,17 @@ func TestRunErrorHintPlatform(t *testing.T) {
 				t.Errorf("nothing here is diagnosed, so nothing should be claimed, got: %q", h)
 			}
 		})
+	}
+}
+
+// A service that already names a platform, arm64, is told to set amd64 in its
+// place: told to add it, a reader who writes a second `platform:` key has a file
+// that no longer loads.
+func TestRunErrorHintPlatformSaysSetNotAdd(t *testing.T) {
+	h := runErrorHint(&compose.Service{Platform: "linux/arm64"}, "", false,
+		runErr(notSupportedLine("linux/arm64", platformEntry("linux", "amd64", "nil"))))
+	if !strings.Contains(h, "Set `platform: linux/amd64` on the service") || strings.Contains(h, "Add `platform") {
+		t.Errorf("the advice should say to set the platform the service already names, got: %q", h)
 	}
 }
 
@@ -253,6 +325,8 @@ func TestEachDecodedHintCarriesItsCode(t *testing.T) {
 			freshPullLine("arm64"), codeImageNoArm64},
 		{"an image listing several platforms and no arm64", &compose.Service{},
 			severalLine("amd64", "s390x"), codeImageNoArm64},
+		{"an image with no arm64 build, asked for arm64", &compose.Service{Platform: "linux/arm64"},
+			notSupportedLine("linux/arm64", platformEntry("linux", "amd64", "nil")), codeImageNoArm64},
 		{"a bind mount that will not resolve", &compose.Service{},
 			"Error: mount failed with errno 20: failed to resolve '/etc/caddy/Caddyfile' in rootfs", codeBindFilePlaceholder},
 	} {
@@ -301,6 +375,14 @@ func severalLine(archs ...string) string {
 
 func severalLineOf(image string, entries ...string) string {
 	return "Error: image " + image + " has multiple platforms ([" + strings.Join(entries, ", ") + "]); pass --os/--arch or set a default\n"
+}
+
+func notSupportedLine(asked string, entries ...string) string {
+	return notSupportedLineOf("x:1", asked, entries...)
+}
+
+func notSupportedLineOf(image, asked string, entries ...string) string {
+	return "Error: image " + image + " does not support " + asked + "; available: [" + strings.Join(entries, ", ") + "]\n"
 }
 
 func platformEntry(os, arch, variant string) string {

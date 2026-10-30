@@ -11,9 +11,10 @@ import (
 // noArm64Build is whether what a platform-limited pull said is the runtime's way of
 // saying the image has no build for that platform: the three wordings
 // runErrorHint reads for a run that names no platform on 1.1.0, 1.2.2 and 1.4.1
-// (each has its own). The fourth it reads, 1.6.1's for a run of an image that
-// lists several platforms with none given, is not read here: these pulls always
-// name the platform, and what 1.6.1 says to such a pull has not been measured.
+// (each has its own). 1.6.1 refuses such a pull in the third wording, with the
+// arm64 variant written out (platform-several-fresh-pull-161.txt, an image that
+// lists amd64, ppc64le and s390x); the two 1.6.1 wordings runErrorHint also reads
+// are for runs, which these pulls are not.
 func noArm64Build(said string) bool {
 	return strings.Contains(said, "Error: platform linux/arm64") ||
 		strings.Contains(said, "does not support required platforms") ||

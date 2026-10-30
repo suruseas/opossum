@@ -14,6 +14,7 @@ All notable changes to opossum are documented here. The format follows
 
 - On Apple `container` 1.6.1, a service whose image lists several platforms and no arm64 build (such as amd64 and s390x) failed to start with only the runtime's error, which 1.6.1 words differently from earlier versions. `up`, `up --foreground` and `run` now read it and give the `OPSM-412` advice to add `platform: linux/amd64` to the service when amd64 is among them. The compatibility notes also say that on 1.6.1 a service that runs an image another service builds for `linux/amd64` alone, and starts after that service, starts without its own `platform:`.
 - The entry `up --from-docker-compose` writes for an image with an amd64 build and no arm64 one no longer says the image has an amd64 build alone: an image that also lists other builds, such as `s390x`, gets the same entry, which now says it has an amd64 build and no arm64 one.
+- On Apple `container` 1.6.1, a service with `platform: linux/arm64` whose image is local and has an amd64 build and no arm64 one now gets the `OPSM-412` advice from `up`, `up --foreground` and `run`, as it did on earlier versions; 1.6.1 words this refusal differently (`does not support linux/arm64; available: […]`). The advice now says to set `platform: linux/amd64` on the service rather than to add it, since such a service already names a platform.
 
 ## [1.0.1] - 2026-10-28
 

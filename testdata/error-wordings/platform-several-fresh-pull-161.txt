@@ -1,0 +1,86 @@
+# Taken 2026-10-30 on container 1.6.1 (macOS 27.0.1), by asking the runtime directly and then
+# through opossum built from this change. The image is ibmjava:8-jre from Docker Hub, whose index
+# lists linux/amd64, linux/ppc64le and linux/s390x and no arm64 (and attestation entries, which
+# the refusal does not list). It was not local before the first command, was removed between
+# the steps below, and was removed afterwards.
+#
+# A first pull with no platform is refused with the same wording as a local image
+# (platform-several-no-arm64-161.txt). So is the run once the amd64 build alone has been pulled:
+# the refusal still lists all three platforms. A pull limited to linux/arm64, which is how
+# opossum asks an image whether it has an arm64 build, says `unsupported platform` with the
+# arm64 default variant written out (`Optional("v8")`); on 1.4.1, for amd64/busybox, it wrote
+# `variant: nil` (platform-unsupported-fresh-pull-141.txt). A pull limited to linux/amd64
+# succeeds. No container is left after a refusal.
+
+$ container --version
+container CLI version 1.6.1 (build: release, commit: unspeci)
+
+# shape 1: first pull of ibmjava:8-jre (amd64, ppc64le, s390x; no arm64), not local
+$ container run --rm --name opossum-probe-run ibmjava:8-jre uname -m
+--- exit code: 1
+--- stdout ---
+--- stderr ---
+[0/6] [0s]
+[0/6] [1s]
+[0/6] [2s]
+[0/6] [2s]
+Error: image ibmjava:8-jre has multiple platforms ([ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "amd64"), ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "ppc64le"), ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "s390x")]); pass --os/--arch or set a default
+
+# platform-limited pulls (what opossum's planning asks), image not local
+$ container image pull --platform linux/arm64 ibmjava:8-jre
+--- exit code: 1
+--- stdout ---
+--- stderr ---
+[1/2] Fetching image [0s]
+[1/2] Fetching image [1s]
+[1/2] Fetching image [2s]
+[2/2] Unpacking image [2s]
+[2/2] Unpacking image [2s]
+Error: unsupported platform Platform(osVersion: nil, osFeatures: nil, variant: Optional("v8"), _rawOS: "linux", _rawArch: "arm64")
+
+$ container image pull --platform linux/amd64 ibmjava:8-jre
+--- exit code: 0
+--- stdout ---
+--- stderr ---
+[1/2] Fetching image [0s]
+[1/2] Fetching image [1s]
+[1/2] Fetching image [2s]
+[1/2] Fetching image 0% (2 of 6 blobs, 5 KB/160.3 MB, 2 KB/s) [3s]
+[1/2] Fetching image 0% (3 of 6 blobs, 49 KB/160.3 MB, 3 KB/s) [4s]
+[1/2] Fetching image 26% (5 of 6 blobs, 43.3/160.3 MB, 35.3 MB/s) [5s]
+[1/2] Fetching image 61% (5 of 6 blobs, 98.4/160.3 MB, 53.8 MB/s) [6s]
+[1/2] Fetching image 95% (5 of 6 blobs, 152.5/160.3 MB, 53.5 MB/s) [7s]
+[2/2] Unpacking image [7s]
+[2/2] Unpacking image for platform linux/amd64 [7s]
+[2/2] Unpacking image for platform linux/amd64 78% (4,405 of 4,618 entries, 219.9/280.2 MB, 390 bytes/s) [8s]
+[2/2] Unpacking image for platform linux/amd64 100% (4,618 entries, 280.2 MB) [8s]
+
+# now local (amd64 only pulled): run with no platform
+$ container run --rm --name opossum-probe-run ibmjava:8-jre uname -m
+--- exit code: 1
+--- stdout ---
+--- stderr ---
+[0/6] [0s]
+[0/6] [0s]
+Error: image ibmjava:8-jre has multiple platforms ([ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "amd64"), ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "ppc64le"), ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "s390x")]); pass --os/--arch or set a default
+
+# opossum up, image not local, no platform
+$ opossum up
+--- exit code: 1
+--- stdout ---
+Creating network p29probe-net
+Starting java (ibmjava:8-jre)
+Nothing this `up` started is left running
+--- stderr ---
+[0/6] [0s]
+[0/6] [1s]
+[0/6] [2s]
+[0/6] [2s]
+Error: image ibmjava:8-jre has multiple platforms ([ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "amd64"), ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "ppc64le"), ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "s390x")]); pass --os/--arch or set a default
+opossum: starting service "java": exit status 1
+  → [OPSM-412] this image has no build for Apple silicon (arm64). Set `platform: linux/amd64` on the service — opossum runs an amd64 image through Rosetta.
+
+$ opossum logs
+--- exit code: 0
+--- stdout ---
+--- stderr ---

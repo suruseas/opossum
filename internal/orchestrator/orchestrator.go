@@ -6081,6 +6081,34 @@ func severalPlatformsWithAmd64(stderr string) bool {
 	return false
 }
 
+// arm64NotSupportedWithAmd64 reports whether the runtime refused a service that
+// asks for arm64 because the image lists no arm64 build, and the list it gives
+// has a linux/amd64 one: container 1.6.1 says so for a local image built for
+// amd64 alone, run with `--platform linux/arm64`
+// (platform-not-supported-arm64-161.txt), where 1.4.1 said `Error: platform
+// linux/arm64`. What was asked for comes between the image and the list, as
+// `linux/arm64` (the runtime writes the arm64 default variant v8 as nothing) or,
+// for `--arch` alone, `*/arm64`; the arch is its second part. One that asked for
+// another arch is told about that arch, not about arm64. The list, which ends the
+// line, is read as for severalPlatformsWithAmd64.
+func arm64NotSupportedWithAmd64(stderr string) bool {
+	for _, line := range strings.Split(stderr, "\n") {
+		if !strings.HasPrefix(line, "Error: image ") {
+			continue
+		}
+		asked, list := strings.Index(line, " does not support "), strings.Index(line, "; available: [")
+		if asked < 0 || list < asked {
+			continue
+		}
+		parts := strings.Split(line[asked+len(" does not support "):list], "/")
+		if len(parts) >= 2 && parts[1] == "arm64" &&
+			strings.Contains(line[list:], `variant: nil, _rawOS: "linux", _rawArch: "amd64")`) && !strings.Contains(line[list:], `_rawArch: "arm64"`) {
+			return true
+		}
+	}
+	return false
+}
+
 // runMadeNothing asks the runtime whether a run that failed left a container of
 // this name. Asked, not decided from the wording of the failure: whether a
 // failed run leaves one differs from failure to failure (measured on 1.4.1: none
@@ -6242,12 +6270,16 @@ func runErrorHint(svc *compose.Service, holder string, takesItBack bool, err err
 	//
 	// A fourth: container 1.6.1 takes the platform from the image, so an image
 	// that lists only an amd64 build runs, and one that lists several and no
-	// arm64 is refused with the list (severalPlatformsWithAmd64). Measured on a
-	// local image; a first pull of such an image from a registry has not been.
+	// arm64 is refused with the list (severalPlatformsWithAmd64), the same on a
+	// local image and on a first pull from a registry (both measured). A fifth,
+	// also 1.6.1: a service that asks for arm64, run on a local image with no
+	// arm64 build, is refused with what it asked for and the list
+	// (arm64NotSupportedWithAmd64).
 	case strings.Contains(s, "Error: platform linux/arm64"),
 		strings.Contains(s, "does not support required platforms"),
 		unsupportedPlatformArm64(s),
-		severalPlatformsWithAmd64(s):
+		severalPlatformsWithAmd64(s),
+		arm64NotSupportedWithAmd64(s):
 		// Except when amd64 is what was asked for and what is missing. The older
 		// wording does not say which platform it wanted, so the service is what
 		// says it: told to add what it already has, a reader is being told to
@@ -6256,7 +6288,7 @@ func runErrorHint(svc *compose.Service, holder string, takesItBack bool, err err
 			return ""
 		}
 		return "\n  → [" + string(codeImageNoArm64) + "] this image has no build for Apple silicon (arm64). " +
-			"Add `platform: linux/amd64` to the service — opossum runs an amd64 image through Rosetta."
+			"Set `platform: linux/amd64` on the service — opossum runs an amd64 image through Rosetta."
 	// The kernel refused to run what the service starts: `Exec format error`
 	// (ENOEXEC). Two things do that — a program built for another architecture
 	// than the image's (an amd64 binary in an arm64 image, which docker runs

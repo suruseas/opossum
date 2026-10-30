@@ -66,6 +66,7 @@ case "$op" in
       case "$ref" in
         *:old) echo 'Error: platform linux/arm64' >&2 ;;
         *:index) echo 'Error: unsupported platform Platform(architecture: "amd64", os: "linux", _rawArch: "arm64")' >&2 ;;
+        *:index161) echo 'Error: unsupported platform Platform(osVersion: nil, osFeatures: nil, variant: Optional("v8"), _rawOS: "linux", _rawArch: "arm64")' >&2 ;;
         *) echo 'Error: image sha256:0000 does not support required platforms' >&2 ;;
       esac
       exit 1
@@ -358,8 +359,11 @@ func TestAnImageIsAskedAboutOnceWhateverTheNumberOfServices(t *testing.T) {
 // (`unsupported platform Platform(… _rawArch: "arm64")`, captured from container
 // 1.5.0 on `amd64/busybox:1.36.1`), and a single-manifest image fetched in full and
 // then refused (`does not support required platforms`, captured on `mailhog/mailhog`).
+// container 1.6.1 refuses an index that lists no arm64 build in the second way, with
+// the arm64 default variant written out (`variant: Optional("v8")`, captured on
+// `ibmjava:8-jre`, platform-several-fresh-pull-161.txt).
 func TestEachWordingOfNoArm64BuildIsRead(t *testing.T) {
-	for _, tag := range []string{"old", "index", "manifest"} {
+	for _, tag := range []string{"old", "index", "index161", "manifest"} {
 		t.Run(tag, func(t *testing.T) {
 			ref := "v/a:" + tag
 			a := newArchShim(t, nil, map[string][]string{ref: {"amd64"}})
