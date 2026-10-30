@@ -312,7 +312,8 @@ interpolation syntax out of comments, or write `$$`.
 **Ignored (file still loads):** `container_name`, `dns`, `dns_search`,
 `network_mode` values other than `none` (e.g. `host` → the service joins the
 project network), a service's per-network static IPs (`ipv4_address`) and the
-`aliases` opossum cannot pass (one with a dot), the keys of a top-level network's `ipam` other than a `config`
+`aliases` opossum cannot pass (one that is not a single DNS label, such as one
+with a dot), the keys of a top-level network's `ipam` other than a `config`
 entry's `subnet` (the subnet is given to `network create --subnet` /
 `--subnet-v6`),
 `deploy` beyond `resources.limits`, and other unrecognized fields. `up`/`run` print
@@ -323,8 +324,8 @@ took effect); `opossum config` lists each, and `--verbose` warns per field
 `networks.<net>.ipv4_address` under a service — the same way per-volume
 fields are. A one-label alias (`aliases: [cache]`) is passed on Apple
 `container` 1.6.0 and later as `cache.<project>.<domain>`, so peers reach it as
-`cache`; it answers on every network, with the address on the network that
-writes it, and `up` says which aliases it left out
+`cache`; it is looked up from every network and resolves to its address on the
+network that writes it, and `up` says which aliases it left out
 (`[OPSM-502]`).
 
 **Don't set `dns`/`dns_search` for service discovery — it's automatic and these are
@@ -641,6 +642,11 @@ list; codes are add-only and never change meaning.
 - **`[OPSM-214]` … `service "<svc>" publishes <spec>, and this host will not bind <address>`** → the entry names a host address this machine will not bind, and nothing starts. Asked with port 0, so the answer is about the address alone; the reason the bind gave is passed through, because the same error comes back for an interface that is down. Check that the machine has the address and that its interface is up, or write one it does have; dropping the address publishes on every address, which is a wider door than the file asked for. Both engines refuse such a file — docker compose names the address and the port, Apple `container` returns the same errno four levels down a chain of causes that names neither.
 - **`[OPSM-215]` … `this host will not bind a published host port: <port>/<proto> (service "<svc>"): <the bind's own error>`** → the bind of an entry's host port was refused, and the reason is not that something is listening on it: The pre-flight says `OPSM-201` only when the bind returns `EADDRINUSE`. The runtime refuses the same entry too (measured on Apple `container` 1.4.1, macOS 26, uid 501: `127.0.0.1:80` and `127.0.0.1:1023` do not start, `80:80` on every address does), so this is a choice of what the reader is told, and of when: before the network and the services ahead of it exist. For a permission refusal on a port below 1024 on a specific address the message adds the way out — a port from 1024 up and, for an IPv4 address, dropping the address, which publishes on every address and is a wider door than the file asks for (a wildcard entry gets neither: it is not what takes root). A service whose container is already running is left alone, whoever holds its port; a stopped one is refused even for a port another service is about to let go of, since that changes who holds the port and not who may bind it. A container-only entry (`127.0.0.1::80`) is not refused: it is moved to a free port on its address as before, and `OPSM-206` names the bind's reason instead of "in use".
 - **`[OPSM-216]` … `this host cannot look up <name> yet, though the service is running`** → a detached `up` found that the host's resolver (`dscacheutil -q host -a name <name>`, the answer a browser or `curl` gets) has no address for the container's name `<service>.<project>.<domain>`, though the container is running. Something asked for the name before the runtime registered it — a backend that connects to its database as it starts, or any program on the host — and the runtime answered NXDOMAIN with no SOA record, which macOS keeps for about 75 seconds (measured on container 1.5.0: 74 s in both of two tries where the host asked once before the container was created, 0 s in both of two where it did not; `dscacheutil -flushcache` did not clear it; clearing it by restarting `mDNSResponder` was not tried). The runtime's own DNS server answers from the first second, so only lookups that go through the host's resolver are late: the host's, and a service's in the project that asks for the name in that window. Nothing is wrong with the container and the name comes by itself; `up` returns 0. A service that gives up on its first failed connection can need `opossum restart <service>` once the name resolves. Asked once for each service, after the services are verified running (a service that exited fails the `up` instead); not for a dry run, a foreground `up`, a run-to-completion service, a `network_mode: none` one or a name with upper case or a "." (`OPSM-209`), not where the DNS domain is absent from the host (`OPSM-202`) or could not be listed, not with `OPOSSUM_CONTAINER_BIN` set, and not off macOS.
+- **`[OPSM-217]` … `another container holds this service's name as a network alias`** → decoded from a
+  failed start on Apple `container` 1.6.1 (`Error: hostname(s) already exist: [...]`): a container that is
+  there, running or stopped, was given the service's name as a network alias by an earlier `up`, before a
+  service took that name. `opossum down` and `up` again, or `opossum up --force-recreate <service>` for the
+  service that holds the alias, which no longer passes an alias that is a service's name.
 - **`[OPSM-207]` … `network <n> exists with IPv4 subnet <a>, and the compose file now declares <b>`** →
   the project network was created earlier with another subnet (or with none, so
   the runtime chose one) and `ipam.config` now declares a different one. opossum
@@ -796,6 +802,7 @@ Every `[OPSM-NNN]` opossum can emit (add-only; grouped 1xx storage / 2xx network
 - `OPSM-214` — a published entry names a host address this machine will not bind, so nothing starts. Asked before any host port is, with port 0, so that a port somebody holds and an address this host does not have are different messages. A service whose container is already running is left alone.
 - `OPSM-215` — a published host port was refused by the bind for a reason other than a listener (a port below 1024 on a specific address takes root for a plain user), so the entry is refused up front and the reason is the bind's own. The pre-flight keeps `OPSM-201` for `EADDRINUSE` alone.
 - `OPSM-216` — a detached `up` started a service whose name the host's resolver cannot look up yet: the name was asked for before it was registered and macOS keeps the NXDOMAIN (no SOA) for about 75 seconds. A note; the `up` still returns 0.
+- `OPSM-217` — the runtime refused to start a service because another container holds its name as a network alias (1.6.1 counts every container, running or stopped).
 - `OPSM-401` — a dependency's container exited before becoming healthy (logs embedded).
 - `OPSM-402` — orphan containers left by services no longer in the compose.
 - `OPSM-403` — a `service_healthy` dependency defines no healthcheck (not waited on).

@@ -706,6 +706,28 @@ func run(args []string) int {
 				}
 			}
 		}
+		// $RUN_ALIAS_HELD is a network alias another container already holds, and
+		// $RUN_HOSTNAME_HELD a container name another holds as an alias: container
+		// 1.6.1 refuses the run with these lines and makes nothing
+		// (testdata/error-wordings/network-aliases-161.txt).
+		if held := os.Getenv("RUN_ALIAS_HELD"); held != "" {
+			for _, a := range args {
+				if strings.HasPrefix(a, "--network=") && strings.Contains(a+",", ",alias="+held+",") {
+					fmt.Fprintln(os.Stderr, "[0/6] [0s]")
+					fmt.Fprintf(os.Stderr, "Error: alias(es) already exist: [%q]\n", held)
+					return 1
+				}
+			}
+		}
+		if held := os.Getenv("RUN_HOSTNAME_HELD"); held != "" {
+			for i, a := range args {
+				if i > 0 && args[i-1] == "--name" && a == held {
+					fmt.Fprintln(os.Stderr, "[0/6] [0s]")
+					fmt.Fprintf(os.Stderr, "Error: hostname(s) already exist: [%q]\n", held+".")
+					return 1
+				}
+			}
+		}
 		// A volume the runtime would not create is refused after the name (a taken
 		// name is said first on 1.4.1) and before anything is recorded: the real
 		// run makes no volume, not even a valid one before it.

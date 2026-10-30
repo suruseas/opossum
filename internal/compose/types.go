@@ -1588,13 +1588,16 @@ func ignoredServiceNetworkFields(n yaml.Node) ([]string, map[string][]string, er
 					}
 					aliases[net] = names
 				}
-				// An alias with a dot in it (`db.internal`) is not passed: Apple
+				// Listed unless every alias is one `up` can pass (IsAliasLabel). An
+				// alias with a dot in it (`db.internal`) is not passed: Apple
 				// container answers only for names under the DNS domain, and the
 				// domain put after it reaches a peer by the short name only
 				// where the peer's resolver searches a name that has a dot
-				// (glibc does, musl does not; measured on 1.6.1). One that is
-				// not a list of strings is not read at all.
-				if ok && allOneLabel(names) {
+				// (glibc does, musl does not; measured on 1.6.1,
+				// testdata/error-wordings/network-aliases-161.txt). One that is
+				// not a list of strings is not read at all. Whether the runtime
+				// takes aliases at all is not known here: `up` says that.
+				if ok && allAliasLabels(names) {
 					continue
 				}
 			}
@@ -1622,11 +1625,21 @@ func stringItems(n yaml.Node) ([]string, bool) {
 	return out, true
 }
 
-// allOneLabel says whether every name is one DNS label: not empty, and with
-// no dot in it.
-func allOneLabel(names []string) bool {
+// aliasLabel is the one DNS label a network alias is passed as: letters,
+// digits, `-` and `_` (Apple container 1.6.1 takes `_` and capitals, measured),
+// starting and ending with a letter or digit, and at most 63 characters (1.6.1
+// refuses a longer label: `label too long`). Anything else would be refused by
+// the runtime or cut the `--network` value short (a comma).
+var aliasLabel = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9_-]{0,61}[A-Za-z0-9])?$`)
+
+// IsAliasLabel says whether a network alias is one `up` can pass: one DNS
+// label of the shape aliasLabel describes.
+func IsAliasLabel(name string) bool { return aliasLabel.MatchString(name) }
+
+// allAliasLabels says whether every name is one IsAliasLabel takes.
+func allAliasLabels(names []string) bool {
 	for _, n := range names {
-		if n == "" || strings.Contains(n, ".") {
+		if !IsAliasLabel(n) {
 			return false
 		}
 	}

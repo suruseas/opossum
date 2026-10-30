@@ -31,9 +31,17 @@ func TestConfigHashSeesAliasesOnlyWhenSet(t *testing.T) {
 		t.Errorf("the alias on another network must change the hash")
 	}
 	two := with(map[string][]string{"a": {"x"}, "b": {"y"}})
-	for i := 0; i < 20; i++ {
-		if configHash(two) != configHash(with(map[string][]string{"b": {"y"}, "a": {"x"}})) {
-			t.Fatalf("the hash must not depend on the order of the networks in the map")
+	if got := configHash(two); got != twoNetworksHash {
+		t.Errorf("two networks' aliases hash to %s, want %s: the order of the networks must not change it", got, twoNetworksHash)
+	}
+	// A map is walked in a different order from one call to the next; each of
+	// these is a fresh walk, held to the one value.
+	for i := 0; i < 64; i++ {
+		if got := configHash(with(map[string][]string{"b": {"y"}, "a": {"x"}})); got != twoNetworksHash {
+			t.Fatalf("the hash must not depend on the order of the networks in the map: got %s", got)
 		}
 	}
 }
+
+// twoNetworksHash is the hash of base with aliases x on a and y on b.
+const twoNetworksHash = "a0b0fca82ec9395f"

@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"errors"
 	"regexp"
 	"sort"
 	"strings"
@@ -8,14 +9,6 @@ import (
 	"github.com/suruseas/opossum/internal/compose"
 	"github.com/suruseas/opossum/internal/runtime"
 )
-
-// aliasLabel is the one DNS label an alias is passed as: letters, digits, `-`
-// and `_` (container 1.6.1 takes `_` and capitals, measured), starting and
-// ending with a letter or digit, and at most 63 characters (1.6.1 refuses a
-// longer label: `label too long`). Anything else would be refused by the
-// runtime or cut the `--network` value short (a comma), and the service would
-// not start where it started before aliases were passed.
-var aliasLabel = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9_-]{0,61}[A-Za-z0-9])?$`)
 
 // networkAliases is the aliases `up` passes for a service, by the runtime's
 // name of each network: `cache` is passed as `cache.<project>.<domain>`, the
@@ -30,11 +23,15 @@ var aliasLabel = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9_-]{0,61}[A-Za-z0-9]
 // (measured), so each is passed once, on the first network that writes it. It
 // refuses a run whose alias is the name of a container that exists, its own
 // included, or one another container has taken, and a run that gives one alias
-// twice (all measured). Each of those would stop a service that started before
-// aliases were passed, so they are left out, and so is an alias with a dot,
-// which a peer reaches by its short name only where its resolver searches a
-// name with a dot (glibc does, musl does not; measured). What is left out is
-// said, once for each alias, with why.
+// twice (all measured, testdata/error-wordings/network-aliases-161.txt). Each
+// of those would stop a service that started before aliases were passed, so
+// they are left out, and so is an alias with a dot, which a peer reaches by its
+// short name only where its resolver searches a name with a dot (glibc does,
+// musl does not; measured), and a 33rd alias on a network (its source takes 32).
+// What is left out is said, once for each alias, with why. A name a container
+// outside the file holds — one an earlier `up` left, running or stopped, or
+// another project's of the same name — is not known here: the run that meets
+// it is made again without aliases (runDroppingHeldAliases).
 //
 // An alias that is a service's name is left out (that name reaches a service
 // already); one that two services write goes to the first of them by name.
@@ -63,9 +60,13 @@ func (o *Orchestrator) networkAliases(name string, svc *compose.Service) map[str
 		}
 		return nil
 	}
-	if !o.runtimeTakesAliases() {
+	if ok, version := o.runtimeTakesAliases(); !ok {
+		why := "Apple container " + version + " does not take network aliases; 1.6.0 and later do"
+		if !cliVersion.MatchString(version) {
+			why = "the runtime did not say its version (`container system status --format json`), and network aliases need 1.6.0 or later"
+		}
 		for _, a := range written {
-			skip(a, "Apple container takes network aliases from 1.6.0 on")
+			skip(a, why)
 		}
 		return nil
 	}
@@ -82,7 +83,7 @@ func (o *Orchestrator) networkAliases(name string, svc *compose.Service) map[str
 			case strings.Contains(a, "."):
 				skip(a, "a peer would reach a name with a dot by its short name on some images and not on others; write one without a dot")
 				continue
-			case !aliasLabel.MatchString(a):
+			case !compose.IsAliasLabel(a):
 				skip(a, "an alias is passed as one DNS label: letters, digits, `-` and `_`, at most 63 characters, starting and ending with a letter or digit")
 				continue
 			case services[low]:
@@ -95,8 +96,12 @@ func (o *Orchestrator) networkAliases(name string, svc *compose.Service) map[str
 				skip(a, "service \""+owner+"\" takes it, as the first service by name that writes it")
 				continue
 			}
-			given[low] = true
 			rn := o.resolveNetwork(key).name
+			if len(out[rn]) == maxAliasesPerNetwork {
+				skip(a, "the runtime takes at most 32 aliases on a network")
+				continue
+			}
+			given[low] = true
 			out[rn] = append(out[rn], a+"."+search)
 		}
 	}
@@ -130,11 +135,66 @@ func (o *Orchestrator) aliasOwner(low string) string {
 	return ""
 }
 
-// runtimeTakesAliases asks the runtime once whether it takes network aliases.
-func (o *Orchestrator) runtimeTakesAliases() bool {
+// cliVersion is the start of a version the runtime said: `1.6.1`.
+var cliVersion = regexp.MustCompile(`^[0-9]+\.[0-9]+`)
+
+// maxAliasesPerNetwork is the most aliases Apple container 1.6.1 takes on one
+// network (its AliasPolicy; read in the source, not measured).
+const maxAliasesPerNetwork = 32
+
+// runtimeTakesAliases asks the runtime once whether it takes network aliases,
+// and says the client version it read ("" where it read none).
+func (o *Orchestrator) runtimeTakesAliases() (bool, string) {
 	if o.aliasesTaken == nil {
-		ok := runtime.AcceptsNetworkAliases(o.rt.SystemStatus().ClientVersion)
-		o.aliasesTaken = &ok
+		v := o.rt.SystemStatus().ClientVersion
+		ok := runtime.AcceptsNetworkAliases(v)
+		o.aliasesTaken, o.aliasesVersion = &ok, v
 	}
-	return *o.aliasesTaken
+	return *o.aliasesTaken, o.aliasesVersion
+}
+
+// runDroppingHeldAliases runs a service's container, and when the runtime
+// refuses the run because another container already holds one of its aliases —
+// one an earlier `up` left, running or stopped, or another project's of the
+// same name, which 1.6.1 counts whatever their state (measured) — runs it again
+// without its aliases and says so. The refusal makes no container (measured),
+// and the label that fingerprints the run is kept, so a later `up` leaves the
+// container as it is until it is recreated.
+func (o *Orchestrator) runDroppingHeldAliases(name string, opts runtime.RunOptions) error {
+	err := o.rt.Run(opts)
+	if err == nil || len(opts.NetworkAliases) == 0 {
+		return err
+	}
+	var re *runtime.RunError
+	if !errors.As(err, &re) || !aliasesHeld(re.Stderr) {
+		return err
+	}
+	o.warnf(codeIgnoredField, "service %q: its network aliases are not passed: another container already holds one of them — "+
+		"remove it (`opossum up --remove-orphans` for one this project no longer has, or `opossum down`), then `opossum up --force-recreate %s`\n", name, name)
+	opts.NetworkAliases = nil
+	return o.rt.Run(opts)
+}
+
+// aliasesHeld reports whether the runtime refused a run because another
+// container holds one of its aliases: 1.6.1's own line, which begins the line
+// (testdata/error-wordings/network-aliases-161.txt).
+func aliasesHeld(stderr string) bool {
+	for _, line := range strings.Split(stderr, "\n") {
+		if strings.HasPrefix(line, "Error: alias(es) already exist: [") {
+			return true
+		}
+	}
+	return false
+}
+
+// hostnameHeldAsAlias reports whether the runtime refused a run because another
+// container holds the container's own name as a network alias: 1.6.1's own
+// line, which begins the line (testdata/error-wordings/network-aliases-161.txt).
+func hostnameHeldAsAlias(stderr string) bool {
+	for _, line := range strings.Split(stderr, "\n") {
+		if strings.HasPrefix(line, "Error: hostname(s) already exist: [") {
+			return true
+		}
+	}
+	return false
 }

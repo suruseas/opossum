@@ -2,11 +2,12 @@ package compose
 
 import (
 	"slices"
+	"strings"
 	"testing"
 )
 
-// A service's `aliases:` under a network is read: a list of one-label names is
-// passed by `up` and not listed among the ignored fields; anything else on that
+// A service's `aliases:` under a network is read: a list of names `up` can pass
+// (IsAliasLabel) is not listed among the ignored fields; anything else on that
 // network's aliases is listed, as every alias was before they were read.
 func TestNetworkAliasesAreRead(t *testing.T) {
 	for _, tc := range []struct {
@@ -21,6 +22,11 @@ func TestNetworkAliasesAreRead(t *testing.T) {
 		{"a name with a dot", "[db.internal]", []string{"db.internal"}, true},
 		{"one-label and dotted", "[cache, db.internal]", []string{"cache", "db.internal"}, true},
 		{"an empty name", `[cache, ""]`, []string{"cache", ""}, true},
+		// Nor is a name that is not one DNS label `up` can pass.
+		{"a leading hyphen", "[-cache]", []string{"-cache"}, true},
+		{"a space", `["a b"]`, []string{"a b"}, true},
+		{"a 64-character label", "[" + strings.Repeat("a", 64) + "]", []string{strings.Repeat("a", 64)}, true},
+		{"a 63-character label", "[" + strings.Repeat("a", 63) + "]", []string{strings.Repeat("a", 63)}, false},
 		// Not a list of strings: not read at all, and listed.
 		{"a single name, not a list", "cache", nil, true},
 		{"a number among the names", "[cache, 5]", nil, true},
