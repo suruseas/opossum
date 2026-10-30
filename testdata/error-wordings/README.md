@@ -9,7 +9,9 @@ Captured with `container CLI version 1.2.2` (Homebrew formula `1.2.2_1`) on 2026
 | `vzerror-shared-named-volume.txt` | `VZErrorDomain` + `Code=2` + `storage device attachment is invalid` | OPSM-103 |
 | `platform-image-index-no-arm64.txt` | `Error: platform linux/arm64` | OPSM-412 |
 | `platform-unsupported-fresh-pull-141.txt` | `Error: unsupported platform Platform(` + `_rawArch: "arm64"` (a first pull of an image that is not local; `_rawArch` holds the arch that is missing) | OPSM-412 |
-| `platform-several-no-arm64-161.txt` | `Error: image ` + ` has multiple platforms (` + `variant: nil, _rawOS: "linux", _rawArch: "amd64")` (1.6.1: a run with no platform of an image that lists several platforms and no arm64; local images only) | OPSM-412 |
+| `platform-several-no-arm64-161.txt` | `Error: image ` + ` has multiple platforms (` + `variant: nil, _rawOS: "linux", _rawArch: "amd64")` (1.6.1: a run with no platform of an image that lists several platforms and no arm64; local images) | OPSM-412 |
+| `platform-several-fresh-pull-161.txt` | the same wording, on a first pull from a registry (1.6.1); and `Error: unsupported platform Platform(` + `_rawArch: "arm64"` with `variant: Optional("v8")` for a pull limited to linux/arm64 | OPSM-412; the pull's refusal is read as no arm64 build |
+| `platform-not-supported-arm64-161.txt` | `Error: image ` + ` does not support ` + `; available: [` + `variant: nil, _rawOS: "linux", _rawArch: "amd64")` (1.6.1: a run that asks for arm64 of a local image built for amd64 alone) | OPSM-412 |
 | `port-attempt-53.txt` | (not reached) | — |
 | `port-attempt-loopback.txt` | (not reached) | — |
 | `volume-in-use.txt` | `in use` | the runtime's wording (`container volume delete` run directly) |
