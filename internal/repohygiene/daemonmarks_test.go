@@ -16,14 +16,16 @@ import (
 //   - the marks: daemonMarksVar is declared once, at package level, as a list
 //     of string literals that holds the Engine API's own header (which a plain
 //     HTTP server does not write), and the name appears nowhere else in the
-//     package but the measurement's loop;
+//     package but a range over it among the test's own statements;
 //   - the loop: the test makes one run, the one that binds the socket and runs
 //     pingDaemonConst, and takes its output into a name nothing assigns again;
 //     then, as one of its own statements with no return ahead of it, it ranges
 //     over the marks and fails when that output lacks one;
 //   - the path: that run's arguments are exactly the expected ones, binding
-//     `<target>:/s.sock` once, and target is what dockerDaemonSocket returns, and every return there is what
-//     filepath.EvalSymlinks made of daemonSocketConst, never assigned again.
+//     `<target>:/s.sock` once, with bin from realRuntime; target is what
+//     dockerDaemonSocket returns, every return there is what
+//     filepath.EvalSymlinks made of daemonSocketConst, never assigned again,
+//     and daemonSocketConst is the path the docs name, dockerSocketPath.
 //
 // It matches names and shapes, not what a name refers to, and it does not
 // follow control flow: a shadowed `t`, `strings` or loop variable, a
@@ -38,6 +40,8 @@ const (
 	pingDaemonConst  = "pingDaemon"
 	engineAPIMark    = "Api-Version:"
 	socketInside     = ":/s.sock"
+	dockerSocketPath = "/var/run/docker.sock" // the path the docs name
+	realRuntimeFunc  = "realRuntime"
 )
 
 func TestTheDaemonMeasurementDecidesOnWhatItSays(t *testing.T) {
@@ -209,12 +213,50 @@ func TestTheDaemonMeasurementDecidesOnWhatItSays(t *testing.T) {
 		if target == "" {
 			t.Fatalf("%s does not take what %s returns", daemonTest, daemonSocketFunc)
 		}
+		// bin is the real runtime, so the bind is the runtime's, not another tool's.
+		binDef := ast.Node(nil)
+		ast.Inspect(b, func(n ast.Node) bool {
+			if as, ok := n.(*ast.AssignStmt); ok && binDef == nil && len(as.Rhs) == 1 && isIdent(as.Lhs[0], "bin") {
+				if c, ok := as.Rhs[0].(*ast.CallExpr); ok && isIdent(c.Fun, realRuntimeFunc) {
+					binDef = as
+				}
+			}
+			return true
+		})
+		if binDef == nil {
+			t.Errorf("%s does not take bin from %s", daemonTest, realRuntimeFunc)
+		} else if at := bindsName(b, "bin", binDef); at.IsValid() {
+			t.Errorf("%s assigns bin again (%s): the run is not the real runtime's", daemonTest, suite.fset.Position(at))
+		}
+		// The socket the measurement resolves is the one the docs name.
+		value := ""
+		for _, f := range suite.files {
+			for _, d := range f.Decls {
+				gen, ok := d.(*ast.GenDecl)
+				if !ok || gen.Tok != token.CONST {
+					continue
+				}
+				for _, sp := range gen.Specs {
+					vs := sp.(*ast.ValueSpec)
+					for i, n := range vs.Names {
+						if n.Name == daemonSocketConst && i < len(vs.Values) {
+							if lit, ok := vs.Values[i].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+								value, _ = strconv.Unquote(lit.Value)
+							}
+						}
+					}
+				}
+			}
+		}
+		if value != dockerSocketPath {
+			t.Errorf("%s is %q, not %q, the path the docs name: the measurement would not be of that sentence", daemonSocketConst, value, dockerSocketPath)
+		}
 		if at := bindsName(b, target, tdef); at.IsValid() {
 			t.Errorf("%s assigns %s again (%s): what it binds is not what was resolved", daemonTest, target, suite.fset.Position(at))
 		}
-		// The run's arguments, all of them: one bind, of the resolved path, in any
-		// spelling the runtime takes (`-v`, `--volume`, `-v=`, `--mount`) another
-		// would be an argument this does not expect.
+		// The run's arguments, all of them: one bind, of the resolved path. A
+		// second, in any spelling the runtime takes (`-v`, `--volume`, `-v=`,
+		// `--mount`), would be an argument this does not expect.
 		call, _, _ := theRun(t, b)
 		a := call.Args
 		ok := len(a) == 10 && isIdent(a[0], "t") && isIdent(a[1], "bin") &&
