@@ -13,70 +13,77 @@ import (
 // it deciding anything is green everywhere else. This reads its source and
 // holds the three things it decides on, one subtest each:
 //
-//   - the marks: daemonMarksVar is a list of string literals that holds the
-//     Engine API's own header, which a plain HTTP server does not write;
-//   - the loop: the test ranges over that list by name, as one of its own
-//     statements with no return ahead of it, and for each mark asks whether the
-//     output of the run it made lacks it, failing the test when it does;
-//   - the path: what the run binds is what dockerDaemonSocket returns, and
-//     that is what filepath.EvalSymlinks made of daemonSocketConst.
+//   - the marks: daemonMarksVar is declared once, at package level, as a list
+//     of string literals that holds the Engine API's own header (which a plain
+//     HTTP server does not write), and nothing in the package assigns it or
+//     declares another of that name;
+//   - the loop: the test makes one run, the one that binds the socket and runs
+//     pingDaemonConst, and takes its output into a name nothing assigns again;
+//     then, as one of its own statements with no return ahead of it, it ranges
+//     over the marks and fails when that output lacks one;
+//   - the path: what that run binds, exactly `<target>:/s.sock` and nothing
+//     else, is what dockerDaemonSocket returns, and every return there is what
+//     filepath.EvalSymlinks made of daemonSocketConst, never assigned again.
+//
+// It matches names and shapes, not what a name refers to: a shadowed `t`,
+// `strings` or loop variable, or a conditional goto ahead of the loop, are not
+// told apart. Those are rewrites made to get past it, not slips.
 const (
 	daemonTest       = "TestARealDockerDaemonAnswersThroughABoundSocket"
 	daemonMarksVar   = "daemonMarks"
 	daemonSocketFunc = "dockerDaemonSocket"
+	pingDaemonConst  = "pingDaemon"
 	engineAPIMark    = "Api-Version:"
+	socketInside     = ":/s.sock"
 )
 
 func TestTheDaemonMeasurementDecidesOnWhatItSays(t *testing.T) {
 	suite := conformanceReach(t)
-	body := func(name string) *ast.BlockStmt {
-		t.Helper()
-		c, ok := suite.bodies[name]
-		if !ok {
-			t.Fatalf("no %s in the conformance suite", name)
-		}
-		switch n := c.node.(type) {
-		case *ast.FuncDecl:
-			return n.Body
-		case *ast.FuncLit:
-			return n.Body
-		}
-		t.Fatalf("%s is not a function with a body", name)
-		return nil
-	}
 
 	t.Run("the marks hold the Engine API's header", func(t *testing.T) {
 		var marks []string
-		found := false
+		var spec ast.Node
+		declared := 0
 		for _, f := range suite.files {
-			ast.Inspect(f, func(n ast.Node) bool {
-				vs, ok := n.(*ast.ValueSpec)
-				if !ok {
-					return true
+			for _, d := range f.Decls { // package level only
+				gen, ok := d.(*ast.GenDecl)
+				if !ok || gen.Tok != token.VAR {
+					continue
 				}
-				for i, name := range vs.Names {
-					if name.Name != daemonMarksVar || i >= len(vs.Values) {
-						continue
-					}
-					found = true
-					lit, ok := vs.Values[i].(*ast.CompositeLit)
-					if !ok {
-						t.Fatalf("%s is not written as a list of strings", daemonMarksVar)
-					}
-					for _, e := range lit.Elts {
-						b, ok := e.(*ast.BasicLit)
-						if !ok || b.Kind != token.STRING {
-							t.Fatalf("%s holds something other than a string literal", daemonMarksVar)
+				for _, sp := range gen.Specs {
+					vs := sp.(*ast.ValueSpec)
+					for i, name := range vs.Names {
+						if name.Name != daemonMarksVar {
+							continue
 						}
-						s, _ := strconv.Unquote(b.Value)
-						marks = append(marks, s)
+						declared++
+						spec = vs
+						if i >= len(vs.Values) {
+							t.Fatalf("%s is declared with no value", daemonMarksVar)
+						}
+						lit, ok := vs.Values[i].(*ast.CompositeLit)
+						if !ok {
+							t.Fatalf("%s is not written as a list of strings", daemonMarksVar)
+						}
+						for _, e := range lit.Elts {
+							b, ok := e.(*ast.BasicLit)
+							if !ok || b.Kind != token.STRING {
+								t.Fatalf("%s holds something other than a string literal", daemonMarksVar)
+							}
+							s, _ := strconv.Unquote(b.Value)
+							marks = append(marks, s)
+						}
 					}
 				}
-				return true
-			})
+			}
 		}
-		if !found {
-			t.Fatalf("no var %s in the conformance suite", daemonMarksVar)
+		if declared != 1 {
+			t.Fatalf("%s is declared %d times at package level, want once", daemonMarksVar, declared)
+		}
+		for _, f := range suite.files {
+			if at := bindsName(f, daemonMarksVar, spec); at.IsValid() {
+				t.Errorf("%s is assigned or declared again (%s): the list the loop reads is not the one written", daemonMarksVar, suite.fset.Position(at))
+			}
 		}
 		has := false
 		for _, m := range marks {
@@ -89,9 +96,15 @@ func TestTheDaemonMeasurementDecidesOnWhatItSays(t *testing.T) {
 		}
 	})
 
-	t.Run("every mark is asked of the run's output and can fail the test", func(t *testing.T) {
-		b := body(daemonTest)
-		outFromRun := assignedFromCall(b, "run")
+	t.Run("every mark is asked of the bound run's output and can fail the test", func(t *testing.T) {
+		b := funcBody(t, suite, daemonTest)
+		call, out, def := theRun(t, b)
+		if last := call.Args[len(call.Args)-1]; !isIdent(last, pingDaemonConst) {
+			t.Errorf("the run in %s does not run %s: its output is not the daemon's answer", daemonTest, pingDaemonConst)
+		}
+		if at := bindsName(b, out, def); at.IsValid() {
+			t.Errorf("%s assigns %s again (%s): what the loop reads is not the run's output", daemonTest, out, suite.fset.Position(at))
+		}
 		var loop *ast.RangeStmt
 		for _, st := range b.List { // one of the test's own statements, not nested
 			rs, isRange := st.(*ast.RangeStmt)
@@ -103,86 +116,189 @@ func TestTheDaemonMeasurementDecidesOnWhatItSays(t *testing.T) {
 				continue
 			}
 			for _, st := range rs.Body.List {
-				if ifs, isIf := st.(*ast.IfStmt); isIf && lacks(ifs.Cond, outFromRun, mark.Name) && fails(ifs.Body) {
+				if ifs, isIf := st.(*ast.IfStmt); isIf && lacks(ifs.Cond, out, mark.Name) && fails(ifs.Body) {
 					loop = rs
 				}
 			}
 		}
-		if loop != nil {
-			if at := returnBefore(b, loop.Pos()); at.IsValid() {
-				t.Errorf("%s can return before it ranges over %s (%s)", daemonTest, daemonMarksVar, suite.fset.Position(at))
-			}
-		}
 		if loop == nil {
-			t.Errorf("%s has no `for _, m := range %s { if !strings.Contains(out, m) { t.Errorf(…) } }` "+
-				"with out the output of its run: what it decides on is no longer the marks", daemonTest, daemonMarksVar)
+			t.Fatalf("%s has no `for _, m := range %s { if !strings.Contains(%s, m) { t.Errorf(…) } }`: "+
+				"what it decides on is no longer the marks", daemonTest, daemonMarksVar, out)
+		}
+		if at := returnBefore(b, loop.Pos()); at.IsValid() {
+			t.Errorf("%s can return before it ranges over %s (%s)", daemonTest, daemonMarksVar, suite.fset.Position(at))
 		}
 	})
 
 	t.Run("what the run binds is the resolved socket name", func(t *testing.T) {
-		resolved := ""
-		returned := false
-		ast.Inspect(body(daemonSocketFunc), func(n ast.Node) bool {
-			switch n := n.(type) {
-			case *ast.AssignStmt:
-				if len(n.Rhs) == 1 && isCallTo(n.Rhs[0], "filepath", "EvalSymlinks") {
-					call := n.Rhs[0].(*ast.CallExpr)
-					if len(call.Args) == 1 && isIdent(call.Args[0], daemonSocketConst) {
-						if id, ok := n.Lhs[0].(*ast.Ident); ok {
-							resolved = id.Name
-						}
-					}
-				}
-			case *ast.ReturnStmt:
-				if resolved != "" && len(n.Results) == 1 && isIdent(n.Results[0], resolved) {
-					returned = true
-				}
-			}
-			return true
-		})
-		if !returned {
-			t.Errorf("%s does not return what filepath.EvalSymlinks(%s) resolved", daemonSocketFunc, daemonSocketConst)
-		}
-		b := body(daemonTest)
-		target := assignedFromCall(b, daemonSocketFunc)
-		binds := false
-		ast.Inspect(b, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok || !isIdent(call.Fun, "run") {
+		sb := funcBody(t, suite, daemonSocketFunc)
+		resolved, rdef := "", ast.Node(nil)
+		ast.Inspect(sb, func(n ast.Node) bool {
+			as, ok := n.(*ast.AssignStmt)
+			if !ok || resolved != "" || len(as.Rhs) != 1 || !isCallTo(as.Rhs[0], "filepath", "EvalSymlinks") {
 				return true
 			}
-			for i, a := range call.Args {
-				if i > 0 && isStringLit(call.Args[i-1], "-v") {
-					if be, ok := a.(*ast.BinaryExpr); ok && be.Op == token.ADD && target != "" && isIdent(be.X, target) {
-						binds = true
-					}
+			call := as.Rhs[0].(*ast.CallExpr)
+			if id, ok := as.Lhs[0].(*ast.Ident); ok && len(call.Args) == 1 && isIdent(call.Args[0], daemonSocketConst) {
+				resolved, rdef = id.Name, as
+			}
+			return true
+		})
+		if resolved == "" {
+			t.Fatalf("%s does not resolve %s with filepath.EvalSymlinks", daemonSocketFunc, daemonSocketConst)
+		}
+		if at := bindsName(sb, resolved, rdef); at.IsValid() {
+			t.Errorf("%s assigns %s again (%s) after resolving it", daemonSocketFunc, resolved, suite.fset.Position(at))
+		}
+		returns := 0
+		ast.Inspect(sb, func(n ast.Node) bool {
+			if _, ok := n.(*ast.FuncLit); ok {
+				return false
+			}
+			r, ok := n.(*ast.ReturnStmt)
+			if !ok {
+				return true
+			}
+			returns++
+			if len(r.Results) != 1 || !isIdent(r.Results[0], resolved) {
+				t.Errorf("%s returns something other than %s (%s)", daemonSocketFunc, resolved, suite.fset.Position(r.Pos()))
+			}
+			return true
+		})
+		if returns == 0 {
+			t.Errorf("%s returns nothing", daemonSocketFunc)
+		}
+
+		b := funcBody(t, suite, daemonTest)
+		target, tdef := "", ast.Node(nil)
+		ast.Inspect(b, func(n ast.Node) bool {
+			as, ok := n.(*ast.AssignStmt)
+			if !ok || target != "" || len(as.Rhs) != 1 {
+				return true
+			}
+			if c, ok := as.Rhs[0].(*ast.CallExpr); ok && isIdent(c.Fun, daemonSocketFunc) {
+				if id, ok := as.Lhs[0].(*ast.Ident); ok {
+					target, tdef = id.Name, as
 				}
 			}
 			return true
 		})
-		if !binds {
-			t.Errorf("the run in %s does not bind (`-v`) what %s returned", daemonTest, daemonSocketFunc)
+		if target == "" {
+			t.Fatalf("%s does not take what %s returns", daemonTest, daemonSocketFunc)
+		}
+		if at := bindsName(b, target, tdef); at.IsValid() {
+			t.Errorf("%s assigns %s again (%s): what it binds is not what was resolved", daemonTest, target, suite.fset.Position(at))
+		}
+		call, _, _ := theRun(t, b)
+		var vs []ast.Expr
+		for i, a := range call.Args {
+			if i > 0 && isStringLit(call.Args[i-1], "-v") {
+				vs = append(vs, a)
+			}
+		}
+		ok := len(vs) == 1
+		if ok {
+			be, isBin := vs[0].(*ast.BinaryExpr)
+			ok = isBin && be.Op == token.ADD && isIdent(be.X, target) && isStringLit(be.Y, socketInside)
+		}
+		if !ok {
+			t.Errorf("the run in %s does not bind exactly one `-v %s+%q`", daemonTest, target, socketInside)
 		}
 	})
 }
 
-// assignedFromCall is the name the first value of a call to fn is assigned to
-// in b ("" where there is none).
-func assignedFromCall(b *ast.BlockStmt, fn string) string {
-	name := ""
+// funcBody is the body of the suite's function name.
+func funcBody(t *testing.T, suite conformanceSuite, name string) *ast.BlockStmt {
+	t.Helper()
+	c, ok := suite.bodies[name]
+	if !ok {
+		t.Fatalf("no %s in the conformance suite", name)
+	}
+	switch n := c.node.(type) {
+	case *ast.FuncDecl:
+		return n.Body
+	case *ast.FuncLit:
+		return n.Body
+	}
+	t.Fatalf("%s is not a function with a body", name)
+	return nil
+}
+
+// theRun is the test's one call to run whose result it keeps: the call, the
+// name its first value goes to and the statement that defines it. A test with
+// another such call is refused, so the output and the bind are of one run.
+func theRun(t *testing.T, b *ast.BlockStmt) (*ast.CallExpr, string, ast.Node) {
+	t.Helper()
+	var call *ast.CallExpr
+	var out string
+	var def ast.Node
+	runs := 0
 	ast.Inspect(b, func(n ast.Node) bool {
-		as, ok := n.(*ast.AssignStmt)
-		if !ok || name != "" || len(as.Rhs) != 1 {
+		c, ok := n.(*ast.CallExpr)
+		if !ok || !isIdent(c.Fun, "run") {
 			return true
 		}
-		if call, ok := as.Rhs[0].(*ast.CallExpr); ok && isIdent(call.Fun, fn) {
+		runs++
+		call = c
+		return true
+	})
+	if runs != 1 {
+		t.Fatalf("%s calls run %d times, want once: the output read and the socket bound have to be one run's", daemonTest, runs)
+	}
+	ast.Inspect(b, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if ok && len(as.Rhs) == 1 && as.Rhs[0] == ast.Expr(call) {
 			if id, ok := as.Lhs[0].(*ast.Ident); ok && id.Name != "_" {
-				name = id.Name
+				out, def = id.Name, as
 			}
 		}
 		return true
 	})
-	return name
+	if out == "" {
+		t.Fatalf("%s does not keep the output of its run", daemonTest)
+	}
+	return call, out, def
+}
+
+// bindsName is the position of a statement in n, other than def, that assigns
+// name or declares a new one of it (NoPos where there is none).
+func bindsName(n ast.Node, name string, def ast.Node) token.Pos {
+	at := token.NoPos
+	ast.Inspect(n, func(x ast.Node) bool {
+		if at.IsValid() || x == nil || x == def {
+			return x != def
+		}
+		switch x := x.(type) {
+		case *ast.AssignStmt:
+			for _, l := range x.Lhs {
+				if isIdent(l, name) {
+					at = x.Pos()
+				}
+			}
+		case *ast.IncDecStmt:
+			if isIdent(x.X, name) {
+				at = x.Pos()
+			}
+		case *ast.ValueSpec:
+			for _, v := range x.Names {
+				if v.Name == name {
+					at = x.Pos()
+				}
+			}
+		case *ast.RangeStmt:
+			if isIdent(x.Key, name) || isIdent(x.Value, name) {
+				at = x.Pos()
+			}
+		case *ast.Field:
+			for _, v := range x.Names {
+				if v.Name == name {
+					at = x.Pos()
+				}
+			}
+		}
+		return true
+	})
+	return at
 }
 
 // returnBefore is the position of a return in b ahead of pos, outside any
