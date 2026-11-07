@@ -719,6 +719,17 @@ func run(args []string) int {
 				return 1
 			}
 		}
+		// $RUN_ALIAS_HELD_OTHER refuses a run that passes any alias, naming an
+		// alias the run did not ask for: the list reads, and names none of them.
+		if other := os.Getenv("RUN_ALIAS_HELD_OTHER"); other != "" {
+			for _, a := range args {
+				if strings.HasPrefix(a, "--network=") && strings.Contains(a, ",alias=") {
+					fmt.Fprintln(os.Stderr, "[0/6] [0s]")
+					fmt.Fprintf(os.Stderr, "Error: alias(es) already exist: [%q]\n", other)
+					return 1
+				}
+			}
+		}
 		if held := strings.Fields(os.Getenv("RUN_ALIAS_HELD")); len(held) > 0 {
 			var hit []string
 			for _, h := range held {

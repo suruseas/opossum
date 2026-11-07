@@ -160,8 +160,9 @@ func (o *Orchestrator) runtimeTakesAliases() (bool, string) {
 // refuses the run because another container already holds some of its aliases —
 // one an earlier `up` left, running or stopped, or another project's of the
 // same name, which 1.6.1 counts whatever their state (measured) — runs it once
-// more without those aliases and says which. The refusal names the aliases it
-// met and makes no container (measured); the run is made again only where
+// more without those aliases and says which. The refusal makes no container
+// (measured) and names the aliases it met (one measured; that it lists every
+// one, as asked for, capitals kept, is read in the 1.6.1 source); the run is made again only where
 // nothing was made, and only without the aliases it named (all of them where it
 // named none the run passed). The label that fingerprints the run is kept, so a
 // later `up` leaves the container as it is until it is recreated.

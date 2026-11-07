@@ -420,6 +420,24 @@ func TestUpRunsAgainWithoutEveryAliasWhenTheListDoesNotRead(t *testing.T) {
 	}
 }
 
+// A refusal whose list reads but names none of the aliases the run passed
+// cannot say which is held, so the run is made again without any.
+func TestUpRunsAgainWithoutEveryAliasWhenTheListNamesNoneOfThem(t *testing.T) {
+	_, all, out, err := aliasUpIn(t, "demo", "1.6.1", "opossum", map[string]*compose.Service{
+		"db": aliased([]string{"back"}, map[string][]string{"back": {"cache", "kv"}}),
+	}, "RUN_ALIAS_HELD_OTHER=other.demo.opossum")
+	if err != nil {
+		t.Fatalf("up should go on, got %v\n%s", err, out)
+	}
+	mine := demoRunsOf(all, "db")
+	if len(mine) != 2 || strings.Contains(mine[1], "alias=") {
+		t.Fatalf("want a run made again with no alias, got %q", mine)
+	}
+	if !strings.Contains(out, `network alias(es) "cache", "kv" not passed`) {
+		t.Errorf("want every alias named, got:\n%s", out)
+	}
+}
+
 // The run made again is made once: when it fails too, up fails with its error,
 // and nothing is run a third time.
 func TestUpFailsWhenTheRunMadeAgainFails(t *testing.T) {

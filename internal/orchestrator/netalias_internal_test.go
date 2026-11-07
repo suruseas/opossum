@@ -73,6 +73,9 @@ func TestWithoutAliasesTakesOutOnlyTheHeld(t *testing.T) {
 			map[string][]string{"demo-back": {"kv.demo.opossum"}, "demo-front": {"Www.demo.opossum"}}, []string{"cache.demo.opossum"}},
 		{"one on the second network, in other capitals with a dot", []string{"www.demo.opossum."},
 			map[string][]string{"demo-back": {"cache.demo.opossum", "kv.demo.opossum"}}, []string{"Www.demo.opossum"}},
+		// The runtime names an alias as it was asked for, capitals included.
+		{"one named in capitals", []string{"KV.DEMO.OPOSSUM"},
+			map[string][]string{"demo-back": {"cache.demo.opossum"}, "demo-front": {"Www.demo.opossum"}}, []string{"kv.demo.opossum"}},
 		{"every one", []string{"cache.demo.opossum", "kv.demo.opossum", "www.demo.opossum"}, nil,
 			[]string{"cache.demo.opossum", "kv.demo.opossum", "Www.demo.opossum"}},
 		{"none the run passed", []string{"other.demo.opossum"}, byNet, nil},
@@ -89,8 +92,16 @@ func TestWithoutAliasesTakesOutOnlyTheHeld(t *testing.T) {
 // The hostname refusal decodes to OPSM-217, and only the runtime's own line does.
 func TestTheHostnameRefusalCarriesItsCode(t *testing.T) {
 	h := runErrorHint(&compose.Service{}, "", false, runErr(`Error: hostname(s) already exist: ["cache.demo.opossum."]`))
-	if want := "[" + string(codeNameHeldAsAlias) + "]"; !contains(h, want) {
-		t.Errorf("want %s in the hint, got %q", want, h)
+	for _, want := range []string{
+		"[" + string(codeNameHeldAsAlias) + "]",
+		// The ways out: recreate the service that holds the alias, and remove an
+		// orphan that does (`down` alone leaves one).
+		"`opossum up --force-recreate <service>`",
+		"`opossum up --remove-orphans`",
+	} {
+		if !contains(h, want) {
+			t.Errorf("want %s in the hint, got %q", want, h)
+		}
 	}
 	if h := runErrorHint(&compose.Service{}, "", false, runErr(`cache: Error: hostname(s) already exist: ["x."]`)); h != "" {
 		t.Errorf("a container's line is not the refusal, got %q", h)
