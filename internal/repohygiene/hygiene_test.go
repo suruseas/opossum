@@ -63,6 +63,8 @@ func TestOffenseFlagsBuildArtifacts(t *testing.T) {
 		// is fine wherever users would look for it.
 		{"a script users are meant to run", "examples/run-demo.sh", 900, []byte("#!/bin/sh\n"), ""},
 		{"a directory that merely starts the same way", "scripts-for-users/x.sh", 900, []byte("#!/bin/sh\n"), ""},
+		// Only the top-level scripts/ is local: .gitignore ignores `/scripts/`.
+		{"a scripts directory further down", "internal/x/scripts/a.sh", 900, []byte("#!/bin/sh\n"), ""},
 		// A driver written to see what a new tool printed, with the shell in the
 		// repository root. It compiled, it was not named like a throwaway, and it
 		// made the module's root a `package main` — which is what `go install
@@ -246,7 +248,7 @@ func TestWhatOpossumWritesAtRunTimeIsNotTracked(t *testing.T) {
 // the table is over the rules, not over one rule's inputs.
 func TestNoRuleIsStricterAboutCaseThanTheFileSystem(t *testing.T) {
 	for _, tc := range []struct{ rule, lower, upper string }{
-		{"maintainer directory", "scripts/release.sh", "Scripts/release.sh"},
+		{"local directory", "scripts/release.sh", "Scripts/release.sh"},
 		{"compose at the top", "compose.yaml", "Compose.yaml"},
 		{"runtime state", ".opossum/mcp/db.json", ".Opossum/mcp/db.json"},
 		{"a throwaway name", "zz_tmp.go", "ZZ_TMP.go"},

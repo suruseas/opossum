@@ -42,7 +42,7 @@ func TestTheOffenseMessagesKeepEachPieceInItsPlace(t *testing.T) {
 			"scripts/release.sh", 4_000, []byte("#!/bin/bash\n"),
 			[]string{
 				"scripts/release.sh is a local file, and local files are not tracked.",
-				"  scripts holds files kept on your own disk",
+				"  scripts holds files kept on your own disk that are not part of the project; .gitignore ignores it.",
 				"Remove it from the index (`git rm --cached scripts/release.sh`)",
 			},
 		},
