@@ -25,6 +25,9 @@ func TestNetworkAliasesAreRead(t *testing.T) {
 		// Nor is a name that is not one DNS label `up` can pass.
 		{"a leading hyphen", "[-cache]", []string{"-cache"}, true},
 		{"a space", `["a b"]`, []string{"a b"}, true},
+		// A comma would end the alias in the runtime's `--network` value and start
+		// another option.
+		{"a comma", `["a,b"]`, []string{"a,b"}, true},
 		{"a 64-character label", "[" + strings.Repeat("a", 64) + "]", []string{strings.Repeat("a", 64)}, true},
 		{"a 63-character label", "[" + strings.Repeat("a", 63) + "]", []string{strings.Repeat("a", 63)}, false},
 		// Not a list of strings: not read at all, and listed.

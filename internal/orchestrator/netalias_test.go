@@ -282,6 +282,21 @@ func TestUpPassesAtMost32AliasesOnANetwork(t *testing.T) {
 	}
 }
 
+// An alias the 32 on one network left out is still given on a later network
+// that writes it: being left out on the first is not being given there.
+func TestUpGivesThe33rdAliasOnALaterNetwork(t *testing.T) {
+	var names []string
+	for i := 0; i < 33; i++ {
+		names = append(names, "a"+strconv.Itoa(i))
+	}
+	runs, _ := aliasUp(t, "1.6.1", "opossum", map[string]*compose.Service{
+		"db": aliased([]string{"back", "front"}, map[string][]string{"back": names, "front": {"a32"}}),
+	})
+	if !strings.Contains(runs["db"], "--network=demo-front,alias=a32.demo.opossum ") {
+		t.Errorf("want a32 given on front, got %q", runs["db"])
+	}
+}
+
 // A one-off `run` passes no aliases, as `docker compose run` passes none without
 // `--use-aliases`; one that did would be refused by the runtime while the
 // service's own container holds them.
@@ -342,10 +357,94 @@ func TestUpRunsAgainWithoutAliasesAnotherContainerHolds(t *testing.T) {
 			if len(mine) != 2 || !strings.Contains(mine[0], "alias=cache.demo.opossum") || strings.Contains(mine[1], "alias=") {
 				t.Fatalf("want a run with the alias, then one without, got %q", mine)
 			}
-			if !strings.Contains(out, `[OPSM-502] service "db": its network aliases are not passed: another container already holds one of them`) {
+			if !strings.Contains(out, `[OPSM-502] service "db": network alias(es) "cache" not passed: another container already holds them`) {
 				t.Errorf("want it said, got:\n%s", out)
 			}
 		})
+	}
+}
+
+// demoRunsOf is the `run` lines of one service of project demo.
+func demoRunsOf(all []string, svc string) []string {
+	var mine []string
+	for _, l := range all {
+		if strings.Contains(l, " --name "+svc+".demo.opossum ") {
+			mine = append(mine, l)
+		}
+	}
+	return mine
+}
+
+// Only the aliases the refusal names are left out of the run made again; the
+// others are still passed, so a service that holds one of them goes on holding
+// it. The warning names those left out.
+func TestUpRunsAgainWithoutOnlyTheHeldAliases(t *testing.T) {
+	_, all, out, err := aliasUpIn(t, "demo", "1.6.1", "opossum", map[string]*compose.Service{
+		"db": aliased([]string{"back", "front"}, map[string][]string{"back": {"cache", "kv"}, "front": {"www"}}),
+	}, "RUN_ALIAS_HELD=kv.demo.opossum")
+	if err != nil {
+		t.Fatalf("up should go on, got %v\n%s", err, out)
+	}
+	mine := demoRunsOf(all, "db")
+	if len(mine) != 2 {
+		t.Fatalf("want two runs, got %q", mine)
+	}
+	for _, want := range []string{"--network=demo-back,alias=cache.demo.opossum ", "--network=demo-front,alias=www.demo.opossum "} {
+		if !strings.Contains(mine[1], want) {
+			t.Errorf("want %q kept in the run made again, got %q", want, mine[1])
+		}
+	}
+	if strings.Contains(mine[1], "alias=kv.") {
+		t.Errorf("want the held alias left out, got %q", mine[1])
+	}
+	if !strings.Contains(out, `network alias(es) "kv" not passed`) {
+		t.Errorf("want the held alias named, got:\n%s", out)
+	}
+}
+
+// A refusal whose list of aliases does not read as one names none of them, and
+// the run is made again without any alias: what is held cannot be told apart.
+func TestUpRunsAgainWithoutEveryAliasWhenTheListDoesNotRead(t *testing.T) {
+	_, all, out, err := aliasUpIn(t, "demo", "1.6.1", "opossum", map[string]*compose.Service{
+		"db": aliased([]string{"back"}, map[string][]string{"back": {"cache", "kv"}}),
+	}, "RUN_ALIAS_HELD=kv.demo.opossum", "RUN_ALIAS_HELD_UNQUOTED=1")
+	if err != nil {
+		t.Fatalf("up should go on, got %v\n%s", err, out)
+	}
+	mine := demoRunsOf(all, "db")
+	if len(mine) != 2 || strings.Contains(mine[1], "alias=") {
+		t.Fatalf("want a run made again with no alias, got %q", mine)
+	}
+	if !strings.Contains(out, `network alias(es) "cache", "kv" not passed`) {
+		t.Errorf("want every alias named, got:\n%s", out)
+	}
+}
+
+// The run made again is made once: when it fails too, up fails with its error,
+// and nothing is run a third time.
+func TestUpFailsWhenTheRunMadeAgainFails(t *testing.T) {
+	_, all, out, err := aliasUpIn(t, "demo", "1.6.1", "opossum", map[string]*compose.Service{
+		"db": aliased([]string{"back"}, map[string][]string{"back": {"cache"}}),
+	}, "RUN_ALIAS_HELD=cache.demo.opossum", "RUN_REFUSE_AFTER_ALIASES=1")
+	if err == nil {
+		t.Fatalf("up should fail when the run made again fails\n%s", out)
+	}
+	if mine := demoRunsOf(all, "db"); len(mine) != 2 {
+		t.Errorf("want two runs, got %q", mine)
+	}
+}
+
+// A refusal line that came after the run made its container is not the
+// runtime's refusal (which makes nothing), and the run is not made again.
+func TestUpDoesNotRunAgainWhenTheRunMadeAContainer(t *testing.T) {
+	_, all, out, err := aliasUpIn(t, "demo", "1.6.1", "opossum", map[string]*compose.Service{
+		"db": aliased([]string{"back"}, map[string][]string{"back": {"cache"}}),
+	}, "RUN_ALIAS_HELD=cache.demo.opossum", "RUN_ALIAS_HELD_MADE=1")
+	if err == nil {
+		t.Fatalf("up should fail\n%s", out)
+	}
+	if mine := demoRunsOf(all, "db"); len(mine) != 1 {
+		t.Errorf("want one run, got %q", mine)
 	}
 }
 
@@ -360,7 +459,7 @@ func TestUpDoesNotRunAgainForAnotherFailure(t *testing.T) {
 	if len(all) != 1 {
 		t.Errorf("want one run, got %q", all)
 	}
-	if strings.Contains(out, "its network aliases are not passed") {
+	if strings.Contains(out, "not passed: another container already holds them") {
 		t.Errorf("not an alias failure, got:\n%s", out)
 	}
 }

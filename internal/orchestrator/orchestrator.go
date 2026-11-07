@@ -6312,8 +6312,9 @@ func runErrorHint(svc *compose.Service, holder string, takesItBack bool, err err
 	// alias, before the file named a service after it.
 	case hostnameHeldAsAlias(s):
 		return "\n  → [" + string(codeNameHeldAsAlias) + "] another container holds this service's name as a network alias — " +
-			"one an earlier `opossum up` made, before a service took that name. Remove it (`opossum down`, then `opossum up`), " +
-			"or recreate the service that holds the alias (`opossum up --force-recreate <service>`), which no longer passes it"
+			"one an earlier `opossum up` made, before a service took that name. Recreate the service that holds the alias " +
+			"(`opossum up --force-recreate <service>`), which no longer passes it, then `opossum up`; " +
+			"if the holder is a container this project no longer has, `opossum up --remove-orphans`"
 	// The kernel refused to run what the service starts: `Exec format error`
 	// (ENOEXEC). Two things do that — a program built for another architecture
 	// than the image's (an amd64 binary in an arm64 image, which docker runs

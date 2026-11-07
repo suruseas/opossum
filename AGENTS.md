@@ -645,8 +645,11 @@ list; codes are add-only and never change meaning.
 - **`[OPSM-217]` … `another container holds this service's name as a network alias`** → decoded from a
   failed start on Apple `container` 1.6.1 (`Error: hostname(s) already exist: [...]`): a container that is
   there, running or stopped, was given the service's name as a network alias by an earlier `up`, before a
-  service took that name. `opossum down` and `up` again, or `opossum up --force-recreate <service>` for the
-  service that holds the alias, which no longer passes an alias that is a service's name.
+  service took that name. `opossum up --force-recreate <service>` for the service that holds the alias,
+  which no longer passes an alias that is a service's name, then `opossum up`; for a holder this project
+  no longer has (an orphan), `opossum up --remove-orphans`. `opossum down` alone does not remove an
+  orphan. Adding a service named after an alias another service holds fails that `up` this way (a known
+  difference: docker compose starts both).
 - **`[OPSM-207]` … `network <n> exists with IPv4 subnet <a>, and the compose file now declares <b>`** →
   the project network was created earlier with another subnet (or with none, so
   the runtime chose one) and `ipam.config` now declares a different one. opossum

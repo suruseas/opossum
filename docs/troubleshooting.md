@@ -100,6 +100,15 @@ build can starve.
   resolves through the normal one. Multiple networks
   per service and `external:` reuse both work. See [Networking
   model](networking.md) for the full picture.
+- **Adding a service named after another service's alias fails that `up`**
+  (Apple `container` 1.6.0 and later): with `db` running and passing
+  `aliases: [cache]`, a new service `cache` is refused by the runtime
+  (`hostname(s) already exist`, `[OPSM-217]`) before `db` is recreated without
+  the alias. Run `opossum up --force-recreate db` (the service that held the
+  alias), then `opossum up`; if the holder is a container the file no longer
+  has, `opossum up --remove-orphans`. The same happens when the holder is
+  stopped, or belongs to a project of the same name in another directory.
+  Docker compose starts both.
 - **`restart:` is honoured by a small per-project supervisor**, not by a resident
   engine: `up` leaves one running when the project declares a policy, and `down`
   stops it. `on-failure` can only be approximated — Apple `container` doesn't

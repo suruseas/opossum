@@ -710,13 +710,49 @@ func run(args []string) int {
 		// $RUN_HOSTNAME_HELD a container name another holds as an alias: container
 		// 1.6.1 refuses the run with these lines and makes nothing
 		// (testdata/error-wordings/network-aliases-161.txt).
-		if held := os.Getenv("RUN_ALIAS_HELD"); held != "" {
-			for _, a := range args {
-				if strings.HasPrefix(a, "--network=") && strings.Contains(a+",", ",alias="+held+",") {
-					fmt.Fprintln(os.Stderr, "[0/6] [0s]")
-					fmt.Fprintf(os.Stderr, "Error: alias(es) already exist: [%q]\n", held)
-					return 1
+		// $RUN_ALIAS_HELD is a space-separated list; the run is refused naming
+		// those of them it asks for. With $RUN_REFUSE_AFTER_ALIASES set, the run
+		// after such a refusal fails too, with another error.
+		if dir := os.Getenv("STATE_DIR"); dir != "" && os.Getenv("RUN_REFUSE_AFTER_ALIASES") != "" {
+			if _, err := os.Stat(filepath.Join(dir, "alias-refused")); err == nil {
+				fmt.Fprintln(os.Stderr, "Error: internalError: \"the run after an alias refusal fails too\"")
+				return 1
+			}
+		}
+		if held := strings.Fields(os.Getenv("RUN_ALIAS_HELD")); len(held) > 0 {
+			var hit []string
+			for _, h := range held {
+				for _, a := range args {
+					if strings.HasPrefix(a, "--network=") && strings.Contains(a+",", ",alias="+h+",") {
+						// $RUN_ALIAS_HELD_UNQUOTED writes the list in a form that
+						// does not read as one, to stand for a wording that changed.
+						if os.Getenv("RUN_ALIAS_HELD_UNQUOTED") != "" {
+							hit = append(hit, h)
+						} else {
+							hit = append(hit, fmt.Sprintf("%q", h))
+						}
+						break
+					}
 				}
+			}
+			if len(hit) > 0 {
+				if dir := os.Getenv("STATE_DIR"); dir != "" {
+					_ = os.WriteFile(filepath.Join(dir, "alias-refused"), nil, 0o644)
+					// $RUN_ALIAS_HELD_MADE stands in for a run that made its
+					// container before the line came: not what 1.6.1 does (its
+					// refusal makes nothing), but what a container that printed
+					// the same line would look like.
+					if os.Getenv("RUN_ALIAS_HELD_MADE") != "" {
+						for k, a := range args {
+							if k > 0 && args[k-1] == "--name" {
+								_ = os.WriteFile(createdPath(dir, a), []byte("1"), 0o644)
+							}
+						}
+					}
+				}
+				fmt.Fprintln(os.Stderr, "[0/6] [0s]")
+				fmt.Fprintf(os.Stderr, "Error: alias(es) already exist: [%s]\n", strings.Join(hit, ", "))
+				return 1
 			}
 		}
 		if held := os.Getenv("RUN_HOSTNAME_HELD"); held != "" {
