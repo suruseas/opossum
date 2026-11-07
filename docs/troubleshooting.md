@@ -109,7 +109,7 @@ build can starve.
   alias), then `opossum up`; if the holder is a container the file no longer
   has, `opossum up --remove-orphans`. The same happens when the holder is
   stopped, or belongs to a project of the same name in another directory.
-  Docker compose starts both.
+  Docker compose was not measured in this shape.
 - **`restart:` is honoured by a small per-project supervisor**, not by a resident
   engine: `up` leaves one running when the project declares a policy, and `down`
   stops it. `on-failure` can only be approximated — Apple `container` doesn't

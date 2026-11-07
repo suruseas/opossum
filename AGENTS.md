@@ -650,7 +650,7 @@ list; codes are add-only and never change meaning.
   no longer has (an orphan), `opossum up --remove-orphans`. `opossum down` alone does not remove an
   orphan. Adding a service named after an alias another service holds fails that `up` this way when the new
   service starts before the holder (measured with `cache` before `db`; the other order was not measured),
-  a known difference: docker compose starts both.
+  docker compose was not measured in this shape.
 - **`[OPSM-207]` … `network <n> exists with IPv4 subnet <a>, and the compose file now declares <b>`** →
   the project network was created earlier with another subnet (or with none, so
   the runtime chose one) and `ipam.config` now declares a different one. opossum
