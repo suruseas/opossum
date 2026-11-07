@@ -2,6 +2,9 @@
 # through opossum built from this change, then docker compose v5.6.1 for comparison. Every
 # container, network, project and directory was named for the run and removed afterwards; the
 # last lines of the opossum part show none left. Progress lines (`[n/6] …`) are left out.
+# The OPSM-217 advice in part (c) is what opossum printed when this was taken; it has since been
+# changed to `opossum up --force-recreate <service>`, then `opossum up`, and `--remove-orphans`
+# for a holder the project no longer has. The runtime's own lines are as measured.
 #
 # What the runtime does with `--network <name>,alias=<name>`:
 # - A one-label alias is refused, with --dns-domain or without (B, B2).
