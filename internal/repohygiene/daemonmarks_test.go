@@ -15,19 +15,22 @@ import (
 //
 //   - the marks: daemonMarksVar is declared once, at package level, as a list
 //     of string literals that holds the Engine API's own header (which a plain
-//     HTTP server does not write), and nothing in the package assigns it or
-//     declares another of that name;
+//     HTTP server does not write), and the name appears nowhere else in the
+//     package but the measurement's loop;
 //   - the loop: the test makes one run, the one that binds the socket and runs
 //     pingDaemonConst, and takes its output into a name nothing assigns again;
 //     then, as one of its own statements with no return ahead of it, it ranges
 //     over the marks and fails when that output lacks one;
-//   - the path: what that run binds, exactly `<target>:/s.sock` and nothing
-//     else, is what dockerDaemonSocket returns, and every return there is what
+//   - the path: that run's arguments are exactly the expected ones, binding
+//     `<target>:/s.sock` once, and target is what dockerDaemonSocket returns, and every return there is what
 //     filepath.EvalSymlinks made of daemonSocketConst, never assigned again.
 //
-// It matches names and shapes, not what a name refers to: a shadowed `t`,
-// `strings` or loop variable, or a conditional goto ahead of the loop, are not
-// told apart. Those are rewrites made to get past it, not slips.
+// It matches names and shapes, not what a name refers to, and it does not
+// follow control flow: a shadowed `t`, `strings` or loop variable, a
+// conditional goto or panic+recover ahead of the loop, a conditional continue
+// or break inside it, an `if false {}` around the failure, or what pingDaemon
+// itself sends, are not told apart. Those are rewrites made to get past it,
+// not slips.
 const (
 	daemonTest       = "TestARealDockerDaemonAnswersThroughABoundSocket"
 	daemonMarksVar   = "daemonMarks"
@@ -80,10 +83,28 @@ func TestTheDaemonMeasurementDecidesOnWhatItSays(t *testing.T) {
 		if declared != 1 {
 			t.Fatalf("%s is declared %d times at package level, want once", daemonMarksVar, declared)
 		}
-		for _, f := range suite.files {
-			if at := bindsName(f, daemonMarksVar, spec); at.IsValid() {
-				t.Errorf("%s is assigned or declared again (%s): the list the loop reads is not the one written", daemonMarksVar, suite.fset.Position(at))
+		// The name appears twice in the package: where it is declared and where
+		// the measurement ranges over it. Anywhere else — assigned, indexed,
+		// copied into, declared again — the list the loop reads may not be the
+		// one written.
+		allowed := map[*ast.Ident]bool{}
+		for _, n := range spec.(*ast.ValueSpec).Names {
+			allowed[n] = true
+		}
+		for _, st := range funcBody(t, suite, daemonTest).List {
+			if rs, ok := st.(*ast.RangeStmt); ok {
+				if id, ok := rs.X.(*ast.Ident); ok && id.Name == daemonMarksVar {
+					allowed[id] = true
+				}
 			}
+		}
+		for _, f := range suite.files {
+			ast.Inspect(f, func(n ast.Node) bool {
+				if id, ok := n.(*ast.Ident); ok && id.Name == daemonMarksVar && !allowed[id] {
+					t.Errorf("%s is used at %s, outside its declaration and the measurement's loop", daemonMarksVar, suite.fset.Position(id.Pos()))
+				}
+				return true
+			})
 		}
 		has := false
 		for _, m := range marks {
@@ -115,8 +136,10 @@ func TestTheDaemonMeasurementDecidesOnWhatItSays(t *testing.T) {
 			if mark == nil {
 				continue
 			}
-			for _, st := range rs.Body.List {
-				if ifs, isIf := st.(*ast.IfStmt); isIf && lacks(ifs.Cond, out, mark.Name) && fails(ifs.Body) {
+			// The body is that one if: a break or continue beside it would stop
+			// asking the later marks.
+			if len(rs.Body.List) == 1 {
+				if ifs, isIf := rs.Body.List[0].(*ast.IfStmt); isIf && ifs.Else == nil && lacks(ifs.Cond, out, mark.Name) && fails(ifs.Body) {
 					loop = rs
 				}
 			}
@@ -189,20 +212,22 @@ func TestTheDaemonMeasurementDecidesOnWhatItSays(t *testing.T) {
 		if at := bindsName(b, target, tdef); at.IsValid() {
 			t.Errorf("%s assigns %s again (%s): what it binds is not what was resolved", daemonTest, target, suite.fset.Position(at))
 		}
+		// The run's arguments, all of them: one bind, of the resolved path, in any
+		// spelling the runtime takes (`-v`, `--volume`, `-v=`, `--mount`) another
+		// would be an argument this does not expect.
 		call, _, _ := theRun(t, b)
-		var vs []ast.Expr
-		for i, a := range call.Args {
-			if i > 0 && isStringLit(call.Args[i-1], "-v") {
-				vs = append(vs, a)
-			}
-		}
-		ok := len(vs) == 1
+		a := call.Args
+		ok := len(a) == 10 && isIdent(a[0], "t") && isIdent(a[1], "bin") &&
+			isStringLit(a[2], "run") && isStringLit(a[3], "--rm") && isStringLit(a[4], "-v") &&
+			isIdent(a[6], "clientImage") && isStringLit(a[7], "python3") && isStringLit(a[8], "-c") &&
+			isIdent(a[9], pingDaemonConst)
 		if ok {
-			be, isBin := vs[0].(*ast.BinaryExpr)
+			be, isBin := a[5].(*ast.BinaryExpr)
 			ok = isBin && be.Op == token.ADD && isIdent(be.X, target) && isStringLit(be.Y, socketInside)
 		}
 		if !ok {
-			t.Errorf("the run in %s does not bind exactly one `-v %s+%q`", daemonTest, target, socketInside)
+			t.Errorf("the run in %s is not `run(t, bin, \"run\", \"--rm\", \"-v\", %s+%q, clientImage, \"python3\", \"-c\", %s)`",
+				daemonTest, target, socketInside, pingDaemonConst)
 		}
 	})
 }
@@ -224,9 +249,9 @@ func funcBody(t *testing.T, suite conformanceSuite, name string) *ast.BlockStmt 
 	return nil
 }
 
-// theRun is the test's one call to run whose result it keeps: the call, the
-// name its first value goes to and the statement that defines it. A test with
-// another such call is refused, so the output and the bind are of one run.
+// theRun is the test's one call to run — every call counts, kept or not — and
+// the name its first value goes to and the statement that defines it. A test
+// with another call is refused, so the output and the bind are of one run.
 func theRun(t *testing.T, b *ast.BlockStmt) (*ast.CallExpr, string, ast.Node) {
 	t.Helper()
 	var call *ast.CallExpr
@@ -261,7 +286,9 @@ func theRun(t *testing.T, b *ast.BlockStmt) (*ast.CallExpr, string, ast.Node) {
 }
 
 // bindsName is the position of a statement in n, other than def, that assigns
-// name or declares a new one of it (NoPos where there is none).
+// name (or an element of it), takes its address, or declares a new one of it
+// (NoPos where there is none). A write through another name it was copied to
+// is not seen.
 func bindsName(n ast.Node, name string, def ast.Node) token.Pos {
 	at := token.NoPos
 	ast.Inspect(n, func(x ast.Node) bool {
@@ -271,9 +298,16 @@ func bindsName(n ast.Node, name string, def ast.Node) token.Pos {
 		switch x := x.(type) {
 		case *ast.AssignStmt:
 			for _, l := range x.Lhs {
+				if ix, ok := l.(*ast.IndexExpr); ok {
+					l = ix.X
+				}
 				if isIdent(l, name) {
 					at = x.Pos()
 				}
+			}
+		case *ast.UnaryExpr: // &name, handed to something that can write it
+			if x.Op == token.AND && isIdent(x.X, name) {
+				at = x.Pos()
 			}
 		case *ast.IncDecStmt:
 			if isIdent(x.X, name) {
