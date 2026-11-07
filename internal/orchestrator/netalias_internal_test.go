@@ -73,7 +73,7 @@ func TestWithoutAliasesTakesOutOnlyTheHeld(t *testing.T) {
 			map[string][]string{"demo-back": {"kv.demo.opossum"}, "demo-front": {"Www.demo.opossum"}}, []string{"cache.demo.opossum"}},
 		{"one on the second network, in other capitals with a dot", []string{"www.demo.opossum."},
 			map[string][]string{"demo-back": {"cache.demo.opossum", "kv.demo.opossum"}}, []string{"Www.demo.opossum"}},
-		// The runtime names an alias as it was asked for, capitals included.
+		// Matched without regard to case, whichever capitals either side has.
 		{"one named in capitals", []string{"KV.DEMO.OPOSSUM"},
 			map[string][]string{"demo-back": {"cache.demo.opossum"}, "demo-front": {"Www.demo.opossum"}}, []string{"kv.demo.opossum"}},
 		{"every one", []string{"cache.demo.opossum", "kv.demo.opossum", "www.demo.opossum"}, nil,
@@ -92,16 +92,16 @@ func TestWithoutAliasesTakesOutOnlyTheHeld(t *testing.T) {
 // The hostname refusal decodes to OPSM-217, and only the runtime's own line does.
 func TestTheHostnameRefusalCarriesItsCode(t *testing.T) {
 	h := runErrorHint(&compose.Service{}, "", false, runErr(`Error: hostname(s) already exist: ["cache.demo.opossum."]`))
-	for _, want := range []string{
-		"[" + string(codeNameHeldAsAlias) + "]",
-		// The ways out: recreate the service that holds the alias, and remove an
-		// orphan that does (`down` alone leaves one).
-		"`opossum up --force-recreate <service>`",
-		"`opossum up --remove-orphans`",
-	} {
-		if !contains(h, want) {
-			t.Errorf("want %s in the hint, got %q", want, h)
-		}
+	// The whole advice, in order: recreating the holder starts only the holder
+	// (network-aliases-161.txt, part c), so the `opossum up` after it is a step
+	// of its own; `--remove-orphans` is for a holder the project no longer has
+	// (`down` alone leaves one).
+	want := "\n  → [" + string(codeNameHeldAsAlias) + "] another container holds this service's name as a network alias — " +
+		"one an earlier `opossum up` made, before a service took that name. Recreate the service that holds the alias " +
+		"(`opossum up --force-recreate <service>`), which no longer passes it, then `opossum up`; " +
+		"if the holder is a container this project no longer has, `opossum up --remove-orphans`"
+	if h != want {
+		t.Errorf("hint:\n got %q\nwant %q", h, want)
 	}
 	if h := runErrorHint(&compose.Service{}, "", false, runErr(`cache: Error: hostname(s) already exist: ["x."]`)); h != "" {
 		t.Errorf("a container's line is not the refusal, got %q", h)

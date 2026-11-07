@@ -104,7 +104,8 @@ build can starve.
   (Apple `container` 1.6.0 and later): with `db` running and passing
   `aliases: [cache]`, a new service `cache` that starts before `db` is refused
   by the runtime (`hostname(s) already exist`, `[OPSM-217]`) before `db` is
-  recreated without the alias. Run `opossum up --force-recreate db` (the service that held the
+  recreated without the alias (measured in that order; the other order was not
+  measured). Run `opossum up --force-recreate db` (the service that held the
   alias), then `opossum up`; if the holder is a container the file no longer
   has, `opossum up --remove-orphans`. The same happens when the holder is
   stopped, or belongs to a project of the same name in another directory.
