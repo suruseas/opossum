@@ -195,17 +195,14 @@ func underRuntimeState(p string) bool {
 	return false
 }
 
-// maintainerDirs hold tooling that runs the project rather than being part of it
-// — the release sync, and whatever joins it. What reaches the public repository
-// should be the product and what someone using it needs; a script that pushes
-// releases is neither, and shipping it puts internal process into the
-// distribution. They stay on the maintainer's disk, ignored rather than tracked,
-// so this catches the one that gets `git add -f`'d back in by habit.
-var maintainerDirs = []string{"scripts"}
+// localDirs hold files that are kept on a contributor's own disk and are not part
+// of the project: .gitignore ignores them, so this catches one that is added
+// with `git add -f`.
+var localDirs = []string{"scripts"}
 
-// underMaintainerDir reports whether p lives in one of them.
-func underMaintainerDir(p string) bool {
-	for _, d := range maintainerDirs {
+// underLocalDir reports whether p lives in one of them.
+func underLocalDir(p string) bool {
+	for _, d := range localDirs {
 		if underDir(p, d) {
 			return true
 		}
@@ -270,13 +267,12 @@ func Offense(p string, size int64, head []byte) string {
 			"  Remove it (`git rm --cached %s`). A program worth keeping belongs under cmd/; "+
 			"one written to try something belongs in a temp directory.", p, p)
 	}
-	if underMaintainerDir(p) {
-		return fmt.Sprintf("%s is maintainer-only tooling, and maintainer-only tooling is not tracked.\n"+
-			"  %s holds what runs the project — the release sync and its like — rather than what the "+
-			"project is. Tracking it publishes internal process alongside the product.\n"+
+	if underLocalDir(p) {
+		return fmt.Sprintf("%s is a local file, and local files are not tracked.\n"+
+			"  %s holds files kept on your own disk that are not part of the project; .gitignore ignores it.\n"+
 			"  Remove it from the index (`git rm --cached %s`); it stays on disk, ignored. If this is "+
 			"something a user of opossum runs, it belongs somewhere they would look for it, not here.",
-			p, strings.Join(maintainerDirs, ", "), p)
+			p, strings.Join(localDirs, ", "), p)
 	}
 	if size > MaxTrackedBytes {
 		return fmt.Sprintf("%s is %d bytes, over the %d-byte limit for a tracked file.\n"+
