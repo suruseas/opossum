@@ -22,6 +22,7 @@ var waitingReaders = []struct{ file, fn string }{
 	{"internal/changelog/published_test.go", "waitingEntriesInPublishedSections"},
 	{"internal/changelog/ratchet_test.go", "TestEveryFragmentWaitingToShipSurvivesTheRoundTrip"},
 	{"internal/changelog/ratchet_test.go", "TestFragmentsAreWellFormed"},
+	{"internal/changelog/ratchet_test.go", "TestUnreleasedMatchesFragments"},
 	{"internal/claimcite/claimcite_test.go", "TestEveryChangelogFragmentNamesItsRuns"},
 }
 
@@ -38,6 +39,24 @@ func TestTheFragmentChecksStopWhenWaitingSaysTheWrongPlace(t *testing.T) {
 	calls := waitingCalls(t, root)
 
 	t.Run("readers", func(t *testing.T) {
+		// The list above is the one found in the tree, so a check that reads the
+		// fragments and is left off it, or taken off it, is seen.
+		listed := map[string]bool{}
+		for _, r := range waitingReaders {
+			listed[r.file+" "+r.fn] = true
+		}
+		found := map[string]bool{}
+		for _, r := range fragmentReaders(t, root) {
+			found[r] = true
+			if !listed[r] {
+				t.Errorf("%s reads changelog.d and is not among the readers this check holds", r)
+			}
+		}
+		for r := range listed {
+			if !found[r] {
+				t.Errorf("%s is listed as reading changelog.d and was not found reading it", r)
+			}
+		}
 		for _, r := range waitingReaders {
 			if p := readerProblem(t, filepath.Join(root, r.file), r.fn); p != "" {
 				t.Errorf("%s: %s", r.file, p)
@@ -230,6 +249,10 @@ func countCalls(fd *ast.FuncDecl, name string) int {
 
 // readerProblem says what is wrong with fn in the file at path as one of the
 // readers: it has to be there, call Waiting once, and not call Load at all.
+//
+// And what it read is what it checks: the fragments Waiting returned are not
+// assigned over afterwards, and no function it calls in its own package reads
+// changelog.d again.
 func readerProblem(t *testing.T, path, fn string) string {
 	t.Helper()
 	fd := funcDecl(t, path, fn)
@@ -241,7 +264,267 @@ func readerProblem(t *testing.T, path, fn string) string {
 	case countCalls(fd, "Waiting") != 1:
 		return fn + " calls changelog.Waiting " + strconv.Itoa(countCalls(fd, "Waiting")) + " times, want once"
 	}
+	if name := waitingResult(fd); name != "" && name != "_" {
+		if assignedAgain(fd, name) {
+			return fn + " assigns over " + name + ", the fragments Waiting returned, after reading them"
+		}
+	}
+	pkg := packageFuncs(t, filepath.Dir(path))
+	if helper := handsOff(fd, pkg); helper != "" {
+		return fn + " hands changelog.d to " + helper + ", where only changelog.Waiting may read it"
+	}
+	seen := map[string]bool{fn: true}
+	queue := calledIn(fd, pkg)
+	for len(queue) > 0 {
+		name := queue[0]
+		queue = queue[1:]
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		if readsChangelogDir(pkg[name]) {
+			return fn + " reads changelog.d again in " + name
+		}
+		queue = append(queue, calledIn(pkg[name], pkg)...)
+	}
 	return ""
+}
+
+// waitingResult is the name the fragments from fd's call to Waiting are put in.
+func waitingResult(fd *ast.FuncDecl) string {
+	name := ""
+	ast.Inspect(fd, func(n ast.Node) bool {
+		if as, ok := n.(*ast.AssignStmt); ok && len(as.Rhs) == 1 && len(as.Lhs) == 2 {
+			if call, ok := as.Rhs[0].(*ast.CallExpr); ok && isChangelogCall(call, "Waiting") {
+				if id, ok := as.Lhs[0].(*ast.Ident); ok {
+					name = id.Name
+				}
+			}
+		}
+		return true
+	})
+	return name
+}
+
+// assignedAgain reports whether name is assigned anywhere in fd other than by
+// the call to Waiting.
+func assignedAgain(fd *ast.FuncDecl, name string) bool {
+	again := false
+	ast.Inspect(fd, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		if len(as.Rhs) == 1 {
+			if call, ok := as.Rhs[0].(*ast.CallExpr); ok && isChangelogCall(call, "Waiting") {
+				return true
+			}
+		}
+		for _, l := range as.Lhs {
+			if isIdent(l, name) {
+				again = true
+			}
+		}
+		return true
+	})
+	return again
+}
+
+// packageFuncs is every function declared in the test files of dir, by name.
+func packageFuncs(t *testing.T, dir string) map[string]*ast.FuncDecl {
+	t.Helper()
+	paths, err := filepath.Glob(filepath.Join(dir, "*_test.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]*ast.FuncDecl{}
+	for _, p := range paths {
+		f, err := parser.ParseFile(token.NewFileSet(), p, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, decl := range f.Decls {
+			if fd, ok := decl.(*ast.FuncDecl); ok && fd.Recv == nil && fd.Body != nil {
+				out[fd.Name.Name] = fd
+			}
+		}
+	}
+	return out
+}
+
+// calledIn is the functions of pkg that fd calls by name.
+func calledIn(fd *ast.FuncDecl, pkg map[string]*ast.FuncDecl) []string {
+	var out []string
+	ast.Inspect(fd, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			if id, ok := call.Fun.(*ast.Ident); ok && pkg[id.Name] != nil {
+				out = append(out, id.Name)
+			}
+		}
+		return true
+	})
+	return out
+}
+
+// readsChangelogDir reports whether fd calls changelog.Load or Waiting with an
+// argument that names changelog.d.
+func readsChangelogDir(fd *ast.FuncDecl) bool {
+	reads := false
+	ast.Inspect(fd, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || !(isChangelogCall(call, "Load") || isChangelogCall(call, "Waiting")) {
+			return true
+		}
+		for _, a := range call.Args {
+			if namesChangelogDir(a) {
+				reads = true
+			}
+		}
+		return true
+	})
+	return reads
+}
+
+func namesChangelogDir(n ast.Node) bool {
+	names := false
+	ast.Inspect(n, func(x ast.Node) bool {
+		if b, ok := x.(*ast.BasicLit); ok && b.Kind == token.STRING && strings.Contains(b.Value, "changelog.d") {
+			names = true
+		}
+		return true
+	})
+	return names
+}
+
+// carriesChangelogDir reports whether the expression names changelog.d or uses
+// a variable of fd that was given a value naming it.
+func carriesChangelogDir(e ast.Expr, tainted map[string]bool) bool {
+	carries := namesChangelogDir(e)
+	ast.Inspect(e, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok && tainted[id.Name] {
+			carries = true
+		}
+		return true
+	})
+	return carries
+}
+
+// taintedNames is the variables of fd given a value that names changelog.d,
+// other than what a call to changelog.Load or Waiting returns (fragments, not
+// a place).
+func taintedNames(fd *ast.FuncDecl) map[string]bool {
+	tainted := map[string]bool{}
+	ast.Inspect(fd, func(n ast.Node) bool {
+		var lhs []ast.Expr
+		var rhs []ast.Expr
+		switch x := n.(type) {
+		case *ast.AssignStmt:
+			lhs, rhs = x.Lhs, x.Rhs
+		case *ast.ValueSpec:
+			for _, id := range x.Names {
+				lhs = append(lhs, id)
+			}
+			rhs = x.Values
+		default:
+			return true
+		}
+		for _, r := range rhs {
+			if call, ok := r.(*ast.CallExpr); ok && (isChangelogCall(call, "Load") || isChangelogCall(call, "Waiting")) {
+				return true
+			}
+		}
+		for _, r := range rhs {
+			if namesChangelogDir(r) {
+				for _, l := range lhs {
+					if id, ok := l.(*ast.Ident); ok {
+						tainted[id.Name] = true
+					}
+				}
+			}
+		}
+		return true
+	})
+	return tainted
+}
+
+// handsOff is the first function of pkg that fd calls with an argument
+// carrying changelog.d, or "".
+func handsOff(fd *ast.FuncDecl, pkg map[string]*ast.FuncDecl) string {
+	tainted := taintedNames(fd)
+	found := ""
+	ast.Inspect(fd, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || found != "" {
+			return true
+		}
+		id, ok := call.Fun.(*ast.Ident)
+		if !ok || pkg[id.Name] == nil || id.Name == fd.Name.Name {
+			return true
+		}
+		for _, a := range call.Args {
+			if carriesChangelogDir(a, tainted) {
+				found = id.Name
+			}
+		}
+		return true
+	})
+	return found
+}
+
+// fragmentReaders finds, in the repository's test files, the functions that
+// read the fragments waiting here: each names changelog.d, builds no directory
+// of its own with t.TempDir, and either calls changelog.Load or Waiting or hands
+// changelog.d to a function of its own package. Each is given as
+// "<file> <function>".
+func fragmentReaders(t *testing.T, root string) []string {
+	t.Helper()
+	var out []string
+	pkgs := map[string]map[string]*ast.FuncDecl{}
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if path != root && strings.HasPrefix(d.Name(), ".") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(root, path)
+		pkg := pkgs[filepath.Dir(path)]
+		if pkg == nil {
+			pkg = packageFuncs(t, filepath.Dir(path))
+			pkgs[filepath.Dir(path)] = pkg
+		}
+		for _, decl := range f.Decls {
+			fd, ok := decl.(*ast.FuncDecl)
+			if !ok || fd.Body == nil {
+				continue
+			}
+			tempDir := false
+			ast.Inspect(fd, func(n ast.Node) bool {
+				if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == "TempDir" {
+					tempDir = true
+				}
+				return true
+			})
+			if !tempDir && namesChangelogDir(fd.Body) && (countCalls(fd, "Load")+countCalls(fd, "Waiting") > 0 || handsOff(fd, pkg) != "") {
+				out = append(out, filepath.ToSlash(rel)+" "+fd.Name.Name)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
 }
 
 func funcDecl(t *testing.T, path, name string) *ast.FuncDecl {
@@ -310,17 +593,27 @@ func TestTheWaitingCheckSeesEachWayACallSiteGoesWrong(t *testing.T) {
 func TestTheReadersCheckSeesAReaderGoneWrong(t *testing.T) {
 	const w = `changelog.Waiting("CHANGELOG.md", "changelog.d")`
 	const l = `changelog.Load("changelog.d")`
-	for _, tc := range []struct{ name, fn, body, want string }{
-		{"Waiting once", "TestR", "_, _ = " + w, ""},
-		{"Load instead", "TestR", "_, _ = " + l, "calls changelog.Load"},
-		{"Load beside Waiting", "TestR", "_, _ = " + w + "\n_, _ = " + l, "calls changelog.Load"},
-		{"Waiting twice", "TestR", "_, _ = " + w + "\n_, _ = " + w, "2 times, want once"},
-		{"neither", "TestR", "", "0 times, want once"},
-		{"another function", "TestOther", "_, _ = " + w, "no function TestR"},
+	const read = "frags, err := " + w + "\nif err != nil {\nt.Fatal(err)\n}\n"
+	for _, tc := range []struct{ name, fn, body, extra, want string }{
+		{"Waiting once", "TestR", "_, _ = " + w, "", ""},
+		{"Load instead", "TestR", "_, _ = " + l, "", "calls changelog.Load"},
+		{"Load beside Waiting", "TestR", "_, _ = " + w + "\n_, _ = " + l, "", "calls changelog.Load"},
+		{"Waiting twice", "TestR", "_, _ = " + w + "\n_, _ = " + w, "", "2 times, want once"},
+		{"neither", "TestR", "", "", "0 times, want once"},
+		{"another function", "TestOther", "_, _ = " + w, "", "no function TestR"},
+		{"what was read used", "TestR", read + "_ = frags", "", ""},
+		{"only the error kept", "TestR", "_, err := " + w + "\n_ = err", "", ""},
+		{"what was read assigned over", "TestR", read + "frags = frags[:0]\n_ = frags", "", "assigns over frags"},
+		{"read again in a helper", "TestR", read + "_ = frags\nhelper()", "func helper() { _, _ = " + l + " }", "reads changelog.d again in helper"},
+		{"read again two helpers down", "TestR", read + "_ = frags\nhelper()", "func helper() { helper2() }\nfunc helper2() { _, _ = changelog.Load(\"changelog.dd\") }", "reads changelog.d again in helper2"},
+		{"a helper that reads somewhere of its own", "TestR", read + "_ = frags\nhelper(\"x\")", "func helper(dir string) { _, _ = changelog.Load(dir) }", ""},
+		{"what was read handed to a helper", "TestR", read + "helper(frags)", "func helper(f []changelog.Fragment) { _ = f }", ""},
+		{"changelog.d handed to a helper", "TestR", read + "_ = frags\nhelper(\"changelog.dd\")", "func helper(dir string) { _, _ = changelog.Load(dir) }", "hands changelog.d to helper"},
+		{"a variable naming it handed to a helper", "TestR", "dir := \"changelog.d\"\n" + read + "_ = frags\nhelper(dir)", "func helper(dir string) { _ = dir }", "hands changelog.d to helper"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "x_test.go")
-			src := "package x_test\n\nimport (\n\"testing\"\n\n\"github.com/suruseas/opossum/internal/changelog\"\n)\n\nfunc " + tc.fn + "(t *testing.T) {\n" + tc.body + "\n}\n"
+			src := "package x_test\n\nimport (\n\"testing\"\n\n\"github.com/suruseas/opossum/internal/changelog\"\n)\n\nfunc " + tc.fn + "(t *testing.T) {\n" + tc.body + "\n}\n" + tc.extra + "\n"
 			if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
 				t.Fatal(err)
 			}
@@ -332,5 +625,40 @@ func TestTheReadersCheckSeesAReaderGoneWrong(t *testing.T) {
 				t.Errorf("want a problem saying %q, got %q", tc.want, got)
 			}
 		})
+	}
+}
+
+// What the search for readers finds, over a file with one function of each kind.
+func TestFragmentReadersAreFound(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "a"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := `package a_test
+
+import (
+	"testing"
+
+	"github.com/suruseas/opossum/internal/changelog"
+)
+
+func TestWaits(t *testing.T) { _, _ = changelog.Waiting("CHANGELOG.md", "changelog.d") }
+func TestLoads(t *testing.T) { _, _ = changelog.Load("changelog.d") }
+func helperLoads(root string) { _, _ = changelog.Load(root + "/changelog.d") }
+func TestOwnDirectory(t *testing.T) { _, _ = changelog.Load(t.TempDir() + "/changelog.d") }
+func TestNoName(t *testing.T) { _, _ = changelog.Load("fragments") }
+func TestNameOnly(t *testing.T) { _ = "changelog.d" }
+func TestThroughAHelper(t *testing.T) { _ = mustLoad("changelog.dd") }
+func mustLoad(dir string) []changelog.Fragment { f, _ := changelog.Load(dir); return f }
+func TestHandsSomethingElse(t *testing.T) { _ = "changelog.d"; describe("x") }
+func describe(s string) {}
+`
+	if err := os.WriteFile(filepath.Join(root, "a", "x_test.go"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(fragmentReaders(t, root), "\n")
+	want := "a/x_test.go TestWaits\na/x_test.go TestLoads\na/x_test.go helperLoads\na/x_test.go TestThroughAHelper"
+	if got != want {
+		t.Errorf("found:\n%s\nwant:\n%s", got, want)
 	}
 }

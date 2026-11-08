@@ -61,7 +61,7 @@ func repoRoot(t *testing.T) string {
 // published release.
 func TestUnreleasedMatchesFragments(t *testing.T) {
 	root := repoRoot(t)
-	frags, err := changelog.Load(filepath.Join(root, "changelog.d"))
+	frags, err := changelog.Waiting(filepath.Join(root, "CHANGELOG.md"), filepath.Join(root, "changelog.d"))
 	if err != nil {
 		t.Fatalf("reading changelog.d: %v", err)
 	}
@@ -962,6 +962,35 @@ func TestAFragmentTheDecomposerCannotReadIsNamed(t *testing.T) {
 	}
 }
 
+// Every fragment handed to the round trip goes through it, not only some: the
+// one the decomposer cannot read sits between two readable ones, and each of
+// the three has to be in the section the round trip assembled.
+func TestTheRoundTripCarriesEveryFragmentItIsHanded(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "1-fine.added.md", "- Fine.\n")
+	write(t, dir, "500-probe.added.md", "- One.\n\n\n- Two.\n")
+	write(t, dir, "999-also-fine.added.md", "- Also fine.\n")
+	frags, err := changelog.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(frags) != 3 || filepath.Base(frags[1].Path) != "500-probe.added.md" {
+		t.Fatalf("want the probe between two readable fragments, got %v", frags)
+	}
+	err = fragmentsRoundTrip(t, frags)
+	if err == nil {
+		t.Fatal("the round trip did not meet the fragment the decomposer cannot read")
+	}
+	// The failure shows the section the round trip assembled, which holds
+	// what it actually carried: the names in the failure are only what it was
+	// handed, so a fragment dropped on the way is seen by its text.
+	for _, entry := range []string{"- Fine.", "- One.", "- Also fine."} {
+		if !strings.Contains(err.Error(), "--- assembled ---") || !strings.Contains(err.Error()[strings.Index(err.Error(), "--- assembled ---"):], entry) {
+			t.Errorf("the round trip did not carry the fragment %q:\n%v", entry, err)
+		}
+	}
+}
+
 // fragmentsRoundTrip runs the fragments it is handed through the round trip,
 // naming them in whatever it reports so the reader has a file to open. It takes
 // the fragments rather than a directory, so what it checks is what the caller
@@ -974,8 +1003,8 @@ func fragmentsRoundTrip(t *testing.T, frags []changelog.Fragment) error {
 	}
 	section, rebuilt, err := roundTrip(t, frags)
 	if err != nil {
-		return fmt.Errorf("one of %s holds a shape the decomposer cannot read:\n%w",
-			strings.Join(names, ", "), err)
+		return fmt.Errorf("one of %s holds a shape the decomposer cannot read:\n%w\n--- assembled ---\n%s",
+			strings.Join(names, ", "), err, section)
 	}
 	if rebuilt != section {
 		return fmt.Errorf("the round trip changed the section assembled from %s.\n"+
