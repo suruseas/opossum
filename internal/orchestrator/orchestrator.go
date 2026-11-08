@@ -144,8 +144,17 @@ type upOptions struct {
 	dryRun        bool // --dry-run: resolve and print the plan, but execute nothing against the runtime
 	// dockerProbeSlow is that Docker did not answer in time when this `up` asked it whether it holds an image (#1905); it is not asked again in the same `up`.
 	dockerProbeSlow bool
-	oneOffOf        string // the service a `run` is starting dependencies for: it waits on them though it is not among what this Up starts
+	oneOffOf        string        // the service a `run` is starting dependencies for: it waits on them though it is not among what this Up starts
+	wait            bool          // --wait: after starting, wait for every started service with a healthcheck to pass it
+	waitTimeout     time.Duration // --wait-timeout: how long that wait may take in all; 0 for no limit
+	// waitDeadline is when the --wait phase gives up, set only while it runs: the
+	// dependency waits before it are not bounded by --wait-timeout.
+	waitDeadline time.Time
 }
+
+// errWaitTimeout is what waitHealthy returns when the --wait phase's deadline
+// passes before the healthcheck does.
+var errWaitTimeout = errors.New("the --wait-timeout ran out")
 
 // orphans returns the project's containers (by label) whose names don't match any
 // current service — left behind when a service was removed or renamed. Both a
@@ -211,6 +220,15 @@ func (o *Orchestrator) upDependenciesOf(service string, deps []string) error {
 // SetUpOptions configures `up`'s recreate/build behavior from the command flags.
 func (o *Orchestrator) SetUpOptions(forceRecreate, build, noBuild, removeOrphans, fromDocker bool) {
 	o.up = upOptions{forceRecreate: forceRecreate, build: build, noBuild: noBuild, removeOrphans: removeOrphans, fromDocker: fromDocker}
+}
+
+// SetWait makes the next `up` wait, once everything is started, for each
+// long-running service it started that has a healthcheck to pass it (`--wait`),
+// for at most timeout in all (0 for no limit). Call it after SetUpOptions, which
+// resets the option block.
+func (o *Orchestrator) SetWait(wait bool, timeout time.Duration) {
+	o.up.wait = wait
+	o.up.waitTimeout = timeout
 }
 
 // SetAfterUpLocked sets what the next `up` runs as it finishes, with the error it is returning, while it still holds the
@@ -3071,7 +3089,51 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 		if err := o.verifyStarted(order, oneShot); err != nil {
 			return err
 		}
+		if o.up.wait {
+			if err := o.awaitStartedHealthy(order, oneShot); err != nil {
+				return err
+			}
+		}
 		o.noteHostNames(order, oneShot)
+	}
+	return nil
+}
+
+// awaitStartedHealthy is `up --wait`: each long-running service this `up`
+// started that has a healthcheck switched on is waited on until it passes, in
+// startup order, and the first that does not pass fails the `up`. Nothing is
+// rolled back — the services are up, and docker compose leaves them running too
+// (v5.6.1, measured: an unhealthy service, one that exits, and a --wait-timeout
+// that runs out are each rc 1 with the containers left as they are). A service
+// with no healthcheck is waited on only as far as verifyStarted's look, which
+// is where docker compose's "running" is; a one-shot has already completed.
+func (o *Orchestrator) awaitStartedHealthy(order []string, oneShot map[string]bool) error {
+	if o.up.waitTimeout > 0 {
+		o.up.waitDeadline = o.now().Add(o.up.waitTimeout)
+		defer func() { o.up.waitDeadline = time.Time{} }()
+	}
+	for _, name := range order {
+		svc := o.Project.Services[name]
+		if svc == nil || oneShot[name] {
+			continue
+		}
+		hc := svc.Healthcheck
+		if hc == nil || hc.Disabled || len(hc.Test) == 0 {
+			continue
+		}
+		o.logf("Waiting for %s to be healthy\n", name)
+		err := o.waitHealthy(name, hc)
+		switch {
+		case err == nil:
+			continue
+		case errors.Is(err, errWaitTimeout):
+			return fmt.Errorf("[%s] service %q was not healthy within the --wait-timeout of %s; the services stay up — `opossum ps` and `opossum logs %s` show where it is",
+				codeWaitNotHealthy, name, o.up.waitTimeout, name)
+		case o.interrupted() != nil:
+			return fmt.Errorf("interrupted while waiting for service %q to be healthy; the services stay up", name)
+		}
+		return fmt.Errorf("[%s] service %q did not become healthy: %v; the services stay up — `opossum logs %s` shows what it said",
+			codeWaitNotHealthy, name, err, name)
 	}
 	return nil
 }
@@ -5258,6 +5320,16 @@ func (o *Orchestrator) waitHealthy(name string, hc *compose.Healthcheck) error {
 			pace := interval
 			if o.now().Sub(start) < hc.StartPeriod && pace > healthStartInterval {
 				pace = healthStartInterval
+			}
+			// Under `up --wait`, not past its deadline: a sleep that would end after
+			// it ends at it, and the deadline is then said instead of probing again.
+			if !o.up.waitDeadline.IsZero() {
+				if left := o.up.waitDeadline.Sub(o.now()); left < pace {
+					if left > 0 {
+						o.sleep(left)
+					}
+					return errWaitTimeout
+				}
 			}
 			o.sleep(pace)
 		}

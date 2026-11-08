@@ -184,6 +184,7 @@ container builder delete --force && container image prune -a  # ビルドキャ�
 opossum up                 # ビルド＋全サービス起動（デタッチ）
 opossum up web             # web とその依存だけ起動
 opossum up web --foreground  # 単一サービスをフォアグラウンドでアタッチ実行
+opossum up --wait          # 起動したあと、各 healthcheck が通るまで待つ（通らなければ失敗）
 opossum ps                 # サービス / コンテナ / IP / ポート / 状態
 opossum port web 3000      # 公開ポートが載ったホスト側の address:port を表示
 opossum ls                 # このマシンの opossum project 一覧（-a で停止中も）
