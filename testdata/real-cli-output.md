@@ -14,24 +14,35 @@ The sections below were not rewritten; what changed is listed here.
 - Of the 71 files 1.6.1 also has, none changed exit code. In the JSON of `ls -a`, `inspect`, `network ls`,
   `network inspect`, `image inspect` and `system status` no key is gone and none is new (`inspect-alias` has no
   JSON to compare: the one-label alias is refused on both).
-- `container stop`, `delete` and `kill` of a name that is not there now say
+- `container stop` and `delete` of a name that is not there now say
   `Error: notFound: "container with ID <name> not found"`, without the `internalError: "failed to … container"
   (cause: …)` around it. opossum does not read that line (a stop or delete of nothing is passed over on the
   exit code and `inspect`); the fakes say the new one.
-- `container stats --format json` adds `cpuUtilization`. opossum does not read it.
 - The `opossum config`, `up`, `images`, `ps` and `down -v` captures print the same as on 1.6.1, and `doctor`
   differs only in the version, counts and sizes.
-- The builder image is `container-builder-shim` 0.13.3.
+- Other differences opossum does not read: the order of the keys in the `volume delete` refusal, which the
+  builder image and images the captures list are, and the second line of a `delete` of several names.
 - Still no exit code for a stopped container in `inspect` or `ls -a`.
 - `make real-conformance` passes (3 tests; `real-conformance.log`).
 
-**Measured on 1.7.1 outside the captures:**
-- The wordings the diagnostics read are as on 1.6.1, and the diagnostics fired on them
-  (`error-wordings/diagnostics-171.txt`). OPSM-201's was not reached (OPSM-213 refuses the shape first).
-- `start` of an absent name now says `Error: container with ID <name> not found` (`get failed: container <name> not found` on 1.4.1; the fakes say the new one). `logs` and `exec` of an absent name, and `kill` of a stopped container, say what the fakes say.
-- `container stop` of a process that ignores TERM took 5.49 s, one run (8.2 s on 1.6.1, 5.35 s on 1.5.0), and left it
-  `stopped`.
+**Measured on 1.7.1, against the last version each was measured on, outside the 1.6.1 captures:**
+- `kill` of an absent name says the same `Error: notFound: …` line. There is no 1.6.1 capture of it; the fakes had
+  the older wording, and say the new one.
+- `start` of an absent name says `Error: container with ID <name> not found` (on 1.4.1, the last time it was
+  taken: `get failed: container <name> not found`). The fakes say the new one.
+- `container stats --format json` lists `cpuUtilization`, which the 2026-07-06 list of its keys below does not. There is
+  no 1.6.1 capture of the JSON. opossum does not read the key.
+
+**Measured on 1.7.1 outside the captures** (`error-wordings/diagnostics-171.txt`, one run each):
+- The wordings OPSM-412, OPSM-502, OPSM-217, OPSM-103 and OPSM-107 read are as on 1.6.1, and each code came out of
+  opossum on 1.7.1, for the shapes that file lists. OPSM-201's wording was not reached (OPSM-213 refuses the shape
+  first). Other wordings the diagnostics read, build's among them, were not taken on 1.7.1.
+- `kill` of a stopped container still says `no runtime client exists: container is stopped`. A second run of a name
+  still says `container with id <name> already exists`.
+- `container stop` of a process that ignores TERM took 5.19 s (8.2 s on 1.6.1, 5.35 s on 1.5.0), and left it `stopped`.
 - `container logs -f` of a running container that had written nothing was still following after 4 s, as on 1.6.1.
+- A build run on 1.7.1 used `container-builder-shim` 0.13.3 (the captures, taken before any build, list the 0.13.2
+  builder left from before the upgrade).
 - `hello`, `demo` (`examples/compose.yaml`), `app-stack` and `mcp-stack` ran `config → up → ps → logs → down -v`
   with every step exiting 0 (`~/opossum-dogfood/sprint-1108/`; `demo` first failed to build because the run had
   copied its compose file without `web/`, and was run again with it, `demo-summary.txt`).

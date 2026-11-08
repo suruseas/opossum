@@ -1,13 +1,18 @@
 # Taken 2026-11-08 on container 1.7.1 (macOS 27.2), by asking the runtime directly and through
-# opossum built from main. The wordings the diagnostics read, repeated from the 1.6.1 captures:
-# OPSM-412 (platform-several-no-arm64-161.txt, platform-several-fresh-pull-161.txt,
-# platform-not-supported-arm64-161.txt), OPSM-502 and OPSM-217 (network-aliases-161.txt), OPSM-103,
-# OPSM-107, and `up --wait` passing and failing. Each is what 1.6.1 said. Progress lines (`[n/6] ...`)
-# and the build's step lines are left out. Every container, network, project, volume and image was
-# named for the run and removed afterwards; the last lines show none left.
+# opossum built from main, in two runs: the first part below, then the part after "second run".
+# Repeated from the 1.6.1 captures: the wordings OPSM-412 (platform-several-no-arm64-161.txt,
+# platform-several-fresh-pull-161.txt, platform-not-supported-arm64-161.txt), OPSM-502 and OPSM-217
+# (network-aliases-161.txt) read, and OPSM-103, OPSM-107 and `up --wait` passing and failing. Through
+# opossum, in the second run: a runtime refusal of an alias another container holds (OPSM-502, the
+# run made again without it), of a service name held as an alias (OPSM-217), and `does not support`
+# and `has multiple platforms` (OPSM-412). `unsupported platform` is the runtime's own answer only:
+# opossum, asked for arm64 of an image with no arm64 build, got `does not support`.
+# Progress lines (`[n/6] ...`) and the build's step lines are left out, the run's directory is
+# written <dir>, and <dir>/opossum is written opossum. Every container, network, project, volume and
+# image was named for the run and removed afterwards; the last lines of each part show none left.
 #
 # OPSM-201's wording was not reached: two services publishing one host port are refused first, by
-# OPSM-213, so the runtime is never asked.
+# OPSM-213, so the runtime is never asked. No other wording the diagnostics read is here.
 
 container CLI version 1.7.1 (build: release, commit: unspeci)
 ########## OPSM-412 platform
@@ -209,6 +214,151 @@ docker.io/library/opossum-probe171-amd:1
 docker.io/library/opossum-probe171-several:1
 docker.io/library/ibmjava:8-jre
 --- rc=0
+containers: 0
+networks: 0
+volumes: 0
+images: 0
+
+########################## second run
+container CLI version 1.7.1 (build: release, commit: unspeci)
+
+$ container network create v171x-net
+v171x-net
+--- rc=0
+########## OPSM-502: an alias another container holds, through opossum
+
+$ container run -d --name holder1.v171x1.opossum --network v171x-net,alias=cache.v171x1.opossum alpine:3.20 sleep 600
+holder1.v171x1.opossum
+--- rc=0
+
+$ opossum up
+Creating network v171x1-net
+Starting a (alpine:3.20)
+Error: alias(es) already exist: ["cache.v171x1.opossum"]
+warning: [OPSM-502] service "a": network alias(es) "cache" not passed: another container already holds them. Free them, then `opossum up --force-recreate a`: where the holder is a service of this project, recreate it (`opossum up --force-recreate <that service>`); where it is a container this project no longer has, `opossum up --remove-orphans` (`opossum down` alone leaves it). A project of the same name in another directory is this project here, so these work from here too
+a.v171x1.opossum
+--- rc=0
+
+$ opossum ps
+SERVICE  CONTAINER         IMAGE        IP            PORTS  STATUS
+a        a.v171x1.opossum  alpine:3.20  192.168.69.2  -      running
+--- rc=0
+
+$ opossum down -v
+Stopping a
+--- rc=0
+########## OPSM-217: the service's name held as an alias, through opossum
+
+$ container run -d --name holder2.v171x2.opossum --network v171x-net,alias=web.v171x2.opossum alpine:3.20 sleep 600
+holder2.v171x2.opossum
+--- rc=0
+
+$ opossum up
+Creating network v171x2-net
+Starting web (alpine:3.20)
+Error: hostname(s) already exist: ["web.v171x2.opossum."]
+Nothing this `up` started is left running
+opossum: starting service "web": exit status 1
+  → [OPSM-217] another container holds this service's name as a network alias — one an earlier `opossum up` made, before a service took that name. Recreate the service that holds the alias (`opossum up --force-recreate <service>`), which no longer passes it, then `opossum up`; if the holder is a container this project no longer has, `opossum up --remove-orphans`
+--- rc=1
+
+$ opossum down -v
+--- rc=0
+
+$ container delete --force holder1.v171x1.opossum holder2.v171x2.opossum
+holder1.v171x1.opossum
+holder2.v171x2.opossum
+--- rc=0
+
+$ container network delete v171x-net
+v171x-net
+--- rc=0
+########## OPSM-412 through opossum: asks arm64 of an amd64 image; an image with no arm64 asked for arm64 from a registry
+build rc=0
+
+$ opossum up
+Creating network v171x3-net
+Starting m (opossum-probe171x-amd:1)
+Error: image opossum-probe171x-amd:1 does not support linux/arm64; available: [ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "amd64")]
+Nothing this `up` started is left running
+opossum: starting service "m": exit status 1
+  → [OPSM-412] this image has no build for Apple silicon (arm64). Set `platform: linux/amd64` on the service — opossum runs an amd64 image through Rosetta.
+--- rc=1
+
+$ opossum down -v
+--- rc=0
+
+$ opossum up
+Creating network v171x4-net
+Starting m (ibmjava:8-jre)
+Error: image ibmjava:8-jre does not support linux/arm64; available: [ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "amd64"), ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "ppc64le"), ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "s390x")]
+Nothing this `up` started is left running
+opossum: starting service "m": exit status 1
+  → [OPSM-412] this image has no build for Apple silicon (arm64). Set `platform: linux/amd64` on the service — opossum runs an amd64 image through Rosetta.
+--- rc=1
+
+$ opossum down -v
+--- rc=0
+
+$ opossum up
+Creating network v171x5-net
+Starting m (ibmjava:8-jre)
+Error: image ibmjava:8-jre has multiple platforms ([ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "amd64"), ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "ppc64le"), ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "s390x")]); pass --os/--arch or set a default
+Nothing this `up` started is left running
+opossum: starting service "m": exit status 1
+  → [OPSM-412] this image has no build for Apple silicon (arm64). Set `platform: linux/amd64` on the service — opossum runs an amd64 image through Rosetta.
+--- rc=1
+
+$ opossum down -v
+--- rc=0
+
+$ container image delete --force opossum-probe171x-amd:1
+Reclaimed 42.4 MB in disk space
+docker.io/library/opossum-probe171x-amd:1
+--- rc=0
+########## name taken, directly
+
+$ container run -d --name v171x-dup alpine:3.20 sleep 60
+v171x-dup
+--- rc=0
+
+$ container run -d --name v171x-dup alpine:3.20 sleep 60
+Error: container with id v171x-dup already exists
+--- rc=1
+
+$ container delete --force v171x-dup
+v171x-dup
+--- rc=0
+########## kill of a stopped container
+
+$ container run --name v171x-s alpine:3.20 true
+--- rc=0
+
+$ container kill v171x-s
+Error: internalError: "failed to kill container" (cause: "invalidState: "no runtime client exists: container is stopped"")
+--- rc=1
+
+$ container delete v171x-s
+v171x-s
+--- rc=0
+########## stop of a process that ignores TERM
+v171x-term
+stop rc=0 seconds=5.19
+"state" : "stopped"
+
+$ container delete --force v171x-term
+v171x-term
+--- rc=0
+########## logs -f of a container that has written nothing
+still following after 4s
+
+$ container delete --force v171x-quiet
+v171x-quiet
+--- rc=0
+########## builder in use
+ID        IMAGE                                                STATE    IP                CPUS  MEMORY
+buildkit  ghcr.io/apple/container-builder-shim/builder:0.13.3  running  192.168.66.13/24  2     2048 MB
+########## left
 containers: 0
 networks: 0
 volumes: 0

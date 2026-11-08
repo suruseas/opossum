@@ -1,1 +1,1 @@
-- Verified against Apple `container` 1.7.1: the commands opossum reads, its diagnostics, `up --wait` and the example projects behave as they did on 1.6.1, and 1.6.x stays supported.
+- Verified against Apple `container` 1.7.1: the commands opossum parses, `up --wait`, the example projects, and the diagnostics OPSM-412, OPSM-502, OPSM-217, OPSM-103 and OPSM-107.
