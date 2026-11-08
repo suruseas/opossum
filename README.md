@@ -276,6 +276,7 @@ container builder delete --force && container image prune -a  # build cache + un
 opossum up                 # build + start everything (detached)
 opossum up web             # start only web and its dependencies
 opossum up web --foreground  # run a single service attached in the foreground
+opossum up --wait          # start, then wait for every healthcheck to pass (fails if one does not)
 opossum ps                 # show service / container / IP / ports / status
 opossum port web 3000      # print the host address:port a published port landed on
 opossum ls                 # list the opossum projects on this machine (-a to include stopped ones)

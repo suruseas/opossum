@@ -56,14 +56,15 @@ func TestOffenseFlagsBuildArtifacts(t *testing.T) {
 		{"a temp copy", "internal/compose/tmp_load.go", 900, []byte("package compose\n"), "throwaway"},
 		{"a debug script", "scripts/dbg_sweep.sh", 400, []byte("#!/bin/bash\n"), "throwaway"},
 		{"a real file whose name merely contains those letters", "internal/compose/probes.go", 900, []byte("package compose\n"), ""},
-		// The release sync lived here and shipped with every public release, which is
-		// how internal process ends up in a distribution.
-		{"maintainer-only release tooling", "scripts/sync-public.sh", 4_000, []byte("#!/bin/bash\n"), "maintainer-only"},
-		{"anything else that lands there", "scripts/lib/helpers.sh", 900, []byte("#!/bin/sh\n"), "maintainer-only"},
+		// Files under scripts/ are kept locally and are not part of the project.
+		{"a local script", "scripts/release.sh", 4_000, []byte("#!/bin/bash\n"), "a local file"},
+		{"anything else that lands there", "scripts/lib/helpers.sh", 900, []byte("#!/bin/sh\n"), "a local file"},
 		// The rule is about that directory, not about the word: a script a user runs
 		// is fine wherever users would look for it.
 		{"a script users are meant to run", "examples/run-demo.sh", 900, []byte("#!/bin/sh\n"), ""},
 		{"a directory that merely starts the same way", "scripts-for-users/x.sh", 900, []byte("#!/bin/sh\n"), ""},
+		// Only the top-level scripts/ is local: .gitignore ignores `/scripts/`.
+		{"a scripts directory further down", "internal/x/scripts/a.sh", 900, []byte("#!/bin/sh\n"), ""},
 		// A driver written to see what a new tool printed, with the shell in the
 		// repository root. It compiled, it was not named like a throwaway, and it
 		// made the module's root a `package main` — which is what `go install
@@ -247,7 +248,7 @@ func TestWhatOpossumWritesAtRunTimeIsNotTracked(t *testing.T) {
 // the table is over the rules, not over one rule's inputs.
 func TestNoRuleIsStricterAboutCaseThanTheFileSystem(t *testing.T) {
 	for _, tc := range []struct{ rule, lower, upper string }{
-		{"maintainer directory", "scripts/release.sh", "Scripts/release.sh"},
+		{"local directory", "scripts/release.sh", "Scripts/release.sh"},
 		{"compose at the top", "compose.yaml", "Compose.yaml"},
 		{"runtime state", ".opossum/mcp/db.json", ".Opossum/mcp/db.json"},
 		{"a throwaway name", "zz_tmp.go", "ZZ_TMP.go"},

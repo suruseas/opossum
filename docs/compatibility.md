@@ -285,9 +285,9 @@ exited ends it with `[OPSM-407]`. On that one point — an exit right after
 starting is a failure — `docker compose up --wait` agrees: measured on v5.5.1
 over a file whose only service runs `true` (the project named after the
 directory), `up -d` is rc 0 and `up -d --wait` is rc 1, saying `container
-demo-init-1 exited (0)`. It is only that point: `--wait` also waits for
-healthchecks to pass, which opossum waits for only where `service_healthy`
-says to (above), and opossum's look is a short fixed window rather than a wait.
+demo-init-1 exited (0)`. It is only that point: opossum's look is a short fixed
+window rather than a wait, and a plain `up` waits for a healthcheck only where
+`service_healthy` says to (above); `opossum up --wait` adds the rest (below).
 `opossum up --foreground` does not look at all, so it returns 0 over the same
 file.
 
@@ -333,6 +333,46 @@ What does not help is `restart: "no"`, which changes neither (measured). And a
 declared completion that fails ends `up` in both, `--wait` or not: docker
 compose says `service "init" didn't complete successfully: exit 1` and returns
 1 (measured).
+
+### `up --wait`
+
+`opossum up --wait` starts the services as `up` does, then waits for each
+long-running service it covers that has a healthcheck switched on to pass it —
+one it left running because it was up to date as well — and fails with `[OPSM-417]` if one does not. `-d` is taken too, so `up -d
+--wait` as written for docker compose runs unchanged (`up` is detached either
+way), and `--wait-timeout <seconds>` bounds the wait in all. Measured against
+docker compose v5.6.1, one service at a time unless said; the opossum rows
+marked ✓ were checked on container 1.6.1, the others against the test
+stand-in for the runtime:
+
+| Shape | docker compose `up -d --wait` | `opossum up --wait` |
+|---|---|---|
+| no healthcheck, keeps running | rc 0 | rc 0, nothing probed |
+| healthcheck that passes (also after a `start_period`) | rc 0 | rc 0 ✓ |
+| healthcheck that fails its retries | rc 1, `container … is unhealthy`, left running | rc 1, `[OPSM-417]`, left running ✓ |
+| the same service already running and unhealthy, `up` again | rc 1, waits for it | rc 1, waits for it |
+| exits right after starting | rc 1, `container … exited (3)` | rc 1, `[OPSM-407]` (the look a plain `up` takes) ✓ |
+| exits three seconds after starting, no healthcheck | rc 0 | rc 0 ✓ |
+| `healthcheck: {disable: true}` | rc 0 | rc 0, nothing probed |
+| a `service_completed_successfully` dependency, then a service | rc 0 | rc 0, the one-shot not probed |
+| `--wait-timeout 3` that runs out | rc 1, `application not healthy after 3s`, left running | rc 1, `[OPSM-417]`, left running ✓ |
+| `--wait-timeout 3` without `--wait` | rc 0, not waited for | rc 0, not waited for, and says so |
+| `--wait` without `-d` | detaches, rc 0 | detaches (as `up` always does) |
+
+Where they differ: docker compose waits for the services together, and opossum
+waits for one after another in startup order and stops at the first that does
+not pass, so a project with two failing services is told about the first. A
+healthcheck's `start_period` and retries are counted from when opossum starts
+waiting on that service rather than from the container's start, which is the
+more patient of the two. opossum runs each probe itself, with `container exec`,
+and a probe still running when `--wait-timeout` passes is let finish (up to
+the healthcheck's `timeout`) before `up` gives up. Only the `healthcheck:` the
+compose file writes is read: a `HEALTHCHECK` in the image, which docker uses
+when the file gives none, is not, so such a service is not waited on. A Ctrl-C
+during the wait ends `up` with status 1 (docker compose's status there was not
+measured), after the probe or pause it is in, which can be as long as the
+healthcheck's interval. `--wait` with `--foreground` is refused: a foreground
+`up` ends when the service does.
 
 ## Variable interpolation
 
@@ -572,7 +612,7 @@ themselves, so they can be typed as printed.
 
 | Command | Supported | Notes |
 |---------|-----------|-------|
-| `up [service…]` | ✅ | build + start the project, or named services plus their deps. What reading the compose file refuses comes first, as for `run` — see the `profiles` row for which services are read, and note that a fault under a service this `up` was not asked to start refuses it, as docker compose v5.5.1 refuses it. Leaves a running service untouched when its config is unchanged (build images only if missing), and flags orphan containers from removed services; `--force-recreate`, `--build`, `--no-build`, `--from-docker-compose` (import build images from Docker instead of building; formerly `--from-docker`, removed: it is refused and names the new flag), `--remove-orphans`, `--foreground`, `--profile` |
+| `up [service…]` | ✅ | build + start the project, or named services plus their deps. What reading the compose file refuses comes first, as for `run` — see the `profiles` row for which services are read, and note that a fault under a service this `up` was not asked to start refuses it, as docker compose v5.5.1 refuses it. Leaves a running service untouched when its config is unchanged (build images only if missing), and flags orphan containers from removed services; `--force-recreate`, `--build`, `--no-build`, `--from-docker-compose` (import build images from Docker instead of building; formerly `--from-docker`, removed: it is refused and names the new flag), `--remove-orphans`, `--foreground`, `-d`/`--detach` (what `up` does already), `--wait` and `--wait-timeout` (see "`up --wait`" below), `--profile` |
 | `down [-v] [--rmi local\|all]` | ✅ | stop, remove, and delete the project network; `-v` also removes named volumes; `--rmi local` removes the image of each service that has a `build:`, under opossum's own name for it, `<project>-<service>:latest` — including the one a `build:` + `image:` service had under it before `image:` was read; a service with no `build:` is passed over even if it names its image that way — and `all` also removes the images services name, whoever made them. An image built under a name `image:` gives is removed by `local` when a label says THIS project built it — opossum's own `opossum.project`, or an imported docker compose build's `com.docker.compose.project`, matched EXACTLY against this project's own name — and left otherwise (pulled, tagged by hand, unlabeled, or built by a docker compose project whose own name is different from this one even if it happens to normalize to the same opossum project name (opossum's own name normalization can turn two different docker compose project names into the same string); the label's value is never normalized before comparing, so that collision cannot make this project claim another's build). `all` removes it regardless of labels. docker compose tells its own builds apart by a label and its `--rmi local` removes them (measured on v5.5.1); `--remove-orphans` also removes containers for services no longer in the compose A `down` whose compose file cannot be read (a file this version refuses, one that is gone or named wrongly, a syntax error) takes the project down by its label when the reader NAMED the project — `-p`, or COMPOSE_PROJECT_NAME in the shell or the `.env` — as docker compose does for `down -p <name>` with no `-f` (measured on v5.5.1: it answers from the engine's labels and does not read the file): every container the runtime holds for that project (another project's are spared) and its default network. A volume, an image and a network the file declares are left, and `--volumes` and `--rmi` say they were not done; a name the runtime holds no container for says so. A project worked out from the folder is not taken down that way, since the folder's name is the project's only when the file does not say otherwise and the file is what could not be read: the refusal names the command to type, `opossum -p <name> down`. A file that reads is read even with `-p` (docker compose does not read it with `-p` and no `-f`; with `-f` too it does, and stops if it cannot, as opossum did before). |
 | `destroy` | ✅ (extra) | remove everything opossum created for the project in one step — containers, the project network, named volumes, images, the restart supervisor, `.opossum/` and the generated `compose.opossum.yaml`. Your compose file, `.env` and sources are never touched, and neither is anything shared (`external: true` volumes, other projects, the DNS domain, the build cache) — with one exception it lists before it asks: images are the ones the services name, pulled ones and ones under an `image:` name included, whoever made them — and the image a `build:` + `image:` service had under `<project>-<service>:latest` before `image:` was read, when it is still there (as `down --rmi all`; `--keep-images` leaves them). Lists what it will remove and asks; `--force` skips the question, `--dry-run` lists and stops, `--keep-overlay` and `--keep-images` narrow it. `--keep-local` leaves this directory's generated files alone and removes only the runtime objects; `-p <other>` with `--force` is refused when it would take this directory's files with it. Volumes named for the project, or declared in the file with a `name:` of their own and not `external: true`, that no service claims are listed, not removed — a name alone can't distinguish a leftover from an `external: true` volume or from another project's; a `name:` volume whose declaration is gone too is nobody's to find, and yours to remove |
 | `ps [--format json]` | ✅ | service / container / image / IP / ports / status — of this project's containers: a container of a service's name that is another project's, carries no `opossum.project` label, or that the runtime gives no readable answer about gets no row and is named on stderr, as docker compose lists only the containers carrying its labels (the third kind also makes the exit non-zero once the table is printed, where docker compose has no such answer to give); `--format json` prints the same columns as an array of objects keyed `Service`, `Container`, `Image`, `IP`, `Ports`, `Status` — an empty string where the table shows `-`, and `Ports` as the table's string (not the shape `docker compose ps --format json` prints) |

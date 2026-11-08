@@ -1078,6 +1078,11 @@ func run(args []string) int {
 			time.Sleep(30 * time.Second) // never returns within the probe timeout
 		}
 		counter := os.Getenv("HEALTH_COUNTER")
+		// $HEALTH_PER_CONTAINER counts each container's probes apart, so a test
+		// can have a second service fail while the first passes.
+		if os.Getenv("HEALTH_PER_CONTAINER") != "" {
+			counter += "." + execTarget(args)
+		}
 		n := 0
 		if b, err := os.ReadFile(counter); err == nil {
 			fmt.Sscanf(strings.TrimSpace(string(b)), "%d", &n)

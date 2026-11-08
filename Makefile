@@ -39,16 +39,13 @@ test-shipped: export TMPDIR := /tmp/opossum-test-$(shell echo $$PPID)
 endif
 
 # `go test` stops a package's run at ten minutes unless it is told otherwise, and
-# the orchestrator package is the longest of them under -race: 393 s and 405 s in
-# the two lanes of a green CI run (the 971 tests are 368 s without -race, 112 s of
-# them the 46 rows of one table that each wait for a real follow to end). It was
-# stopped at 600 s twice (#1798, #1813) — and not because it is slow: the machine
-# was, by about four times for the whole run. The same job's `go vet` took 21-31 s
-# where it takes 8, and `cmd/opossum`, `internal/compose` and the rest took 3.4 to
-# 4.8 times what they take when the run is green, so four times the orchestrator's
-# 405 s is 27 minutes. Thirty minutes is that, and a test that hangs is still
-# stopped, only later. It is given as GOFLAGS, which `go test` reads and every other
-# go command ignores, so the gate's lines above keep the flags they are pinned to.
+# the orchestrator package is the longest of them under -race. Run whole, as the
+# gate runs it away from CI, it takes several minutes on its own, and a machine
+# that is busy with something else slows every package in the run at once, so
+# that package can pass ten minutes without any of its tests being stuck. Thirty
+# minutes leaves room for that, and a test that hangs is still stopped, only
+# later. It is given as GOFLAGS, which `go test` reads and every other go
+# command ignores, so the gate's lines above keep the flags they are pinned to.
 # Away from CI as well: the gate that is shorter than CI's is the one that passes
 # where CI fails.
 test: export GOFLAGS := $(GOFLAGS) -timeout=30m
