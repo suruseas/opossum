@@ -540,7 +540,8 @@ func quoted(msg string) string {
 }
 
 func upCmd() *cobra.Command {
-	var foreground bool
+	var foreground, detach, wait bool
+	var waitTimeout int
 	var forceRecreate, build, noBuild, removeOrphans, fromDockerCompose, fromDockerRemoved, dryRun, noSupervisor bool
 	cmd := &cobra.Command{
 		Use:   "up [service...]",
@@ -557,6 +558,22 @@ func upCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if build && noBuild {
 				return fmt.Errorf("--build and --no-build are mutually exclusive")
+			}
+			// `up` is detached already; -d is taken so that `up -d --wait`, as scripts
+			// write it for docker compose, runs here unchanged.
+			if foreground && detach {
+				return fmt.Errorf("--foreground and --detach are mutually exclusive")
+			}
+			if foreground && wait {
+				return fmt.Errorf("--wait waits for a detached up; it cannot be used with --foreground")
+			}
+			if waitTimeout < 0 {
+				return fmt.Errorf("--wait-timeout must be 0 (no limit) or a number of seconds, not %d", waitTimeout)
+			}
+			// docker compose takes --wait-timeout without --wait and does nothing with it
+			// (v5.6.1, measured: rc 0, not waited for); so does this, but says so.
+			if cmd.Flags().Changed("wait-timeout") && !wait {
+				fmt.Fprintln(cmd.ErrOrStderr(), "opossum: --wait-timeout does nothing without --wait")
 			}
 			fromDocker := fromDockerCompose
 			announceOverlay(cmd.ErrOrStderr())
@@ -601,6 +618,7 @@ func upCmd() *cobra.Command {
 			// (startup order, recreate/skip decisions, and the container commands it
 			// would issue) so the plan can be validated before acting.
 			o.SetDryRun(dryRun)
+			o.SetWait(wait, time.Duration(waitTimeout)*time.Second)
 			o.SetHostNameCheck(hostNameCheck())
 			// First Ctrl-C cancels the run so a partial `up` rolls back cleanly; a
 			// second one forces an immediate exit (as docker compose does).
@@ -655,6 +673,9 @@ func upCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&foreground, "foreground", false, "run a single service attached in the foreground instead of detached (rejected for multiple long-running services)")
+	cmd.Flags().BoolVarP(&detach, "detach", "d", false, "run detached, which `up` does already (taken so `up -d` works as with docker compose)")
+	cmd.Flags().BoolVar(&wait, "wait", false, "after starting, wait for each service this up covers that has a healthcheck to pass it (one already running too); fail if one does not")
+	cmd.Flags().IntVar(&waitTimeout, "wait-timeout", 0, "with --wait, the most seconds to wait in all (0 for no limit)")
 	cmd.Flags().BoolVar(&forceRecreate, "force-recreate", false, "recreate containers even if their configuration is unchanged")
 	cmd.Flags().BoolVar(&build, "build", false, "build images before starting, even if already present")
 	cmd.Flags().BoolVar(&noBuild, "no-build", false, "don't build images (error if one is missing)")

@@ -732,6 +732,25 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error: get failed: container %s not found\n", target)
 			os.Exit(1)
 		}
+		// A healthcheck probe that fails until the $HEALTH_OK_AT-th exec (counted in
+		// the file $HEALTH_COUNTER), as the orchestrator's fake has it: the real CLI
+		// exits with the probe's own status, and a fake whose every probe passed
+		// could not show `up --wait` waiting or giving up. Unset, every exec passes.
+		if counter := os.Getenv("HEALTH_COUNTER"); counter != "" {
+			n := 0
+			if b, err := os.ReadFile(counter); err == nil {
+				fmt.Sscanf(strings.TrimSpace(string(b)), "%d", &n)
+			}
+			n++
+			os.WriteFile(counter, []byte(strconv.Itoa(n)), 0o644)
+			okAt := 1
+			if v := os.Getenv("HEALTH_OK_AT"); v != "" {
+				fmt.Sscanf(v, "%d", &okAt)
+			}
+			if n < okAt {
+				os.Exit(1)
+			}
+		}
 
 	case "logs":
 		// A container that is not there has no logs (container 1.4.1): reading
