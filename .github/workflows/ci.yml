@@ -23,18 +23,17 @@ name: ci
 # in that directory, and a directory shared with another job would show it
 # the other job's work in progress.
 # Every push to a pull request runs it, drafted or not (and a reopened pull
-# request runs again: reopening is a way to run the same head again without
-# a push), and so does every push to main: a draft's run finds a broken
-# shape while it is still being worked on, and main's run is a green about
-# main's own tree. A `[skip ci]` in a
-# commit's message makes GitHub skip that push's run, on a pull request as
-# on main (measured: a commit whose message merely mentioned the marker got
-# no run); the squash commit's title is the pull request's title (or the
-# one commit's, when the branch has only one) and its body is the branch's
-# commit messages, one after the other (the repository's squash settings,
-# `COMMIT_OR_PR_TITLE` and `COMMIT_MESSAGES`), so a marker in any commit on
-# the branch reaches main — keep it out of the commits as well as the title
-# and body.
+# request runs again: reopening is a way to run the same head again without a
+# push), and so does every push to main: a draft's run finds a broken shape
+# while it is still being worked on, and main's run is a green about main's
+# own tree. A `[skip ci]` in a commit's message makes GitHub skip that push's
+# run, on a pull request as on main (measured: a commit whose message merely
+# mentioned the marker got no run); the squash commit's title is the pull
+# request's title (or the one commit's, when the branch has only one) and its
+# body is the branch's commit messages, one after the other (the repository's
+# squash settings, `COMMIT_OR_PR_TITLE` and `COMMIT_MESSAGES`), so a marker in
+# any commit on the branch reaches main — keep it out of the commits as well
+# as the title and body.
 # `workflow_dispatch` stays, for a run of main by hand. On a push to main the
 # event carries no pull request, and the two pull-request gates below say so
 # in their conditions and are skipped; a step that reads
@@ -89,7 +88,7 @@ jobs:
             command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
           done
           if [ -n "$missing" ]; then
-            echo "::error::this runner lacks:$missing — install them on the runner host (apt-get install build-essential jq make git)"
+            echo "::error::this runner lacks:$missing — the runner image this job names no longer provides them; name one that does in runs-on, or add a step that installs them (apt-get install build-essential jq make git)"
             exit 1
           fi
           echo "runner: $(uname -srm), $(nproc) cpus, tmp=$(dirname "$(mktemp -u)")"
@@ -162,18 +161,19 @@ jobs:
       # still points at it — once per compiler, and at nothing else.
       #
       # A temporary directory of this run's and this job's own, so two jobs
-      # that share a machine do not read each other's
-      # leftovers. Not the runner's `_work/_temp`: that is under the runner
-      # user's home, and the suites refuse a state directory under the home
-      # (they must never write to the real one). Made just before the gate
-      # and removed after it, whatever the gate said.
+      # that share a machine do not read each other's leftovers. Not the
+      # runner's `_work/_temp`: that is under the runner user's home, and the
+      # suites refuse a state directory under the home (they must never write
+      # to the real one). Made just before the gate and removed after it,
+      # whatever the gate said.
       # While the job runs, the host's load is written to a file every 15 s,
       # and the last step but one prints it. A job on the self-hosted runners
       # this used before sometimes took about four times as long as the same
       # job another day (`go vet` 8 s against 21-31 s), and what else was
-      # running on the machine at the time left no trace. The sampler is a background shell
-      # the runner removes with the job's other processes; it reads `uptime`
-      # and the five busiest processes, so it costs next to nothing.
+      # running on the machine at the time left no trace. The sampler is a
+      # background shell the runner removes with the job's other processes; it
+      # reads `uptime` and the five busiest processes, so it costs next to
+      # nothing.
       - name: the host's load is sampled while the job runs
         run: |
           log="/tmp/opossum-ci-load-${{ github.run_id }}-${{ github.job }}.log"
@@ -235,7 +235,7 @@ jobs:
             command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
           done
           if [ -n "$missing" ]; then
-            echo "::error::this runner lacks:$missing — install them on the runner host (apt-get install build-essential jq make git)"
+            echo "::error::this runner lacks:$missing — the runner image this job names no longer provides them; name one that does in runs-on, or add a step that installs them (apt-get install build-essential jq make git)"
             exit 1
           fi
           echo "runner: $(uname -srm), $(nproc) cpus, tmp=$(dirname "$(mktemp -u)")"

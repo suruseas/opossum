@@ -82,8 +82,8 @@ func TestUnreleasedMatchesFragments(t *testing.T) {
 // isn't a `- ` entry, would be silently dropped from a release otherwise.
 func TestFragmentsAreWellFormed(t *testing.T) {
 	root := repoRoot(t)
-	if _, err := changelog.Load(filepath.Join(root, "changelog.d")); err != nil {
-		t.Errorf("changelog.d holds a fragment that can't be read: %v\n"+
+	if _, err := changelog.Waiting(filepath.Join(root, "CHANGELOG.md"), filepath.Join(root, "changelog.d")); err != nil {
+		t.Fatalf("changelog.d holds a fragment that can't be read: %v\n"+
 			"Name them <number>-<slug>.<type>.md and start the body with \"- \".", err)
 	}
 }
@@ -915,17 +915,17 @@ func TestBreakingASectionAnywhereIsRefusedOrSurvivesExactly(t *testing.T) {
 // the pull request that adds it, naming the file — rather than months later,
 // during a release, as a byte difference in a section nobody has touched.
 func TestEveryFragmentWaitingToShipSurvivesTheRoundTrip(t *testing.T) {
-	dir := filepath.Join(repoRoot(t), "changelog.d")
+	root := repoRoot(t)
 	// Asserting the premise: with nothing to carry, the round trip proves nothing,
 	// and a skip says so rather than passing.
-	frags, err := changelog.Load(dir)
+	frags, err := changelog.Waiting(filepath.Join(root, "CHANGELOG.md"), filepath.Join(root, "changelog.d"))
 	if err != nil {
 		t.Fatalf("reading changelog.d: %v", err)
 	}
 	if len(frags) == 0 {
 		t.Skip("changelog.d is empty, which it is right after a release")
 	}
-	if err := fragmentsRoundTrip(t, dir); err != nil {
+	if err := fragmentsRoundTrip(t, frags); err != nil {
 		t.Error(err)
 	}
 }
@@ -941,7 +941,14 @@ func TestAFragmentTheDecomposerCannotReadIsNamed(t *testing.T) {
 	// the left margin would be refused by Load first, one step before the decomposer
 	// is reached, and would say nothing about which of the two spoke.
 	write(t, dir, "999-probe.added.md", "- One.\n\n\n- Two.\n")
-	err := fragmentsRoundTrip(t, dir)
+	frags, err := changelog.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(frags) != 1 {
+		t.Fatalf("got %d fragments from the probe directory, want the one written there", len(frags))
+	}
+	err = fragmentsRoundTrip(t, frags)
 	if err == nil {
 		t.Fatal("a fragment the decomposer cannot read went through the round trip")
 	}
@@ -955,14 +962,12 @@ func TestAFragmentTheDecomposerCannotReadIsNamed(t *testing.T) {
 	}
 }
 
-// fragmentsRoundTrip runs every fragment in dir through the round trip, naming
-// the fragments in whatever it reports so the reader has a file to open.
-func fragmentsRoundTrip(t *testing.T, dir string) error {
+// fragmentsRoundTrip runs the fragments it is handed through the round trip,
+// naming them in whatever it reports so the reader has a file to open. It takes
+// the fragments rather than a directory, so what it checks is what the caller
+// read, not a second reading of a place the caller may not have meant.
+func fragmentsRoundTrip(t *testing.T, frags []changelog.Fragment) error {
 	t.Helper()
-	frags, err := changelog.Load(dir)
-	if err != nil {
-		return fmt.Errorf("reading %s: %w", dir, err)
-	}
 	names := make([]string, len(frags))
 	for i, f := range frags {
 		names[i] = filepath.Base(f.Path)
