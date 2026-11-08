@@ -1,0 +1,488 @@
+# Taken 2026-10-30 on container 1.6.1 (macOS 27.0.1): first by asking the runtime directly, then
+# through opossum built from this change, then docker compose v5.6.1 for comparison. Every
+# container, network, project and directory was named for the run and removed afterwards; the
+# last lines of the opossum part show none left. Progress lines (`[n/6] …`) are left out.
+# Two of opossum's lines are what it printed when this was taken and have since been changed: the
+# OPSM-502 warning in part (b), which now names the aliases it left out ("network alias(es)
+# "cache" not passed: …"), and the OPSM-217 advice in part (c), which now says
+# `opossum up --force-recreate <service>`, then `opossum up`, and `--remove-orphans` for a holder
+# the project no longer has. The runtime's own lines are as measured.
+#
+# What the runtime does with `--network <name>,alias=<name>`:
+# - A one-label alias is refused, with --dns-domain or without (B, B2).
+# - An alias outside the DNS domain is taken, but no peer can look it up (A: dba.internal).
+# - `<alias>.<project>.<domain>` is taken, and a peer with that search domain reaches it by the
+#   short name (C, E); several on one network work (E).
+# - Names are not kept apart by network: an alias given on p28probe-net2 alone is looked up from
+#   a peer on p28probe-net, and resolves to the p28probe-net2 address (D). Whether that peer can
+#   reach the address was not measured.
+# - `<name>.internal.<project>.<domain>`: a glibc peer reaches `<name>.internal`, a musl peer
+#   does not (F).
+# - Capitals and `_` are taken; a label over 63 characters is refused (`label too long`).
+# - Refused: an alias that is another container's name or the container's own, one another
+#   container holds, the same alias on two networks, or twice on one. A name or an alias held by
+#   a stopped container counts too (`hostname(s) already exist`, `alias(es) already exist`).
+#   A refused run leaves no container.
+#
+# `system status --format json` reports the client version opossum reads to decide whether the
+# runtime takes aliases (`client.version`); the paths in it are shortened to <user>.
+
+$ container --version
+container CLI version 1.6.1 (build: release, commit: unspeci)
+
+########## the runtime asked directly: shapes A to E
+$ container network create p28probe-net
+--- exit code: 0
+--- stdout ---
+p28probe-net
+--- stderr ---
+
+$ container network create p28probe-net2
+--- exit code: 0
+--- stdout ---
+p28probe-net2
+--- stderr ---
+
+# A: two-label alias, with opossum's DNS flags
+$ container run -d --name srva.p28probe.opossum --network p28probe-net,alias=dba.internal --dns-domain opossum --dns-search p28probe.opossum alpine:3.20 sleep 600
+--- exit code: 0
+--- stdout ---
+srva.p28probe.opossum
+--- stderr ---
+
+# B: one-label alias, with --dns-domain opossum
+$ container run -d --name srvb.p28probe.opossum --network p28probe-net,alias=cacheb --dns-domain opossum --dns-search p28probe.opossum alpine:3.20 sleep 600
+--- exit code: 1
+--- stdout ---
+--- stderr ---
+Error: alias "cacheb" must be a fully qualified name with at least 2 labels, such as "api.example.test". Configure a default DNS domain to have the domain added to a name that has none
+
+# B2: one-label alias, no DNS flags
+$ container run -d --name srvb2.p28probe.opossum --network p28probe-net,alias=cacheb2 alpine:3.20 sleep 600
+--- exit code: 1
+--- stdout ---
+--- stderr ---
+Error: alias "cacheb2" must be a fully qualified name with at least 2 labels, such as "api.example.test". Configure a default DNS domain to have the domain added to a name that has none
+
+# C: alias written as <alias>.<project>.<domain>
+$ container run -d --name srvc.p28probe.opossum --network p28probe-net,alias=cachec.p28probe.opossum --dns-domain opossum --dns-search p28probe.opossum alpine:3.20 sleep 600
+--- exit code: 0
+--- stdout ---
+srvc.p28probe.opossum
+--- stderr ---
+
+# D: two networks, the alias on the second only
+$ container run -d --name srvd.p28probe.opossum --network p28probe-net --network p28probe-net2,alias=cached.p28probe.opossum --dns-domain opossum --dns-search p28probe.opossum alpine:3.20 sleep 600
+--- exit code: 0
+--- stdout ---
+srvd.p28probe.opossum
+--- stderr ---
+
+# E: two aliases on one network
+$ container run -d --name srve.p28probe.opossum --network p28probe-net,alias=e1.p28probe.opossum,alias=e2.p28probe.opossum --dns-domain opossum --dns-search p28probe.opossum alpine:3.20 sleep 600
+--- exit code: 0
+--- stdout ---
+srve.p28probe.opossum
+--- stderr ---
+
+# peers on p28probe-net
+$ container run --rm --name cli1.p28probe.opossum --network p28probe-net --dns-domain opossum --dns-search p28probe.opossum alpine:3.20 sh -c echo "== srva"; getent hosts srva || echo '(getent: none)'; echo "== dba.internal"; getent hosts dba.internal || echo '(getent: none)'; echo "== cacheb"; getent hosts cacheb || echo '(getent: none)'; echo "== cacheb.opossum"; getent hosts cacheb.opossum || echo '(getent: none)'; echo "== cacheb.p28probe.opossum"; getent hosts cacheb.p28probe.opossum || echo '(getent: none)'; echo "== cacheb2"; getent hosts cacheb2 || echo '(getent: none)'; echo "== cachec"; getent hosts cachec || echo '(getent: none)'; echo "== cachec.p28probe.opossum"; getent hosts cachec.p28probe.opossum || echo '(getent: none)'; echo "== cached"; getent hosts cached || echo '(getent: none)'; echo "== e1"; getent hosts e1 || echo '(getent: none)'; echo "== e2"; getent hosts e2 || echo '(getent: none)'; 
+--- exit code: 0
+--- stdout ---
+== srva
+fd92:11da:19c6:3f25:f049:caff:fedc:de11  srva.p28probe.opossum  srva.p28probe.opossum srva
+== dba.internal
+(getent: none)
+== cacheb
+(getent: none)
+== cacheb.opossum
+(getent: none)
+== cacheb.p28probe.opossum
+(getent: none)
+== cacheb2
+(getent: none)
+== cachec
+fd92:11da:19c6:3f25:f0be:adff:fee7:50a1  cachec.p28probe.opossum  cachec.p28probe.opossum cachec
+== cachec.p28probe.opossum
+fd92:11da:19c6:3f25:f0be:adff:fee7:50a1  cachec.p28probe.opossum  cachec.p28probe.opossum
+== cached
+fdf4:a65d:ffd3:780b:fcc5:b5ff:fef1:2b1e  cached.p28probe.opossum  cached.p28probe.opossum cached
+== e1
+fd92:11da:19c6:3f25:f42f:3bff:feb0:b3c1  e1.p28probe.opossum  e1.p28probe.opossum e1
+== e2
+fd92:11da:19c6:3f25:f42f:3bff:feb0:b3c1  e2.p28probe.opossum  e2.p28probe.opossum e2
+--- stderr ---
+
+# peer on p28probe-net2
+$ container run --rm --name cli2.p28probe.opossum --network p28probe-net2 --dns-domain opossum --dns-search p28probe.opossum alpine:3.20 sh -c echo "== cached"; getent hosts cached || echo '(getent: none)'; echo "== cached.p28probe.opossum"; getent hosts cached.p28probe.opossum || echo '(getent: none)'; echo "== srvd"; getent hosts srvd || echo '(getent: none)'; 
+--- exit code: 0
+--- stdout ---
+== cached
+fdf4:a65d:ffd3:780b:fcc5:b5ff:fef1:2b1e  cached.p28probe.opossum  cached.p28probe.opossum cached
+== cached.p28probe.opossum
+fdf4:a65d:ffd3:780b:fcc5:b5ff:fef1:2b1e  cached.p28probe.opossum  cached.p28probe.opossum
+== srvd
+fd92:11da:19c6:3f25:f056:bff:fef2:afed  srvd.p28probe.opossum  srvd.p28probe.opossum srvd
+--- stderr ---
+
+# inspect of srvc (networks)
+[
+ {
+  "network": "p28probe-net",
+  "options": {
+   "aliases": [
+    "cachec.p28probe.opossum"
+   ],
+   "hostname": "srvc.p28probe.opossum.",
+   "mtu": 1280
+  }
+ }
+]
+[
+ {
+  "hostname": "srvc.p28probe.opossum.",
+  "ipv4Address": "192.168.67.3/24",
+  "ipv4Gateway": "192.168.67.1",
+  "ipv6Address": "fd92:11da:19c6:3f25:f0be:adff:fee7:50a1/64",
+  "macAddress": "f2:be:ad:e7:50:a1",
+  "mtu": 1280,
+  "network": "p28probe-net",
+  "variant": "reserved"
+ }
+]
+
+########## F: an alias with a dot, with the project and domain after it; a musl and a glibc peer
+# F: alias=dbf.internal.p28probe.opossum
+srvf.p28probe.opossum
+exit 0
+# musl client (alpine:3.20)
+== dbf.internal
+(none)
+== dbf.internal.p28probe.opossum
+fd92:11da:19c6:3f25:fc67:a7ff:fe91:6f7a  dbf.internal.p28probe.opossum  dbf.internal.p28probe.opossum
+== srvf
+fd92:11da:19c6:3f25:fc67:a7ff:fe91:6f7a  srvf.p28probe.opossum  srvf.p28probe.opossum srvf
+nameserver 192.168.67.1
+domain opossum
+search p28probe.opossum
+# glibc client (node:lts-buster-slim)
+== dbf.internal
+fd92:11da:19c6:3f25:fc67:a7ff:fe91:6f7a dbf.internal.p28probe.opossum
+== dbf.internal.p28probe.opossum
+fd92:11da:19c6:3f25:fc67:a7ff:fe91:6f7a dbf.internal.p28probe.opossum
+== srvf
+fd92:11da:19c6:3f25:fc67:a7ff:fe91:6f7a srvf.p28probe.opossum
+nameserver 192.168.67.1
+domain opossum
+search p28probe.opossum
+
+########## which aliases the runtime refuses
+# capitals
+$ container run -d --name s1.p28probe.opossum --network p28probe-net,alias=Cache.p28probe.opossum ... alpine:3.20 sleep 600
+s1.p28probe.opossum
+--- exit code: 0
+
+# underscore
+$ container run -d --name s2.p28probe.opossum --network p28probe-net,alias=cache_1.p28probe.opossum ... alpine:3.20 sleep 600
+s2.p28probe.opossum
+--- exit code: 0
+
+# a 64-character label
+$ container run -d --name s3.p28probe.opossum --network p28probe-net,alias=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.p28probe.opossum ... alpine:3.20 sleep 600
+Error: invalid alias 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.p28probe.opossum': invalid DNS name: label too long: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+--- exit code: 1
+
+# the name of another running container
+$ container run -d --name s5.p28probe.opossum --network p28probe-net,alias=s4.p28probe.opossum ... alpine:3.20 sleep 600
+Error: alias(es) already exist: ["s4.p28probe.opossum"]
+--- exit code: 1
+
+# its own name
+$ container run -d --name s6.p28probe.opossum --network p28probe-net,alias=s6.p28probe.opossum ... alpine:3.20 sleep 600
+Error: alias "s6.p28probe.opossum" is already a hostname of the container
+--- exit code: 1
+
+# an alias another container will also take (first)
+$ container run -d --name s7.p28probe.opossum --network p28probe-net,alias=shared.p28probe.opossum ... alpine:3.20 sleep 600
+s7.p28probe.opossum
+--- exit code: 0
+
+# the same alias on a second container
+$ container run -d --name s8.p28probe.opossum --network p28probe-net,alias=shared.p28probe.opossum ... alpine:3.20 sleep 600
+Error: alias(es) already exist: ["shared.p28probe.opossum"]
+--- exit code: 1
+
+# who answers for shared, s4, Cache, cache_1
+== shared
+fd92:11da:19c6:3f25:fcae:7fff:fe08:24d8  shared.p28probe.opossum  shared.p28probe.opossum shared
+== s4
+fd92:11da:19c6:3f25:f05f:c3ff:feda:f790  s4.p28probe.opossum  s4.p28probe.opossum s4
+== cache
+fd92:11da:19c6:3f25:f87d:8fff:fea1:ab66  cache.p28probe.opossum  cache.p28probe.opossum cache
+== cache_1
+fd92:11da:19c6:3f25:f413:6aff:fe7f:6a45  cache_1.p28probe.opossum  cache_1.p28probe.opossum cache_1
+s4: ['fd92:11da:19c6:3f25:f05f:c3ff:feda:f790/64']
+s5: (no such container)
+s7: ['fd92:11da:19c6:3f25:fcae:7fff:fe08:24d8/64']
+s8: (no such container)
+
+########## the same alias on two networks, or twice on one
+# the same alias on both networks of one container
+$ container run -d --name t1.p28probe.opossum --network p28probe-net,alias=both.p28probe.opossum --network p28probe-net2,alias=both.p28probe.opossum ...
+Error: alias "both.p28probe.opossum" is declared on more than one network
+--- exit code: 1
+# the same alias twice on one network
+$ container run -d --name t2.p28probe.opossum --network p28probe-net,alias=twice.p28probe.opossum,alias=twice.p28probe.opossum ...
+Error: alias "twice.p28probe.opossum" is listed more than once for network p28probe-net
+--- exit code: 1
+
+########## a name or an alias another container holds, running or stopped
+# h1 holds the alias x.p28probe.opossum; a container named x.p28probe.opossum is then run
+$ container run -d --name h1.p28probe.opossum --network p28probe-net,alias=x.p28probe.opossum --dns-domain opossum --dns-search p28probe.opossum alpine:3.20 sleep 600
+h1.p28probe.opossum
+--- exit code: 0
+
+$ container run -d --name x.p28probe.opossum --network p28probe-net --dns-domain opossum --dns-search p28probe.opossum alpine:3.20 sleep 600
+Error: hostname(s) already exist: ["x.p28probe.opossum."]
+--- exit code: 1
+
+# h1 stopped: does it still hold x.p28probe.opossum?
+$ container stop h1.p28probe.opossum
+h1.p28probe.opossum
+--- exit code: 0
+
+$ container run -d --name x.p28probe.opossum --network p28probe-net --dns-domain opossum --dns-search p28probe.opossum alpine:3.20 sleep 600
+Error: hostname(s) already exist: ["x.p28probe.opossum."]
+--- exit code: 1
+
+$ container run -d --name h2.p28probe.opossum --network p28probe-net,alias=x.p28probe.opossum --dns-domain opossum --dns-search p28probe.opossum alpine:3.20 sleep 600
+Error: alias(es) already exist: ["x.p28probe.opossum"]
+--- exit code: 1
+
+# h3 is stopped and holds the alias y.p28probe.opossum; h4 asks for the same alias
+$ container run -d --name h3.p28probe.opossum --network p28probe-net,alias=y.p28probe.opossum --dns-domain opossum --dns-search p28probe.opossum alpine:3.20 sleep 600
+h3.p28probe.opossum
+--- exit code: 0
+
+$ container stop h3.p28probe.opossum
+h3.p28probe.opossum
+--- exit code: 0
+
+$ container run -d --name h4.p28probe.opossum --network p28probe-net,alias=y.p28probe.opossum --dns-domain opossum --dns-search p28probe.opossum alpine:3.20 sleep 600
+Error: alias(es) already exist: ["y.p28probe.opossum"]
+--- exit code: 1
+
+# what is left of h2 and h4 after their refusals
+(no h2 or h4)
+
+########## opossum built from this change
+$ container system status --format json
+{"client":{"appName":"container","build":"release","commit":"unspecified","version":"1.6.1"},"host":{"architecture":"arm64","cpus":8,"operatingSystem":"Version 27.0.1 (Build 26A434)"},"paths":{"appRoot":"/Users/<user>/Library/Application Support/com.apple.container/","installRoot":"/opt/homebrew/Cellar/container/1.6.1/"},"resources":{"containersRunning":1,"containersTotal":1,"images":38},"server":{"appName":"container-apiserver","build":"release","commit":"unspecified","version":"1.6.1"},"status":"running"}
+
+########## (a) project p28real
+# compose.yaml:
+#   name: p28real
+#   services:
+#     db:
+#       image: alpine:3.20
+#       command: ["sleep", "300"]
+#       networks:
+#         back:
+#           aliases: [cache, db.internal]
+#         front:
+#           aliases: [www]
+#     other:
+#       image: alpine:3.20
+#       command: ["sleep", "300"]
+#       networks:
+#         back:
+#           aliases: [cache]
+#     client:
+#       image: alpine:3.20
+#       depends_on: [db, other]
+#       networks: [back]
+#       command: ["sh", "-c", "sleep 3; for n in cache www db.internal db other; do echo \"== $$n\"; getent hosts $$n || echo '(none)'; done; sleep 300"]
+#   networks:
+#     back: {}
+#     front: {}
+
+$ opossum config
+name: p28real
+services:
+    client:
+        image: alpine:3.20
+        command:
+            - sh
+            - -c
+            - sleep 3; for n in cache www db.internal db other; do echo "== $$n"; getent hosts $$n || echo '(none)'; done; sleep 300
+        networks:
+            - back
+        depends_on:
+            db:
+                condition: service_started
+                required: true
+            other:
+                condition: service_started
+                required: true
+    db:
+        image: alpine:3.20
+        command:
+            - sleep
+            - "300"
+        networks:
+            - back
+            - front
+    other:
+        image: alpine:3.20
+        command:
+            - sleep
+            - "300"
+        networks:
+            - back
+networks:
+    back: {}
+    front: {}
+
+# fields opossum ignores (parsed but not acted on):
+#   db: networks.back.aliases
+--- exit code: 0
+
+$ opossum up
+note: 1 compose field is ignored (db: networks.back.aliases) — run `opossum config` for details
+Creating network p28real-back
+Creating network p28real-front
+warning: [OPSM-502] service "db": network alias "db.internal" is not passed: a peer would reach a name with a dot by its short name on some images and not on others; write one without a dot
+Starting db (alpine:3.20)
+db.p28real.opossum
+warning: [OPSM-502] service "other": network alias "cache" is not passed: service "db" takes it, as the first service by name that writes it
+Starting other (alpine:3.20)
+other.p28real.opossum
+Starting client (alpine:3.20)
+client.p28real.opossum
+--- exit code: 0
+
+$ opossum logs client
+client-1  | == cache
+client-1  | fd92:11da:19c6:3f25:f053:c4ff:fe96:cbf4  cache.p28real.opossum  cache.p28real.opossum cache
+client-1  | == www
+client-1  | fdf4:a65d:ffd3:780b:f436:2eff:fea0:5e68  www.p28real.opossum  www.p28real.opossum www
+client-1  | == db.internal
+client-1  | (none)
+client-1  | == db
+client-1  | fd92:11da:19c6:3f25:f053:c4ff:fe96:cbf4  db.p28real.opossum  db.p28real.opossum db
+client-1  | == other
+client-1  | fd92:11da:19c6:3f25:f02a:10ff:fe55:1a2  other.p28real.opossum  other.p28real.opossum other
+--- exit code: 0
+
+# aliases of db, then other (container inspect)
+[('p28real-back', ['cache.p28real.opossum']), ('p28real-front', ['www.p28real.opossum'])]
+[('p28real-back', None)]
+
+$ opossum down --remove-orphans
+Stopping client
+Stopping other
+Stopping db
+--- exit code: 0
+
+########## (b) project p28s1: service cache renamed to redis, keeping cache as an alias
+# compose.yaml: services.cache (alpine:3.20, sleep 300)
+$ opossum up
+Creating network p28s1-net
+Starting cache (alpine:3.20)
+cache.p28s1.opossum
+--- exit code: 0
+
+# compose.yaml now: services.redis with networks.default.aliases [cache]; cache.p28s1.opossum is left over
+$ opossum up
+warning: [OPSM-402] found orphan container(s) not defined in the compose file: cache.p28s1.opossum
+         remove them with `opossum down --remove-orphans` (or `up --remove-orphans`)
+Starting redis (alpine:3.20)
+Error: alias(es) already exist: ["cache.p28s1.opossum"]
+warning: [OPSM-502] service "redis": its network aliases are not passed: another container already holds one of them — remove it (`opossum up --remove-orphans` for one this project no longer has, or `opossum down`), then `opossum up --force-recreate redis`
+redis.p28s1.opossum
+--- exit code: 0
+
+# aliases of redis
+[('p28s1-net', None)]
+
+$ opossum up
+warning: [OPSM-402] found orphan container(s) not defined in the compose file: cache.p28s1.opossum
+         remove them with `opossum down --remove-orphans` (or `up --remove-orphans`)
+redis is up to date
+--- exit code: 0
+
+$ opossum up --remove-orphans
+Removing orphan container cache.p28s1.opossum
+redis is up to date
+--- exit code: 0
+
+$ opossum up --force-recreate redis
+Starting redis (alpine:3.20)
+redis.p28s1.opossum
+--- exit code: 0
+
+# aliases of redis
+[('p28s1-net', ['cache.p28s1.opossum'])]
+
+$ opossum down --remove-orphans
+Stopping redis
+--- exit code: 0
+
+########## (c) project p28s2: db holds the alias cache, then a service cache is added
+# compose.yaml: services.db with networks.default.aliases [cache]
+$ opossum up
+Creating network p28s2-net
+Starting db (alpine:3.20)
+db.p28s2.opossum
+--- exit code: 0
+
+# compose.yaml now also has services.cache
+$ opossum up
+Starting cache (alpine:3.20)
+Error: hostname(s) already exist: ["cache.p28s2.opossum."]
+Nothing this `up` started is left running
+opossum: starting service "cache": exit status 1
+  → [OPSM-217] another container holds this service's name as a network alias — one an earlier `opossum up` made, before a service took that name. Remove it (`opossum down`, then `opossum up`), or recreate the service that holds the alias (`opossum up --force-recreate <service>`), which no longer passes it
+--- exit code: 1
+
+$ opossum up --force-recreate db
+warning: [OPSM-502] service "db": network alias "cache" is not passed: it is the name of a service in this project, which reaches that service already
+Starting db (alpine:3.20)
+db.p28s2.opossum
+--- exit code: 0
+
+$ opossum up
+Starting cache (alpine:3.20)
+cache.p28s2.opossum
+warning: [OPSM-502] service "db": network alias "cache" is not passed: it is the name of a service in this project, which reaches that service already
+db is up to date
+--- exit code: 0
+
+$ opossum ps
+SERVICE  CONTAINER            IMAGE        IP            PORTS  STATUS
+cache    cache.p28s2.opossum  alpine:3.20  192.168.67.4  -      running
+db       db.p28s2.opossum     alpine:3.20  192.168.67.3  -      running
+--- exit code: 0
+
+$ opossum down --remove-orphans
+Stopping db
+Stopping cache
+--- exit code: 0
+
+$ container ls -a | grep p28 ; container network ls | grep p28
+(no containers)
+(no networks)
+
+########## docker compose v5.6.1: a one-off run gives the service's aliases only with --use-aliases
+$ docker compose version
+Docker Compose version v5.6.1
+
+# compose.yaml: services.a (alpine:3.20, sleep 60) with networks.back.aliases [kv]
+$ docker compose -p p28dock run -d --name p28dock-plain a sleep 60
+<container id>
+$ docker compose -p p28dock run -d --use-aliases --name p28dock-alias a sleep 60
+<container id>
+$ docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}={{$v.Aliases}} {{end}}' p28dock-plain
+p28dock_back=[p28dock-plain] 
+$ docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}={{$v.Aliases}} {{end}}' p28dock-alias
+p28dock_back=[p28dock-alias a kv] 

@@ -67,6 +67,10 @@ type Orchestrator struct {
 	planPullsOff bool
 	planNamed    map[string]bool
 	planArch     map[string]archOfImage // what asking each image for its builds came to, so a plan asks each once
+	// aliasesTaken is whether the runtime takes network aliases, asked once
+	// (nil until then; see networkAliases).
+	aliasesTaken   *bool
+	aliasesVersion string
 	// imageWorkdirs remembers where each image starts its process, for the same
 	// reason: a crash decode asks once per image, not once per mount.
 	imageWorkdirs map[string]string
@@ -312,6 +316,17 @@ func configHash(o runtime.RunOptions) string {
 	// recreated on upgrade — but toggling any of these does recreate.
 	if o.MacAddress != "" {
 		write("mac", o.MacAddress)
+	}
+	if len(o.NetworkAliases) > 0 {
+		nets := make([]string, 0, len(o.NetworkAliases))
+		for n := range o.NetworkAliases {
+			nets = append(nets, n)
+		}
+		sort.Strings(nets)
+		for _, n := range nets {
+			write("alias", n)
+			write(o.NetworkAliases[n]...)
+		}
 	}
 	if o.ShmSize != "" {
 		write("shm", o.ShmSize)
@@ -2782,6 +2797,7 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 
 		mem, cpu, _ := svc.Resources() // validated at load
 		svcNets, dnsDomain, dnsSearch := o.serviceNetworks(svc)
+		aliases := o.networkAliases(name, svc)
 		// The pre-flight above has already refused a service whose env_file
 		// could not be read, so this cannot fail here today. It is asked
 		// through the same door anyway: the alternative is reading Environment
@@ -2809,6 +2825,7 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 			Image:             image,
 			Platform:          svc.Platform,
 			Networks:          svcNets,
+			NetworkAliases:    aliases,
 			DNSDomain:         dnsDomain,
 			DNSSearch:         dnsSearch,
 			MacAddress:        svc.MacAddress,
@@ -2892,7 +2909,7 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 			// satisfied structurally, since deps precede dependents in the order.
 			runOpts.Detach = false
 			o.logf("Running %s to completion (%s)\n", name, image)
-			if err := o.rt.Run(runOpts); err != nil {
+			if err := o.runDroppingHeldAliases(name, runOpts); err != nil {
 				// A Ctrl-C during the run kills the child, and the run returns a
 				// failure — but the person who pressed it did not see a service
 				// fail, and there is nothing in its logs to check. Say what happened.
@@ -2966,7 +2983,7 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 			continue
 		}
 		o.logf("Starting %s (%s)\n", name, image)
-		if err := o.rt.Run(runOpts); err != nil {
+		if err := o.runDroppingHeldAliases(name, runOpts); err != nil {
 			// A foreground run stays attached until the container exits, so a Ctrl-C
 			// lands here as the run's failure ("signal: killed"). The loop's own
 			// interrupted() check runs only between services and never sees it; the
@@ -6289,6 +6306,15 @@ func runErrorHint(svc *compose.Service, holder string, takesItBack bool, err err
 		}
 		return "\n  → [" + string(codeImageNoArm64) + "] this image has no build for Apple silicon (arm64). " +
 			"Set `platform: linux/amd64` on the service — opossum runs an amd64 image through Rosetta."
+	// container 1.6.1 counts the names and network aliases of every container,
+	// running or stopped, and refuses a run whose own name another holds as an
+	// alias (network-aliases-161.txt): a container an earlier `up` gave the
+	// alias, before the file named a service after it.
+	case hostnameHeldAsAlias(s):
+		return "\n  → [" + string(codeNameHeldAsAlias) + "] another container holds this service's name as a network alias — " +
+			"one an earlier `opossum up` made, before a service took that name. Recreate the service that holds the alias " +
+			"(`opossum up --force-recreate <service>`), which no longer passes it, then `opossum up`; " +
+			"if the holder is a container this project no longer has, `opossum up --remove-orphans`"
 	// The kernel refused to run what the service starts: `Exec format error`
 	// (ENOEXEC). Two things do that — a program built for another architecture
 	// than the image's (an amd64 binary in an arm64 image, which docker runs

@@ -25,6 +25,7 @@ OPSM-213 codeHostPortTwice: two entries of this run publish the same host port
 OPSM-214 codeHostAddressUnbindable: a published entry names a host address this machine will not bind
 OPSM-215 codeHostPortNotBindable: a published host port was refused for a reason other than a listener (a port below 1024 on a specific address takes root)
 OPSM-216 codeHostNameNotYet: a running service's name cannot be looked up on this host: something asked for it before it was registered and macOS keeps that answer
+OPSM-217 codeNameHeldAsAlias: another container holds the service's name as a network alias, so the runtime refuses to start it
 OPSM-401 codeDepNotRunning: a dependency's container exited before becoming healthy
 OPSM-402 codeOrphans: containers left by services no longer in the compose
 OPSM-403 codeDepNoHealth: a service_healthy dependency defines no healthcheck

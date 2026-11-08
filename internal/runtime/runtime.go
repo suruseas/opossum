@@ -1341,8 +1341,14 @@ type RunOptions struct {
 	Platform   string   // --platform (e.g. linux/amd64); amd64 also enables --rosetta
 	Networks   []string // one --network per entry (a service may join several); "none" for full isolation
 	MacAddress string   // the MAC for the first network, as `--network <name>,mac=<addr>` (the runtime takes it per network)
-	DNSDomain  string   // --dns-domain (the registered local domain)
-	DNSSearch  string   // --dns-search (per-project subdomain for bare-name resolution)
+
+	// NetworkAliases is the names to give the container on each network, keyed by
+	// the network's name as Networks has it: `--network <name>,alias=<name>`, one
+	// per alias (container 1.6.0 and later; see AcceptsNetworkAliases).
+	NetworkAliases map[string][]string
+
+	DNSDomain  string // --dns-domain (the registered local domain)
+	DNSSearch  string // --dns-search (per-project subdomain for bare-name resolution)
 	Env        []string
 	Ports      []string
 	Volumes    []string
@@ -1477,9 +1483,13 @@ func (r *Runtime) Run(o RunOptions) error {
 	if o.CPUs != "" {
 		args = append(args, "-c", o.CPUs)
 	}
-	for i, n := range o.Networks {
+	for i, name := range o.Networks {
+		n := name
 		if i == 0 && o.MacAddress != "" && n != "none" {
 			n += ",mac=" + o.MacAddress
+		}
+		for _, a := range o.NetworkAliases[name] {
+			n += ",alias=" + a
 		}
 		// One argument (#996, as --user above): an `external: true` network's
 		// real name is whatever the compose file wrote.
@@ -2308,4 +2318,22 @@ func (r *Runtime) Networks() []NetworkSummary {
 		summaries = append(summaries, NetworkSummary{Name: res.Configuration.Name, Builtin: builtin})
 	}
 	return summaries
+}
+
+// AcceptsNetworkAliases says whether a `container` CLI of this version takes
+// `--network <name>,alias=<name>`, which 1.6.0 added. The version is the one
+// `system status --format json` reports for the client (`1.6.1`); one that
+// cannot be read, as where the report is the table of 1.3.1 and before, does
+// not.
+func AcceptsNetworkAliases(clientVersion string) bool {
+	parts := strings.SplitN(clientVersion, ".", 3)
+	if len(parts) < 2 {
+		return false
+	}
+	major, err1 := strconv.Atoi(parts[0])
+	minor, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return major > 1 || (major == 1 && minor >= 6)
 }

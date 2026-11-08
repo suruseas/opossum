@@ -6,7 +6,8 @@ import (
 )
 
 // Per-network settings opossum reads past — `ipam` under a top-level
-// declaration, `aliases`/`ipv4_address` under a service's map-form entry —
+// declaration, `ipv4_address` and an alias that cannot be passed (one with a
+// dot) under a service's map-form entry —
 // used to be dropped without a word: `config` listed every ignored volume
 // field but no network field, so an alias that never resolved was discovered
 // at runtime rather than announced (#714). Both sides now report each dropped
@@ -18,7 +19,7 @@ services:
     image: app:1
     networks:
       back:
-        aliases: [db-alias]
+        aliases: [db.internal]
         ipv4_address: 10.0.0.5
       front:
         x-note: kept quiet
