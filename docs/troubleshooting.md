@@ -94,12 +94,22 @@ build can starve.
   case is an app + nginx sharing a `public`/assets volume.) `up` **warns** when it
   sees this — use a **bind mount** (a host path, which *is* shareable) for the
   shared data, or bake it into the image.
-- **`networks:` — aliases and static IPs (`ipv4_address`) aren't applied** (a top-level network's `ipam` subnet is), and a container
+- **`networks:` — static IPs (`ipv4_address`) aren't applied** (a top-level network's `ipam` subnet is), aliases only on Apple `container` 1.6.0 and later and only as one label (`cache`, not `db.internal`; an alias is looked up from every network and resolves to its address on the network that writes it), and a container
   whose **first** network is `internal:` resolves no name at all (it must address
   peers by IP), while one that joins an internal network after a normal one still
   resolves through the normal one. Multiple networks
   per service and `external:` reuse both work. See [Networking
   model](networking.md) for the full picture.
+- **Adding a service named after another service's alias can fail that `up`**
+  (Apple `container` 1.6.0 and later): with `db` running and passing
+  `aliases: [cache]`, a new service `cache` that starts before `db` is refused
+  by the runtime (`hostname(s) already exist`, `[OPSM-217]`) before `db` is
+  recreated without the alias (measured in that order; the other order was not
+  measured). Run `opossum up --force-recreate db` (the service that held the
+  alias), then `opossum up`; if the holder is a container the file no longer
+  has, `opossum up --remove-orphans`. The same happens when the holder is
+  stopped, or belongs to a project of the same name in another directory.
+  Docker compose was not measured in this shape.
 - **`restart:` is honoured by a small per-project supervisor**, not by a resident
   engine: `up` leaves one running when the project declares a policy, and `down`
   stops it. `on-failure` can only be approximated — Apple `container` doesn't

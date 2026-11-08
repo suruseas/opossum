@@ -38,12 +38,9 @@ func TestNetworksMergeAcrossListAndMapForms(t *testing.T) {
 	if got := []string(web.Networks); !slices.Equal(got, []string{"back", "front"}) {
 		t.Fatalf("the merged service should join both networks once each, got %v", got)
 	}
-	// The map's entry survived the merge, so the reader who wrote aliases hears
-	// (as before, per field) that opossum does not act on them — rather than
-	// nothing, which read as "applied".
-	if !slices.Contains(web.Unsupported, "networks.back.aliases") {
-		t.Errorf("the base file's aliases should still be reported after the override's list form, got %v", web.Unsupported)
-	}
+	// The map's entry survived the merge, so the aliases it wrote are still
+	// there to pass.
+	wantAliases(t, web, "back", "db-alias")
 }
 
 // The other way round — a map form over a list form — carries the map's
@@ -132,9 +129,7 @@ func TestNetworksEmptyMapEntryKeepsTheOtherFilesSettings(t *testing.T) {
 	if got := []string(web.Networks); !slices.Equal(got, []string{"back"}) {
 		t.Fatalf("got %v", got)
 	}
-	if !slices.Contains(web.Unsupported, "networks.back.aliases") {
-		t.Errorf("an empty map entry must not erase the base file's aliases, got %v", web.Unsupported)
-	}
+	wantAliases(t, web, "back", "db-alias")
 }
 
 // Two map forms that both write settings under one name keep both sides'
@@ -163,11 +158,10 @@ func TestNetworksMapEntriesMergeFieldByField(t *testing.T) {
 		t.Fatalf("LoadFiles: %v", err)
 	}
 	web := p.Services["web"]
-	for _, want := range []string{"networks.back.aliases", "networks.back.ipv4_address"} {
-		if !slices.Contains(web.Unsupported, want) {
-			t.Errorf("both files' settings for back should survive the merge, missing %s in %v", want, web.Unsupported)
-		}
+	if !slices.Contains(web.Unsupported, "networks.back.ipv4_address") {
+		t.Errorf("the override's address for back should survive the merge, got %v", web.Unsupported)
 	}
+	wantAliases(t, web, "back", "db-alias")
 }
 
 // An empty list (`networks: []`) in the override names nothing, and so changes
@@ -198,9 +192,7 @@ func TestNetworksEmptyListLeavesTheOtherFileAlone(t *testing.T) {
 	if got := []string(web.Networks); !slices.Equal(got, []string{"back"}) {
 		t.Fatalf("an empty override list should leave the base's networks in place, got %v", got)
 	}
-	if !slices.Contains(web.Unsupported, "networks.back.aliases") {
-		t.Errorf("the base's aliases should still be reported, got %v", web.Unsupported)
-	}
+	wantAliases(t, web, "back", "db-alias")
 }
 
 // The top-level `networks:` declarations go the same road: an override that
@@ -235,8 +227,7 @@ func TestTopLevelNetworkDeclarationSurvivesAnEmptyOverrideEntry(t *testing.T) {
 }
 
 // Both files writing aliases for the same network: the lists append (docker
-// compose concatenates them), so neither file's aliases are lost from the
-// report. A reader who believes "the override's entry wins whole" would drop
+// compose concatenates them), so neither file's aliases is lost. A reader who believes "the override's entry wins whole" would drop
 // the base's list here.
 func TestNetworksAliasesFromBothFilesAreBothKept(t *testing.T) {
 	dir := t.TempDir()
@@ -264,9 +255,7 @@ func TestNetworksAliasesFromBothFilesAreBothKept(t *testing.T) {
 	if got := []string(web.Networks); !slices.Equal(got, []string{"back"}) {
 		t.Fatalf("got %v", got)
 	}
-	if !slices.Contains(web.Unsupported, "networks.back.aliases") {
-		t.Errorf("aliases should still be reported, got %v", web.Unsupported)
-	}
+	wantAliases(t, web, "back", "a-alias", "b-alias")
 }
 
 // An explicit empty map (`back: {}`) is "the name and nothing more" too — not
@@ -293,7 +282,13 @@ func TestNetworksEmptyMapValueKeepsTheOtherFilesSettings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadFiles: %v", err)
 	}
-	if !slices.Contains(p.Services["web"].Unsupported, "networks.back.aliases") {
-		t.Errorf("an empty map value must not erase the base file's aliases, got %v", p.Services["web"].Unsupported)
+	wantAliases(t, p.Services["web"], "back", "db-alias")
+}
+
+// wantAliases fails unless the service's aliases on net are want, in order.
+func wantAliases(t *testing.T, svc *Service, net string, want ...string) {
+	t.Helper()
+	if got := svc.NetworkAliases[net]; !slices.Equal(got, want) {
+		t.Errorf("aliases on %s: want %v, got %v (all: %v)", net, want, got, svc.NetworkAliases)
 	}
 }

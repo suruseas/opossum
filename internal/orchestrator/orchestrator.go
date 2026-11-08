@@ -67,6 +67,10 @@ type Orchestrator struct {
 	planPullsOff bool
 	planNamed    map[string]bool
 	planArch     map[string]archOfImage // what asking each image for its builds came to, so a plan asks each once
+	// aliasesTaken is whether the runtime takes network aliases, asked once
+	// (nil until then; see networkAliases).
+	aliasesTaken   *bool
+	aliasesVersion string
 	// imageWorkdirs remembers where each image starts its process, for the same
 	// reason: a crash decode asks once per image, not once per mount.
 	imageWorkdirs map[string]string
@@ -144,8 +148,17 @@ type upOptions struct {
 	dryRun        bool // --dry-run: resolve and print the plan, but execute nothing against the runtime
 	// dockerProbeSlow is that Docker did not answer in time when this `up` asked it whether it holds an image (#1905); it is not asked again in the same `up`.
 	dockerProbeSlow bool
-	oneOffOf        string // the service a `run` is starting dependencies for: it waits on them though it is not among what this Up starts
+	oneOffOf        string        // the service a `run` is starting dependencies for: it waits on them though it is not among what this Up starts
+	wait            bool          // --wait: after starting, wait for every service this up covers that has a healthcheck to pass it
+	waitTimeout     time.Duration // --wait-timeout: how long that wait may take in all; 0 for no limit
+	// waitDeadline is when the --wait phase gives up, set only while it runs: the
+	// dependency waits before it are not bounded by --wait-timeout.
+	waitDeadline time.Time
 }
+
+// errWaitTimeout is what waitHealthy returns when the --wait phase's deadline
+// passes before the healthcheck does.
+var errWaitTimeout = errors.New("the --wait-timeout ran out")
 
 // orphans returns the project's containers (by label) whose names don't match any
 // current service — left behind when a service was removed or renamed. Both a
@@ -211,6 +224,15 @@ func (o *Orchestrator) upDependenciesOf(service string, deps []string) error {
 // SetUpOptions configures `up`'s recreate/build behavior from the command flags.
 func (o *Orchestrator) SetUpOptions(forceRecreate, build, noBuild, removeOrphans, fromDocker bool) {
 	o.up = upOptions{forceRecreate: forceRecreate, build: build, noBuild: noBuild, removeOrphans: removeOrphans, fromDocker: fromDocker}
+}
+
+// SetWait makes the next `up` wait, once everything is started, for each
+// long-running service it covers that has a healthcheck to pass it (`--wait`),
+// for at most timeout in all (0 for no limit). Call it after SetUpOptions, which
+// resets the option block.
+func (o *Orchestrator) SetWait(wait bool, timeout time.Duration) {
+	o.up.wait = wait
+	o.up.waitTimeout = timeout
 }
 
 // SetAfterUpLocked sets what the next `up` runs as it finishes, with the error it is returning, while it still holds the
@@ -312,6 +334,17 @@ func configHash(o runtime.RunOptions) string {
 	// recreated on upgrade — but toggling any of these does recreate.
 	if o.MacAddress != "" {
 		write("mac", o.MacAddress)
+	}
+	if len(o.NetworkAliases) > 0 {
+		nets := make([]string, 0, len(o.NetworkAliases))
+		for n := range o.NetworkAliases {
+			nets = append(nets, n)
+		}
+		sort.Strings(nets)
+		for _, n := range nets {
+			write("alias", n)
+			write(o.NetworkAliases[n]...)
+		}
 	}
 	if o.ShmSize != "" {
 		write("shm", o.ShmSize)
@@ -2782,6 +2815,7 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 
 		mem, cpu, _ := svc.Resources() // validated at load
 		svcNets, dnsDomain, dnsSearch := o.serviceNetworks(svc)
+		aliases := o.networkAliases(name, svc)
 		// The pre-flight above has already refused a service whose env_file
 		// could not be read, so this cannot fail here today. It is asked
 		// through the same door anyway: the alternative is reading Environment
@@ -2809,6 +2843,7 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 			Image:             image,
 			Platform:          svc.Platform,
 			Networks:          svcNets,
+			NetworkAliases:    aliases,
 			DNSDomain:         dnsDomain,
 			DNSSearch:         dnsSearch,
 			MacAddress:        svc.MacAddress,
@@ -2892,7 +2927,7 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 			// satisfied structurally, since deps precede dependents in the order.
 			runOpts.Detach = false
 			o.logf("Running %s to completion (%s)\n", name, image)
-			if err := o.rt.Run(runOpts); err != nil {
+			if err := o.runDroppingHeldAliases(name, runOpts); err != nil {
 				// A Ctrl-C during the run kills the child, and the run returns a
 				// failure — but the person who pressed it did not see a service
 				// fail, and there is nothing in its logs to check. Say what happened.
@@ -2966,7 +3001,7 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 			continue
 		}
 		o.logf("Starting %s (%s)\n", name, image)
-		if err := o.rt.Run(runOpts); err != nil {
+		if err := o.runDroppingHeldAliases(name, runOpts); err != nil {
 			// A foreground run stays attached until the container exits, so a Ctrl-C
 			// lands here as the run's failure ("signal: killed"). The loop's own
 			// interrupted() check runs only between services and never sees it; the
@@ -3071,7 +3106,53 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 		if err := o.verifyStarted(order, oneShot); err != nil {
 			return err
 		}
+		if o.up.wait {
+			if err := o.awaitStartedHealthy(order, oneShot); err != nil {
+				return err
+			}
+		}
 		o.noteHostNames(order, oneShot)
+	}
+	return nil
+}
+
+// awaitStartedHealthy is `up --wait`: each long-running service this `up`
+// covers — started now, or left running because it was up to date, as docker
+// compose waits for one already running (v5.6.1, measured: rc 1 over a running
+// unhealthy service) — that has a healthcheck switched on is waited on until it passes, in
+// startup order, and the first that does not pass fails the `up`. Nothing is
+// rolled back — the services are up, and docker compose leaves them running too
+// (v5.6.1, measured: an unhealthy service, one that exits, and a --wait-timeout
+// that runs out are each rc 1 with the containers left as they are). A service
+// with no healthcheck is waited on only as far as verifyStarted's look, which
+// is where docker compose's "running" is; a one-shot has already completed.
+func (o *Orchestrator) awaitStartedHealthy(order []string, oneShot map[string]bool) error {
+	if o.up.waitTimeout > 0 {
+		o.up.waitDeadline = o.now().Add(o.up.waitTimeout)
+		defer func() { o.up.waitDeadline = time.Time{} }()
+	}
+	for _, name := range order {
+		svc := o.Project.Services[name]
+		if svc == nil || oneShot[name] {
+			continue
+		}
+		hc := svc.Healthcheck
+		if hc == nil || hc.Disabled || len(hc.Test) == 0 {
+			continue
+		}
+		o.logf("Waiting for %s to be healthy\n", name)
+		err := o.waitHealthy(name, hc)
+		switch {
+		case err == nil:
+			continue
+		case errors.Is(err, errWaitTimeout):
+			return fmt.Errorf("[%s] service %q was not healthy within the --wait-timeout of %s; the services stay up — `opossum ps` and `opossum logs %s` show where it is",
+				codeWaitNotHealthy, name, o.up.waitTimeout, name)
+		case o.interrupted() != nil:
+			return fmt.Errorf("interrupted while waiting for service %q to be healthy; the services stay up", name)
+		}
+		return fmt.Errorf("[%s] service %q did not become healthy: %v; the services stay up — `opossum logs %s` shows what it said",
+			codeWaitNotHealthy, name, err, name)
 	}
 	return nil
 }
@@ -5259,6 +5340,16 @@ func (o *Orchestrator) waitHealthy(name string, hc *compose.Healthcheck) error {
 			if o.now().Sub(start) < hc.StartPeriod && pace > healthStartInterval {
 				pace = healthStartInterval
 			}
+			// Under `up --wait`, not past its deadline: a sleep that would end after
+			// it ends at it, and the deadline is then said instead of probing again.
+			if !o.up.waitDeadline.IsZero() {
+				if left := o.up.waitDeadline.Sub(o.now()); left < pace {
+					if left > 0 {
+						o.sleep(left)
+					}
+					return errWaitTimeout
+				}
+			}
 			o.sleep(pace)
 		}
 		err := o.rt.Exec(cname, hc.Test, probeTimeout(hc))
@@ -6289,6 +6380,15 @@ func runErrorHint(svc *compose.Service, holder string, takesItBack bool, err err
 		}
 		return "\n  → [" + string(codeImageNoArm64) + "] this image has no build for Apple silicon (arm64). " +
 			"Set `platform: linux/amd64` on the service — opossum runs an amd64 image through Rosetta."
+	// container 1.6.1 counts the names and network aliases of every container,
+	// running or stopped, and refuses a run whose own name another holds as an
+	// alias (network-aliases-161.txt): a container an earlier `up` gave the
+	// alias, before the file named a service after it.
+	case hostnameHeldAsAlias(s):
+		return "\n  → [" + string(codeNameHeldAsAlias) + "] another container holds this service's name as a network alias — " +
+			"one an earlier `opossum up` made, before a service took that name. Recreate the service that holds the alias " +
+			"(`opossum up --force-recreate <service>`), which no longer passes it, then `opossum up`; " +
+			"if the holder is a container this project no longer has, `opossum up --remove-orphans`"
 	// The kernel refused to run what the service starts: `Exec format error`
 	// (ENOEXEC). Two things do that — a program built for another architecture
 	// than the image's (an amd64 binary in an arm64 image, which docker runs

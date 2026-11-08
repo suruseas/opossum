@@ -122,13 +122,6 @@ func TestAServiceNamedAfterACollectionKeepsItsOwnFieldRules(t *testing.T) {
 	if svc == nil {
 		t.Fatalf("service missing: %v", p.Services)
 	}
-	found := false
-	for _, u := range svc.Unsupported {
-		if u == "networks.back.aliases" {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("the service's own networks field should merge by name (aliases kept), got %v", svc.Unsupported)
-	}
+	// The service's own networks field merges by name, so the aliases are kept.
+	wantAliases(t, svc, "back", "db-alias")
 }

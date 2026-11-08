@@ -84,7 +84,13 @@ func run(args []string) int {
 		// rendering); report running (the stopped case is handled above).
 		if arg(1) == "status" {
 			if arg(2) == "--format" && arg(3) == "json" {
-				fmt.Println(`{"client":{"version":"1.4.1"},"resources":{"containersRunning":0,"containersTotal":1,"images":3},"server":{"version":"1.4.1"},"status":"running"}`)
+				// CLIENT_VERSION stands in for a newer CLI (1.6.0 takes network
+				// aliases); the server's is left as it is.
+				client := "1.4.1"
+				if v := os.Getenv("CLIENT_VERSION"); v != "" {
+					client = v
+				}
+				fmt.Printf(`{"client":{"version":%q},"resources":{"containersRunning":0,"containersTotal":1,"images":3},"server":{"version":"1.4.1"},"status":"running"}`+"\n", client)
 			} else {
 				fmt.Println("status running")
 			}
@@ -700,6 +706,75 @@ func run(args []string) int {
 				}
 			}
 		}
+		// $RUN_ALIAS_HELD is a network alias another container already holds, and
+		// $RUN_HOSTNAME_HELD a container name another holds as an alias: container
+		// 1.6.1 refuses the run with these lines and makes nothing
+		// (testdata/error-wordings/network-aliases-161.txt).
+		// $RUN_ALIAS_HELD is a space-separated list; the run is refused naming
+		// those of them it asks for. With $RUN_REFUSE_AFTER_ALIASES set, the run
+		// after such a refusal fails too, with another error.
+		if dir := os.Getenv("STATE_DIR"); dir != "" && os.Getenv("RUN_REFUSE_AFTER_ALIASES") != "" {
+			if _, err := os.Stat(filepath.Join(dir, "alias-refused")); err == nil {
+				fmt.Fprintln(os.Stderr, "Error: internalError: \"the run after an alias refusal fails too\"")
+				return 1
+			}
+		}
+		// $RUN_ALIAS_HELD_OTHER refuses a run that passes any alias, naming an
+		// alias the run did not ask for: the list reads, and names none of them.
+		if other := os.Getenv("RUN_ALIAS_HELD_OTHER"); other != "" {
+			for _, a := range args {
+				if strings.HasPrefix(a, "--network=") && strings.Contains(a, ",alias=") {
+					fmt.Fprintln(os.Stderr, "[0/6] [0s]")
+					fmt.Fprintf(os.Stderr, "Error: alias(es) already exist: [%q]\n", other)
+					return 1
+				}
+			}
+		}
+		if held := strings.Fields(os.Getenv("RUN_ALIAS_HELD")); len(held) > 0 {
+			var hit []string
+			for _, h := range held {
+				for _, a := range args {
+					if strings.HasPrefix(a, "--network=") && strings.Contains(a+",", ",alias="+h+",") {
+						// $RUN_ALIAS_HELD_UNQUOTED writes the list in a form that
+						// does not read as one, to stand for a wording that changed.
+						if os.Getenv("RUN_ALIAS_HELD_UNQUOTED") != "" {
+							hit = append(hit, h)
+						} else {
+							hit = append(hit, fmt.Sprintf("%q", h))
+						}
+						break
+					}
+				}
+			}
+			if len(hit) > 0 {
+				if dir := os.Getenv("STATE_DIR"); dir != "" {
+					_ = os.WriteFile(filepath.Join(dir, "alias-refused"), nil, 0o644)
+					// $RUN_ALIAS_HELD_MADE stands in for a run that made its
+					// container before the line came: not what 1.6.1 does (its
+					// refusal makes nothing), but what a container that printed
+					// the same line would look like.
+					if os.Getenv("RUN_ALIAS_HELD_MADE") != "" {
+						for k, a := range args {
+							if k > 0 && args[k-1] == "--name" {
+								_ = os.WriteFile(createdPath(dir, a), []byte("1"), 0o644)
+							}
+						}
+					}
+				}
+				fmt.Fprintln(os.Stderr, "[0/6] [0s]")
+				fmt.Fprintf(os.Stderr, "Error: alias(es) already exist: [%s]\n", strings.Join(hit, ", "))
+				return 1
+			}
+		}
+		if held := os.Getenv("RUN_HOSTNAME_HELD"); held != "" {
+			for i, a := range args {
+				if i > 0 && args[i-1] == "--name" && a == held {
+					fmt.Fprintln(os.Stderr, "[0/6] [0s]")
+					fmt.Fprintf(os.Stderr, "Error: hostname(s) already exist: [%q]\n", held+".")
+					return 1
+				}
+			}
+		}
 		// A volume the runtime would not create is refused after the name (a taken
 		// name is said first on 1.4.1) and before anything is recorded: the real
 		// run makes no volume, not even a valid one before it.
@@ -1003,6 +1078,11 @@ func run(args []string) int {
 			time.Sleep(30 * time.Second) // never returns within the probe timeout
 		}
 		counter := os.Getenv("HEALTH_COUNTER")
+		// $HEALTH_PER_CONTAINER counts each container's probes apart, so a test
+		// can have a second service fail while the first passes.
+		if os.Getenv("HEALTH_PER_CONTAINER") != "" {
+			counter += "." + execTarget(args)
+		}
 		n := 0
 		if b, err := os.ReadFile(counter); err == nil {
 			fmt.Sscanf(strings.TrimSpace(string(b)), "%d", &n)

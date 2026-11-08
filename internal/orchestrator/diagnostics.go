@@ -57,6 +57,7 @@ const (
 	codeHostAddressUnbindable   diagCode = "OPSM-214" // a published entry names a host address this machine will not bind
 	codeHostPortNotBindable     diagCode = "OPSM-215" // a published host port was refused for a reason other than a listener (a port below 1024 on a specific address takes root)
 	codeHostNameNotYet          diagCode = "OPSM-216" // a running service's name cannot be looked up on this host: something asked for it before it was registered and macOS keeps that answer
+	codeNameHeldAsAlias         diagCode = "OPSM-217" // another container holds the service's name as a network alias, so the runtime refuses to start it
 	codeDepNotRunning           diagCode = "OPSM-401" // a dependency's container exited before becoming healthy
 	codeOrphans                 diagCode = "OPSM-402" // containers left by services no longer in the compose
 	codeDepNoHealth             diagCode = "OPSM-403" // a service_healthy dependency defines no healthcheck
@@ -73,6 +74,7 @@ const (
 	codeRegistryRefused         diagCode = "OPSM-415" // the runtime refuses to pull from this registry (lscr.io), where docker compose does not
 	codeProgramWrongArch        diagCode = "OPSM-416" // the kernel could not run what a service starts (`Exec format error`): a program built for another CPU architecture than the image's, or a script with no `#!` line
 	codeServiceExited           diagCode = "OPSM-407" // a service's container exited right after starting (no health gate)
+	codeWaitNotHealthy          diagCode = "OPSM-417" // `up --wait`: a started service did not pass its healthcheck, or not within --wait-timeout
 	codeIgnoredTopField         diagCode = "OPSM-501" // unsupported top-level compose field(s), ignored
 	codeIgnoredField            diagCode = "OPSM-502" // unsupported service compose field(s), ignored
 	codeWatchRebuild            diagCode = "OPSM-601" // a `watch` rebuild action failed
@@ -90,10 +92,10 @@ var allDiagCodes = []diagCode{
 	codeDataDirNotThisMount,
 	codeHostPortInUse, codeDNSDomainAbsent, codeInternalEgress, codeDockerSocket, codeExternalNetAbsent, codeHostPortRemapped,
 	codeNetworkSubnetChanged, codeProjectBusy, codeServiceNameUnresolvable, codeExternalVolumeAbsent, codeSecondNetworkName,
-	codeHostPortNotPlaced, codeHostPortTwice, codeHostAddressUnbindable, codeHostPortNotBindable, codeHostNameNotYet,
+	codeHostPortNotPlaced, codeHostPortTwice, codeHostAddressUnbindable, codeHostPortNotBindable, codeHostNameNotYet, codeNameHeldAsAlias,
 	codeDepNotRunning, codeOrphans, codeDepNoHealth,
 	codeIgnoredTopField, codeIgnoredField, codeRuntimeAbsent, codeRuntimeStopped, codeRuntimeAutoStart, codeServiceExited, codeSupervisorStarted, codeSupervisorAction, codeImageNoArm64, codeProgramWrongArch, codeOptionalDependency, codeRegistryRefused,
-	codeSupervisorLogTrimmed, codeSupervisorLogUncapped, codeSupervisorStopFailed,
+	codeSupervisorLogTrimmed, codeSupervisorLogUncapped, codeSupervisorStopFailed, codeWaitNotHealthy,
 	codeWatchRebuild, codeWatchRestart, codeWatchSync, codeWatchSetup, codeWatchError,
 }
 

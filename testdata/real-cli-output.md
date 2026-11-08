@@ -55,6 +55,13 @@ and compared with the 1.5.0 files. The sections below were not rewritten; what c
   `Error: image … does not support linux/arm64; available: […]` (`--arch arm64` alone: `*/arm64`), where
   1.4.1 said `Error: platform linux/arm64`; with `platform: linux/amd64` it runs `x86_64`
   (`error-wordings/platform-not-supported-arm64-161.txt`, row 2d of the wording table).
+- Network aliases (`--network <name>,alias=<name>`): a one-label alias is refused; one under the DNS domain
+  (`<alias>.<project>.<domain>`) is reached by its short name through the search domain; names are not kept
+  apart by network; a name or alias any container holds, running or stopped, is refused for another
+  (`hostname(s) already exist`, `alias(es) already exist`, rows 14 and 15 of the wording table); an alias with
+  a dot and the domain after it is reached by its short name from glibc and not from musl. The raw output, with
+  opossum built from the change that passes aliases, `system status --format json` and docker compose v5.6.1's
+  `run --use-aliases`, is in `error-wordings/network-aliases-161.txt`.
 
 **Not measured on 1.6.1:**
 - Keys opossum reads that no capture contains: a container's `publishedPorts` and `mounts[].type.volume.name`,
@@ -544,6 +551,8 @@ HOST FOOTPRINT が黙って `—`／上流はホストのコマンド）。
 | 11 | `doctor` の storage 警告 | `doctor.go` `parseReclaimable` | `GB (` | `raw:doctor-inputs-131.txt` | `raw:doctor-inputs-131.txt`（`GB` と `MB` のみ。`B`/`KB`/`TB`/`PB` は unverified） |
 | 12 | `doctor` の builder 警告 | `doctor.go` `parseBuilder` | `running` `MB` | `raw:doctor-inputs-131.txt` | `raw:doctor-inputs-131.txt`（`running`・`stopped`・`MB` のみ。`GB` は unverified） |
 | 13 | OPSM-416 | `orchestrator.go` `execFormatError` | `failed to exec [` `Exec format error` | `unverified` | `raw:exec-format-error-150.txt` |
+| 14 | OPSM-502（alias なしでやり直す） | `netalias.go` `aliasesHeld` | `Error: alias(es) already exist: [` | `raw:network-aliases-161.txt` | `raw:network-aliases-161.txt` |
+| 15 | OPSM-217 | `netalias.go` `hostnameHeldAsAlias` | `Error: hostname(s) already exist: [` | `raw:network-aliases-161.txt` | `raw:network-aliases-161.txt` |
 
 **文言列とコードは、コード側の宣言で結ばれている。** 上流の文言に当てる各パッケージは
 `UpstreamWordings`（`internal/runtime/upstream.go` の型）に「どの関数が・どの文言に」を宣言し、

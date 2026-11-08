@@ -55,7 +55,7 @@ func TestKeysDockerComposeTakesAreListedNotRefused(t *testing.T) {
 		"    ports: [{target: 80, published: 8080, mode: host, x-note: 1}]\n" +
 		"    volumes: [{type: volume, source: d, target: /d, volume: {subpath: x}}]\n" +
 		"    depends_on: {db: {condition: service_started, restart: true, x-note: 1}}\n" +
-		"    networks: {back: {aliases: [w], x-note: 1}}\n" +
+		"    networks: {back: {aliases: [w.example], x-note: 1}}\n" +
 		"  db:\n    image: b\n" +
 		"volumes:\n  d:\n    driver: local\n    x-note: 1\n" +
 		"networks:\n  back:\n    ipam: {driver: default, config: [{subnet: 10.0.0.0/24}]}\n" +

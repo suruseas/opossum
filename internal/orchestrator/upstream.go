@@ -26,6 +26,8 @@ var UpstreamWordings = []runtime.UpstreamWording{
 	{Site: "arm64NotSupportedWithAmd64", Wording: " does not support "},
 	{Site: "arm64NotSupportedWithAmd64", Wording: "; available: ["},
 	{Site: "arm64NotSupportedWithAmd64", Wording: `variant: nil, _rawOS: "linux", _rawArch: "amd64")`},
+	{Site: "aliasesHeld", Wording: "Error: alias(es) already exist: ["},
+	{Site: "hostnameHeldAsAlias", Wording: "Error: hostname(s) already exist: ["},
 	{Site: "runErrorHint", Wording: "failed to resolve"},
 	{Site: "runErrorHint", Wording: "in rootfs"},
 	{Site: "runErrorHint", Wording: "Address already in use"},
