@@ -8,8 +8,8 @@ import (
 	"testing"
 )
 
-// `go test` stops a package's run at ten minutes unless it is told otherwise. The orchestrator package under -race takes 393 s and 405 s in the two lanes of a
-// green CI run, and twice (#1798, #1813) it was stopped at 600 s because the machine the run was on was about four times slower for the whole run, so the gate
+// `go test` stops a package's run at ten minutes unless it is told otherwise. The orchestrator package under -race is the longest of them, and a machine busy
+// with something else slows the whole run at once, enough to stop that package at ten minutes with none of its tests stuck, so the gate
 // gives `go test` thirty minutes, as GOFLAGS (which `go test` reads and every other go command ignores, so the gate's own lines keep the flags they are pinned
 // to). What is asked here is what the child of each target is handed, not how the Makefile says it: a Makefile that said it a different way — an assignment that
 // is not exported, one under an `ifndef  CI` or an `else`, one after a line that ends in a backslash — reads right and gives `go test` no timeout, and CI the
@@ -83,7 +83,7 @@ func TestTheGateHandsGoTestItsTimeoutInCIAndAway(t *testing.T) {
 						}
 					}
 					if timeout != "-timeout=30m" {
-						t.Errorf("`make %s`%s hands the test run GOFLAGS=%q, whose timeout is %q: want -timeout=30m, or `go test` stops a package at the ten minutes it stopped the orchestrator at (#1756)",
+						t.Errorf("`make %s`%s hands the test run GOFLAGS=%q, whose timeout is %q: want -timeout=30m, or `go test` stops a package at the ten minutes, which a busy machine can take the orchestrator past",
 							target, map[bool]string{true: " in CI", false: ""}[ci != ""], flags, timeout)
 					}
 				}

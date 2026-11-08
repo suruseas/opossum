@@ -57,8 +57,12 @@ func TestAnEntryInBothPlacesIsCaught(t *testing.T) {
 	}
 
 	// …and a directory where only the published entry exists is not reported: the
-	// check is about entries still waiting, not about every line in the file.
+	// check is about entries still waiting, not about every line in the file. With
+	// the fragment gone, `make changelog` would have emptied [Unreleased] too.
 	if err := os.Remove(filepath.Join(dir, "changelog.d", "999-waiting.fixed.md")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "CHANGELOG.md"), []byte(strings.Replace(doc, "### Fixed\n\n"+entry+"\n", "", 1)), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if found := waitingEntriesInPublishedSections(t, dir); len(found) != 0 {
@@ -78,7 +82,7 @@ func waitingEntriesInPublishedSections(t *testing.T, root string) []string {
 	if len(published) == 0 {
 		t.Fatal("no published sections found; this check is reading the file wrong")
 	}
-	frags, err := changelog.Load(filepath.Join(root, "changelog.d"))
+	frags, err := changelog.Waiting(filepath.Join(root, "CHANGELOG.md"), filepath.Join(root, "changelog.d"))
 	if err != nil {
 		t.Fatal(err)
 	}
