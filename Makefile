@@ -44,8 +44,8 @@ endif
 # that is busy with something else slows every package in the run at once, so
 # that package can pass ten minutes without any of its tests being stuck. Thirty
 # minutes leaves room for that, and a test that hangs is still stopped, only
-# later. It is given as GOFLAGS, which `go test` reads and every other
-# go command ignores, so the gate's lines above keep the flags they are pinned to.
+# later. It is given as GOFLAGS, which `go test` reads and every other go
+# command ignores, so the gate's lines above keep the flags they are pinned to.
 # Away from CI as well: the gate that is shorter than CI's is the one that passes
 # where CI fails.
 test: export GOFLAGS := $(GOFLAGS) -timeout=30m

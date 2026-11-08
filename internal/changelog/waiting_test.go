@@ -19,10 +19,11 @@ func TestWaitingTellsNoFragmentsFromTheWrongPlace(t *testing.T) {
 	const notExist = "\x00the read error"
 	const listed = "## [Unreleased]\n\n### Fixed\n\n- A fix.\n\n## [1.0.0] - 2026-10-24\n\n- Old.\n"
 	const empty = "## [Unreleased]\n\n## [1.0.0] - 2026-10-24\n\n- Old.\n"
+	const entry, unreadable = "- A fix.\n", "not an entry\n"
 	for _, tc := range []struct {
 		name      string
 		changelog string // "" for no CHANGELOG.md at all
-		fragment  bool   // a fragment in the directory asked about
+		fragment  string // the body of the one fragment in the directory asked about; "" for none
 		// apart puts the fragment directory somewhere other than beside the
 		// changelog, with a decoy CHANGELOG.md beside it that says the opposite,
 		// so only the changelog named in the call gives the row's answer.
@@ -30,13 +31,19 @@ func TestWaitingTellsNoFragmentsFromTheWrongPlace(t *testing.T) {
 		wantN   int
 		wantErr string // "" for no error; notExist for the read error itself
 	}{
-		{"entries listed and none found is the wrong place", listed, false, false, 0, "looking in the wrong place"},
-		{"entries listed and found", listed, true, false, 1, ""},
-		{"nothing listed and nothing found, as after a release", empty, false, false, 0, ""},
-		{"entries listed and none found, the changelog elsewhere", listed, false, true, 0, "looking in the wrong place"},
-		{"nothing listed and nothing found, the changelog elsewhere", empty, false, true, 0, ""},
+		{"entries listed and none found is the wrong place", listed, "", false, 0, "looking in the wrong place"},
+		{"entries listed and found", listed, entry, false, 1, ""},
+		{"nothing listed and nothing found, as after a release", empty, "", false, 0, ""},
+		{"entries listed and none found, the changelog elsewhere", listed, "", true, 0, "looking in the wrong place"},
+		{"nothing listed and nothing found, the changelog elsewhere", empty, "", true, 0, ""},
+		// The fragment where the call says and nowhere near the changelog: only
+		// the directory named in the call finds it.
+		{"entries listed and found, the changelog elsewhere", listed, entry, true, 1, ""},
 		// The read error, not the wrong-place one, which names CHANGELOG.md too.
-		{"no changelog is no answer", "", false, false, 0, notExist},
+		{"no changelog is no answer", "", "", false, 0, notExist},
+		// A fragment Load cannot read is an error, not "nothing found": the
+		// checks that lean on Waiting would otherwise skip over it.
+		{"a fragment that cannot be read is no answer", listed, unreadable, false, 0, "4-a-fix.fixed.md"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -63,11 +70,11 @@ func TestWaitingTellsNoFragmentsFromTheWrongPlace(t *testing.T) {
 				}
 				dir = filepath.Join(elsewhere, "changelog.d")
 			}
-			if tc.fragment {
+			if tc.fragment != "" {
 				if err := os.Mkdir(dir, 0o755); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.WriteFile(filepath.Join(dir, "4-a-fix.fixed.md"), []byte("- A fix.\n"), 0o644); err != nil {
+				if err := os.WriteFile(filepath.Join(dir, "4-a-fix.fixed.md"), []byte(tc.fragment), 0o644); err != nil {
 					t.Fatal(err)
 				}
 			}

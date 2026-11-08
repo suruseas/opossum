@@ -83,7 +83,7 @@ func TestTheGateHandsGoTestItsTimeoutInCIAndAway(t *testing.T) {
 						}
 					}
 					if timeout != "-timeout=30m" {
-						t.Errorf("`make %s`%s hands the test run GOFLAGS=%q, whose timeout is %q: want -timeout=30m, or `go test` stops a package at the ten minutes it stopped the orchestrator at (#1756)",
+						t.Errorf("`make %s`%s hands the test run GOFLAGS=%q, whose timeout is %q: want -timeout=30m, or `go test` stops a package at the ten minutes, which a busy machine can take the orchestrator past",
 							target, map[bool]string{true: " in CI", false: ""}[ci != ""], flags, timeout)
 					}
 				}
