@@ -61,7 +61,7 @@ func repoRoot(t *testing.T) string {
 // published release.
 func TestUnreleasedMatchesFragments(t *testing.T) {
 	root := repoRoot(t)
-	frags, err := changelog.Load(filepath.Join(root, "changelog.d"))
+	frags, err := changelog.Waiting(filepath.Join(root, "CHANGELOG.md"), filepath.Join(root, "changelog.d"))
 	if err != nil {
 		t.Fatalf("reading changelog.d: %v", err)
 	}
@@ -962,21 +962,31 @@ func TestAFragmentTheDecomposerCannotReadIsNamed(t *testing.T) {
 	}
 }
 
-// Every fragment handed to the round trip goes through it, not only the first:
-// a readable one first and the one the decomposer cannot read second still fails.
+// Every fragment handed to the round trip goes through it, not only some: the
+// one the decomposer cannot read sits between two readable ones, so carrying
+// only the first, dropping the first, or dropping the last still meets it.
 func TestTheRoundTripCarriesEveryFragmentItIsHanded(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "1-fine.added.md", "- Fine.\n")
-	write(t, dir, "999-probe.added.md", "- One.\n\n\n- Two.\n")
+	write(t, dir, "500-probe.added.md", "- One.\n\n\n- Two.\n")
+	write(t, dir, "999-also-fine.added.md", "- Also fine.\n")
 	frags, err := changelog.Load(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(frags) != 2 || filepath.Base(frags[1].Path) != "999-probe.added.md" {
-		t.Fatalf("want the readable fragment first and the probe second, got %v", frags)
+	if len(frags) != 3 || filepath.Base(frags[1].Path) != "500-probe.added.md" {
+		t.Fatalf("want the probe between two readable fragments, got %v", frags)
 	}
-	if err := fragmentsRoundTrip(t, frags); err == nil || !strings.Contains(err.Error(), "999-probe.added.md") {
-		t.Errorf("the round trip did not carry the second fragment: %v", err)
+	err = fragmentsRoundTrip(t, frags)
+	if err == nil {
+		t.Fatal("the round trip did not meet the fragment the decomposer cannot read")
+	}
+	// The failure names every fragment it carried, so one left out is seen
+	// even where the probe was not.
+	for _, name := range []string{"1-fine.added.md", "500-probe.added.md", "999-also-fine.added.md"} {
+		if !strings.Contains(err.Error(), name) {
+			t.Errorf("the round trip did not carry %s:\n%v", name, err)
+		}
 	}
 }
 
