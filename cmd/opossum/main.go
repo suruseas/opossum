@@ -674,7 +674,7 @@ func upCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&foreground, "foreground", false, "run a single service attached in the foreground instead of detached (rejected for multiple long-running services)")
 	cmd.Flags().BoolVarP(&detach, "detach", "d", false, "run detached, which `up` does already (taken so `up -d` works as with docker compose)")
-	cmd.Flags().BoolVar(&wait, "wait", false, "after starting, wait for each started service with a healthcheck to pass it; fail if one does not")
+	cmd.Flags().BoolVar(&wait, "wait", false, "after starting, wait for each service this up covers that has a healthcheck to pass it (one already running too); fail if one does not")
 	cmd.Flags().IntVar(&waitTimeout, "wait-timeout", 0, "with --wait, the most seconds to wait in all (0 for no limit)")
 	cmd.Flags().BoolVar(&forceRecreate, "force-recreate", false, "recreate containers even if their configuration is unchanged")
 	cmd.Flags().BoolVar(&build, "build", false, "build images before starting, even if already present")

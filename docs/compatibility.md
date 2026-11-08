@@ -337,22 +337,25 @@ compose says `service "init" didn't complete successfully: exit 1` and returns
 ### `up --wait`
 
 `opossum up --wait` starts the services as `up` does, then waits for each
-long-running service it started that has a healthcheck switched on to pass it,
-and fails with `[OPSM-417]` if one does not. `-d` is taken too, so `up -d
+long-running service it covers that has a healthcheck switched on to pass it —
+one it left running because it was up to date as well — and fails with `[OPSM-417]` if one does not. `-d` is taken too, so `up -d
 --wait` as written for docker compose runs unchanged (`up` is detached either
 way), and `--wait-timeout <seconds>` bounds the wait in all. Measured against
-docker compose v5.6.1, one service at a time unless said:
+docker compose v5.6.1, one service at a time unless said; the opossum rows
+marked ✓ were checked on container 1.6.1, the others against the test
+stand-in for the runtime:
 
 | Shape | docker compose `up -d --wait` | `opossum up --wait` |
 |---|---|---|
 | no healthcheck, keeps running | rc 0 | rc 0, nothing probed |
-| healthcheck that passes (also after a `start_period`) | rc 0 | rc 0 |
-| healthcheck that fails its retries | rc 1, `container … is unhealthy`, left running | rc 1, `[OPSM-417]`, left running |
-| exits right after starting | rc 1, `container … exited (3)` | rc 1, `[OPSM-407]` (the look a plain `up` takes) |
-| exits three seconds after starting, no healthcheck | rc 0 | rc 0 |
+| healthcheck that passes (also after a `start_period`) | rc 0 | rc 0 ✓ |
+| healthcheck that fails its retries | rc 1, `container … is unhealthy`, left running | rc 1, `[OPSM-417]`, left running ✓ |
+| the same service already running and unhealthy, `up` again | rc 1, waits for it | rc 1, waits for it |
+| exits right after starting | rc 1, `container … exited (3)` | rc 1, `[OPSM-407]` (the look a plain `up` takes) ✓ |
+| exits three seconds after starting, no healthcheck | rc 0 | rc 0 ✓ |
 | `healthcheck: {disable: true}` | rc 0 | rc 0, nothing probed |
 | a `service_completed_successfully` dependency, then a service | rc 0 | rc 0, the one-shot not probed |
-| `--wait-timeout 3` that runs out | rc 1, `application not healthy after 3s`, left running | rc 1, `[OPSM-417]`, left running |
+| `--wait-timeout 3` that runs out | rc 1, `application not healthy after 3s`, left running | rc 1, `[OPSM-417]`, left running ✓ |
 | `--wait-timeout 3` without `--wait` | rc 0, not waited for | rc 0, not waited for, and says so |
 | `--wait` without `-d` | detaches, rc 0 | detaches (as `up` always does) |
 
@@ -363,8 +366,13 @@ healthcheck's `start_period` and retries are counted from when opossum starts
 waiting on that service rather than from the container's start, which is the
 more patient of the two. opossum runs each probe itself, with `container exec`,
 and a probe still running when `--wait-timeout` passes is let finish (up to
-the healthcheck's `timeout`) before `up` gives up. `--wait` with `--foreground`
-is refused: a foreground `up` ends when the service does.
+the healthcheck's `timeout`) before `up` gives up. Only the `healthcheck:` the
+compose file writes is read: a `HEALTHCHECK` in the image, which docker uses
+when the file gives none, is not, so such a service is not waited on. A Ctrl-C
+during the wait ends `up` with status 1 (docker compose's status there was not
+measured), after the probe or pause it is in, which can be as long as the
+healthcheck's interval. `--wait` with `--foreground` is refused: a foreground
+`up` ends when the service does.
 
 ## Variable interpolation
 

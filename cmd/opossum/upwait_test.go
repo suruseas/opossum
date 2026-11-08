@@ -99,11 +99,25 @@ func TestUpWaitFlags(t *testing.T) {
 		if err != nil {
 			t.Fatalf("up --wait-timeout 1: %v", err)
 		}
-		if !strings.Contains(stderr, "opossum: --wait-timeout does nothing without --wait") {
-			t.Errorf("not said on stderr:\n%s", stderr)
+		if n := strings.Count(stderr, "opossum: --wait-timeout does nothing without --wait"); n != 1 {
+			t.Errorf("said %d times on stderr, want once:\n%s", n, stderr)
 		}
 		if n := probes(readLog()); n != 0 {
 			t.Errorf("probed %d times without --wait", n)
+		}
+	})
+
+	t.Run("-d alone starts and probes nothing", func(t *testing.T) {
+		readLog := start(t, "100000")
+		compose := writeCompose(t, healthchecked)
+		if _, err := run(t, "-f", compose, "up", "--no-supervisor", "-d"); err != nil {
+			t.Fatalf("up -d: %v", err)
+		}
+		if !ran(readLog()) {
+			t.Errorf("up -d started nothing: %v", readLog())
+		}
+		if n := probes(readLog()); n != 0 {
+			t.Errorf("up -d probed %d times", n)
 		}
 	})
 

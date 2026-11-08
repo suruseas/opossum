@@ -145,7 +145,7 @@ type upOptions struct {
 	// dockerProbeSlow is that Docker did not answer in time when this `up` asked it whether it holds an image (#1905); it is not asked again in the same `up`.
 	dockerProbeSlow bool
 	oneOffOf        string        // the service a `run` is starting dependencies for: it waits on them though it is not among what this Up starts
-	wait            bool          // --wait: after starting, wait for every started service with a healthcheck to pass it
+	wait            bool          // --wait: after starting, wait for every service this up covers that has a healthcheck to pass it
 	waitTimeout     time.Duration // --wait-timeout: how long that wait may take in all; 0 for no limit
 	// waitDeadline is when the --wait phase gives up, set only while it runs: the
 	// dependency waits before it are not bounded by --wait-timeout.
@@ -223,7 +223,7 @@ func (o *Orchestrator) SetUpOptions(forceRecreate, build, noBuild, removeOrphans
 }
 
 // SetWait makes the next `up` wait, once everything is started, for each
-// long-running service it started that has a healthcheck to pass it (`--wait`),
+// long-running service it covers that has a healthcheck to pass it (`--wait`),
 // for at most timeout in all (0 for no limit). Call it after SetUpOptions, which
 // resets the option block.
 func (o *Orchestrator) SetWait(wait bool, timeout time.Duration) {
@@ -3100,7 +3100,9 @@ func (o *Orchestrator) Up(detach bool, services ...string) (err error) {
 }
 
 // awaitStartedHealthy is `up --wait`: each long-running service this `up`
-// started that has a healthcheck switched on is waited on until it passes, in
+// covers — started now, or left running because it was up to date, as docker
+// compose waits for one already running (v5.6.1, measured: rc 1 over a running
+// unhealthy service) — that has a healthcheck switched on is waited on until it passes, in
 // startup order, and the first that does not pass fails the `up`. Nothing is
 // rolled back — the services are up, and docker compose leaves them running too
 // (v5.6.1, measured: an unhealthy service, one that exits, and a --wait-timeout

@@ -164,6 +164,32 @@ func TestUpWaitWaitsForTheStartedServicesHealthchecks(t *testing.T) {
 	})
 }
 
+// A service the `up` left running because it was up to date is waited on too,
+// as docker compose waits for one already running (v5.6.1, measured: a second
+// `up -d --wait` over a running unhealthy service is rc 1, `is unhealthy`).
+func TestUpWaitWaitsForAServiceAlreadyRunning(t *testing.T) {
+	rt, log := fakeShim(t)
+	p := project("demo", map[string]*compose.Service{"web": {Image: "web:latest", Healthcheck: probed(2)}})
+	if err := orchestrator.New(p, rt, "opossum", &bytes.Buffer{}).Up(true); err != nil {
+		t.Fatalf("first Up: %v", err)
+	}
+	runs := countLines(log(), "run -d --name web.demo.opossum")
+	setShimEnv(rt, "HEALTH_OK_AT=100000")
+	var out bytes.Buffer
+	o := orchestrator.New(p, rt, "opossum", &out)
+	o.SetWait(true, 0)
+	err := o.Up(true)
+	if !strings.Contains(out.String(), "web is up to date") {
+		t.Fatalf("the second up did not leave web as it was, so this is not the shape asked about:\n%s", out.String())
+	}
+	if n := countLines(log(), "run -d --name web.demo.opossum"); n != runs {
+		t.Fatalf("web was run again (%d runs, was %d)", n, runs)
+	}
+	if err == nil || !strings.Contains(err.Error(), `[OPSM-417] service "web" did not become healthy`) {
+		t.Errorf("want the running service waited on and failed, got %v", err)
+	}
+}
+
 // --wait-timeout bounds the wait after starting, and only that.
 func TestUpWaitTimeout(t *testing.T) {
 	t.Run("a wait that outlasts it fails, saying so", func(t *testing.T) {
@@ -199,6 +225,24 @@ func TestUpWaitTimeout(t *testing.T) {
 			}
 		case <-time.After(20 * time.Second):
 			t.Fatal("the wait slept an hour's interval past a 300ms --wait-timeout")
+		}
+	})
+
+	t.Run("it bounds the whole wait, not each service", func(t *testing.T) {
+		slow := func() *compose.Healthcheck { hc := probed(100); hc.Interval = 300 * time.Millisecond; return hc }
+		p := project("demo", map[string]*compose.Service{
+			"a": {Image: "a:latest", Healthcheck: slow()},
+			"b": {Image: "b:latest", Healthcheck: slow()},
+		})
+		// Each passes on its own third probe, 600ms after its first: a by about
+		// 600ms in, b not before 1.2s, past the 900ms the wait has in all, though
+		// within 900ms of its own first probe.
+		err, _, lines := upWaiting(t, p, true, 900*time.Millisecond, "HEALTH_PER_CONTAINER=1", "HEALTH_OK_AT=3")
+		if err == nil || !strings.Contains(err.Error(), `service "b" was not healthy within the --wait-timeout of 900ms`) {
+			t.Fatalf("want b to run out of the wait a used part of, got %v", err)
+		}
+		if n := countLines(lines, "exec a.demo.opossum probe"); n != 3 {
+			t.Errorf("want a probed 3 times, got %d", n)
 		}
 	})
 
