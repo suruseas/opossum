@@ -187,8 +187,14 @@ func (o *Orchestrator) runDroppingHeldAliases(name string, opts runtime.RunOptio
 	for i, a := range dropped {
 		short[i] = strconv.Quote(strings.TrimSuffix(a, "."+o.searchDomain()))
 	}
-	o.warnf(codeIgnoredField, "service %q: network alias(es) %s not passed: another container already holds them — "+
-		"remove it (`opossum up --remove-orphans` for one this project no longer has, or `opossum down`), then `opossum up --force-recreate %s`\n",
+	// The refusal does not say which container holds them, so each way out is
+	// given with the holder it is for. `opossum down` without --remove-orphans
+	// leaves an orphan, so it is not offered for one.
+	o.warnf(codeIgnoredField, "service %q: network alias(es) %s not passed: another container already holds them. "+
+		"Free them, then `opossum up --force-recreate %s`: "+
+		"where the holder is a service of this project, recreate it (`opossum up --force-recreate <that service>`); "+
+		"where it is a container this project no longer has, `opossum up --remove-orphans` (`opossum down` alone leaves it); "+
+		"where it is another project's, such as one of the same name in another directory, that project's `opossum down`\n",
 		name, strings.Join(short, ", "), name)
 	opts.NetworkAliases = kept
 	return o.rt.Run(opts)
