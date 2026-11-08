@@ -963,8 +963,8 @@ func TestAFragmentTheDecomposerCannotReadIsNamed(t *testing.T) {
 }
 
 // Every fragment handed to the round trip goes through it, not only some: the
-// one the decomposer cannot read sits between two readable ones, so carrying
-// only the first, dropping the first, or dropping the last still meets it.
+// one the decomposer cannot read sits between two readable ones, and each of
+// the three has to be in the section the round trip assembled.
 func TestTheRoundTripCarriesEveryFragmentItIsHanded(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "1-fine.added.md", "- Fine.\n")
@@ -981,11 +981,12 @@ func TestTheRoundTripCarriesEveryFragmentItIsHanded(t *testing.T) {
 	if err == nil {
 		t.Fatal("the round trip did not meet the fragment the decomposer cannot read")
 	}
-	// The failure names every fragment it carried, so one left out is seen
-	// even where the probe was not.
-	for _, name := range []string{"1-fine.added.md", "500-probe.added.md", "999-also-fine.added.md"} {
-		if !strings.Contains(err.Error(), name) {
-			t.Errorf("the round trip did not carry %s:\n%v", name, err)
+	// The failure shows the section the round trip assembled, which holds
+	// what it actually carried: the names in the failure are only what it was
+	// handed, so a fragment dropped on the way is seen by its text.
+	for _, entry := range []string{"- Fine.", "- One.", "- Also fine."} {
+		if !strings.Contains(err.Error(), "--- assembled ---") || !strings.Contains(err.Error()[strings.Index(err.Error(), "--- assembled ---"):], entry) {
+			t.Errorf("the round trip did not carry the fragment %q:\n%v", entry, err)
 		}
 	}
 }
@@ -1002,8 +1003,8 @@ func fragmentsRoundTrip(t *testing.T, frags []changelog.Fragment) error {
 	}
 	section, rebuilt, err := roundTrip(t, frags)
 	if err != nil {
-		return fmt.Errorf("one of %s holds a shape the decomposer cannot read:\n%w",
-			strings.Join(names, ", "), err)
+		return fmt.Errorf("one of %s holds a shape the decomposer cannot read:\n%w\n--- assembled ---\n%s",
+			strings.Join(names, ", "), err, section)
 	}
 	if rebuilt != section {
 		return fmt.Errorf("the round trip changed the section assembled from %s.\n"+
