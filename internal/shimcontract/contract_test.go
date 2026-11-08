@@ -441,8 +441,8 @@ var contract = []struct {
 	{"a container that is gone: stop, delete, start and logs all fail", nil, []step{
 		{argv: []string{"run", "-d", "--name", "NAME", "alpine"}},
 		{argv: []string{"delete", "--force", "NAME"}},
-		{argv: []string{"stop", "NAME"}, rc: 1, has: `notFound: "container with ID NAME not found"`},
-		{argv: []string{"delete", "--force", "NAME"}, rc: 1, has: `notFound: "container with ID NAME not found"`},
+		{argv: []string{"stop", "NAME"}, rc: 1, has: `Error: notFound: "container with ID NAME not found"`},
+		{argv: []string{"delete", "--force", "NAME"}, rc: 1, has: `Error: notFound: "container with ID NAME not found"`},
 		// A command that should have passed the service by would otherwise
 		// look as though it worked: no logs read as an empty log, and a start
 		// that says nothing reads as a container started (#1096).
@@ -450,7 +450,7 @@ var contract = []struct {
 		// that invents a message tells whoever reads it next something the
 		// runtime never says (measured on 1.4.1, quotes left unclosed as they
 		// come).
-		{argv: []string{"start", "NAME"}, rc: 1, has: "get failed: container NAME not found"},
+		{argv: []string{"start", "NAME"}, rc: 1, has: "Error: container with ID NAME not found"},
 		{argv: []string{"logs", "NAME"}, rc: 1, has: `failed to open container logs: notFound: "container with ID NAME not found`},
 		// Running the name again makes it there again.
 		{argv: []string{"run", "-d", "--name", "NAME", "alpine"}},
@@ -471,7 +471,7 @@ var contract = []struct {
 		{argv: []string{"inspect", "NAME"}, has: `"state":"stopped"`},
 		{argv: []string{"kill", "NAME"}, rc: 1, has: `invalidState: "no runtime client exists: container is stopped"`},
 		{argv: []string{"delete", "--force", "NAME"}},
-		{argv: []string{"kill", "NAME"}, rc: 1, has: `notFound: "container with ID NAME not found"`},
+		{argv: []string{"kill", "NAME"}, rc: 1, has: `Error: notFound: "container with ID NAME not found"`},
 	}},
 	// `run` of a name already there refuses, whether that container is
 	// running or stopped — the same sentence either way (measured on 1.4.1,
@@ -493,8 +493,8 @@ var contract = []struct {
 		{argv: []string{"stop", "NAME"}},
 		{argv: []string{"delete", "--force", "NAME"}},
 		{argv: []string{"inspect", "NAME"}, rc: 1, has: "container not found: NAME"},
-		{argv: []string{"stop", "NAME"}, rc: 1, has: `notFound: "container with ID NAME not found"`},
-		{argv: []string{"delete", "--force", "NAME"}, rc: 1, has: `notFound: "container with ID NAME not found"`},
+		{argv: []string{"stop", "NAME"}, rc: 1, has: `Error: notFound: "container with ID NAME not found"`},
+		{argv: []string{"delete", "--force", "NAME"}, rc: 1, has: `Error: notFound: "container with ID NAME not found"`},
 	}},
 	{"deleting one container leaves another alone", nil, []step{
 		{argv: []string{"run", "-d", "--name", "NAME", "alpine"}},
@@ -1135,12 +1135,12 @@ func init() {
 		env   []string
 		steps []step
 	}{"with INSPECT_STRICT start, logs, exec, kill, stop, delete and stats of a name nothing ran are refused, and of one that was run are not", []string{"INSPECT_STRICT=1"}, []step{
-		{argv: []string{"start", "NAME"}, rc: 1, has: "container probe.demo.opossum not found"},
+		{argv: []string{"start", "NAME"}, rc: 1, has: "Error: container with ID probe.demo.opossum not found"},
 		{argv: []string{"logs", "NAME"}, rc: 1, has: "failed to get logs for container probe.demo.opossum"},
 		{argv: []string{"exec", "NAME", "true"}, rc: 1, has: "container probe.demo.opossum not found"},
-		{argv: []string{"kill", "NAME"}, rc: 1, has: "failed to kill container"},
-		{argv: []string{"stop", "NAME"}, rc: 1, has: "failed to stop container"},
-		{argv: []string{"delete", "--force", "NAME"}, rc: 1, has: "failed to delete container"},
+		{argv: []string{"kill", "NAME"}, rc: 1, has: `Error: notFound: "container with ID NAME not found"`},
+		{argv: []string{"stop", "NAME"}, rc: 1, has: `Error: notFound: "container with ID NAME not found"`},
+		{argv: []string{"delete", "--force", "NAME"}, rc: 1, has: `Error: notFound: "container with ID NAME not found"`},
 		{argv: []string{"run", "-d", "--name", "NAME", "alpine"}, rc: 0},
 		{argv: []string{"start", "NAME"}, rc: 0, lacks: "Error"},
 		{argv: []string{"logs", "NAME"}, rc: 0, lacks: "Error"},
@@ -1174,7 +1174,7 @@ func init() {
 		{argv: []string{"exec", "--ulimit", "nofile=64", "NAME", "true"}, rc: 0, lacks: "Error"},
 		{argv: []string{"exec", "--env=A=1", "OTHER", "true"}, rc: 1, has: "container probe.other.opossum not found"},
 		{argv: []string{"exec", "-i", "-e", "A=1", "OTHER", "true"}, rc: 1, has: "container probe.other.opossum not found"},
-		{argv: []string{"start", "OTHER"}, rc: 1, has: "container probe.other.opossum not found"},
+		{argv: []string{"start", "OTHER"}, rc: 1, has: "Error: container with ID probe.other.opossum not found"},
 		// `stats` takes names and flags together: a flag is not a name to look for.
 		{argv: []string{"stats", "--no-stream", "OTHER"}, rc: 1, has: "no such container"},
 		{argv: []string{"stats", "--no-stream", "NAME"}, rc: 0, lacks: "Error"},

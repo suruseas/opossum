@@ -1,0 +1,365 @@
+# Taken 2026-11-08 on container 1.7.1 (macOS 27.2), by asking the runtime directly and through
+# opossum built from main, in two runs: the first part below, then the part after "second run".
+# Repeated from the 1.6.1 captures: the wordings OPSM-412 (platform-several-no-arm64-161.txt,
+# platform-several-fresh-pull-161.txt, platform-not-supported-arm64-161.txt), OPSM-502 and OPSM-217
+# (network-aliases-161.txt) read, and OPSM-103, OPSM-107 and `up --wait` passing and failing. Through
+# opossum, in the second run: a runtime refusal of an alias another container holds (OPSM-502, the
+# run made again without it), of a service name held as an alias (OPSM-217), and `does not support`
+# and `has multiple platforms` (OPSM-412). `unsupported platform` is the runtime's own answer only:
+# opossum, asked for arm64 of an image with no arm64 build, got `does not support`.
+# Progress lines (`[n/6] ...`) and the build's step lines are left out, the run's directory is
+# written <dir>, and <dir>/opossum is written opossum. Every container, network, project, volume and
+# image was named for the run and removed afterwards; the last lines of each part show none left.
+#
+# OPSM-201's wording was not reached: two services publishing one host port are refused first, by
+# OPSM-213, so the runtime is never asked. No other wording the diagnostics read is here.
+
+container CLI version 1.7.1 (build: release, commit: unspeci)
+########## OPSM-412 platform
+
+$ container build --platform linux/amd64 -t opossum-probe171-amd:1 <dir>/b
+docker.io/library/opossum-probe171-amd:1
+--- rc=0
+
+$ container build --platform linux/amd64 --platform linux/s390x -t opossum-probe171-several:1 <dir>/b
+docker.io/library/opossum-probe171-several:1
+--- rc=0
+
+$ container run --rm --name opossum-probe171-run opossum-probe171-several:1
+Error: image opossum-probe171-several:1 has multiple platforms ([ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "amd64"), ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "s390x")]); pass --os/--arch or set a default
+--- rc=1
+
+$ container run --rm --name opossum-probe171-run --platform linux/arm64 opossum-probe171-amd:1
+Error: image opossum-probe171-amd:1 does not support linux/arm64; available: [ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "amd64")]
+--- rc=1
+
+$ container run --rm --name opossum-probe171-run --arch arm64 opossum-probe171-amd:1
+Error: image opossum-probe171-amd:1 does not support */arm64; available: [ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "amd64")]
+--- rc=1
+
+$ container run --rm --name opossum-probe171-run opossum-probe171-amd:1
+x86_64
+--- rc=0
+
+$ container run --rm --name opossum-probe171-run --platform linux/amd64 opossum-probe171-several:1
+x86_64
+--- rc=0
+
+$ container run --rm --name opossum-probe171-run ibmjava:8-jre uname -m
+Error: image ibmjava:8-jre has multiple platforms ([ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "amd64"), ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "ppc64le"), ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "s390x")]); pass --os/--arch or set a default
+--- rc=1
+
+$ container image pull --platform linux/arm64 ibmjava:8-jre
+Error: unsupported platform Platform(osVersion: nil, osFeatures: nil, variant: Optional("v8"), _rawOS: "linux", _rawArch: "arm64")
+--- rc=1
+
+$ opossum up
+Creating network w412-net
+Starting m (opossum-probe171-several:1)
+Error: image opossum-probe171-several:1 has multiple platforms ([ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "amd64"), ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "s390x")]); pass --os/--arch or set a default
+Nothing this `up` started is left running
+opossum: starting service "m": exit status 1
+  → [OPSM-412] this image has no build for Apple silicon (arm64). Set `platform: linux/amd64` on the service — opossum runs an amd64 image through Rosetta.
+--- rc=1
+
+$ opossum down -v
+--- rc=0
+########## aliases OPSM-502/217
+
+$ container network create v171w-net
+v171w-net
+--- rc=0
+
+$ container run -d --name srva.v171w.opossum --network v171w-net,alias=cachea.v171w.opossum --dns-domain opossum --dns-search v171w.opossum alpine:3.20 sleep 600
+srva.v171w.opossum
+--- rc=0
+
+$ container run -d --name srvb.v171w.opossum --network v171w-net,alias=cachea.v171w.opossum --dns-domain opossum --dns-search v171w.opossum alpine:3.20 sleep 600
+Error: alias(es) already exist: ["cachea.v171w.opossum"]
+--- rc=1
+
+$ container run -d --name cachea.v171w.opossum --network v171w-net --dns-domain opossum --dns-search v171w.opossum alpine:3.20 sleep 600
+Error: hostname(s) already exist: ["cachea.v171w.opossum."]
+--- rc=1
+
+$ container run -d --name srvc.v171w.opossum --network v171w-net,alias=srva.v171w.opossum --dns-domain opossum --dns-search v171w.opossum alpine:3.20 sleep 600
+Error: alias(es) already exist: ["srva.v171w.opossum"]
+--- rc=1
+
+$ container run --rm --network v171w-net --dns-domain opossum --dns-search v171w.opossum alpine:3.20 sh -c getent hosts cachea; getent hosts srva
+fdf4:a65d:ffd3:780b:f034:24ff:fe1f:8851  cachea.v171w.opossum  cachea.v171w.opossum cachea
+fdf4:a65d:ffd3:780b:f034:24ff:fe1f:8851  srva.v171w.opossum  srva.v171w.opossum srva
+--- rc=0
+
+$ container run -d --name srvd.v171w.opossum --network v171w-net,alias=cached --dns-domain opossum --dns-search v171w.opossum alpine:3.20 sleep 600
+Error: alias "cached" must be a fully qualified name with at least 2 labels, such as "api.example.test". Configure a default DNS domain to have the domain added to a name that has none
+--- rc=1
+
+$ container stop srva.v171w.opossum
+srva.v171w.opossum
+--- rc=0
+
+$ container run -d --name srve.v171w.opossum --network v171w-net,alias=cachea.v171w.opossum --dns-domain opossum --dns-search v171w.opossum alpine:3.20 sleep 600
+Error: alias(es) already exist: ["cachea.v171w.opossum"]
+--- rc=1
+
+$ container delete --force srva.v171w.opossum
+srva.v171w.opossum
+--- rc=0
+
+$ container network delete v171w-net
+v171w-net
+--- rc=0
+
+$ opossum up
+Creating network v171w2-net
+Starting a (alpine:3.20)
+a.v171w2.opossum
+warning: [OPSM-502] service "b": network alias "cache" is not passed: service "a" takes it, as the first service by name that writes it
+Starting b (alpine:3.20)
+b.v171w2.opossum
+Starting p (alpine:3.20)
+p.v171w2.opossum
+--- rc=0
+
+$ opossum ps
+SERVICE  CONTAINER         IMAGE        IP            PORTS  STATUS
+a        a.v171w2.opossum  alpine:3.20  192.168.68.2  -      running
+b        b.v171w2.opossum  alpine:3.20  192.168.68.3  -      running
+p        p.v171w2.opossum  alpine:3.20  192.168.68.4  -      running
+--- rc=0
+
+$ opossum logs p
+p-1  | fdf4:a65d:ffd3:780b:f89c:40ff:fe62:967  cache.v171w2.opossum  cache.v171w2.opossum cache
+--- rc=0
+
+$ opossum down -v
+Stopping p
+Stopping b
+Stopping a
+--- rc=0
+########## OPSM-201 / 103 / 107
+
+$ opossum up
+opossum: [OPSM-213] two entries publish host port 19532/tcp:
+  - service "a" (19532:19532)
+  - service "b" (19532:19532)
+  give one of them a different host port.
+--- rc=1
+
+$ opossum down -v
+--- rc=0
+
+$ opossum up
+warning: [OPSM-102] services "a", "b" share named volume "shared", but Apple container attaches a named volume to only one running container at a time — the others fail to start. Use a bind mount (a host path) for shared data, or bake it into the image.
+Creating network v171w4-net
+Starting a (alpine:3.20)
+a.v171w4.opossum
+Starting b (alpine:3.20)
+Error: failed to bootstrap container (cause: "internalError: "failed to bootstrap container b.v171w4.opossum (cause: "unknown: "Error Domain=VZErrorDomain Code=2 "The storage device attachment is invalid." UserInfo={NSLocalizedFailure=Invalid virtual machine configuration., NSLocalizedFailureReason=The storage device attachment is invalid.}"")"")
+Rolled back a — stopped and removed; nothing this `up` started is left running
+opossum: [OPSM-103] service "b" can't start: Apple `container` attaches a named volume to only one running container at a time, and "v171w4_shared" (held by running container "a.v171w4.opossum") is already attached elsewhere — the second attach fails with a storage-device (VZError) error. Stop the container holding it (`container stop <name>`), or give this service its own volume; for shared data use a bind mount (a host path) instead
+--- rc=1
+
+$ opossum down -v
+Removing volume v171w4_shared
+--- rc=0
+
+$ opossum up
+Creating network v171w5-net
+Created host directory <dir>/v171w5/notthere.conf for a bind mount
+Starting m (alpine:3.20)
+Error: failed to start process m.v171w5.opossum in container m.v171w5.opossum (cause: "internalError: "failed to start process (cause: "internalError: "startProcess: failed to start process: internalError: "vmexec error: mount failed with errno 20: failed to resolve '/etc/passwd' in rootfs""")"")
+Nothing this `up` started is left running
+opossum: starting service "m": exit status 1
+  → [OPSM-107] the bind mount for /etc/passwd couldn't be resolved. If it's a config FILE, create it on the host first — opossum creates a missing bind source as a directory, which can't mount onto a file path.
+--- rc=1
+
+$ opossum down -v
+--- rc=0
+########## up --wait
+
+$ opossum up --wait --wait-timeout 60
+Creating network v171w6-net
+Starting ok (alpine:3.20)
+ok.v171w6.opossum
+Waiting for ok to be healthy
+--- rc=0
+
+$ opossum ps
+SERVICE  CONTAINER          IMAGE        IP            PORTS  STATUS
+ok       ok.v171w6.opossum  alpine:3.20  192.168.68.2  -      running
+--- rc=0
+
+$ opossum down -v
+Stopping ok
+--- rc=0
+
+$ opossum up --wait --wait-timeout 30
+Creating network v171w7-net
+Starting bad (alpine:3.20)
+bad.v171w7.opossum
+Waiting for bad to be healthy
+opossum: [OPSM-417] service "bad" did not become healthy: healthcheck did not pass after 2 attempt(s): exit status 1; the services stay up — `opossum logs bad` shows what it said
+--- rc=1
+
+$ opossum down -v
+Stopping bad
+--- rc=0
+########## cleanup
+
+$ container image delete --force opossum-probe171-amd:1 opossum-probe171-several:1 ibmjava:8-jre
+Reclaimed 84.9 MB in disk space
+docker.io/library/opossum-probe171-amd:1
+docker.io/library/opossum-probe171-several:1
+docker.io/library/ibmjava:8-jre
+--- rc=0
+containers: 0
+networks: 0
+volumes: 0
+images: 0
+
+########################## second run
+container CLI version 1.7.1 (build: release, commit: unspeci)
+
+$ container network create v171x-net
+v171x-net
+--- rc=0
+########## OPSM-502: an alias another container holds, through opossum
+
+$ container run -d --name holder1.v171x1.opossum --network v171x-net,alias=cache.v171x1.opossum alpine:3.20 sleep 600
+holder1.v171x1.opossum
+--- rc=0
+
+$ opossum up
+Creating network v171x1-net
+Starting a (alpine:3.20)
+Error: alias(es) already exist: ["cache.v171x1.opossum"]
+warning: [OPSM-502] service "a": network alias(es) "cache" not passed: another container already holds them. Free them, then `opossum up --force-recreate a`: where the holder is a service of this project, recreate it (`opossum up --force-recreate <that service>`); where it is a container this project no longer has, `opossum up --remove-orphans` (`opossum down` alone leaves it). A project of the same name in another directory is this project here, so these work from here too
+a.v171x1.opossum
+--- rc=0
+
+$ opossum ps
+SERVICE  CONTAINER         IMAGE        IP            PORTS  STATUS
+a        a.v171x1.opossum  alpine:3.20  192.168.69.2  -      running
+--- rc=0
+
+$ opossum down -v
+Stopping a
+--- rc=0
+########## OPSM-217: the service's name held as an alias, through opossum
+
+$ container run -d --name holder2.v171x2.opossum --network v171x-net,alias=web.v171x2.opossum alpine:3.20 sleep 600
+holder2.v171x2.opossum
+--- rc=0
+
+$ opossum up
+Creating network v171x2-net
+Starting web (alpine:3.20)
+Error: hostname(s) already exist: ["web.v171x2.opossum."]
+Nothing this `up` started is left running
+opossum: starting service "web": exit status 1
+  → [OPSM-217] another container holds this service's name as a network alias — one an earlier `opossum up` made, before a service took that name. Recreate the service that holds the alias (`opossum up --force-recreate <service>`), which no longer passes it, then `opossum up`; if the holder is a container this project no longer has, `opossum up --remove-orphans`
+--- rc=1
+
+$ opossum down -v
+--- rc=0
+
+$ container delete --force holder1.v171x1.opossum holder2.v171x2.opossum
+holder1.v171x1.opossum
+holder2.v171x2.opossum
+--- rc=0
+
+$ container network delete v171x-net
+v171x-net
+--- rc=0
+########## OPSM-412 through opossum: asks arm64 of an amd64 image; an image with no arm64 asked for arm64 from a registry
+build rc=0
+
+$ opossum up
+Creating network v171x3-net
+Starting m (opossum-probe171x-amd:1)
+Error: image opossum-probe171x-amd:1 does not support linux/arm64; available: [ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "amd64")]
+Nothing this `up` started is left running
+opossum: starting service "m": exit status 1
+  → [OPSM-412] this image has no build for Apple silicon (arm64). Set `platform: linux/amd64` on the service — opossum runs an amd64 image through Rosetta.
+--- rc=1
+
+$ opossum down -v
+--- rc=0
+
+$ opossum up
+Creating network v171x4-net
+Starting m (ibmjava:8-jre)
+Error: image ibmjava:8-jre does not support linux/arm64; available: [ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "amd64"), ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "ppc64le"), ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "s390x")]
+Nothing this `up` started is left running
+opossum: starting service "m": exit status 1
+  → [OPSM-412] this image has no build for Apple silicon (arm64). Set `platform: linux/amd64` on the service — opossum runs an amd64 image through Rosetta.
+--- rc=1
+
+$ opossum down -v
+--- rc=0
+
+$ opossum up
+Creating network v171x5-net
+Starting m (ibmjava:8-jre)
+Error: image ibmjava:8-jre has multiple platforms ([ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "amd64"), ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "ppc64le"), ContainerizationOCI.Platform(osVersion: nil, osFeatures: nil, variant: nil, _rawOS: "linux", _rawArch: "s390x")]); pass --os/--arch or set a default
+Nothing this `up` started is left running
+opossum: starting service "m": exit status 1
+  → [OPSM-412] this image has no build for Apple silicon (arm64). Set `platform: linux/amd64` on the service — opossum runs an amd64 image through Rosetta.
+--- rc=1
+
+$ opossum down -v
+--- rc=0
+
+$ container image delete --force opossum-probe171x-amd:1
+Reclaimed 42.4 MB in disk space
+docker.io/library/opossum-probe171x-amd:1
+--- rc=0
+########## name taken, directly
+
+$ container run -d --name v171x-dup alpine:3.20 sleep 60
+v171x-dup
+--- rc=0
+
+$ container run -d --name v171x-dup alpine:3.20 sleep 60
+Error: container with id v171x-dup already exists
+--- rc=1
+
+$ container delete --force v171x-dup
+v171x-dup
+--- rc=0
+########## kill of a stopped container
+
+$ container run --name v171x-s alpine:3.20 true
+--- rc=0
+
+$ container kill v171x-s
+Error: internalError: "failed to kill container" (cause: "invalidState: "no runtime client exists: container is stopped"")
+--- rc=1
+
+$ container delete v171x-s
+v171x-s
+--- rc=0
+########## stop of a process that ignores TERM
+v171x-term
+stop rc=0 seconds=5.19
+"state" : "stopped"
+
+$ container delete --force v171x-term
+v171x-term
+--- rc=0
+########## logs -f of a container that has written nothing
+still following after 4s
+
+$ container delete --force v171x-quiet
+v171x-quiet
+--- rc=0
+########## builder in use
+ID        IMAGE                                                STATE    IP                CPUS  MEMORY
+buildkit  ghcr.io/apple/container-builder-shim/builder:0.13.3  running  192.168.66.13/24  2     2048 MB
+########## left
+containers: 0
+networks: 0
+volumes: 0
+images: 0

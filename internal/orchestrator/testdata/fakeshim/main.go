@@ -109,14 +109,14 @@ func run(args []string) int {
 			name := args[len(args)-1]
 			_ = os.WriteFile(stopAskedPath(dir, name), []byte("1"), 0o644)
 			if _, err := os.Stat(gonePath(dir, name)); err == nil {
-				fmt.Fprintf(os.Stderr, "Error: internalError: \"failed to stop container\" (cause: \"notFound: \"container with ID %s not found\"\")\n", name)
+				fmt.Fprintf(os.Stderr, "Error: notFound: \"container with ID %s not found\"\n", name)
 				return 1
 			}
 			// $INSPECT_STRICT: a name nothing here ran is not a container the runtime has, for `stop` as
 			// for `inspect` (#1551).
 			if os.Getenv("INSPECT_STRICT") != "" {
 				if _, err := os.Stat(createdPath(dir, name)); err != nil {
-					fmt.Fprintf(os.Stderr, "Error: internalError: \"failed to stop container\" (cause: \"notFound: \"container with ID %s not found\"\")\n", name)
+					fmt.Fprintf(os.Stderr, "Error: notFound: \"container with ID %s not found\"\n", name)
 					return 1
 				}
 			}
@@ -149,7 +149,7 @@ func run(args []string) int {
 		if dir := os.Getenv("STATE_DIR"); dir != "" && len(args) > 0 {
 			name := args[len(args)-1]
 			if !there(name) {
-				fmt.Fprintf(os.Stderr, "Error: internalError: \"failed to kill container\" (cause: \"notFound: \"container with ID %s not found\"\")\n", name)
+				fmt.Fprintf(os.Stderr, "Error: notFound: \"container with ID %s not found\"\n", name)
 				return 1
 			}
 			if _, err := os.Stat(stoppedPath(dir, name)); err == nil {
@@ -164,7 +164,7 @@ func run(args []string) int {
 		// saying so — whether it was never made ($INSPECT_ABSENT) or deleted
 		// (the gone marker).
 		if len(args) > 0 && !there(args[len(args)-1]) {
-			fmt.Fprintf(os.Stderr, "Error: get failed: container %s not found\n", args[len(args)-1])
+			fmt.Fprintf(os.Stderr, "Error: container with ID %s not found\n", args[len(args)-1])
 			return 1
 		}
 		// Starting a stopped container in place: it is running again (the marker
@@ -193,14 +193,14 @@ func run(args []string) int {
 			// Deleting what is not there is the one failure the real CLI reports
 			// (rc 1, `notFound`) — measured on 1.4.1.
 			if _, err := os.Stat(gonePath(dir, name)); err == nil {
-				fmt.Fprintf(os.Stderr, "Error: internalError: \"failed to delete container\" (cause: \"notFound: \"container with ID %s not found\"\")\n", name)
+				fmt.Fprintf(os.Stderr, "Error: notFound: \"container with ID %s not found\"\n", name)
 				return 1
 			}
 			// $INSPECT_STRICT: a name nothing here ran is not a container the runtime has, for `delete` as
 			// for `inspect` (#1551).
 			if os.Getenv("INSPECT_STRICT") != "" {
 				if _, err := os.Stat(createdPath(dir, name)); err != nil {
-					fmt.Fprintf(os.Stderr, "Error: internalError: \"failed to delete container\" (cause: \"notFound: \"container with ID %s not found\"\")\n", name)
+					fmt.Fprintf(os.Stderr, "Error: notFound: \"container with ID %s not found\"\n", name)
 					return 1
 				}
 			}
@@ -1379,7 +1379,7 @@ func run(args []string) int {
 				// Every key 1.4.1 prints, each with its own value, in the
 				// runtime's (alphabetical) key order.
 				objs = append(objs, fmt.Sprintf(
-					`{"blockReadBytes":8192,"blockWriteBytes":16384,"cpuUsageUsec":1500000,"id":"%s",`+
+					`{"blockReadBytes":8192,"blockWriteBytes":16384,"cpuUsageUsec":1500000,"cpuUtilization":0,"id":"%s",`+
 						`"memoryLimitBytes":1073741824,"memoryUsageBytes":49283072,"networkRxBytes":2048,"networkTxBytes":4096,"numProcesses":3}`,
 					n,
 				))

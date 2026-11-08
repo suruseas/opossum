@@ -621,23 +621,23 @@ case "$1" in
     # for a running, stopped or exited container, 1 when there is none.
     n=$(last "$@"); g=$(marker gone "$n")
     if [ -n "$g" ] && [ -e "$g" ]; then
-      echo "Error: internalError: \"failed to stop container\" (cause: \"notFound: \"container with ID $n not found\"\")" >&2; exit 1
+      echo "Error: notFound: \"container with ID $n not found\"" >&2; exit 1
     fi
     # $INSPECT_STRICT: a name nothing here ran is not a container the runtime has, for stop as for
     # inspect (#1551).
     if [ -n "${INSPECT_STRICT:-}" ]; then
       c=$(marker created "$n")
       if [ -n "$c" ] && [ ! -e "$c" ]; then
-        echo "Error: internalError: \"failed to stop container\" (cause: \"notFound: \"container with ID $n not found\"\")" >&2; exit 1
+        echo "Error: notFound: \"container with ID $n not found\"" >&2; exit 1
       fi
     fi
     s=$(marker stopped "$n"); if [ -n "$s" ]; then : > "$s"; fi
     ;;
   start)
-    # As for stop: a name that is not there cannot be started (container 1.4.1).
+    # As for stop: a name that is not there cannot be started (container 1.7.1's words).
     n=$(last "$@")
     if ! is_there "$n"; then
-      echo "Error: get failed: container $n not found" >&2; exit 1
+      echo "Error: container with ID $n not found" >&2; exit 1
     fi
     s=$(marker stopped "$n"); if [ -n "$s" ]; then rm -f "$s"; fi
     ;;
@@ -650,7 +650,7 @@ case "$1" in
     # both — answering them correctly here changes no caller's behaviour.
     n=$(last "$@")
     if ! is_there "$n"; then
-      echo "Error: internalError: \"failed to kill container\" (cause: \"notFound: \"container with ID $n not found\"\")" >&2; exit 1
+      echo "Error: notFound: \"container with ID $n not found\"" >&2; exit 1
     fi
     s=$(marker stopped "$n")
     if [ -n "$s" ] && [ -e "$s" ]; then
@@ -661,13 +661,13 @@ case "$1" in
   delete|rm)
     n=$(last "$@"); g=$(marker gone "$n")
     if [ -n "$g" ] && [ -e "$g" ]; then
-      echo "Error: internalError: \"failed to delete container\" (cause: \"notFound: \"container with ID $n not found\"\")" >&2; exit 1
+      echo "Error: notFound: \"container with ID $n not found\"" >&2; exit 1
     fi
     # $INSPECT_STRICT: a name nothing here ran is not a container the runtime has, for delete as for
     # inspect (#1551).
     c=$(marker created "$n")
     if [ -n "${INSPECT_STRICT:-}" ] && [ -n "$c" ] && [ ! -e "$c" ]; then
-      echo "Error: internalError: \"failed to delete container\" (cause: \"notFound: \"container with ID $n not found\"\")" >&2; exit 1
+      echo "Error: notFound: \"container with ID $n not found\"" >&2; exit 1
     fi
     if [ -n "$g" ]; then : > "$g"; fi
     s=$(marker stopped "$n"); if [ -n "$s" ]; then rm -f "$s"; fi

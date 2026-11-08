@@ -5,7 +5,53 @@ stdout+stderr と exit code の golden。`testdata/fake-container.sh` はこれ�
 返し、`internal/runtime/runtime_test.go` の忠実性 eval はこの文字列を各パーサに流して
 整合を確認する。**CLI 更新時はここを再採取して同期すること。**
 
-**Last verified: 2026-10-28 / `container CLI version 1.6.1` (Homebrew formula `1.6.1`), macOS 27.0.1 only.**
+**Last verified: 2026-11-08 / `container CLI version 1.7.1` (Homebrew formula `1.7.1`), macOS 27.2 only.**
+The commands the parsers read were re-captured on 1.7.1 with the same script as for 1.6.1 (raw output in
+`~/opossum-dogfood/results/v171-recapture/`, with `real-conformance.log`), and compared with the 1.6.1 files.
+The sections below were not rewritten; what changed is listed here.
+
+**What changed from 1.6.1 to 1.7.1, in the captures:**
+- Of the 71 files 1.6.1 also has, none changed exit code. In the JSON of `ls -a`, `inspect`, `network ls`,
+  `network inspect`, `image inspect` and `system status` no key is gone and none is new (`inspect-alias` has no
+  JSON to compare: the one-label alias is refused on both).
+- `container stop` and `delete` of a name that is not there now say
+  `Error: notFound: "container with ID <name> not found"`, without the `internalError: "failed to … container"
+  (cause: …)` around it. opossum does not read that line (a stop or delete of nothing is passed over on the
+  exit code and `inspect`); the fakes say the new one.
+- The `opossum config`, `up`, `images`, `ps` and `down -v` captures print the same as on 1.6.1, and `doctor`
+  differs only in the version, counts and sizes.
+- Other differences opossum does not read: the order of the keys in the `volume delete` refusal, which the
+  builder image and images the captures list are, and the second line of a `delete` of several names.
+- Still no exit code for a stopped container in `inspect` or `ls -a`.
+- `make real-conformance` passes (3 tests; `real-conformance.log`).
+
+**Measured on 1.7.1, against the last version each was measured on, outside the 1.6.1 captures:**
+- `kill` of an absent name says the same `Error: notFound: …` line. There is no 1.6.1 capture of it; the fakes had
+  the older wording, and say the new one.
+- `start` of an absent name says `Error: container with ID <name> not found` (on 1.4.1, the last time it was
+  taken: `get failed: container <name> not found`). The fakes say the new one.
+- `container stats --format json` lists `cpuUtilization`, which the 2026-07-06 list of its keys below does not. There is
+  no 1.6.1 capture of the JSON. opossum does not read the key.
+
+**Measured on 1.7.1 outside the captures** (`error-wordings/diagnostics-171.txt`, one run each):
+- The wordings OPSM-412, OPSM-502, OPSM-217, OPSM-103 and OPSM-107 read are as on 1.6.1, and each code came out of
+  opossum on 1.7.1, for the shapes that file lists. OPSM-201's wording was not reached (OPSM-213 refuses the shape
+  first). Other wordings the diagnostics read, build's among them, were not taken on 1.7.1.
+- `kill` of a stopped container still says `no runtime client exists: container is stopped`. A second run of a name
+  still says `container with id <name> already exists`.
+- `container stop` of a process that ignores TERM took 5.19 s (8.2 s on 1.6.1, 5.35 s on 1.5.0), and left it `stopped`.
+- `container logs -f` of a running container that had written nothing was still following after 4 s, as on 1.6.1.
+- A build run on 1.7.1 used `container-builder-shim` 0.13.3 (the captures, taken before any build, list the 0.13.2
+  builder left from before the upgrade).
+- `hello`, `demo` (`examples/compose.yaml`), `app-stack` and `mcp-stack` ran `config → up → ps → logs → down -v`
+  with every step exiting 0 (`~/opossum-dogfood/sprint-1108/`; `demo` first failed to build because the run had
+  copied its compose file without `web/`, and was run again with it, `demo-summary.txt`).
+- Not re-measured on 1.7.1: the numbers in `docs/benchmarks.md`, and the rest of the sections below, which keep the
+  version they name.
+
+---
+
+**Verified before that: 2026-10-28 / `container CLI version 1.6.1` (Homebrew formula `1.6.1`), macOS 27.0.1 only.**
 The commands the parsers read were re-captured on 1.6.1 with the same script as for 1.5.0, plus a few new
 captures (raw output in `~/opossum-dogfood/results/v161-recapture/`, 71 files, with `real-conformance.log`)
 and compared with the 1.5.0 files. The sections below were not rewritten; what changed is listed here.

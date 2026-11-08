@@ -342,7 +342,8 @@ one it left running because it was up to date as well — and fails with `[OPSM-
 --wait` as written for docker compose runs unchanged (`up` is detached either
 way), and `--wait-timeout <seconds>` bounds the wait in all. Measured against
 docker compose v5.6.1, one service at a time unless said; the opossum rows
-marked ✓ were checked on container 1.6.1, the others against the test
+marked ✓ were checked on container 1.6.1 (and, for a service that becomes
+healthy and one that never does, again on 1.7.1), the others against the test
 stand-in for the runtime:
 
 | Shape | docker compose `up -d --wait` | `opossum up --wait` |
