@@ -231,6 +231,10 @@ func TestFidelitySystemRunning(t *testing.T) {
 	if !replayShim(t, realStatus161, 0).SystemRunning() {
 		t.Error("SystemRunning should be true for the 1.6.1 `status running` report too")
 	}
+	const realStatus171 = "FIELD               VALUE\nstatus              running\nclient.version      1.7.1\nclient.build        release\nclient.commit       unspecified\nhost.os             Version 27.2 (Build 26B123)\nhost.architecture   arm64\nhost.cpus           8\nserver.version      1.7.1\nserver.build        release\nserver.commit       unspecified\nserver.appName      container-apiserver\npaths.appRoot       /Users/<user>/Library/Application Support/com.apple.container/\npaths.installRoot   /opt/homebrew/Cellar/container/1.7.1/\npaths.logRoot       \ncontainers.total    1\ncontainers.running  0\nimages.total        38\n"
+	if !replayShim(t, realStatus171, 0).SystemRunning() {
+		t.Error("SystemRunning should be true for the 1.7.1 `status running` report too")
+	}
 	// 1.4.1 with the daemon down: exit 1 and a sentence, no table.
 	if replayShim(t, "apiserver is not running and not registered with launchd\n", 1).SystemRunning() {
 		t.Error("SystemRunning should be false for the 1.4.1 not-running report")
@@ -264,6 +268,11 @@ func TestFidelitySystemStatusJSON(t *testing.T) {
 	const realJSON161 = `{"client":{"appName":"container","build":"release","commit":"unspecified","version":"1.6.1"},"host":{"architecture":"arm64","cpus":8,"operatingSystem":"Version 27.0.1 (Build 26A434)"},"paths":{"appRoot":"/Users/<user>/Library/Application Support/com.apple.container/","installRoot":"/opt/homebrew/Cellar/container/1.6.1/"},"resources":{"containersRunning":0,"containersTotal":1,"images":35},"server":{"appName":"container-apiserver","build":"release","commit":"unspecified","version":"1.6.1"},"status":"running"}` + "\n"
 	if st := replayShim(t, realJSON161, 0).SystemStatus(); !st.Running || !st.FromJSON || st.ClientVersion != "1.6.1" || st.ServerVersion != "1.6.1" || st.ContainersTotal != 1 || st.Images != 35 {
 		t.Errorf("the 1.6.1 JSON report should read as running 1.6.1 with 1 container and 35 images: %+v", st)
+	}
+	// So does 1.7.1 (measured 2026-11-08).
+	const realJSON171 = `{"client":{"appName":"container","build":"release","commit":"unspecified","version":"1.7.1"},"host":{"architecture":"arm64","cpus":8,"operatingSystem":"Version 27.2 (Build 26B123)"},"paths":{"appRoot":"/Users/<user>/Library/Application Support/com.apple.container/","installRoot":"/opt/homebrew/Cellar/container/1.7.1/"},"resources":{"containersRunning":0,"containersTotal":1,"images":38},"server":{"appName":"container-apiserver","build":"release","commit":"unspecified","version":"1.7.1"},"status":"running"}`
+	if st := replayShim(t, realJSON171, 0).SystemStatus(); !st.Running || !st.FromJSON || st.ClientVersion != "1.7.1" || st.ServerVersion != "1.7.1" || st.ContainersTotal != 1 || st.Images != 38 {
+		t.Errorf("the 1.7.1 JSON report should read as running 1.7.1 with 1 container and 38 images: %+v", st)
 	}
 	// Down: exit 1 and `{"status":"unregistered"}`.
 	if st := replayShim(t, "{\"status\":\"unregistered\"}\n", 1).SystemStatus(); st.Running || !st.FromJSON {
@@ -1602,6 +1611,19 @@ func TestEnsureAndDeleteNetworkArgv(t *testing.T) {
 	rt.DeleteNetwork("demo-net") // shim exits 0, so no warning path
 	if got := lastLine(t, read); got != "network delete demo-net" {
 		t.Errorf("DeleteNetwork argv = %q", got)
+	}
+}
+
+// container 1.7.1 adds cpuUtilization to the report (measured 2026-11-08); a key
+// opossum does not read must not cost it the ones it does.
+func TestStatsSnapshotReadsThe171Report(t *testing.T) {
+	const real171 = `[{"blockReadBytes":4759552,"blockWriteBytes":0,"cpuUsageUsec":2356,"cpuUtilization":0,"id":"web.demo.opossum","memoryLimitBytes":1073741824,"memoryUsageBytes":5120000,"networkRxBytes":20189,"networkTxBytes":602,"numProcesses":1}]`
+	stats, err := replayShim(t, real171, 0).StatsSnapshot([]string{"web.demo.opossum"})
+	if err != nil {
+		t.Fatalf("StatsSnapshot: %v", err)
+	}
+	if len(stats) != 1 || stats[0].ID != "web.demo.opossum" || stats[0].MemoryUsageBytes != 5120000 || stats[0].CPUUsageUsec != 2356 {
+		t.Errorf("the 1.7.1 report should read as it says: %+v", stats)
 	}
 }
 

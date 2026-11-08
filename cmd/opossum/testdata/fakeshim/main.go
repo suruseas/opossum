@@ -643,14 +643,14 @@ func main() {
 		// reports — the marker below, cleared when the name is run again. Same
 		// model as the orchestrator's shim.
 		if isGone("container", lastArg()) {
-			fmt.Fprintf(os.Stderr, "Error: internalError: \"failed to stop container\" (cause: \"notFound: \"container with ID %s not found\"\")\n", lastArg())
+			fmt.Fprintf(os.Stderr, "Error: notFound: \"container with ID %s not found\"\n", lastArg())
 			os.Exit(1)
 		}
 		// $INSPECT_STRICT: a name nothing here ran is not a container the runtime has, for `stop` as
 		// for `inspect` (#1551).
 		if os.Getenv("INSPECT_STRICT") != "" && stateDir != "" {
 			if _, err := os.Stat(createdPath(lastArg())); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: internalError: \"failed to stop container\" (cause: \"notFound: \"container with ID %s not found\"\")\n", lastArg())
+				fmt.Fprintf(os.Stderr, "Error: notFound: \"container with ID %s not found\"\n", lastArg())
 				os.Exit(1)
 			}
 		}
@@ -659,14 +659,14 @@ func main() {
 		}
 	case "delete", "rm":
 		if isGone("container", lastArg()) {
-			fmt.Fprintf(os.Stderr, "Error: internalError: \"failed to delete container\" (cause: \"notFound: \"container with ID %s not found\"\")\n", lastArg())
+			fmt.Fprintf(os.Stderr, "Error: notFound: \"container with ID %s not found\"\n", lastArg())
 			os.Exit(1)
 		}
 		// $INSPECT_STRICT: a name nothing here ran is not a container the runtime has, for `delete` as
 		// for `inspect` (#1551).
 		if os.Getenv("INSPECT_STRICT") != "" && stateDir != "" {
 			if _, err := os.Stat(createdPath(lastArg())); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: internalError: \"failed to delete container\" (cause: \"notFound: \"container with ID %s not found\"\")\n", lastArg())
+				fmt.Fprintf(os.Stderr, "Error: notFound: \"container with ID %s not found\"\n", lastArg())
 				os.Exit(1)
 			}
 		}
@@ -678,9 +678,9 @@ func main() {
 			_ = os.Remove(p)
 		}
 	case "start":
-		// A container that is not there cannot be started (container 1.4.1).
+		// A container that is not there cannot be started (container 1.7.1's words).
 		if !there(lastArg()) {
-			fmt.Fprintf(os.Stderr, "Error: get failed: container %s not found\n", lastArg())
+			fmt.Fprintf(os.Stderr, "Error: container with ID %s not found\n", lastArg())
 			os.Exit(1)
 		}
 		// Running again in place: the stop marker is cleared.
@@ -697,7 +697,7 @@ func main() {
 		// running or unreadable, so a container not running discards both —
 		// answering them correctly here changes no caller's behaviour.
 		if !there(lastArg()) {
-			fmt.Fprintf(os.Stderr, "Error: internalError: \"failed to kill container\" (cause: \"notFound: \"container with ID %s not found\"\")\n", lastArg())
+			fmt.Fprintf(os.Stderr, "Error: notFound: \"container with ID %s not found\"\n", lastArg())
 			os.Exit(1)
 		}
 		if p := stoppedPath(lastArg()); p != "" {
@@ -909,7 +909,7 @@ func main() {
 				}
 				// Every key container 1.4.1 prints, each with its own value, in
 				// the runtime's (alphabetical) key order.
-				objs = append(objs, fmt.Sprintf(`{"blockReadBytes":8192,"blockWriteBytes":16384,"cpuUsageUsec":1500000,"id":"%s",`+
+				objs = append(objs, fmt.Sprintf(`{"blockReadBytes":8192,"blockWriteBytes":16384,"cpuUsageUsec":1500000,"cpuUtilization":0,"id":"%s",`+
 					`"memoryLimitBytes":1073741824,"memoryUsageBytes":49283072,"networkRxBytes":2048,"networkTxBytes":4096,"numProcesses":3}`, n))
 			}
 			fmt.Printf("[%s]\n", strings.Join(objs, ","))

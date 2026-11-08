@@ -5,7 +5,42 @@ stdout+stderr と exit code の golden。`testdata/fake-container.sh` はこれ�
 返し、`internal/runtime/runtime_test.go` の忠実性 eval はこの文字列を各パーサに流して
 整合を確認する。**CLI 更新時はここを再採取して同期すること。**
 
-**Last verified: 2026-10-28 / `container CLI version 1.6.1` (Homebrew formula `1.6.1`), macOS 27.0.1 only.**
+**Last verified: 2026-11-08 / `container CLI version 1.7.1` (Homebrew formula `1.7.1`), macOS 27.2 only.**
+The commands the parsers read were re-captured on 1.7.1 with the same script as for 1.6.1 (raw output in
+`~/opossum-dogfood/results/v171-recapture/`, with `real-conformance.log`), and compared with the 1.6.1 files.
+The sections below were not rewritten; what changed is listed here.
+
+**What changed from 1.6.1 to 1.7.1, in the captures:**
+- Of the 71 files 1.6.1 also has, none changed exit code. In the JSON of `ls -a`, `inspect`, `network ls`,
+  `network inspect`, `image inspect` and `system status` no key is gone and none is new (`inspect-alias` has no
+  JSON to compare: the one-label alias is refused on both).
+- `container stop`, `delete` and `kill` of a name that is not there now say
+  `Error: notFound: "container with ID <name> not found"`, without the `internalError: "failed to … container"
+  (cause: …)` around it. opossum does not read that line (a stop or delete of nothing is passed over on the
+  exit code and `inspect`); the fakes say the new one.
+- `container stats --format json` adds `cpuUtilization`. opossum does not read it.
+- The `opossum config`, `up`, `images`, `ps` and `down -v` captures print the same as on 1.6.1, and `doctor`
+  differs only in the version, counts and sizes.
+- The builder image is `container-builder-shim` 0.13.3.
+- Still no exit code for a stopped container in `inspect` or `ls -a`.
+- `make real-conformance` passes (3 tests; `real-conformance.log`).
+
+**Measured on 1.7.1 outside the captures:**
+- The wordings the diagnostics read are as on 1.6.1, and the diagnostics fired on them
+  (`error-wordings/diagnostics-171.txt`). OPSM-201's was not reached (OPSM-213 refuses the shape first).
+- `start` of an absent name now says `Error: container with ID <name> not found` (`get failed: container <name> not found` on 1.4.1; the fakes say the new one). `logs` and `exec` of an absent name, and `kill` of a stopped container, say what the fakes say.
+- `container stop` of a process that ignores TERM took 5.49 s, one run (8.2 s on 1.6.1, 5.35 s on 1.5.0), and left it
+  `stopped`.
+- `container logs -f` of a running container that had written nothing was still following after 4 s, as on 1.6.1.
+- `hello`, `demo` (`examples/compose.yaml`), `app-stack` and `mcp-stack` ran `config → up → ps → logs → down -v`
+  with every step exiting 0 (`~/opossum-dogfood/sprint-1108/`; `demo` first failed to build because the run had
+  copied its compose file without `web/`, and was run again with it, `demo-summary.txt`).
+- Not re-measured on 1.7.1: the numbers in `docs/benchmarks.md`, and the rest of the sections below, which keep the
+  version they name.
+
+---
+
+**Verified before that: 2026-10-28 / `container CLI version 1.6.1` (Homebrew formula `1.6.1`), macOS 27.0.1 only.**
 The commands the parsers read were re-captured on 1.6.1 with the same script as for 1.5.0, plus a few new
 captures (raw output in `~/opossum-dogfood/results/v161-recapture/`, 71 files, with `real-conformance.log`)
 and compared with the 1.5.0 files. The sections below were not rewritten; what changed is listed here.

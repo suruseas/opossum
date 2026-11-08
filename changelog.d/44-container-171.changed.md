@@ -1,0 +1,1 @@
+- Verified against Apple `container` 1.7.1: the commands opossum reads, its diagnostics, `up --wait` and the example projects behave as they did on 1.6.1, and 1.6.x stays supported.
