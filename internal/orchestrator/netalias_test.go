@@ -364,6 +364,49 @@ func TestUpRunsAgainWithoutAliasesAnotherContainerHolds(t *testing.T) {
 	}
 }
 
+// The way out of a held alias is given for each holder it is for, since the
+// refusal does not say who holds it. One subtest per holder, and one for the
+// advice it no longer gives: `opossum down` frees nothing an orphan holds.
+func TestTheHeldAliasWarningSaysWhichWayOutIsForWhichHolder(t *testing.T) {
+	svcs := map[string]*compose.Service{
+		"db":  aliased([]string{"back"}, map[string][]string{"back": {"cache"}}),
+		"web": {Image: "nginx", Networks: []string{"back"}},
+	}
+	_, _, out, err := aliasUpIn(t, "demo", "1.6.1", "opossum", svcs, "RUN_ALIAS_HELD=cache.demo.opossum")
+	if err != nil {
+		t.Fatalf("up should go on without the aliases, got %v\n%s", err, out)
+	}
+	var line string
+	for _, l := range strings.Split(out, "\n") {
+		if strings.Contains(l, "[OPSM-502]") && strings.Contains(l, "already holds them") {
+			line = l
+		}
+	}
+	if line == "" {
+		t.Fatalf("no held-alias warning in:\n%s", out)
+	}
+	for _, tc := range []struct{ name, want string }{
+		{"what to run once they are free", "Free them, then `opossum up --force-recreate db`:"},
+		{"a service of this project", "where the holder is a service of this project, recreate it (`opossum up --force-recreate <that service>`)"},
+		{"a container this project no longer has", "where it is a container this project no longer has, `opossum up --remove-orphans` (`opossum down` alone leaves it)"},
+		{"a project of the same name elsewhere", "A project of the same name in another directory is this project here, so these work from here too"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if !strings.Contains(line, tc.want) {
+				t.Errorf("want %q in:\n%s", tc.want, line)
+			}
+		})
+	}
+	// `opossum down` is named once, to say it leaves an orphan, and offered for
+	// no holder: for an orphan it frees nothing, and for a project of the same
+	// name elsewhere it would take down what runs here too.
+	t.Run("down offered for no holder", func(t *testing.T) {
+		if n := strings.Count(line, "opossum down"); n != 1 || !strings.Contains(line, "(`opossum down` alone leaves it)") {
+			t.Errorf("want `opossum down` named once, as what leaves an orphan, got %d in:\n%s", n, line)
+		}
+	})
+}
+
 // demoRunsOf is the `run` lines of one service of project demo.
 func demoRunsOf(all []string, svc string) []string {
 	var mine []string

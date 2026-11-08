@@ -4,7 +4,8 @@
 # last lines of the opossum part show none left. Progress lines (`[n/6] …`) are left out.
 # Two of opossum's lines are what it printed when this was taken and have since been changed: the
 # OPSM-502 warning in part (b), which now names the aliases it left out ("network alias(es)
-# "cache" not passed: …"), and the OPSM-217 advice in part (c), which now says
+# "cache" not passed: …") and gives each way out with the holder it is for, no longer offering
+# `opossum down` beside `--remove-orphans`, and the OPSM-217 advice in part (c), which now says
 # `opossum up --force-recreate <service>`, then `opossum up`, and `--remove-orphans` for a holder
 # the project no longer has. The runtime's own lines are as measured.
 #
