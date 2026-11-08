@@ -962,6 +962,24 @@ func TestAFragmentTheDecomposerCannotReadIsNamed(t *testing.T) {
 	}
 }
 
+// Every fragment handed to the round trip goes through it, not only the first:
+// a readable one first and the one the decomposer cannot read second still fails.
+func TestTheRoundTripCarriesEveryFragmentItIsHanded(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "1-fine.added.md", "- Fine.\n")
+	write(t, dir, "999-probe.added.md", "- One.\n\n\n- Two.\n")
+	frags, err := changelog.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(frags) != 2 || filepath.Base(frags[1].Path) != "999-probe.added.md" {
+		t.Fatalf("want the readable fragment first and the probe second, got %v", frags)
+	}
+	if err := fragmentsRoundTrip(t, frags); err == nil || !strings.Contains(err.Error(), "999-probe.added.md") {
+		t.Errorf("the round trip did not carry the second fragment: %v", err)
+	}
+}
+
 // fragmentsRoundTrip runs the fragments it is handed through the round trip,
 // naming them in whatever it reports so the reader has a file to open. It takes
 // the fragments rather than a directory, so what it checks is what the caller
