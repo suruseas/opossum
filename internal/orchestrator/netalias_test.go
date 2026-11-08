@@ -389,7 +389,7 @@ func TestTheHeldAliasWarningSaysWhichWayOutIsForWhichHolder(t *testing.T) {
 		{"what to run once they are free", "Free them, then `opossum up --force-recreate db`:"},
 		{"a service of this project", "where the holder is a service of this project, recreate it (`opossum up --force-recreate <that service>`)"},
 		{"a container this project no longer has", "where it is a container this project no longer has, `opossum up --remove-orphans` (`opossum down` alone leaves it)"},
-		{"another project's", "where it is another project's, such as one of the same name in another directory, that project's `opossum down`"},
+		{"a project of the same name elsewhere", "A project of the same name in another directory is this project here, so these work from here too"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if !strings.Contains(line, tc.want) {
@@ -397,9 +397,12 @@ func TestTheHeldAliasWarningSaysWhichWayOutIsForWhichHolder(t *testing.T) {
 			}
 		})
 	}
-	t.Run("not down for an orphan", func(t *testing.T) {
-		if strings.Contains(line, "or `opossum down`") {
-			t.Errorf("still offers `opossum down` beside --remove-orphans:\n%s", line)
+	// `opossum down` is named once, to say it leaves an orphan, and offered for
+	// no holder: for an orphan it frees nothing, and for a project of the same
+	// name elsewhere it would take down what runs here too.
+	t.Run("down offered for no holder", func(t *testing.T) {
+		if n := strings.Count(line, "opossum down"); n != 1 || !strings.Contains(line, "(`opossum down` alone leaves it)") {
+			t.Errorf("want `opossum down` named once, as what leaves an orphan, got %d in:\n%s", n, line)
 		}
 	})
 }
