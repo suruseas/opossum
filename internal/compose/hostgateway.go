@@ -17,9 +17,10 @@ const hostGateway = "host-gateway"
 // A list entry is `name=addresses` or `name:addresses`, with `=` looked for
 // first; the addresses are separated by commas. A mapping's value is one address
 // or a list of them, and there a comma does not separate. An address with a
-// bracket at both ends loses that one pair, in either form. Merge keys follow YAML, which the decoder applies: a
-// key the mapping writes wins over a merged one, and the first merged mapping
-// wins over a later one. The word is compared exactly.
+// bracket at both ends loses that one pair, in either form. Merge keys follow
+// YAML, which the decoder applies: a key the mapping writes wins over a merged
+// one, and the first merged mapping wins over a later one. The word is compared
+// exactly.
 func hostGatewayNames(n *yaml.Node) []string {
 	var names []string
 	n = unalias(n)

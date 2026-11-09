@@ -91,6 +91,12 @@ func TestTheHostGatewayNoteIsNotPrintedForAServiceWithNoNetwork(t *testing.T) {
 	if !strings.Contains(got, "1 compose field is ignored (a: extra_hosts)") {
 		t.Errorf("the general note should still name the field:\n%s", got)
 	}
+	verbose := hostGatewayOutput(t, true, []string{"a"}, map[string]*compose.Service{
+		"a": {Name: "a", Image: "x", NetworkMode: compose.NetworkModeNone, Unsupported: []string{"extra_hosts"}},
+	})
+	if !strings.Contains(verbose, `service "a": ignoring unsupported field(s): extra_hosts`) {
+		t.Errorf("the verbose line should still name the field:\n%s", verbose)
+	}
 }
 
 func TestTheHostGatewayNoteCannotBeMadeIntoTwoLines(t *testing.T) {
