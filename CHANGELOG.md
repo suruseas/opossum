@@ -6,6 +6,8 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-09
+
 ### Added
 
 - `opossum up --wait` starts the services, then waits for each service it covers that has a healthcheck to pass it, one that was already running included, and fails with `OPSM-417` if one does not, leaving the services up, as `docker compose up --wait` does (docker compose v5.6.1, side by side in ten shapes in `docs/compatibility.md`). `--wait-timeout <seconds>` bounds the wait in all, and `-d` is now taken, so `opossum up -d --wait` as scripts write it for docker compose runs unchanged; `up` is detached either way. Services are waited for one after another, and the first that does not pass ends the wait.
@@ -2986,7 +2988,8 @@ First tagged release. Everything opossum can do so far.
 - `restart` reassigns a container's IP (the runtime does this on `start`); the
   name and config are preserved, so name-based discovery is unaffected.
 
-[Unreleased]: https://github.com/suruseas/opossum/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/suruseas/opossum/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/suruseas/opossum/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/suruseas/opossum/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/suruseas/opossum/compare/v0.49.0...v1.0.0
 [0.49.0]: https://github.com/suruseas/opossum/compare/v0.48.2...v0.49.0

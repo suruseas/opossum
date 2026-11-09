@@ -1,1 +1,0 @@
-- Verified against Apple `container` 1.7.1: the commands opossum parses, `up --wait`, the example projects, and the diagnostics OPSM-412, OPSM-502, OPSM-217, OPSM-103 and OPSM-107.
