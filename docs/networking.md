@@ -179,6 +179,11 @@ Two requirements for the host service to be reachable:
   with a default if you need one: `${OPOSSUM_HOST_GATEWAY:-127.0.0.1}`. Run
   `opossum config` to see the value that will be used.
 
+`extra_hosts` is not applied, because `container run` has no option to add a
+host entry. A service that maps a name to `host-gateway`, as in
+`host.docker.internal:host-gateway`, gets a `note:` from `up` and `run` that
+says so. Use `${OPOSSUM_HOST_GATEWAY}` in place of that name.
+
 See [`examples/local-ai-stack`](../examples/local-ai-stack) for a full stack.
 
 [← back to the README](../README.md)

@@ -195,6 +195,10 @@ type Service struct {
 	// container_name, restart), collected during parsing so it can warn rather
 	// than silently ignore them.
 	Unsupported []string `yaml:"-"`
+	// HostGatewayNames holds the `extra_hosts` names mapped to host-gateway.
+	// The field is still ignored, but these are the entries a service relies
+	// on to reach the host, so they are named where the service starts.
+	HostGatewayNames []string `yaml:"-"`
 	// Extends is set when the service carries an `extends:` key — a service
 	// that pulls its settings from another (in this file or another). opossum
 	// does not read it; the load refuses the service by name rather than
@@ -1508,6 +1512,9 @@ func (s *Service) UnmarshalYAML(value *yaml.Node) error {
 	}
 	if ext, ok := keys["extends"]; ok {
 		s.Extends = decodeExtends(ext)
+	}
+	if hosts, ok := keys["extra_hosts"]; ok {
+		s.HostGatewayNames = hostGatewayNames(&hosts)
 	}
 	sort.Strings(s.Unsupported)
 	return nil

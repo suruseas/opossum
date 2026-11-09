@@ -6,6 +6,10 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- `up` and `run` now say when a service maps a name to `host-gateway` in `extra_hosts`: the entry cannot be added to the container, and `${OPOSSUM_HOST_GATEWAY}` is what reaches the host. Before, the only sign was the general note that `extra_hosts` is ignored.
+
 ## [1.1.0] - 2026-11-09
 
 ### Added
