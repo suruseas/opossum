@@ -198,16 +198,16 @@ func underRuntimeState(p string) bool {
 // localDirs hold files that are kept on a contributor's own disk and are not part
 // of the project: .gitignore ignores them, so this catches one that is added
 // with `git add -f`.
-var localDirs = []string{"scripts"}
+var localDirs = []string{"scripts", "articles"}
 
-// underLocalDir reports whether p lives in one of them.
-func underLocalDir(p string) bool {
+// localDirOf is the local directory p lives in, or "" when it lives in none.
+func localDirOf(p string) string {
 	for _, d := range localDirs {
 		if underDir(p, d) {
-			return true
+			return d
 		}
 	}
-	return false
+	return ""
 }
 
 // Offense returns a human-readable reason the file should not be tracked, or ""
@@ -267,12 +267,12 @@ func Offense(p string, size int64, head []byte) string {
 			"  Remove it (`git rm --cached %s`). A program worth keeping belongs under cmd/; "+
 			"one written to try something belongs in a temp directory.", p, p)
 	}
-	if underLocalDir(p) {
+	if dir := localDirOf(p); dir != "" {
 		return fmt.Sprintf("%s is a local file, and local files are not tracked.\n"+
 			"  %s holds files kept on your own disk that are not part of the project; .gitignore ignores it.\n"+
 			"  Remove it from the index (`git rm --cached %s`); it stays on disk, ignored. If this is "+
-			"something a user of opossum runs, it belongs somewhere they would look for it, not here.",
-			p, strings.Join(localDirs, ", "), p)
+			"something users of opossum need, it belongs somewhere they would look for it, not here.",
+			p, dir, p)
 	}
 	if size > MaxTrackedBytes {
 		return fmt.Sprintf("%s is %d bytes, over the %d-byte limit for a tracked file.\n"+
