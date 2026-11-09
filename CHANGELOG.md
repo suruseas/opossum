@@ -8,7 +8,7 @@ All notable changes to opossum are documented here. The format follows
 
 ### Changed
 
-- `up` and `run` now say when a service maps a name to `host-gateway` in `extra_hosts`: the entry cannot be added to the container, and `${OPOSSUM_HOST_GATEWAY}` is what reaches the host. Before, the only sign was the general note that `extra_hosts` is ignored.
+- `up` and `run` now say when a service maps a name to `host-gateway` in `extra_hosts`: the entry cannot be added to the container, and `${OPOSSUM_HOST_GATEWAY}` is what reaches the host. Before, the only sign was the general note that `extra_hosts` is ignored. The networking guide also shows how to register `host.docker.internal` as a DNS domain for images that have the name built in.
 
 ## [1.1.0] - 2026-11-09
 

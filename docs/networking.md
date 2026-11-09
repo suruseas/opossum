@@ -184,6 +184,20 @@ host entry. A service that maps a name to `host-gateway`, as in
 `host.docker.internal:host-gateway`, gets a `note:` from `up` and `run` that
 says so. Use `${OPOSSUM_HOST_GATEWAY}` in place of that name.
 
+If the image has that name built in and you cannot change it, register the name
+once as a DNS domain, with an address the runtime redirects to the host's
+loopback:
+
+```console
+sudo container system dns create host.docker.internal --localhost 203.0.113.113
+```
+
+Containers then resolve `host.docker.internal` to that address, and a connection
+to it reaches services on the host, including one bound only to `127.0.0.1`
+(measured on Apple `container` 1.7.1). The note still appears, because it comes
+from the compose file. To undo it, run
+`sudo container system dns delete host.docker.internal`.
+
 See [`examples/local-ai-stack`](../examples/local-ai-stack) for a full stack.
 
 [← back to the README](../README.md)
