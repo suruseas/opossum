@@ -6,6 +6,10 @@ All notable changes to opossum are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `--error-format json` and `OPOSSUM_ERROR_FORMAT=json` report a failure as one JSON line, the last line on stderr: `schema`, `level`, `source`, `code`, `message` and `exit`. Coded warnings become JSON lines on stderr too. The default output has not changed.
+
 ## [1.1.0] - 2026-11-09
 
 ### Added

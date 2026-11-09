@@ -84,6 +84,9 @@ func TestAForegroundServiceIsDiagnosedOnlyWhereNoContainerWasMade(t *testing.T) 
 			if tc.want != "" && !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("the failure should carry %s, got: %v", tc.want, err)
 			}
+			if code := strings.Trim(tc.want, "[]"); tc.want != "" && orchestrator.DiagCode(err) != code {
+				t.Errorf("DiagCode = %q, want %q: the code is in the words but not on the error", orchestrator.DiagCode(err), code)
+			}
 			if tc.wantNot != "" && strings.Contains(err.Error(), tc.wantNot) {
 				t.Errorf("no container was refused here, so %s is not the runtime's to say, got: %v", tc.wantNot, err)
 			}

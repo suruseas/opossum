@@ -79,10 +79,12 @@ type Orchestrator struct {
 	// OfferDNSDomain, where set, is asked when the DNS domain is not there, with its name, and reports whether it is there now (the user said yes and it
 	// was created). It is set by the command, which knows whether this is a terminal; where it is nil nothing is asked (#1907).
 	OfferDNSDomain func(domain string) bool
-	rt             *runtime.Runtime
-	out            interface{ Write([]byte) (int, error) }
-	sleep          func(time.Duration) // overridable so tests don't wait in real time
-	now            func() time.Time    // the clock a healthcheck wait counts its start period by; overridable with sleep
+	// Warn, where set, takes each coded warning instead of the `warning:` line.
+	Warn  func(code, message string)
+	rt    *runtime.Runtime
+	out   interface{ Write([]byte) (int, error) }
+	sleep func(time.Duration) // overridable so tests don't wait in real time
+	now   func() time.Time    // the clock a healthcheck wait counts its start period by; overridable with sleep
 	// holdPort binds one host port and holds it until the closer runs: port 0
 	// asks the operating system to choose, any other number asks whether that
 	// one can be bound. Overridable so a test can answer with a port the
@@ -787,8 +789,7 @@ func (o *Orchestrator) ensureNetwork(rn resolvedNetwork) (created bool, err erro
 		if hostOnly {
 			have, want = "host-only", "not host-only"
 		}
-		return false, &subnetChangedError{fmt.Errorf("[%s] network %q exists as a %s network, and the compose file now declares it %s — the network is kept while the project is up; %s",
-			codeNetworkSubnetChanged, rn.name, have, want, o.recreateAdvice(rn, "recreate it as the file declares it", "make `internal:` match the existing network to keep it"))}
+		return false, &subnetChangedError{codedf(codeNetworkSubnetChanged, "network %q exists as a %s network, and the compose file now declares it %s — the network is kept while the project is up; %s", rn.name, have, want, o.recreateAdvice(rn, "recreate it as the file declares it", "make `internal:` match the existing network to keep it"))}
 	}
 	if rn.subnets.V4 == "" && rn.subnets.V6 == "" {
 		return false, nil
@@ -799,8 +800,7 @@ func (o *Orchestrator) ensureNetwork(rn resolvedNetwork) (created bool, err erro
 	}
 	for _, want := range []struct{ family, declared, has string }{{"IPv4", rn.subnets.V4, have.V4}, {"IPv6", rn.subnets.V6, have.V6}} {
 		if want.declared != "" && want.declared != want.has {
-			return false, &subnetChangedError{fmt.Errorf("[%s] network %q exists with %s subnet %s, and the compose file now declares %s — the network is kept while the project is up; %s",
-				codeNetworkSubnetChanged, rn.name, want.family, want.has, want.declared, o.recreateAdvice(rn, "recreate it with the new subnet", "remove `ipam` to keep the existing one"))}
+			return false, &subnetChangedError{codedf(codeNetworkSubnetChanged, "network %q exists with %s subnet %s, and the compose file now declares %s — the network is kept while the project is up; %s", rn.name, want.family, want.has, want.declared, o.recreateAdvice(rn, "recreate it with the new subnet", "remove `ipam` to keep the existing one"))}
 		}
 	}
 	return false, nil
@@ -878,9 +878,8 @@ func (o *Orchestrator) checkExternalNetworks(services []string) error {
 			}
 			checked[rn.name] = true
 			if !o.rt.NetworkExists(rn.name) {
-				return fmt.Errorf("[%s] network %q is declared `external: true` but doesn't exist — "+
-					"create it first (`container network create %s`), or remove `external: true` so opossum creates it for the project",
-					codeExternalNetAbsent, rn.name, rn.name)
+				return codedf(codeExternalNetAbsent, "network %q is declared `external: true` but doesn't exist — "+
+					"create it first (`container network create %s`), or remove `external: true` so opossum creates it for the project", rn.name, rn.name)
 			}
 		}
 	}
@@ -906,9 +905,8 @@ func (o *Orchestrator) checkExternalVolumes(services []string) error {
 				if exists, known := o.rt.VolumeListed(name); exists || !known {
 					continue
 				}
-				return fmt.Errorf("[%s] volume %q is declared `external: true` but doesn't exist — "+
-					"create it first (`container volume create %s`), or remove `external: true` so opossum creates it for the project",
-					codeExternalVolumeAbsent, name, name)
+				return codedf(codeExternalVolumeAbsent, "volume %q is declared `external: true` but doesn't exist — "+
+					"create it first (`container volume create %s`), or remove `external: true` so opossum creates it for the project", name, name)
 			}
 		}
 	}
@@ -3146,13 +3144,11 @@ func (o *Orchestrator) awaitStartedHealthy(order []string, oneShot map[string]bo
 		case err == nil:
 			continue
 		case errors.Is(err, errWaitTimeout):
-			return fmt.Errorf("[%s] service %q was not healthy within the --wait-timeout of %s; the services stay up — `opossum ps` and `opossum logs %s` show where it is",
-				codeWaitNotHealthy, name, o.up.waitTimeout, name)
+			return codedf(codeWaitNotHealthy, "service %q was not healthy within the --wait-timeout of %s; the services stay up — `opossum ps` and `opossum logs %s` show where it is", name, o.up.waitTimeout, name)
 		case o.interrupted() != nil:
 			return fmt.Errorf("interrupted while waiting for service %q to be healthy; the services stay up", name)
 		}
-		return fmt.Errorf("[%s] service %q did not become healthy: %v; the services stay up — `opossum logs %s` shows what it said",
-			codeWaitNotHealthy, name, err, name)
+		return codedf(codeWaitNotHealthy, "service %q did not become healthy: %v; the services stay up — `opossum logs %s` shows what it said", name, err, name)
 	}
 	return nil
 }
@@ -3323,8 +3319,7 @@ func (o *Orchestrator) verifyStarted(order []string, oneShot map[string]bool) er
 		crashed = append(crashed, name)
 	}
 	sort.Strings(crashed)
-	return fmt.Errorf("[%s] %d service(s) exited right after starting: %s — see the logs above, fix the cause, and run `opossum up` again",
-		codeServiceExited, len(crashed), strings.Join(quoteAll(crashed), ", "))
+	return codedf(codeServiceExited, "%d service(s) exited right after starting: %s — see the logs above, fix the cause, and run `opossum up` again", len(crashed), strings.Join(quoteAll(crashed), ", "))
 }
 
 // printPlan lists the exact `container` invocations a dry-run recorded but did
@@ -4274,11 +4269,10 @@ func (o *Orchestrator) refuseUnbindableHostAddresses(order []string) error {
 				if strings.Contains(port, "-") {
 					ports = "host ports " + port
 				}
-				return fmt.Errorf("[%s] service %q publishes %s, and this host will not bind %s:\n"+
+				return codedf(codeHostAddressUnbindable, "service %q publishes %s, and this host will not bind %s:\n"+
 					"  %v\ncheck that the machine has %s and that its interface is up, or write an "+
 					"address it does have. Dropping the address publishes %s on EVERY "+
-					"address, which is a wider door than the file asks for.",
-					codeHostAddressUnbindable, name, spec, host, err, host, ports)
+					"address, which is a wider door than the file asks for.", name, spec, host, err, host, ports)
 			}
 		}
 	}
@@ -4375,9 +4369,8 @@ func (o *Orchestrator) refuseDuplicateHostPorts(order []string) error {
 					why = " Two published ports of one service may not overlap, whatever addresses " +
 						"they name."
 				}
-				return fmt.Errorf("[%s] two entries publish host port %s:\n  - service %q (%s)\n"+
-					"  - service %q (%s)\ngive one of them a different host port.%s",
-					codeHostPortTwice, key, e.service, e.spec, name, spec, why)
+				return codedf(codeHostPortTwice, "two entries publish host port %s:\n  - service %q (%s)\n"+
+					"  - service %q (%s)\ngive one of them a different host port.%s", key, e.service, e.spec, name, spec, why)
 			}
 			byPort[key] = append(byPort[key], this)
 		}
@@ -4597,7 +4590,11 @@ func (o *Orchestrator) checkHostPorts(order []string) error {
 			codeHostPortNotBindable, strings.Join(refused, "\n  - ")))
 	}
 	if len(problems) > 0 {
-		return errors.New(strings.Join(problems, "\n"))
+		code := codeHostPortNotBindable
+		if len(conflicts) > 0 {
+			code = codeHostPortInUse
+		}
+		return withCode(code, errors.New(strings.Join(problems, "\n")))
 	}
 	return nil
 }
@@ -5364,11 +5361,10 @@ func (o *Orchestrator) waitHealthy(name string, hc *compose.Healthcheck) error {
 			// container — otherwise the usual "check `opossum logs`" hint points at a
 			// container that's already gone.
 			if logs := o.rt.CaptureLogs(cname, 15); logs != "" {
-				return fmt.Errorf("[%s] container is not running (state %q); its last log lines:\n%s%s",
-					codeDepNotRunning,
+				return codedf(codeDepNotRunning, "container is not running (state %q); its last log lines:\n%s%s",
 					info.State, indentLines(logs), o.crashHint(name, logs))
 			}
-			return fmt.Errorf("[%s] container is not running (state %q)", codeDepNotRunning, info.State)
+			return codedf(codeDepNotRunning, "container is not running (state %q)", info.State)
 		}
 		if o.now().Sub(start) >= hc.StartPeriod {
 			failures++
@@ -6238,7 +6234,7 @@ func (o *Orchestrator) specificStartError(name, excludeContainer string, order [
 		holder, takesItBack = o.hostPortHolderInOrder(o.Project.Services[name], order)
 	}
 	if hint := runErrorHint(o.Project.Services[name], holder, takesItBack, err); hint != "" {
-		return fmt.Errorf("starting service %q: %w%s", name, err, hint)
+		return withCode(hintCode(hint), fmt.Errorf("starting service %q: %w%s", name, err, hint))
 	}
 	return nil
 }
@@ -6553,10 +6549,9 @@ func (o *Orchestrator) decodeVolumeAttachError(name, excludeContainer string, er
 		verb, those = "are", "those fills"
 	}
 	if len(busy) == 0 && len(filling) > 0 {
-		return fmt.Errorf("[%s] service %q can't start: %s %s still being filled from the image by another `up` or `run`, "+
+		return codedf(codeVolumeAttachBusy, "service %q can't start: %s %s still being filled from the image by another `up` or `run`, "+
 			"and Apple `container` attaches a named volume to only one running container at a time. Wait for %s "+
-			"to finish, then retry — do not stop the filler: a volume it leaves half-filled is taken as already there by the next start",
-			codeVolumeAttachBusy, name, strings.Join(filling, ", "), verb, those), true
+			"to finish, then retry — do not stop the filler: a volume it leaves half-filled is taken as already there by the next start", name, strings.Join(filling, ", "), verb, those), true
 	}
 	if len(busy) == 0 {
 		for _, v := range vols {
@@ -6575,11 +6570,10 @@ func (o *Orchestrator) decodeVolumeAttachError(name, excludeContainer string, er
 		}
 		alsoFilling = fmt.Sprintf("; %s %s still being filled from the image — wait for %s", strings.Join(filling, ", "), verb, which)
 	}
-	return fmt.Errorf("[%s] service %q can't start: Apple `container` attaches a named volume to only "+
+	return codedf(codeVolumeAttachBusy, "service %q can't start: Apple `container` attaches a named volume to only "+
 		"one running container at a time, and %s is already attached elsewhere — the second attach fails "+
 		"with a storage-device (VZError) error. Stop the container holding it (`container stop <name>`), "+
-		"or give this service its own volume; for shared data use a bind mount (a host path) instead%s",
-		codeVolumeAttachBusy, name, strings.Join(busy, ", "), alsoFilling), true
+		"or give this service its own volume; for shared data use a bind mount (a host path) instead%s", name, strings.Join(busy, ", "), alsoFilling), true
 }
 
 // seedIsFilling reports whether the only thing holding volume v is v's own
@@ -6906,11 +6900,10 @@ func (o *Orchestrator) refuseSymlinkedSocketMounts(service string, vols []string
 			hint = fmt.Sprintf("\n  mounting %s — what the link points at — works, so that is the way out "+
 				"if the service really needs this socket", resolved)
 		}
-		return fmt.Errorf("[%s] service %q mounts %s at %s, and that cannot be done here: the path is a "+
+		return codedf(codeSymlinkedSocket, "service %q mounts %s at %s, and that cannot be done here: the path is a "+
 			"symlink to a socket, which this runtime refuses (`mount failed with errno 95`)\n"+
 			"  a socket reached by its own path mounts fine, and so does a symlink to a file or a "+
-			"directory — it is the combination that fails%s",
-			codeSymlinkedSocket, service, src, target, hint)
+			"directory — it is the combination that fails%s", service, src, target, hint)
 	}
 	return nil
 }
@@ -9065,6 +9058,8 @@ func (o *Orchestrator) buildOptions(tag, service string, svc *compose.Service, r
 // (`errors.As` matches the type itself; nothing unwraps it further).
 type subnetChangedError struct{ error }
 
+func (e *subnetChangedError) Unwrap() error { return e.error }
+
 // volumeMount is a service's resolved volume mount. Arg is the runtime `-v`
 // value. When the mount is backed by a project-owned volume (named or
 // anonymous), Volume is that volume's name and Target its in-container path, so
@@ -9489,7 +9484,7 @@ func (o *Orchestrator) ensureBindDirs(service string, vols []string, redo string
 		}
 		if made, perr := o.materializePlaceholder(src); made || perr != nil {
 			if perr != nil {
-				return fmt.Errorf("[%s] service %q: could not make the stand-in file %s: %v", codeBindDirCreate, service, src, perr)
+				return codedf(codeBindDirCreate, "service %q: could not make the stand-in file %s: %v", service, src, perr)
 			}
 			continue
 		}
@@ -9515,18 +9510,16 @@ func (o *Orchestrator) ensureBindDirs(service string, vols []string, redo string
 			// nothing can see.
 			if fi, lerr := os.Lstat(src); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
 				target, _ := os.Readlink(src)
-				return fmt.Errorf("[%s] service %q needs %s for a bind mount, but it is a symlink to "+
+				return codedf(codeBindDirCreate, "service %q needs %s for a bind mount, but it is a symlink to "+
 					"%q, and there is nothing there\n"+
 					"  the container cannot start without it — point the link at something that "+
 					"exists, or remove the link and let opossum create the directory, then run "+
-					"%s again",
-					codeBindDirCreate, service, src, target, redo)
+					"%s again", service, src, target, redo)
 			}
-			return fmt.Errorf("[%s] service %q needs the host directory %s for a bind mount, and it "+
+			return codedf(codeBindDirCreate, "service %q needs the host directory %s for a bind mount, and it "+
 				"could not be created: %v\n"+
 				"  the container cannot start without it — create it yourself (`mkdir -p %s`) or fix "+
-				"the parent directory's permissions, then run %s again",
-				codeBindDirCreate, service, src, mkErr, src, redo)
+				"the parent directory's permissions, then run %s again", service, src, mkErr, src, redo)
 		}
 		o.logf("Created host directory %s for a bind mount\n", src)
 		// A directory is all this can create, and for a mount that names a file

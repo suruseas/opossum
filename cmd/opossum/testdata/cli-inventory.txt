@@ -1,6 +1,7 @@
 opossum
 opossum --dns-domain string = opossum
 opossum --env-file stringArray = []
+opossum --error-format string = text
 opossum --file -f stringArray = []
 opossum --profile stringArray = []
 opossum --project-name -p string = 

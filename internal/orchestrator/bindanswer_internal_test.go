@@ -229,6 +229,13 @@ func TestAnExplicitEntryIsOnlyCalledInUseWhenSomethingHoldsIt(t *testing.T) {
 			if has(inUse) != tc.wantIn {
 				t.Errorf("says %q: %v, want %v — %s:\n%s", inUse, has(inUse), tc.wantIn, tc.errno, msg)
 			}
+			wantCode := string(codeHostPortNotBindable)
+			if tc.wantIn {
+				wantCode = string(codeHostPortInUse)
+			}
+			if got := DiagCode(err); got != wantCode {
+				t.Errorf("DiagCode = %q, want %q", got, wantCode)
+			}
 			if has(string(codeHostPortInUse)) != tc.wantIn {
 				t.Errorf("carries %s: %v, want %v:\n%s", codeHostPortInUse, has(string(codeHostPortInUse)), tc.wantIn, msg)
 			}
