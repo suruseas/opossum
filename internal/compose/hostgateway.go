@@ -15,9 +15,9 @@ const hostGateway = "host-gateway"
 // hostGatewayNames is the names an `extra_hosts` value maps to host-gateway,
 // sorted and once each, read the way docker compose (v5.6.1) reads these forms.
 // A list entry is `name=addresses` or `name:addresses`, with `=` looked for
-// first; the addresses are separated by commas and each may be in brackets. A
-// mapping's value is one address or a list of them, taken as written: there a
-// comma does not separate. Merge keys follow YAML, which the decoder applies: a
+// first; the addresses are separated by commas. A mapping's value is one address
+// or a list of them, and there a comma does not separate. An address with a
+// bracket at both ends loses that one pair, in either form. Merge keys follow YAML, which the decoder applies: a
 // key the mapping writes wins over a merged one, and the first merged mapping
 // wins over a later one. The word is compared exactly.
 func hostGatewayNames(n *yaml.Node) []string {
@@ -60,7 +60,7 @@ func cutHostEntry(n *yaml.Node) (name, addrs string, ok bool) {
 // comma-separated addresses.
 func listNamesHostGateway(addrs string) bool {
 	for _, addr := range strings.Split(addrs, ",") {
-		if strings.TrimSuffix(strings.TrimPrefix(addr, "["), "]") == hostGateway {
+		if isHostGatewayAddress(addr) {
 			return true
 		}
 	}
@@ -72,9 +72,21 @@ func listNamesHostGateway(addrs string) bool {
 func isHostGatewayValue(value any) bool {
 	switch v := value.(type) {
 	case string:
-		return v == hostGateway
+		return isHostGatewayAddress(v)
 	case []any:
-		return slices.Contains(v, any(hostGateway))
+		return slices.ContainsFunc(v, func(item any) bool {
+			addr, ok := item.(string)
+			return ok && isHostGatewayAddress(addr)
+		})
 	}
 	return false
+}
+
+// isHostGatewayAddress compares one address, without the pair of brackets it may
+// have at both ends.
+func isHostGatewayAddress(addr string) bool {
+	if len(addr) >= 2 && addr[0] == '[' && addr[len(addr)-1] == ']' {
+		addr = addr[1 : len(addr)-1]
+	}
+	return addr == hostGateway
 }

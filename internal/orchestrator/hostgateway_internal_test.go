@@ -78,9 +78,18 @@ func TestTheHostGatewayNoteIsNotPrintedWithoutAnEntry(t *testing.T) {
 }
 
 func TestTheHostGatewayNoteIsNotPrintedForAServiceWithNoNetwork(t *testing.T) {
-	got := hostGatewayOutput(t, false, []string{"web"}, map[string]*compose.Service{"web": {Name: "web", Image: "x", NetworkMode: compose.NetworkModeNone, HostGatewayNames: []string{"a"}}})
-	if strings.Contains(got, "OPOSSUM_HOST_GATEWAY") {
+	got := hostGatewayOutput(t, false, []string{"a", "b"}, map[string]*compose.Service{
+		"a": {Name: "a", Image: "x", NetworkMode: compose.NetworkModeNone, Unsupported: []string{"extra_hosts"}, HostGatewayNames: []string{"sealed"}},
+		"b": {Name: "b", Image: "x", HostGatewayNames: []string{"open"}},
+	})
+	if strings.Contains(got, "maps sealed to") {
 		t.Errorf("a service with no network cannot follow the advice:\n%s", got)
+	}
+	if !strings.Contains(got, `service "b": extra_hosts maps open to`) {
+		t.Errorf("the service after it should still be told:\n%s", got)
+	}
+	if !strings.Contains(got, "1 compose field is ignored (a: extra_hosts)") {
+		t.Errorf("the general note should still name the field:\n%s", got)
 	}
 }
 
