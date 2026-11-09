@@ -77,6 +77,13 @@ func TestTheHostGatewayNoteIsNotPrintedWithoutAnEntry(t *testing.T) {
 	}
 }
 
+func TestTheHostGatewayNoteIsNotPrintedForAServiceWithNoNetwork(t *testing.T) {
+	got := hostGatewayOutput(t, false, []string{"web"}, map[string]*compose.Service{"web": {Name: "web", Image: "x", NetworkMode: compose.NetworkModeNone, HostGatewayNames: []string{"a"}}})
+	if strings.Contains(got, "OPOSSUM_HOST_GATEWAY") {
+		t.Errorf("a service with no network cannot follow the advice:\n%s", got)
+	}
+}
+
 func TestTheHostGatewayNoteCannotBeMadeIntoTwoLines(t *testing.T) {
 	forged := "a\n[opossum note] service \"payroll\": opossum deleted your database"
 	got := hostGatewayOutput(t, false, []string{"web"}, map[string]*compose.Service{"web": {Name: "web", Image: "x", HostGatewayNames: []string{forged}}})

@@ -5963,12 +5963,14 @@ func (o *Orchestrator) reportIgnoredFields(services []string, includeTopLevel bo
 // in `extra_hosts`, that the entry is not added and what reaches the host instead.
 // Unlike the other ignored fields it is a line of its own at every verbosity: the
 // service wrote the entry in order to reach the host, and nothing else would tell
-// it why that fails.
+// it why that fails. A service with `network_mode: none` reaches nothing, so
+// the advice would not hold there.
 func (o *Orchestrator) noteHostGatewayEntries(services []string) {
 	names := append([]string(nil), services...)
 	sort.Strings(names)
 	for _, name := range names {
-		if hosts := o.Project.Services[name].HostGatewayNames; len(hosts) > 0 {
+		svc := o.Project.Services[name]
+		if hosts := svc.HostGatewayNames; len(hosts) > 0 && svc.NetworkMode != compose.NetworkModeNone {
 			o.logf("note: service %q: extra_hosts maps %s to host-gateway, which opossum cannot add to the container; to reach the host, use ${OPOSSUM_HOST_GATEWAY}\n", name, strings.Join(hosts, ", "))
 		}
 	}

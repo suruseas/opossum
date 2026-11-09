@@ -3,10 +3,12 @@ package compose
 import (
 	"slices"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestHostGatewayNamesReadEveryWayOfWritingTheEntry(t *testing.T) {
-	const pre = "x-h: &h {viaanchor: host-gateway}\nx-a: &a viaalias:host-gateway\nx-g: &g host-gateway\nservices:\n  web:\n    image: alpine\n"
+	const pre = "x-h: &h {viaanchor: host-gateway}\nx-a: &a viaalias:host-gateway\nx-g: &g host-gateway\nx-m: &m {one: host-gateway, same: host-gateway}\nx-n: &n {two: host-gateway, same: 10.0.0.9}\nservices:\n  web:\n    image: alpine\n"
 	for _, tc := range []struct {
 		name, body string
 		want       []string
@@ -22,6 +24,21 @@ func TestHostGatewayNamesReadEveryWayOfWritingTheEntry(t *testing.T) {
 		{"the word in another case", "    extra_hosts: [\"a:HOST-GATEWAY\"]\n", nil},
 		{"the word with more after it", "    extra_hosts: [\"a:host-gateway:x\"]\n", nil},
 		{"equals decides over colon", "    extra_hosts: [\"a=b:host-gateway\"]\n", nil},
+		{"a space before the word", "    extra_hosts: [\"a: host-gateway\"]\n", nil},
+		{"after a comma, colon", "    extra_hosts: [\"a:10.0.0.1,host-gateway\"]\n", []string{"a"}},
+		{"before a comma, equals", "    extra_hosts: [\"a=host-gateway,10.0.0.1\"]\n", []string{"a"}},
+		{"in brackets", "    extra_hosts: [\"a:[host-gateway]\"]\n", []string{"a"}},
+		{"in brackets, equals", "    extra_hosts: [\"a=[host-gateway]\"]\n", []string{"a"}},
+		{"a mapping's comma does not separate", "    extra_hosts: {a: \"10.0.0.1,host-gateway\"}\n", nil},
+		{"mapping, another case", "    extra_hosts: {a: HOST-GATEWAY}\n", nil},
+		{"mapping, more after it", "    extra_hosts: {a: host-gateway2}\n", nil},
+		{"mapping to a list, another case", "    extra_hosts: {a: [10.0.0.1, HOST-GATEWAY]}\n", nil},
+		{"mapping to a list, more after it", "    extra_hosts: {a: [10.0.0.1, host-gateway2]}\n", nil},
+		{"a build's extra_hosts is not the service's", "    build: {context: ., extra_hosts: [\"a:host-gateway\"]}\n", nil},
+		{"a written key wins over a merged one, merge first", "    extra_hosts: {<<: *m, one: 10.0.0.1}\n", []string{"same"}},
+		{"a written key wins over a merged one, merge last", "    extra_hosts: {one: 10.0.0.1, <<: *m}\n", []string{"same"}},
+		{"a list of merges, first wins", "    extra_hosts: {<<: [*m, *n]}\n", []string{"one", "same", "two"}},
+		{"a list of merges, the other order", "    extra_hosts: {<<: [*n, *m]}\n", []string{"one", "two"}},
 		{"sorted", "    extra_hosts: [\"z:host-gateway\", \"a:host-gateway\"]\n", []string{"a", "z"}},
 		{"once each", "    extra_hosts: [\"a:host-gateway\", \"a=host-gateway\"]\n", []string{"a"}},
 		{"through an alias on the item", "    extra_hosts: [*a]\n", []string{"viaalias"}},
@@ -39,6 +56,18 @@ func TestHostGatewayNamesReadEveryWayOfWritingTheEntry(t *testing.T) {
 				t.Errorf("HostGatewayNames = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// A key that is not a name is refused when the file is loaded, as docker compose
+// refuses it, so this is asked of the function: such a mapping names nothing.
+func TestHostGatewayNamesOfAMappingThatDoesNotDecodeAreNone(t *testing.T) {
+	var doc yaml.Node
+	if err := yaml.Unmarshal([]byte("{? [x] : host-gateway, a: host-gateway}\n"), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if got := hostGatewayNames(doc.Content[0]); got != nil {
+		t.Errorf("HostGatewayNames = %v, want none", got)
 	}
 }
 

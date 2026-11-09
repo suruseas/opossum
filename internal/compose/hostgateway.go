@@ -13,29 +13,31 @@ import (
 const hostGateway = "host-gateway"
 
 // hostGatewayNames is the names an `extra_hosts` value maps to host-gateway,
-// sorted and once each. An entry is `name=address` or `name:address`, with `=`
-// taking precedence (docker compose, v5.6.1, reads `a:b=host-gateway` as the
-// name `a:b`), or a mapping whose value is an address or a list of them. The
-// word is compared exactly, as docker compose carries it.
+// sorted and once each, read the way docker compose (v5.6.1) reads these forms.
+// A list entry is `name=addresses` or `name:addresses`, with `=` looked for
+// first; the addresses are separated by commas and each may be in brackets. A
+// mapping's value is one address or a list of them, taken as written: there a
+// comma does not separate. Merge keys follow YAML, which the decoder applies: a
+// key the mapping writes wins over a merged one, and the first merged mapping
+// wins over a later one. The word is compared exactly.
 func hostGatewayNames(n *yaml.Node) []string {
 	var names []string
 	n = unalias(n)
 	switch n.Kind {
 	case yaml.SequenceNode:
 		for _, item := range n.Content {
-			if name, addr, ok := cutHostEntry(unalias(item)); ok && addr == hostGateway {
+			if name, addrs, ok := cutHostEntry(unalias(item)); ok && listNamesHostGateway(addrs) {
 				names = append(names, name)
 			}
 		}
 	case yaml.MappingNode:
-		for i := 0; i+1 < len(n.Content); i += 2 {
-			key, value := unalias(n.Content[i]), unalias(n.Content[i+1])
-			if key.Tag == "!!merge" {
-				names = append(names, hostGatewayNames(value)...)
-				continue
-			}
+		var hosts map[string]any
+		if n.Decode(&hosts) != nil {
+			return nil
+		}
+		for name, value := range hosts {
 			if isHostGatewayValue(value) {
-				names = append(names, key.Value)
+				names = append(names, name)
 			}
 		}
 	}
@@ -43,28 +45,36 @@ func hostGatewayNames(n *yaml.Node) []string {
 	return slices.Compact(names)
 }
 
-// cutHostEntry splits a list entry into its name and address.
-func cutHostEntry(n *yaml.Node) (name, addr string, ok bool) {
+// cutHostEntry splits a list entry into its name and addresses.
+func cutHostEntry(n *yaml.Node) (name, addrs string, ok bool) {
 	if n.Kind != yaml.ScalarNode {
 		return "", "", false
 	}
-	if name, addr, ok = strings.Cut(n.Value, "="); ok {
-		return name, addr, true
+	if name, addrs, ok = strings.Cut(n.Value, "="); ok {
+		return name, addrs, true
 	}
 	return strings.Cut(n.Value, ":")
 }
 
+// listNamesHostGateway reports whether host-gateway is among a list entry's
+// comma-separated addresses.
+func listNamesHostGateway(addrs string) bool {
+	for _, addr := range strings.Split(addrs, ",") {
+		if strings.TrimSuffix(strings.TrimPrefix(addr, "["), "]") == hostGateway {
+			return true
+		}
+	}
+	return false
+}
+
 // isHostGatewayValue reports whether a mapping's value is host-gateway, or a
 // list of addresses with host-gateway among them.
-func isHostGatewayValue(n *yaml.Node) bool {
-	if n.Kind == yaml.ScalarNode {
-		return n.Value == hostGateway
+func isHostGatewayValue(value any) bool {
+	switch v := value.(type) {
+	case string:
+		return v == hostGateway
+	case []any:
+		return slices.Contains(v, any(hostGateway))
 	}
-	if n.Kind != yaml.SequenceNode {
-		return false
-	}
-	return slices.ContainsFunc(n.Content, func(item *yaml.Node) bool {
-		item = unalias(item)
-		return item.Kind == yaml.ScalarNode && item.Value == hostGateway
-	})
+	return false
 }
