@@ -271,7 +271,7 @@ func Offense(p string, size int64, head []byte) string {
 		return fmt.Sprintf("%s is a local file, and local files are not tracked.\n"+
 			"  %s holds files kept on your own disk that are not part of the project; .gitignore ignores it.\n"+
 			"  Remove it from the index (`git rm --cached %s`); it stays on disk, ignored. If this is "+
-			"something a user of opossum runs, it belongs somewhere they would look for it, not here.",
+			"something users of opossum need, it belongs somewhere they would look for it, not here.",
 			p, dir, p)
 	}
 	if size > MaxTrackedBytes {
