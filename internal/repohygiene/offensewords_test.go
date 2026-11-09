@@ -47,6 +47,15 @@ func TestTheOffenseMessagesKeepEachPieceInItsPlace(t *testing.T) {
 			},
 		},
 		{
+			"a local file names the directory it is under, not the first or the list",
+			"articles/launch.md", 4_000, []byte("# Launch\n"),
+			[]string{
+				"articles/launch.md is a local file, and local files are not tracked.",
+				"  articles holds files kept on your own disk that are not part of the project; .gitignore ignores it.",
+				"Remove it from the index (`git rm --cached articles/launch.md`)",
+			},
+		},
+		{
 			"a large file names its size and then the limit",
 			"docs/huge.md", repohygiene.MaxTrackedBytes + 1, []byte("# hello"),
 			[]string{

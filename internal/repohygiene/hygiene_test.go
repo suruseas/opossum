@@ -59,6 +59,10 @@ func TestOffenseFlagsBuildArtifacts(t *testing.T) {
 		// Files under scripts/ are kept locally and are not part of the project.
 		{"a local script", "scripts/release.sh", 4_000, []byte("#!/bin/bash\n"), "a local file"},
 		{"anything else that lands there", "scripts/lib/helpers.sh", 900, []byte("#!/bin/sh\n"), "a local file"},
+		{"a local article", "articles/launch.md", 4_000, []byte("# Launch\n"), "a local file"},
+		{"further down in the articles", "articles/drafts/next.md", 900, []byte("# Next\n"), "a local file"},
+		{"a directory that merely starts like articles", "articles-for-users/x.md", 900, []byte("# x\n"), ""},
+		{"an articles directory further down", "docs/articles/a.md", 900, []byte("# a\n"), ""},
 		// The rule is about that directory, not about the word: a script a user runs
 		// is fine wherever users would look for it.
 		{"a script users are meant to run", "examples/run-demo.sh", 900, []byte("#!/bin/sh\n"), ""},
@@ -249,6 +253,7 @@ func TestWhatOpossumWritesAtRunTimeIsNotTracked(t *testing.T) {
 func TestNoRuleIsStricterAboutCaseThanTheFileSystem(t *testing.T) {
 	for _, tc := range []struct{ rule, lower, upper string }{
 		{"local directory", "scripts/release.sh", "Scripts/release.sh"},
+		{"the other local directory", "articles/launch.md", "Articles/launch.md"},
 		{"compose at the top", "compose.yaml", "Compose.yaml"},
 		{"runtime state", ".opossum/mcp/db.json", ".Opossum/mcp/db.json"},
 		{"a throwaway name", "zz_tmp.go", "ZZ_TMP.go"},
