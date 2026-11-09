@@ -24,6 +24,7 @@ func TestDiagCodeIsCarriedBesideTheWords(t *testing.T) {
 		{"wrapped", fmt.Errorf("up: %w", coded), string(codeRuntimeAbsent)},
 		{"the outer code of two", withCode(codeHostPortInUse, fmt.Errorf("x: %w", coded)), string(codeHostPortInUse)},
 		{"a subnet change", &subnetChangedError{coded}, string(codeRuntimeAbsent)},
+		{"one of several", errorList{msg: "two failed", errs: []error{errors.New("first"), coded}}, string(codeRuntimeAbsent)},
 		{"plain", errors.New("plain"), ""},
 		{"a project's value that looks like one", fmt.Errorf("service %q failed", "[OPSM-999] x"), ""},
 		{"an empty code does not hide one inside", withCode("", coded), string(codeRuntimeAbsent)},
@@ -84,8 +85,10 @@ func TestAWarningGoesToWarnWhereItIsSet(t *testing.T) {
 	}
 }
 
-// A code written into the sentence is read by nobody: DiagCode would say "".
-func TestNoCodedErrorIsBuiltFromASentence(t *testing.T) {
+// A code written into the sentence is read by nobody: DiagCode would say "". This
+// looks for the three common spellings. It does not find a code assembled by other
+// means, such as a hint appended to a wrapped error, which withCode has to carry.
+func TestTheCommonSpellingsOfACodeInASentenceAreRefused(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)

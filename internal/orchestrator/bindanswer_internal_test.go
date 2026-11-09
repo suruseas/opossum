@@ -149,6 +149,31 @@ func TestOnlyAddressInUseIsTaken(t *testing.T) {
 // An entry that writes its host port is a contract, so a refused bind fails the
 // run before anything starts. The row is what the reader is told: "already in
 // use" only for a listener, and the bind's own reason for anything else.
+// Both kinds of refusal in one run are said in one error, and its text opens with
+// the port in use, so that is its code.
+func TestTheCodeOfBothRefusalsIsTheFirstOneSaid(t *testing.T) {
+	p := &compose.Project{Name: "demo", Services: map[string]*compose.Service{
+		"a": {Image: "web:latest", Ports: []string{"127.0.0.1:8080:80", "127.0.0.1:80:81"}},
+	}}
+	var out bytes.Buffer
+	o := New(p, quietShim(t), "opossum", &out)
+	a := &bindAnswers{by: map[string]error{
+		"tcp 127.0.0.1:8080": refusedBind(t, "tcp", "127.0.0.1:8080", syscall.EADDRINUSE),
+		"tcp 127.0.0.1:80":   refusedBind(t, "tcp", "127.0.0.1:80", syscall.EACCES),
+	}}
+	o.probeHostPort = a.probe
+	err := o.checkHostPorts([]string{"a"})
+	if err == nil {
+		t.Fatal("nothing was refused")
+	}
+	if !strings.HasPrefix(err.Error(), "["+string(codeHostPortInUse)+"]") {
+		t.Fatalf("this fixture should say the port in use first:\n%v", err)
+	}
+	if got := DiagCode(err); got != string(codeHostPortInUse) {
+		t.Errorf("DiagCode = %q, want %q", got, codeHostPortInUse)
+	}
+}
+
 func TestAnExplicitEntryIsOnlyCalledInUseWhenSomethingHoldsIt(t *testing.T) {
 	const (
 		inUse  = "host port already in use"

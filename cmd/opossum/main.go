@@ -474,6 +474,13 @@ func main() { os.Exit(runCLI(os.Args[1:], os.Stdout, os.Stderr)) }
 // thing covering this line is that someone read it.
 func runCLI(args []string, out, errOut io.Writer) int {
 	asJSON, formatErr := reportsJSON(args, os.Getenv)
+	if cmd, ok := helpJSONRequested(args); ok {
+		if err := writeHelpJSON(out, cmd); err != nil {
+			reportFailure(errOut, asJSON, err, 1)
+			return 1
+		}
+		return 0
+	}
 	if formatErr != nil {
 		fmt.Fprintln(errOut, "opossum: "+quoted(formatErr.Error()))
 		return 1
@@ -481,13 +488,6 @@ func runCLI(args []string, out, errOut io.Writer) int {
 	defer func() { warnSink = nil }()
 	if asJSON {
 		warnSink = func(code, message string) { writeWarningJSON(errOut, code, message) }
-	}
-	if cmd, ok := helpJSONRequested(args); ok {
-		if err := writeHelpJSON(out, cmd); err != nil {
-			reportFailure(errOut, asJSON, err, 1)
-			return 1
-		}
-		return 0
 	}
 	root := newRootCmd()
 	root.SetOut(out)

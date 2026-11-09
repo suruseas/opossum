@@ -75,6 +75,10 @@ func TestErrorFormatIsFoundWhereTheFlagIsAFlag(t *testing.T) {
 		{"the value of another flag is not the flag", []string{"-p", "--error-format", "up"}, "", false},
 		{"after a boolean flag", []string{"--verbose", "--error-format", j, "up"}, j, true},
 		{"after a short boolean flag", []string{"up", "-d", "--error-format", j}, j, true},
+		{"after a long flag with its value attached", []string{"--project-name=x", "--error-format", j, "up"}, j, true},
+		{"after a short flag with its value attached", []string{"-pdemo", "--error-format", j, "up"}, j, true},
+		{"after an inherited short flag on run", []string{"run", "-p", "x", "--error-format", j, "web"}, j, true},
+		{"after an inherited long flag on run", []string{"run", "--project-name", "x", "--error-format", j, "web"}, j, true},
 		{"after an unknown flag", []string{"up", "--bogus", "--error-format", j}, j, true},
 		{"after a service of a command that keeps its flags", []string{"up", "web", "--error-format", j}, j, true},
 		{"the last one counts", []string{"--error-format", "text", "up", "--error-format", j}, j, true},
@@ -142,10 +146,69 @@ func TestReportFailureKeepsWhatTheMessageSays(t *testing.T) {
 		t.Errorf("code %q, message %q: a code further in stays, as the message said it", got.Code, got.Message)
 	}
 	buf.Reset()
-	reportFailure(&buf, true, errors.New("a & b\n  second line"), 1)
-	if !strings.Contains(buf.String(), `a & b\n  second line`) {
-		t.Errorf("want the ampersand as it is and the new line kept: %s", buf.String())
+	reportFailure(&buf, true, errors.New("a & b\nsecond line"), 1)
+	if !strings.Contains(buf.String(), `"message":"a & b\nsecond line"`) {
+		t.Errorf("want the ampersand as it is, the new line kept, and no indentation added: %s", buf.String())
 	}
+}
+
+// A script reads these keys. An empty code is still a key.
+func TestALineHasThePromisedKeysAndTypes(t *testing.T) {
+	number, text := "number", "string"
+	kind := func(v any) string {
+		switch v.(type) {
+		case float64:
+			return number
+		case string:
+			return text
+		}
+		return fmt.Sprintf("%T", v)
+	}
+	check := func(t *testing.T, raw []byte, want map[string]string) map[string]any {
+		t.Helper()
+		var got map[string]any
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != len(want) {
+			t.Errorf("keys = %v, want %v", got, want)
+		}
+		for key, typ := range want {
+			v, ok := got[key]
+			if !ok {
+				t.Errorf("no %q in %s", key, raw)
+			} else if kind(v) != typ {
+				t.Errorf("%q is a %s, want a %s", key, kind(v), typ)
+			}
+		}
+		return got
+	}
+	failure := map[string]string{"schema": number, "level": text, "source": text, "code": text, "message": text, "exit": number}
+	t.Run("a failure with no code", func(t *testing.T) {
+		var buf bytes.Buffer
+		reportFailure(&buf, true, errors.New("plain"), 1)
+		got := check(t, buf.Bytes(), failure)
+		if got["code"] != "" || got["message"] != "plain" {
+			t.Errorf("got %v", got)
+		}
+	})
+	t.Run("a failure with a code", func(t *testing.T) {
+		var buf bytes.Buffer
+		err := orchestrator.ErrRuntimeAbsent()
+		reportFailure(&buf, true, err, 1)
+		got := check(t, buf.Bytes(), failure)
+		if got["code"] != orchestrator.DiagCode(err) || got["code"] == "" {
+			t.Errorf("got %v", got)
+		}
+		if got["message"] == "" {
+			t.Errorf("no message: %v", got)
+		}
+	})
+	t.Run("a warning", func(t *testing.T) {
+		var buf bytes.Buffer
+		writeWarningJSON(&buf, "OPSM-502", "ignored")
+		check(t, buf.Bytes(), map[string]string{"schema": number, "level": text, "source": text, "code": text, "message": text})
+	})
 }
 
 func TestAWarningIsALineWithoutAnExit(t *testing.T) {
@@ -268,6 +331,52 @@ func TestAFailureToParseIsReportedByTheFormatItAskedFor(t *testing.T) {
 				t.Errorf("want the text form, got %q", line)
 			}
 		})
+	}
+}
+
+// `--help --format json` promises exit 0, so a bad setting beside it does not fail it.
+func TestAnInvalidErrorFormatDoesNotFailTheHelpJSON(t *testing.T) {
+	dir := errorFormatProject(t)
+	for _, tc := range []struct {
+		name string
+		args []string
+		env  []string
+	}{
+		{"variable", []string{"--help", "--format", "json"}, []string{"OPOSSUM_ERROR_FORMAT=yaml"}},
+		{"flag", []string{"--help", "--format", "json", "--error-format", "yaml"}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdout, stderr, code := runWithErrorFormat(t, dir, tc.env, tc.args...)
+			if code != 0 || !strings.HasPrefix(stdout, "{") {
+				t.Errorf("exit %d\nstdout: %.80s\nstderr: %s", code, stdout, stderr)
+			}
+		})
+	}
+}
+
+// `up --from-docker-compose --dry-run` plans against the adapted project with a
+// second orchestrator, and its warnings are the ones that project prints.
+func TestACodedWarningAfterTheProjectIsReloadedIsStillJSON(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "compose.yaml"), `name: ef
+services:
+  db:
+    image: postgres:16
+    dns_search: example.com
+    volumes:
+      - data:/var/lib/postgresql/data
+volumes:
+  data: {}
+`)
+	stdout, stderr, _ := runWithErrorFormat(t, dir, []string{"OPOSSUM_ERROR_FORMAT=json"}, "--verbose", "up", "--from-docker-compose", "--no-build", "--dry-run")
+	if !strings.Contains(stderr, "OPSM-101") {
+		t.Fatalf("this fixture should find a change to plan with, which is what reloads the project; got:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, `"level":"warning"`) || !strings.Contains(stderr, `"code":"OPSM-502"`) {
+		t.Errorf("no JSON warning on stderr:\n%s", stderr)
+	}
+	if strings.Contains(stdout, "warning: [OPSM-502]") {
+		t.Errorf("the reloaded project printed the warning as text:\n%s", stdout)
 	}
 }
 
