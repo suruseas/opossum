@@ -1,6 +1,11 @@
 package orchestrator
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+	"regexp"
+	"strings"
+)
 
 // Error-message guideline (applies to EVERY user-facing error and warning opossum
 // emits, not just coded ones): each should carry three things —
@@ -104,9 +109,9 @@ var allDiagCodes = []diagCode{
 // non-zero exit) instead of an empty `ps` table or a raw exec error means an
 // agent reads a clear, actionable signal rather than "nothing is running".
 func ErrRuntimeAbsent() error {
-	return fmt.Errorf("[%s] the `container` CLI was not found on PATH — install it first: "+
+	return codedf(codeRuntimeAbsent, "the `container` CLI was not found on PATH — install it first: "+
 		"`brew install container` (or the .pkg from github.com/apple/container/releases), "+
-		"then run `container system start`", codeRuntimeAbsent)
+		"then run `container system start`")
 }
 
 // runtimeWhy explains, in one breath, why the runtime needs starting — so the
@@ -123,9 +128,9 @@ const runtimeWhy = "opossum drives Apple's `container` CLI, which manages the VM
 // command like `ps` would render an empty table — indistinguishable from "nothing
 // is running" — when in truth it just couldn't reach the daemon.
 func ErrRuntimeStopped() error {
-	return fmt.Errorf("[%s] the `container` system isn't running. %s Start it with "+
+	return codedf(codeRuntimeStopped, "the `container` system isn't running. %s Start it with "+
 		"`container system start` (or run `opossum doctor`); opossum starts it for you on "+
-		"a mutating command unless OPOSSUM_NO_AUTO_START is set", codeRuntimeStopped, runtimeWhy)
+		"a mutating command unless OPOSSUM_NO_AUTO_START is set", runtimeWhy)
 }
 
 // NoticeRuntimeAutoStart is the one-line notice printed before opossum starts a
@@ -139,9 +144,8 @@ func NoticeRuntimeAutoStart() string {
 // runtime for a mutating command and the start itself failed — so it says opossum
 // tried and couldn't, not (as ErrRuntimeStopped would) that it will.
 func ErrRuntimeAutoStartFailed(cause error) error {
-	return fmt.Errorf("[%s] the `container` system isn't running and opossum couldn't start it "+
-		"(`container system start` failed: %v). %s Try starting it yourself, or run `opossum doctor`",
-		codeRuntimeStopped, cause, runtimeWhy)
+	return codedf(codeRuntimeStopped, "the `container` system isn't running and opossum couldn't start it "+
+		"(`container system start` failed: %v). %s Try starting it yourself, or run `opossum doctor`", cause, runtimeWhy)
 }
 
 // warnf prints a coded warning: `warning: [OPSM-NNN] <message>`. Every warning the
@@ -155,5 +159,56 @@ func ErrRuntimeAutoStartFailed(cause error) error {
 // checking printf args at call sites. The 16 call sites are content-tested, so a
 // format mistake still surfaces; a new call site should assert its output.
 func (o *Orchestrator) warnf(code diagCode, format string, a ...interface{}) {
+	if o.Warn != nil {
+		o.Warn(string(code), strings.TrimRight(fmt.Sprintf(format, a...), "\n"))
+		return
+	}
 	o.logf("warning: [%s] "+format, append([]interface{}{code}, a...)...)
+}
+
+// codedError is an error that says which diagnostic it is beside saying it in
+// words, so a caller that wants the code does not have to look for it in a
+// sentence that may quote a project's own `[OPSM-999]`. Its text is exactly the
+// text a plain error would have had.
+type codedError struct {
+	code diagCode
+	err  error
+}
+
+func (e *codedError) Error() string { return e.err.Error() }
+func (e *codedError) Unwrap() error { return e.err }
+
+// codedf is fmt.Errorf with the text starting `[OPSM-NNN] `.
+func codedf(code diagCode, format string, a ...interface{}) error {
+	return &codedError{code, fmt.Errorf("["+string(code)+"] "+format, a...)}
+}
+
+// withCode says which diagnostic err is, keeping its text. An empty code leaves
+// err as it is.
+func withCode(code diagCode, err error) error {
+	if code == "" {
+		return err
+	}
+	return &codedError{code, err}
+}
+
+// DiagCode is the code of the outermost diagnostic err carries, or "".
+func DiagCode(err error) string {
+	var c *codedError
+	if errors.As(err, &c) {
+		return string(c.code)
+	}
+	return ""
+}
+
+// hintCodePattern is how a hint opossum appends to a runtime's failure starts.
+var hintCodePattern = regexp.MustCompile(`^\n  → \[(OPSM-[0-9]+)\]`)
+
+// hintCode is the code a hint opens with, or "". The opening is opossum's own
+// words; what a project supplies comes after it.
+func hintCode(hint string) diagCode {
+	if m := hintCodePattern.FindStringSubmatch(hint); m != nil {
+		return diagCode(m[1])
+	}
+	return ""
 }

@@ -77,6 +77,7 @@ func newRootCmd() *cobra.Command {
 	root.PersistentFlags().StringArrayVarP(&composeFiles, "file", "f", nil, "path to a compose file (repeatable; later files override earlier ones). Default: COMPOSE_FILE from the shell or the .env, then a discovered compose file plus its override")
 	root.PersistentFlags().StringVarP(&projectName, "project-name", "p", "", "project name (default: COMPOSE_PROJECT_NAME from the shell or the .env, then the compose file's `name:`, then its directory)")
 	root.PersistentFlags().StringVar(&dnsDomain, "dns-domain", defaultDNSDomain, "local DNS domain for bare-name service discovery (create once: sudo container system dns create <domain>)")
+	root.PersistentFlags().String(errorFormatFlag, errorFormatText, "how a failure is reported on stderr: text or json")
 	root.PersistentFlags().BoolVar(&verbose, "verbose", false, "print each underlying container command as it runs (useful for bug reports)")
 	root.PersistentFlags().StringArrayVar(&envFiles, "env-file", nil, "env file(s) read in place of the default .env, for ${VAR} interpolation, for a service's bare environment names and for COMPOSE_PROJECT_NAME, COMPOSE_FILE, COMPOSE_PATH_SEPARATOR and COMPOSE_PROFILES (repeatable; later files win)")
 	root.PersistentFlags().StringArrayVar(&profiles, "profile", nil, "enable services gated behind this compose profile (repeatable; '*' enables every profile). Without it COMPOSE_PROFILES is read, from the shell and then the .env; given, it is the only source, as with docker compose. Changes which services are read from the compose file; what the commands that act on containers already there act on is unchanged by it")
@@ -472,12 +473,21 @@ func main() { os.Exit(runCLI(os.Args[1:], os.Stdout, os.Stderr)) }
 // main does with a failure can be run by a test. Without the seam the only
 // thing covering this line is that someone read it.
 func runCLI(args []string, out, errOut io.Writer) int {
+	asJSON, formatErr := reportsJSON(args, os.Getenv)
 	if cmd, ok := helpJSONRequested(args); ok {
 		if err := writeHelpJSON(out, cmd); err != nil {
-			fmt.Fprintln(errOut, "opossum: "+err.Error())
+			reportFailure(errOut, asJSON, err, 1)
 			return 1
 		}
 		return 0
+	}
+	if formatErr != nil {
+		fmt.Fprintln(errOut, "opossum: "+quoted(formatErr.Error()))
+		return 1
+	}
+	defer func() { warnSink = nil }()
+	if asJSON {
+		warnSink = func(code, message string) { writeWarningJSON(errOut, code, message) }
 	}
 	root := newRootCmd()
 	root.SetOut(out)
@@ -489,14 +499,15 @@ func runCLI(args []string, out, errOut io.Writer) int {
 		if errors.Is(err, orchestrator.ErrInterrupted) {
 			return 130
 		}
-		fmt.Fprintln(errOut, "opossum: "+quoted(err.Error()))
 		// `run` and `exec` exit with the container's own code, as docker
 		// compose does; every other failure is opossum's and exits 1.
+		code := 1
 		var ce *orchestrator.ContainerExitError
 		if errors.As(err, &ce) {
-			return ce.Code
+			code = ce.Code
 		}
-		return 1
+		reportFailure(errOut, asJSON, err, code)
+		return code
 	}
 	return 0
 }
@@ -815,7 +826,7 @@ func downByLabel(cmd *cobra.Command, loadErr error, volumes bool, rmi string, pr
 			"(is the name right? `opossum ls` lists the projects it holds)\n", name)
 		return true, nil
 	}
-	o := orchestrator.New(&compose.Project{Name: name, Services: map[string]*compose.Service{}}, rt, dnsDomain, cmd.OutOrStdout())
+	o := newOrchestrator(&compose.Project{Name: name, Services: map[string]*compose.Service{}}, rt, dnsDomain, cmd.OutOrStdout())
 	o.SetRunFlags(thisRunFlags())
 	o.SetSupervisorStopper(stopSupervisorFn)
 	o.AdoptProjectLock(projectLock) // the lock of this name, taken before the supervisor was stopped
@@ -1865,7 +1876,7 @@ func reloadWith(stderr io.Writer, o *orchestrator.Orchestrator, body string) (*o
 	proj.Name = o.Project.Name
 	rt := runtime.New()
 	rt.Verbose = verbose
-	reloaded := orchestrator.New(proj, rt, dnsDomain, o.Out())
+	reloaded := newOrchestrator(proj, rt, dnsDomain, o.Out())
 	// Told the flags like every other, though nothing it prints reads them
 	// yet: the messages that do are `watch`'s, and the `up` it goes on to has
 	// no `watch`.
@@ -2045,7 +2056,7 @@ func loadOrchestratorAs(out io.Writer, softValues bool) (*orchestrator.Orchestra
 	}
 	rt := runtime.New()
 	rt.Verbose = verbose
-	o := orchestrator.New(proj, rt, dnsDomain, out)
+	o := newOrchestrator(proj, rt, dnsDomain, out)
 	o.SetRunFlags(thisRunFlags())
 	offer := dnsOffer(rt)
 	o.OfferDNSDomain = func(domain string) bool { return offer.Ask(domain) == dnsoffer.Created }

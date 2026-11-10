@@ -65,7 +65,7 @@ func lockProject(project string) (*projectLock, error) {
 		}
 		f.Close()
 		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
-			return nil, fmt.Errorf("[%s] another opossum command is changing project %q%s — wait for it to finish (a foreground `up` ends with Ctrl-C), then retry", codeProjectBusy, project, holder)
+			return nil, codedf(codeProjectBusy, "another opossum command is changing project %q%s — wait for it to finish (a foreground `up` ends with Ctrl-C), then retry", project, holder)
 		}
 		return nil, fmt.Errorf("locking project %q: %w", project, err)
 	}

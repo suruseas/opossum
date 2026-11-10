@@ -37,6 +37,7 @@ opossum down                                 # stop + remove + drop the network 
 `--env-file` given), before a file is looked for); `-p <name>` sets the project name (without it
 `COMPOSE_PROJECT_NAME`, from the same places, then the file's `name:`, then
 its directory);
+`--error-format json` (or `OPOSSUM_ERROR_FORMAT=json`) reports a failure as one JSON line, the last line on stderr;
 `--verbose` echoes each `container` command; `--dns-domain` overrides
 the discovery domain (default `opossum`); `--profile <name>` enables services
 gated behind a compose profile (repeatable, taken by every command, and
