@@ -5932,6 +5932,7 @@ func (o *Orchestrator) warnSharedNamedVolumes(order []string) {
 // the note is the middle ground. (Fields that DO change behavior, e.g. a Postgres
 // datadir on a named volume, still warn unconditionally elsewhere.)
 func (o *Orchestrator) reportIgnoredFields(services []string, includeTopLevel bool) {
+	o.noteHostGatewayEntries(services)
 	if o.rt.Verbose {
 		if includeTopLevel {
 			if u := o.Project.Unsupported; len(u) > 0 {
@@ -5951,6 +5952,23 @@ func (o *Orchestrator) reportIgnoredFields(services []string, includeTopLevel bo
 		// project could otherwise end early. The trailing newline is the format's
 		// to add.
 		o.logf("%s\n", strings.TrimRight(note, "\n"))
+	}
+}
+
+// noteHostGatewayEntries says, for each service that maps a name to host-gateway
+// in `extra_hosts`, that the entry is not added and what reaches the host instead.
+// Unlike the other ignored fields it is a line of its own at every verbosity: the
+// service wrote the entry in order to reach the host, and nothing else would tell
+// it why that fails. A service with `network_mode: none` reaches nothing, so
+// the advice would not hold there.
+func (o *Orchestrator) noteHostGatewayEntries(services []string) {
+	names := append([]string(nil), services...)
+	sort.Strings(names)
+	for _, name := range names {
+		svc := o.Project.Services[name]
+		if hosts := svc.HostGatewayNames; len(hosts) > 0 && svc.NetworkMode != compose.NetworkModeNone {
+			o.logf("note: service %q: extra_hosts maps %s to host-gateway, which opossum cannot add to the container; to reach the host, use ${OPOSSUM_HOST_GATEWAY}\n", name, strings.Join(hosts, ", "))
+		}
 	}
 }
 
