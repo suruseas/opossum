@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+
 	"github.com/suruseas/opossum/internal/orchestrator"
 )
 
@@ -425,4 +427,71 @@ func TestACodedWarningMovesToStderrOnceWhenAskedForJSON(t *testing.T) {
 			}
 		})
 	}
+}
+
+type refusingWriter struct{}
+
+func (refusingWriter) Write([]byte) (int, error) { return 0, errors.New("stdout is closed") }
+
+// The help JSON is written before the command line is parsed, on a path of its
+// own, and a failure to write it is reported like every other failure, once.
+func TestAFailureToWriteTheHelpJSONIsReportedByTheFormatItAskedFor(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		env  string
+		json bool
+	}{
+		{"the flag", []string{"--help", "--format", "json", "--error-format", "json"}, "", true},
+		{"the variable", []string{"--help", "--format", "json"}, "json", true},
+		{"text by default", []string{"--help", "--format", "json"}, "", false},
+		{"the flag over the variable", []string{"--help", "--format", "json", "--error-format", "text"}, "json", false},
+		{"text when the flag is invalid", []string{"--help", "--format", "json", "--error-format", "yaml"}, "", false},
+		{"text when the variable is invalid", []string{"--help", "--format", "json"}, "yaml", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(errorFormatEnv, tc.env)
+			var stderr bytes.Buffer
+			if code := runCLI(tc.args, refusingWriter{}, &stderr); code != 1 {
+				t.Fatalf("exit %d\n%s", code, stderr.String())
+			}
+			line := lastLine(stderr.String())
+			if stderr.String() != line+"\n" {
+				t.Errorf("want one line on stderr, got %q", stderr.String())
+			}
+			if !tc.json {
+				if line != "opossum: stdout is closed" {
+					t.Errorf("want the text form, got %q", line)
+				}
+				return
+			}
+			var got diagnosticLine
+			if err := json.Unmarshal([]byte(line), &got); err != nil {
+				t.Fatalf("%v in %q", err, line)
+			}
+			if got.Level != "error" || got.Source != "opossum" || got.Message != "stdout is closed" || got.Exit == nil || *got.Exit != 1 {
+				t.Errorf("got %+v", got)
+			}
+		})
+	}
+}
+
+// The search for the flag stops at a service only for the commands whose parser
+// stops there too, and the list of them is written by hand. A word after the
+// first argument is asked of each command's own parser: one that stops does not
+// look at it, so an unknown flag there is not refused.
+func TestTheCommandsThatStopAtTheirFirstArgumentAreTheOnesTheSearchStopsAt(t *testing.T) {
+	var walk func(c *cobra.Command)
+	walk = func(c *cobra.Command) {
+		t.Run(c.CommandPath(), func(t *testing.T) {
+			stops := c.ParseFlags([]string{"service", "--not-a-flag-of-any-command"}) == nil
+			if stops != passesThrough[c.Name()] {
+				t.Errorf("its parser stops at the first argument: %v; passesThrough says %v", stops, passesThrough[c.Name()])
+			}
+		})
+		for _, sub := range c.Commands() {
+			walk(sub)
+		}
+	}
+	walk(newRootCmd())
 }
