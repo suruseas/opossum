@@ -433,8 +433,8 @@ type refusingWriter struct{}
 
 func (refusingWriter) Write([]byte) (int, error) { return 0, errors.New("stdout is closed") }
 
-// The help JSON is written before anything else is read, on a path of its own,
-// and a failure to write it is reported like every other failure.
+// The help JSON is written before the command line is parsed, on a path of its
+// own, and a failure to write it is reported like every other failure, once.
 func TestAFailureToWriteTheHelpJSONIsReportedByTheFormatItAskedFor(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -445,7 +445,9 @@ func TestAFailureToWriteTheHelpJSONIsReportedByTheFormatItAskedFor(t *testing.T)
 		{"the flag", []string{"--help", "--format", "json", "--error-format", "json"}, "", true},
 		{"the variable", []string{"--help", "--format", "json"}, "json", true},
 		{"text by default", []string{"--help", "--format", "json"}, "", false},
-		{"text when the setting is invalid", []string{"--help", "--format", "json", "--error-format", "yaml"}, "", false},
+		{"the flag over the variable", []string{"--help", "--format", "json", "--error-format", "text"}, "json", false},
+		{"text when the flag is invalid", []string{"--help", "--format", "json", "--error-format", "yaml"}, "", false},
+		{"text when the variable is invalid", []string{"--help", "--format", "json"}, "yaml", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(errorFormatEnv, tc.env)
@@ -454,6 +456,9 @@ func TestAFailureToWriteTheHelpJSONIsReportedByTheFormatItAskedFor(t *testing.T)
 				t.Fatalf("exit %d\n%s", code, stderr.String())
 			}
 			line := lastLine(stderr.String())
+			if stderr.String() != line+"\n" {
+				t.Errorf("want one line on stderr, got %q", stderr.String())
+			}
 			if !tc.json {
 				if line != "opossum: stdout is closed" {
 					t.Errorf("want the text form, got %q", line)
@@ -479,7 +484,7 @@ func TestTheCommandsThatStopAtTheirFirstArgumentAreTheOnesTheSearchStopsAt(t *te
 	var walk func(c *cobra.Command)
 	walk = func(c *cobra.Command) {
 		t.Run(c.CommandPath(), func(t *testing.T) {
-			stops := c.Flags().Parse([]string{"service", "--not-a-flag-of-any-command"}) == nil
+			stops := c.ParseFlags([]string{"service", "--not-a-flag-of-any-command"}) == nil
 			if stops != passesThrough[c.Name()] {
 				t.Errorf("its parser stops at the first argument: %v; passesThrough says %v", stops, passesThrough[c.Name()])
 			}
